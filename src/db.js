@@ -155,6 +155,12 @@ const w = {
      ON CONFLICT(shift_id, employee_id) DO UPDATE SET
        cash_tips_cents = excluded.cash_tips_cents, cash_entered_by = excluded.cash_entered_by`
   ),
+  // Staff-reported card tips (doesn't touch sales columns).
+  setCardTips: db.prepare(
+    `INSERT INTO server_sales (shift_id, employee_id, card_tips_cents)
+     VALUES (@shift_id, @employee_id, @card_tips_cents)
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET card_tips_cents = excluded.card_tips_cents`
+  ),
   salesForShift: db.prepare('SELECT * FROM server_sales WHERE shift_id = ?'),
   salesRow: db.prepare('SELECT * FROM server_sales WHERE shift_id = ? AND employee_id = ?'),
 };

@@ -268,13 +268,29 @@ select.inline:focus, input.inline:focus { outline: none; border-color: var(--pri
 /* ===========================================================================
    Staff cash-tips screen (bare, app-like) — blue
    =========================================================================== */
-body.bare { background: none; }
-.tips-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 22px 16px;
+body.bare { background: #0f1e40; }
+.tips-screen { min-height: 100vh; min-height: 100dvh; width: 100%; display: flex; align-items: center; justify-content: center;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
   background: linear-gradient(160deg, #2563eb 0%, #1d4ed8 45%, #172554 100%); }
-.tips-card { width: 100%; max-width: 440px; background: #fff; border-radius: 22px; padding: 30px 26px 26px; box-shadow: 0 24px 60px rgba(23,37,84,.35); }
-.tips-brand { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--primary); }
-.tips-title { font-size: 26px; font-weight: 800; letter-spacing: -.02em; margin: 4px 0 6px; }
-.tips-lead { color: var(--muted); font-size: 14px; line-height: 1.5; margin-bottom: 18px; }
+.tips-card { width: 100%; max-width: 460px; background: #fff; border-radius: 20px; padding: 28px 26px 26px; box-shadow: 0 24px 60px rgba(15,30,64,.4); }
+.tips-head { display: flex; align-items: center; gap: 13px; margin-bottom: 14px; }
+.tips-head img { border-radius: 11px; flex-shrink: 0; }
+.tips-brand { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.tips-title { font-size: 23px; font-weight: 800; letter-spacing: -.025em; line-height: 1.15; }
+.tips-lead { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 0 0 20px; }
+.tips-hint { display: block; color: var(--faint); font-size: 11.5px; font-weight: 500; margin-top: 6px; }
+
+/* segmented Café / Dinner control */
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 7px; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { display: flex; align-items: center; justify-content: center; padding: 13px 10px; border: 1.5px solid var(--line-2);
+  border-radius: 13px; font-size: 15px; font-weight: 600; color: var(--ink-2); cursor: pointer; margin: 0; background: #fff; transition: all .12s; }
+.seg label:hover { border-color: #c3cede; }
+.seg input:checked + label { border-color: var(--primary); background: var(--primary-50); color: var(--primary-700); box-shadow: var(--ring); }
+
+.tips-receipt { background: var(--surface-2); border: 1px solid var(--line); border-radius: 13px; padding: 14px 16px; margin: 18px 0 4px; text-align: left; }
+.tips-receipt .kv { font-size: 14.5px; padding: 5px 0; }
+.tips-foot { color: var(--faint); font-size: 12.5px; line-height: 1.5; margin: 14px 0 20px; }
 .tips-error { background: var(--danger-bg); color: #991b1b; border-radius: 12px; padding: 11px 14px; font-size: 14px; font-weight: 600; margin-bottom: 16px; }
 .tips-field { display: block; font-size: 13px; font-weight: 700; color: var(--ink-2); margin-bottom: 16px; }
 .tips-in { display: block; width: 100%; margin-top: 7px; padding: 14px 14px; font-size: 17px; border: 1.5px solid var(--line-2);
@@ -288,8 +304,7 @@ body.bare { background: none; }
   border: 0; border-radius: 13px; font-size: 17px; font-weight: 700; cursor: pointer; text-align: center; text-decoration: none; box-shadow: 0 4px 14px rgba(37,99,235,.35); }
 .tips-submit:hover { background: var(--primary-hover); text-decoration: none; }
 .tips-done { text-align: center; }
-.tips-check { width: 78px; height: 78px; margin: 4px auto 14px; border-radius: 50%; background: var(--primary-100); color: var(--primary);
-  font-size: 42px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
-.tips-done-title { font-size: 22px; font-weight: 800; }
-.tips-done-amt { font-size: 46px; font-weight: 800; color: var(--primary); letter-spacing: -.02em; margin: 8px 0 2px; }
-.tips-done-sub { color: var(--muted); font-size: 14px; margin-bottom: 22px; }
+.tips-check { width: 62px; height: 62px; margin: 6px auto 16px; border-radius: 50%; background: var(--ok-bg); color: var(--ok);
+  display: flex; align-items: center; justify-content: center; }
+.tips-done-title { font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
+.tips-done-sub { color: var(--muted); font-size: 13.5px; margin-top: 4px; }

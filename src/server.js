@@ -689,60 +689,105 @@ app.post('/shifts/:id/send', async (req, res) => {
 app.get('/tips', (req, res) => {
   // Success screen after a submit.
   if (req.query.done === '1') {
+    const card = String(req.query.card || '');
     const body = `
       <div class="tips-screen">
         <div class="tips-card tips-done">
-          <div class="tips-check">✓</div>
-          <div class="tips-done-title">Nice work${req.query.name ? ', ' + esc(req.query.name) : ''}! 🎉</div>
-          <div class="tips-done-amt">${esc(req.query.amt || '')}</div>
-          <div class="tips-done-sub">cash recorded${req.query.shift ? ' for ' + esc(req.query.shift) : ''}. You're all set.</div>
-          <a class="tips-submit" href="/tips">Log another</a>
+          <div class="tips-check"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>
+          <div class="tips-done-title">Thanks${req.query.name ? ', ' + esc(req.query.name) : ''}</div>
+          <div class="tips-done-sub">Your tips have been recorded${req.query.date ? ' for ' + esc(req.query.date) : ''}${req.query.shift ? ' · ' + esc(req.query.shift) : ''}.</div>
+          <div class="tips-receipt">
+            <div class="kv"><span>Cash tips</span><b>$${esc(req.query.cash || '0.00')}</b></div>
+            ${card !== '' ? `<div class="kv"><span>Card tips</span><b>$${esc(card)}</b></div>` : ''}
+          </div>
+          <p class="tips-foot">You'll get an email with your full breakdown once your manager closes the shift.</p>
+          <a class="tips-submit" href="/tips">Log another shift</a>
         </div>
       </div>`;
-    return res.send(layout('Done', body, { bare: true }));
+    return res.send(layout('Recorded', body, { bare: true }));
   }
 
-  const servers = q.serversList.all();
-  const shifts = s.recentShifts.all(6);
+  const staff = q.nonManagerList.all();
+  const today = new Date().toISOString().slice(0, 10);
   const err = req.query.err === '1' ? `<div class="tips-error">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
   const body = `
     <div class="tips-screen">
       <div class="tips-card">
-        <div class="tips-brand">${esc(RESTAURANT)}</div>
-        <div class="tips-title">💵 Log your cash tips</div>
-        <div class="tips-lead">Takes 10 seconds. Only you can see your PIN — your manager just sees the totals.</div>
+        <div class="tips-head">
+          <img src="/static/logo.png" alt="" width="40" height="40">
+          <div><div class="tips-brand">${esc(RESTAURANT)}</div><div class="tips-title">Log your tips</div></div>
+        </div>
+        <p class="tips-lead">Fill this in at the end of your shift. Your manager only sees the totals — your PIN stays private.</p>
         ${err}
         <form method="post" action="/tips" class="tips-form">
-          <label class="tips-field">Who are you?
-            <select name="employee_id" class="tips-in" required>${servers.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select>
+          <label class="tips-field">Your name
+            <select name="employee_id" class="tips-in" required>
+              <option value="" disabled selected>Select your name</option>
+              ${staff.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('')}
+            </select>
           </label>
-          <label class="tips-field">Which shift?
-            <select name="shift_id" class="tips-in" required>${shifts.map((sh) => `<option value="${sh.id}">${sh.date} · ${dp(sh.daypart)}</option>`).join('')}</select>
+
+          <label class="tips-field">Date you worked
+            <input name="date" class="tips-in" type="date" value="${today}" max="${today}" required>
           </label>
+
+          <div class="tips-field">Which shift
+            <div class="seg">
+              <input type="radio" name="daypart" id="dp-cafe" value="cafe" required>
+              <label for="dp-cafe">Café</label>
+              <input type="radio" name="daypart" id="dp-dinner" value="dinner" checked>
+              <label for="dp-dinner">Dinner</label>
+            </div>
+          </div>
+
+          <label class="tips-field">Cash tips you took home
+            <div class="tips-money"><span>$</span><input name="cash_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00" required></div>
+          </label>
+
+          <label class="tips-field">Card tips
+            <div class="tips-money"><span>$</span><input name="card_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
+            <span class="tips-hint">From your closeout slip. Leave blank if you don't have it.</span>
+          </label>
+
           <label class="tips-field">Your PIN
             <input name="pin" class="tips-in tips-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••" required>
           </label>
-          <label class="tips-field">Cash you took home
-            <div class="tips-money"><span>$</span><input name="cash_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00" required></div>
-          </label>
-          <button class="tips-submit" type="submit">Submit my tips →</button>
+
+          <button class="tips-submit" type="submit">Submit</button>
         </form>
       </div>
     </div>`;
-  res.send(layout('Cash tips', body, { bare: true }));
+  res.send(layout('Log your tips', body, { bare: true }));
 });
 
 app.post('/tips', (req, res) => {
+  const fail = (msg) => res.redirect('/tips?err=1&msg=' + encodeURIComponent(msg));
   const emp = q.employee.get(Number(req.body.employee_id));
-  if (!emp || String(emp.pin || '') !== String(req.body.pin || '')) {
-    return res.redirect('/tips?err=1&msg=' + encodeURIComponent('Name or PIN did not match — try again.'));
-  }
-  const sh = s.shiftById.get(Number(req.body.shift_id));
-  if (!sh) return res.redirect('/tips?err=1&msg=' + encodeURIComponent('Pick a valid shift.'));
-  w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: 'server' });
-  w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: toCents(req.body.cash_tips), by: 'staff' });
-  const amt = '$' + (toCents(req.body.cash_tips) / 100).toFixed(2);
-  res.redirect('/tips?done=1&name=' + encodeURIComponent(emp.name.split(' ')[0]) + '&amt=' + encodeURIComponent(amt) + '&shift=' + encodeURIComponent(dp(sh.daypart)));
+  if (!emp) return fail('Please select your name.');
+  if (String(emp.pin || '') !== String(req.body.pin || '')) return fail("That PIN doesn't match your name. Please try again.");
+
+  const date = String(req.body.date || '').slice(0, 10);
+  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !daypart) return fail('Please choose the date and which shift you worked.');
+
+  // Find the shift — or start it. Staff often report before the manager has
+  // opened the close, which is what used to leave the picker empty.
+  s.getOrIgnore.run(date, daypart);
+  const sh = s.findShift.get(date, daypart);
+  policyForShift(sh); // lock in the tip-out policy version that's current now
+
+  w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: emp.role || 'server' });
+  const cash = toCents(req.body.cash_tips);
+  w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
+  const cardRaw = String(req.body.card_tips || '').trim();
+  if (cardRaw !== '') w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(cardRaw) });
+
+  const p = new URLSearchParams({
+    done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
+    card: cardRaw === '' ? '' : (toCents(cardRaw) / 100).toFixed(2),
+    shift: dp(daypart), date,
+  });
+  res.redirect('/tips?' + p.toString());
 });
 
 // ---------------------------------------------------------------------------

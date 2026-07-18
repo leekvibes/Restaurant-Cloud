@@ -62,8 +62,9 @@ const swScript = `<script>if('serviceWorker' in navigator){window.addEventListen
 
 function layout(title, body, opts = {}) {
   if (opts.bare) {
+    // No .wrap here — the staff screen owns the full viewport.
     return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
-      <body class="bare"><main class="wrap">${body}</main>${swScript}</body></html>`;
+      <body class="bare">${body}${swScript}</body></html>`;
   }
   return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
     <body>
