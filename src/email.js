@@ -145,12 +145,42 @@ function buildEmails(results, meta, people) {
   return emails;
 }
 
+// Google shows App Passwords as "abcd efgh ijkl mnop" — everybody pastes the
+// spaces, and Gmail then rejects the login with a useless 535. Strip them.
+const appPassword = () => (process.env.GMAIL_APP_PASSWORD || '').replace(/\s+/g, '');
+
+/**
+ * What mail is configured, and what's missing if it isn't. Drives the settings
+ * page and decides whether "send" really sends or just writes previews.
+ * @returns {{ready:boolean, mode:string, from:string|null, problem:string|null}}
+ */
+function mailStatus() {
+  const gmailUser = (process.env.GMAIL_USER || '').trim();
+  if (gmailUser) {
+    if (!appPassword()) {
+      return { ready: false, mode: 'gmail', from: gmailUser,
+        problem: 'GMAIL_USER is set but GMAIL_APP_PASSWORD is empty. Gmail needs a 16-character App Password — your normal account password will not work.' };
+    }
+    return { ready: true, mode: 'gmail', from: gmailUser, problem: null };
+  }
+  if (process.env.SMTP_HOST) {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      return { ready: false, mode: 'smtp', from: process.env.MAIL_FROM || null,
+        problem: 'SMTP_HOST is set but SMTP_USER / SMTP_PASS are missing.' };
+    }
+    return { ready: true, mode: 'smtp', from: process.env.MAIL_FROM || process.env.SMTP_USER, problem: null };
+  }
+  return { ready: false, mode: 'none', from: null,
+    problem: 'No mail account connected yet. Emails are written as preview files instead of being sent.' };
+}
+
 function transport() {
-  if (!process.env.SMTP_HOST && !process.env.GMAIL_USER) return null;
-  if (process.env.GMAIL_USER) {
+  const st = mailStatus();
+  if (!st.ready) return null;
+  if (st.mode === 'gmail') {
     return nodemailer.createTransport({
       service: 'gmail',
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+      auth: { user: process.env.GMAIL_USER.trim(), pass: appPassword() },
     });
   }
   return nodemailer.createTransport({
@@ -161,13 +191,57 @@ function transport() {
   });
 }
 
+/** Gmail's SMTP errors are cryptic. Turn them into something actionable. */
+function friendlyMailError(err) {
+  const msg = err.message || String(err);
+  if (err.code === 'EAUTH' || /535|Username and Password not accepted|Invalid login/i.test(msg)) {
+    return 'Gmail rejected the login. Use the 16-character App Password from myaccount.google.com/apppasswords — not your normal Gmail password. (2-Step Verification must be on for that page to exist.)';
+  }
+  if (/5\.4\.5|Daily user sending (limit|quota) exceeded/i.test(msg)) {
+    return 'Gmail’s daily sending limit was hit (about 500 messages). It resets in 24 hours.';
+  }
+  if (err.code === 'ECONNECTION' || err.code === 'ETIMEDOUT' || /ENOTFOUND|ECONNREFUSED/.test(msg)) {
+    return 'Could not reach the mail server — check the internet connection on the host.';
+  }
+  if (/Message failed: 550/i.test(msg)) return 'The recipient address was rejected — check it for typos.';
+  return msg;
+}
+
+/** From header: "Palm Vintage <malek...@gmail.com>" reads better than a bare address. */
+function fromAddress() {
+  const st = mailStatus();
+  const address = process.env.MAIL_FROM || st.from || 'noreply@restaurant.local';
+  // If MAIL_FROM already carries a display name, leave it exactly as given.
+  if (/</.test(address)) return address;
+  return { name: RESTAURANT, address };
+}
+
+/** Prove the credentials work without emailing the whole staff. */
+async function sendTest(to) {
+  const t = transport();
+  if (!t) throw new Error(mailStatus().problem);
+  try {
+    await t.verify();
+    await t.sendMail({
+      from: fromAddress(),
+      to,
+      subject: `${RESTAURANT}: test email`,
+      html: shell('Test email', line('Status', 'Working', { border: false })
+        + `<div style="margin-top:10px;font-size:13px;color:#64748b;line-height:1.5">If you can read this, ${RESTAURANT} can send nightly tip summaries to your staff.</div>`,
+      { label: 'Mail', value: 'Connected' }),
+    });
+  } catch (err) {
+    throw new Error(friendlyMailError(err));
+  }
+}
+
 /**
  * Send (or, if no mail is configured, preview) the emails.
  * Returns { sent, previewed, files, errors }.
  */
 async function sendEmails(emails) {
   const t = transport();
-  const from = process.env.MAIL_FROM || process.env.GMAIL_USER || 'noreply@restaurant.local';
+  const from = fromAddress();
   const out = { sent: 0, previewed: 0, files: [], errors: [] };
 
   if (!t) {
@@ -183,16 +257,25 @@ async function sendEmails(emails) {
     return out;
   }
 
+  // Fail fast on a bad password rather than reporting the same auth error
+  // eight times, once per employee.
+  try {
+    await t.verify();
+  } catch (err) {
+    out.errors.push(friendlyMailError(err));
+    return out;
+  }
+
   for (const e of emails) {
     if (!e.to) { out.errors.push(`${e.name}: no email on file`); continue; }
     try {
       await t.sendMail({ from, to: e.to, subject: e.subject, html: e.html });
       out.sent++;
     } catch (err) {
-      out.errors.push(`${e.name}: ${err.message}`);
+      out.errors.push(`${e.name}: ${friendlyMailError(err)}`);
     }
   }
   return out;
 }
 
-module.exports = { buildEmails, sendEmails, serverEmail, supportEmail, PREVIEW_DIR, RESTAURANT };
+module.exports = { buildEmails, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, PREVIEW_DIR, RESTAURANT };

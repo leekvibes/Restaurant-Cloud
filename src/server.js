@@ -7,7 +7,7 @@ const path = require('path');
 const express = require('express');
 const { db, q, s, w, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
-const { buildEmails, sendEmails } = require('./email');
+const { buildEmails, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
 const { layout, flash, esc, money, dp, RESTAURANT } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
@@ -655,7 +655,7 @@ app.get('/shifts/:id/results', (req, res) => {
     `<div class="pot"><span>${role} pool</span><b>${money(r.pots[role])}</b></div>`).join('');
   const poolTile = r.pool.total ? `<div class="pot"><span>Jar + to-go pool</span><b>${money(r.pool.total)}</b></div>` : '';
 
-  const mailReady = process.env.GMAIL_USER || process.env.SMTP_HOST;
+  const mailReady = mailStatus().ready;
   const totalTips = r.reconciliation.totalTipsCollected;
   const body = `
     ${flash(req)}
@@ -1218,6 +1218,63 @@ function describeRules(rules) {
   }
   return items;
 }
+
+// ---------------------------------------------------------------------------
+// EMAIL SETTINGS — connection status and a test send, so a bad password shows
+// up here rather than on a shift you're trying to close out at 1am.
+// ---------------------------------------------------------------------------
+app.get('/email', (req, res) => {
+  const st = mailStatus();
+  const mgr = q.allEmployees.all().find((e) => e.role === 'manager' && e.email);
+  const testTo = req.query.to || (mgr && mgr.email) || st.from || '';
+
+  const banner = st.ready
+    ? `<div class="flash flash-ok"><div>Connected as <b>${esc(st.from)}</b>. Staff emails will send from this address.</div></div>`
+    : `<div class="flash flash-warn"><div><b>Not sending yet.</b> ${esc(st.problem)}</div></div>`;
+
+  const setup = st.ready ? '' : `
+    <div class="card">
+      <div class="card-head"><strong>Connect a Gmail account</strong></div>
+      <ol class="steps">
+        <li>Sign in to the Gmail account you want the emails to come from.</li>
+        <li>Turn on <b>2-Step Verification</b> at <code>myaccount.google.com/security</code> — App Passwords don't exist without it.</li>
+        <li>Go to <code>myaccount.google.com/apppasswords</code>, name it “Restaurant Cloud”, and create it.</li>
+        <li>Google shows a 16-character password. Put it in your <code>.env</code> file yourself — never paste it into a chat:
+          <pre>GMAIL_USER=you@gmail.com
+GMAIL_APP_PASSWORD=the16charpassword
+RESTAURANT_NAME=Your Restaurant</pre></li>
+        <li>Restart the app, then send yourself a test below.</li>
+      </ol>
+      <p class="muted">Spaces in the App Password are fine — they get stripped automatically.</p>
+    </div>`;
+
+  const body = `
+    ${flash(req)}
+    <div class="page-head"><div><h1>Email</h1><p class="sub">Where nightly tip summaries send from.</p></div></div>
+    ${banner}
+    ${setup}
+    <div class="card">
+      <div class="card-head"><strong>Send a test</strong></div>
+      <p class="muted">Checks the login and delivers one message. Nothing goes to staff.</p>
+      <form method="post" action="/email/test" class="row-form">
+        <input type="email" name="to" value="${esc(testTo)}" placeholder="you@example.com" required>
+        <button class="btn btn-primary" type="submit"${st.ready ? '' : ' disabled'}>Send test email</button>
+      </form>
+      ${st.ready ? '' : '<p class="muted">Connect an account first.</p>'}
+    </div>`;
+  res.send(layout('Email', body));
+});
+
+app.post('/email/test', async (req, res) => {
+  const to = (req.body.to || '').trim();
+  if (!to) return res.redirect('/email?err=1&msg=' + encodeURIComponent('Enter an address to send the test to.'));
+  try {
+    await sendTest(to);
+    res.redirect('/email?msg=' + encodeURIComponent(`Test email sent to ${to}. Check the inbox (and spam).`));
+  } catch (err) {
+    res.redirect('/email?err=1&msg=' + encodeURIComponent(err.message));
+  }
+});
 
 app.get('/policy', (req, res) => {
   const daypart = DAYPARTS.includes(req.query.daypart) ? req.query.daypart : 'dinner';
