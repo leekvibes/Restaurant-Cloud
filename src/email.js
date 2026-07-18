@@ -126,29 +126,18 @@ function supportEmail(p, ctx) {
   if (ctx.salaried) body += line('Pay', 'Salaried');
   else if (wage > 0) body += line('Estimated wage', fmt(wage));
 
-  // Grouped by how the money actually reaches them, not by which rule produced
-  // it: card money rides payroll, jar cash is counted out by hand.
-  const cardTotal = p.cardTotal != null ? p.cardTotal : (p.tipShare || 0);
-  const cashTotal = p.cashTotal != null ? p.cashTotal : 0;
-  const total = cardTotal + cashTotal;
+  // Three plain lines — where the money came from, nothing about when or how
+  // it lands. Staff already know that; spelling it out just adds noise.
+  const cashTips = p.cashTotal != null ? p.cashTotal : 0;
+  const togoCard = p.poolCard || 0;
+  const serverTipout = p.tipShare || 0;
+  const total = cashTips + togoCard + serverTipout;
 
-  body += section('What you made today');
-  body += line('Card tips', fmt(cardTotal), { border: false });
-  if (cardTotal > 0) {
-    const parts = [];
-    if (p.tipShare) parts.push(`${fmt(p.tipShare)} tip-out from servers`);
-    if (p.poolCard) parts.push(`${fmt(p.poolCard)} to-go card tips`);
-    if (parts.length > 1) body += hint(parts.join(' + '));
-  }
-  body += line('Cash tips', fmt(cashTotal));
-  if (cashTotal > 0) body += hint('Your share of the tip jar, split by hours worked.');
-  body += line('Total for today', fmt(total), { strong: true, color: '#059669' });
-
-  body += section('How this reaches you');
-  if (cardTotal > 0) body += line('On your next paycheck', fmt(cardTotal), { border: false });
-  if (cashTotal > 0) body += line('Cash, handed out weekly', fmt(cashTotal), { border: cardTotal > 0 });
-  if (total === 0) body += line('Nothing to report today', fmt(0), { border: false });
-  body += `<div style="margin-top:10px;font-size:12px;color:#94a3b8;line-height:1.5">Card tips can’t be handed out the same night — servers keep their cash, so your share of it comes through payroll. Everything is split by hours worked.</div>`;
+  body += section('Your tips');
+  body += line('Cash tips', fmt(cashTips), { border: false });
+  body += line('To-go card tips', fmt(togoCard));
+  body += line('Server tip-out (card)', fmt(serverTipout));
+  body += line('Total tips', fmt(total), { strong: true, color: '#059669' });
 
   const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(total)} in tips`;
   return { to: ctx.email, subject, html: shell(`${ROLE_LABEL[p.role] || p.role} summary`, body, { label: 'Total tips', value: fmt(total) }) };

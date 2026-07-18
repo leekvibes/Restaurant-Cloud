@@ -26,7 +26,10 @@ function defaultRules() {
     { type: 'tipout', recipient: 'barista', percent: 1.5, base: 'coffee', split: 'hours' },
     { type: 'tipout', recipient: 'bartender', percent: 5, base: 'alcohol', split: 'hours' },
     { type: 'tipout', recipient: 'busser', percent: 13, base: 'remaining', split: 'hours' },
-    { type: 'pool', source: 'jar_togo', split: 'hours', among: 'all_support', payout: 'weekly_cash' },
+    // Cash out of the jar is the only thing handed over by hand. To-go CARD
+    // tips are card money, so they ride payroll like every other card tip.
+    { type: 'pool', source: 'jar', split: 'hours', among: 'all_support', payout: 'weekly_cash' },
+    { type: 'pool', source: 'togo_card', split: 'hours', among: 'all_support', payout: 'paycheck' },
   ];
 }
 
@@ -142,19 +145,28 @@ function runShift(shift, rules) {
   // Allocate each bucket SEPARATELY even when one rule covers both, so we can
   // tell someone "$X of this was card, $Y was cash out of the jar". Splitting
   // the allocation keeps it penny-exact either way.
+  // 'togo' / 'togo_cash' are old names for jar money — cash, not card. Letting
+  // them fall through to "both buckets" made a policy with a separate
+  // togo_card rule pay the card money out twice.
   const sourceBuckets = (src) => {
     if (src === 'togo_card') return [['card', togoCard]];
-    if (src === 'jar' || src === 'cash') return [['cash', cash]];
-    return [['cash', cash], ['card', togoCard]]; // 'jar_togo' / legacy
+    if (src === 'jar' || src === 'cash' || src === 'togo' || src === 'togo_cash') return [['cash', cash]];
+    return [['cash', cash], ['card', togoCard]]; // 'jar_togo' / unset
   };
   const poolShareMap = new Map();  // employeeId -> { <payout>: cents }
   const poolSourceMap = new Map(); // employeeId -> { cash: cents, card: cents }
+  const claimed = new Set();       // a bucket may only be paid out once
+  const poolConflicts = [];
   let poolTotal = 0;
   for (const r of poolRules) {
     const recips = poolRecipients(support, r.among);
     const split = r.split || 'hours';
     const payout = r.payout || 'weekly_cash';
     for (const [source, amount] of sourceBuckets(r.source)) {
+      // Two rules claiming the same pot would invent money out of nothing.
+      // Pay it once and tell the manager the policy is contradicting itself.
+      if (claimed.has(source)) { poolConflicts.push({ source, rule: r.source || 'jar_togo' }); continue; }
+      claimed.add(source);
       if (amount === 0) continue;
       if (!recips.length) { orphanedPots.push({ role: 'shared pool', cents: amount }); continue; }
       poolTotal += amount;
@@ -195,7 +207,7 @@ function runShift(shift, rules) {
 
   return {
     servers: serverPayouts, support: supportResult,
-    pots: rolePools, pool: { cash, togoCard, total: poolTotal }, orphanedPots,
+    pots: rolePools, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
     skippedPots: Object.entries(skippedPots).filter(([, c]) => c > 0).map(([role, cents]) => ({ role, cents })),
     reconciliation: { totalTipsCollected, totalKept, totalPots, balanced: totalTipsCollected === totalKept + totalPots },
   };

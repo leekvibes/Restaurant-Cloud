@@ -628,6 +628,7 @@ app.get('/shifts/:id/results', (req, res) => {
   const notes = [];
   if (!r.reconciliation.balanced) warn.push('Tip totals do not reconcile — check the numbers.');
   for (const o of r.orphanedPots) warn.push(`${money(o.cents)} is owed to “${o.role}” but nobody worked that role. Add them or the money is unassigned.`);
+  for (const c of r.poolConflicts) warn.push(`Your tip-out policy has two rules paying out the same ${c.source === 'card' ? 'to-go card' : 'cash jar'} money (the “${c.rule}” rule). It was only paid once — fix the duplicate on the tip-out policy page.`);
   // Nobody worked a tipped-out role, so it wasn't charged. Running without a
   // busser is a normal short-staffed night; running without a cook is almost
   // always someone forgotten on the shift, so that one gets flagged louder.

@@ -63,4 +63,30 @@ function revertTo(id, note) {
   Q.insert.run({ daypart: row.daypart, rules_json: row.rules_json, note: note || `Reverted to the ${row.effective_from} version` });
 }
 
+// Older policies pooled the cash jar and to-go CARD tips together and paid the
+// whole thing out as weekly cash. To-go card is card money, so it belongs on
+// the paycheck; only the jar is handed over by hand. Split any policy still
+// using the combined rule into two. Recorded as a normal new version, so it
+// shows up in the history and can be reverted from /policy like anything else.
+// Idempotent: once split, no rule matches and this does nothing.
+function splitJarFromToGoCard() {
+  for (const daypart of ['cafe', 'dinner']) {
+    const cur = currentForDaypart(daypart);
+    if (!cur) continue;
+    const combined = cur.rules.filter((r) => r.type === 'pool'
+      && (r.source == null || r.source === 'jar_togo')
+      && (r.payout || 'weekly_cash') === 'weekly_cash');
+    if (!combined.length) continue;
+
+    const rules = cur.rules.filter((r) => !combined.includes(r));
+    for (const r of combined) {
+      rules.push({ ...r, source: 'jar', payout: 'weekly_cash' });
+      rules.push({ ...r, source: 'togo_card', payout: 'paycheck' });
+    }
+    Q.insert.run({ daypart, rules_json: JSON.stringify(rules),
+      note: 'To-go card tips now pay on the paycheck; only the cash jar is handed out' });
+  }
+}
+splitJarFromToGoCard();
+
 module.exports = { currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo };

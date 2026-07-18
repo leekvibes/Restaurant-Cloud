@@ -246,3 +246,52 @@ test('a support person with no tips at all reports zeros, not undefined', () => 
   assert.strictEqual(k.poolCash, 0);
   assert.strictEqual(k.poolCard, 0);
 });
+
+// --- a pot may only be paid out once --------------------------------------
+
+test('legacy "togo" is jar cash, not card, so it cannot double-pay to-go card', () => {
+  // This exact shape existed in a live cafe policy and paid $160 out as $220.
+  const rules = [
+    { type: 'pool', source: 'togo', split: 'hours', among: 'all_support', payout: 'weekly_cash' },
+    { type: 'pool', source: 'togo_card', split: 'hours', among: 'all_support', payout: 'paycheck' },
+  ];
+  const r = runShift({
+    servers: [],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 5 },
+      { employeeId: 'B', name: 'b', role: 'busser', hours: 5 }],
+    pool: { jar: 100, togoCard: 60 },
+  }, rules);
+  const paid = r.support.reduce((a, p) => a + p.poolShare, 0);
+  assert.strictEqual(paid, toCents(160), 'pays out exactly what went in');
+  assert.strictEqual(r.support.reduce((a, p) => a + p.poolCard, 0), toCents(60));
+  assert.strictEqual(r.support.reduce((a, p) => a + p.poolCash, 0), toCents(100));
+});
+
+test('two rules claiming the same pot pay it once and report the conflict', () => {
+  const rules = [
+    { type: 'pool', source: 'jar', split: 'hours', among: 'all_support', payout: 'weekly_cash' },
+    { type: 'pool', source: 'jar_togo', split: 'hours', among: 'all_support', payout: 'paycheck' },
+  ];
+  const r = runShift({
+    servers: [],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 5 }],
+    pool: { jar: 100, togoCard: 40 },
+  }, rules);
+  // Jar was claimed first; the second rule may only take the card bucket.
+  assert.strictEqual(r.support[0].poolCash, toCents(100));
+  assert.strictEqual(r.support[0].poolCard, toCents(40));
+  assert.strictEqual(r.support[0].poolShare, toCents(140), 'never more than went in');
+  assert.strictEqual(r.poolConflicts.length, 1);
+  assert.strictEqual(r.poolConflicts[0].source, 'cash');
+});
+
+test('default policy: jar pays weekly cash, to-go card pays on the paycheck', () => {
+  const r = runShift({
+    servers: [],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 5 }],
+    pool: { jar: 90, togoCard: 60 },
+  });
+  assert.strictEqual(r.support[0].poolShares.weekly_cash, toCents(90));
+  assert.strictEqual(r.support[0].poolShares.paycheck, toCents(60));
+  assert.strictEqual(r.poolConflicts.length, 0);
+});
