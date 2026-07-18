@@ -85,6 +85,23 @@ function layout(title, body, opts = {}) {
             if (a.getAttribute('href') === p) a.classList.add('active');
           });
         })();
+        // Copy each column's heading onto its cells so tables can restack as
+        // cards on a phone (see the mobile table rules in styles.css). Doing it
+        // here means every table gets it, including ones added later.
+        (function () {
+          document.querySelectorAll('table.table').forEach(function (t) {
+            var heads = [].map.call(t.querySelectorAll('thead th'), function (th) {
+              return th.textContent.trim();
+            });
+            if (!heads.length) return;
+            [].forEach.call(t.querySelectorAll('tbody tr, tfoot tr'), function (tr) {
+              [].forEach.call(tr.children, function (td, i) {
+                // Skip the first cell — it's the card title, not a value.
+                if (i > 0 && heads[i]) td.setAttribute('data-label', heads[i]);
+              });
+            });
+          });
+        })();
       </script>
       ${swScript}
     </body></html>`;

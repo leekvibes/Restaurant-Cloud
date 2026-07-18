@@ -348,3 +348,88 @@ body.bare { background: #0f1e40; }
   background: var(--surface-3); border: 1.5px solid var(--line-2); border-radius: 12px; }
 .tips-signout { display: block; text-align: center; margin-top: 16px; color: var(--muted);
   font-size: 13px; font-weight: 600; }
+
+/* ===========================================================================
+   MOBILE TABLES
+   Below 700px a table can't hold its shape — you end up scrolling sideways to
+   find the column you want. Each row becomes a card instead: first cell is the
+   title, the rest are label/value pairs. Labels are copied from <thead> by the
+   script in layout(), so this works for every table without touching markup.
+   =========================================================================== */
+@media (max-width: 700px) {
+  .table-wrap { overflow: visible; margin: 0; }
+  .table { display: block; border: 0; background: none; box-shadow: none; border-radius: 0; }
+  .table thead { display: none; }
+  .table tbody, .table tfoot { display: block; }
+  .table tr { display: block; background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); margin-bottom: 10px; box-shadow: var(--shadow-sm); overflow: hidden; }
+  .table tbody tr:hover { background: var(--surface); }
+  .table td { display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    padding: 9px 14px; border-top: 1px solid var(--line); text-align: right; }
+
+  /* First cell is the card's title — name, date, whatever identifies the row. */
+  .table td:first-child { display: block; text-align: left; font-weight: 700; font-size: 15.5px;
+    padding: 12px 14px 11px; border-top: 0; background: var(--surface-2); }
+  .table td:first-child::before { display: none; }
+
+  .table td::before { content: attr(data-label); color: var(--muted); font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .05em; text-align: left; flex: 0 0 auto; }
+  .table td:not([data-label])::before { display: none; }
+  /* An unlabelled, empty cell carries nothing on mobile — drop it entirely. */
+  .table td:not([data-label]):empty { display: none; }
+  .num { text-align: right; }
+
+  /* Row buttons sit together on their own line, comfortably tappable. */
+  .table td.row-actions, .table td:last-child:not([data-label]) { justify-content: flex-end; gap: 20px; padding: 11px 14px; }
+  .table td.row-actions form, .table td:last-child form { display: inline; }
+  .table .link, .table .link-danger, .table td a { font-size: 14px; padding: 4px 0; }
+
+  .table tfoot tr { background: var(--primary-50); border-color: var(--primary-200); }
+  .table tfoot td { background: none; border-top: 1px solid var(--primary-200); }
+  .table tfoot td:first-child { background: none; color: var(--primary-700); }
+}
+
+/* --- Mobile: denser KPI tiles and headers -------------------------------- */
+@media (max-width: 700px) {
+  /* One tile per row turned a 4-stat page into four screens of scrolling. */
+  .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 14px 0 18px; }
+  .stat { padding: 13px 14px; }
+  .stat-label { font-size: 11.5px; }
+  .stat-value { font-size: 21px; margin-top: 4px; }
+  .stat-sub { font-size: 11px; }
+  /* A lone wide stat (or an odd one out) can still span the row. */
+  .stats .stat.wide { grid-column: 1 / -1; }
+
+  h1 { font-size: 21px; }
+  .page-head { gap: 10px; margin-bottom: 4px; }
+  .page-head .btn, .head-row .btn { width: 100%; justify-content: center; }
+  .wrap { padding: 16px 14px 60px; }
+}
+
+/* --- Collapsible "add" panels -------------------------------------------
+   The add-a-person forms are seven fields each and were permanently open, so
+   the shift page read as a wall of inputs with the actual roster buried in it.
+   Collapsed by default: the tables are what you're looking at, adding is a
+   deliberate step you open.                                                */
+.add-panel { margin: 10px 0 4px; }
+.add-panel > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 15px; border: 1px dashed var(--line-2); border-radius: 10px; background: var(--surface);
+  color: var(--primary-700); font-size: 13.5px; font-weight: 600; user-select: none; }
+.add-panel > summary::-webkit-details-marker { display: none; }
+.add-panel > summary:hover { border-color: var(--primary-200); background: var(--primary-50); }
+.add-panel[open] > summary { border-style: solid; border-color: var(--primary-200); background: var(--primary-50);
+  border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.add-panel[open] > .card { margin-top: 0; border-top-left-radius: 0; }
+.add-panel > .card { margin-bottom: 4px; }
+
+/* --- Photo reader: side-by-side on desktop, stacked on a phone ----------- */
+@media (max-width: 700px) {
+  .add-panel, .add-panel > summary { display: block; width: 100%; }
+  .add-panel > summary { text-align: center; }
+  .photo-form { gap: 12px; }
+  /* Full-width, thumb-sized controls throughout the forms. */
+  .form.grid { grid-template-columns: 1fr; gap: 12px; }
+  .form.grid .btn, .card > form .btn { width: 100%; justify-content: center; padding: 12px 15px; }
+  .form input, .form select, textarea { padding: 12px; font-size: 16px; } /* 16px stops iOS zooming on focus */
+  .seg label { padding: 12px 10px; }
+}

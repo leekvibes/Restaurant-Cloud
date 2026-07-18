@@ -430,18 +430,22 @@ app.get('/shifts/:id', (req, res) => {
 
     <h2>Servers</h2>
     <p class="muted">Sales &amp; card tips come from Benugin (enter manually for now). Cash tips come from staff on the <a href="/tips">cash-tip page</a> — tap <b>edit</b> to correct any of it, including cash.</p>
-    <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="card form photo-form">
-      <div>
-        <strong>📸 Read from a report photo</strong>
-        <p class="muted" style="margin:2px 0 0">Snap the end-of-day report (several photos OK). It fills in each server's sales + card tips below for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p>
-      </div>
-      <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
-      <button class="btn" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
-    </form>
+    <details class="add-panel">
+      <summary>📸 Read from a report photo</summary>
+      <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="card form photo-form">
+        <div>
+          <p class="muted" style="margin:0">Snap the end-of-day report (several photos OK). It fills in each server's sales + card tips below for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p>
+        </div>
+        <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
+        <button class="btn" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
+      </form>
+    </details>
     <table class="table">
       <thead><tr><th>Server</th><th class="num">Food</th><th class="num">Coffee</th><th class="num">Card tips</th><th class="num">Cash tips</th><th class="num">Hours</th><th class="num">Wage</th><th></th></tr></thead>
       <tbody>${serverRows || '<tr><td colspan="8" class="muted">No servers yet.</td></tr>'}</tbody>
     </table>
+    <details class="add-panel">
+      <summary>＋ Add a server / edit their numbers</summary>
     <form method="post" action="/shifts/${sh.id}/server" class="card form grid" id="server-form">
       <label>Server <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
       <label>Food sales <input name="food" type="number" step="0.01" min="0" placeholder="0.00"></label>
@@ -452,6 +456,7 @@ app.get('/shifts/:id', (req, res) => {
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
       <button class="btn" type="submit">Save server</button>
     </form>
+    </details>
 
     <h2>Support — kitchen, busser, barista</h2>
     <p class="muted">Their hours (and wage, if different today). Tips are what they logged on the tips page — that money goes into the shared pool and is split by hours, not kept by whoever reported it. Tap <b>edit</b> to correct anything they mistyped.</p>
@@ -459,6 +464,8 @@ app.get('/shifts/:id', (req, res) => {
       <thead><tr><th>Name</th><th>Role</th><th class="num">Hours</th><th class="num">Wage</th><th class="num">Cash tips</th><th class="num">To-go card</th><th></th></tr></thead>
       <tbody>${supportRows || '<tr><td colspan="7" class="muted">No support staff yet.</td></tr>'}</tbody>
     </table></div>
+    <details class="add-panel">
+      <summary>＋ Add support staff / edit their numbers</summary>
     <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
       <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
       <label>Role <select name="role" id="support-role">${roleOpts()}</select></label>
@@ -466,6 +473,7 @@ app.get('/shifts/:id', (req, res) => {
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
       <button class="btn" type="submit">Save support</button>
     </form>
+    </details>
 
     ${notesBlock(w.notesForShift.all(sh.id))}
 
