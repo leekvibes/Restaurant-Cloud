@@ -236,19 +236,53 @@ function cellValue(m, f, row) {
   return v ? esc(v) : '<span class="muted">—</span>';
 }
 
-function renderInput(f) {
+/** @param row  existing values when editing; omit for a blank add form. */
+function renderInput(f, row) {
+  const cur = row ? row[f.name] : null;
+  const has = cur !== null && cur !== undefined && cur !== '';
   const req = f.required ? ' required' : '';
   const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : '';
-  if (f.type === 'textarea') return `<textarea name="${f.name}"${req}${ph} rows="2"></textarea>`;
+  if (f.type === 'textarea') return `<textarea name="${f.name}"${req}${ph} rows="3">${has ? esc(cur) : ''}</textarea>`;
   if (f.type === 'select') {
-    const opts = resolveOptions(f).map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+    const opts = resolveOptions(f).map((o) =>
+      `<option value="${esc(o.value)}"${String(o.value) === String(cur) ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
     return `<select name="${f.name}"${req}><option value="">—</option>${opts}</select>`;
   }
-  if (f.type === 'file') return `<input type="file" name="${f.name}"${req}>`;
-  if (f.type === 'money') return `<input name="${f.name}" type="number" step="0.01" min="0"${req} placeholder="0.00">`;
+  if (f.type === 'file') {
+    // Required only when there's nothing on file yet — otherwise leaving it
+    // blank keeps whatever is already attached.
+    const need = f.required && !has ? ' required' : '';
+    const current = has
+      ? `<span class="file-current">Attached: <a href="/uploads/${esc(cur)}" target="_blank">open</a> — choosing a file replaces it</span>`
+      : '';
+    return `<input type="file" name="${f.name}"${need}>${current}`;
+  }
+  if (f.type === 'money') return `<input name="${f.name}" type="number" step="0.01" min="0"${req} placeholder="0.00" value="${has ? (Number(cur) / 100).toFixed(2) : ''}">`;
   const map = { date: 'date', number: 'number', url: 'url', tel: 'tel', email: 'email' };
-  return `<input name="${f.name}" type="${map[f.type] || 'text'}"${req}${ph}>`;
+  return `<input name="${f.name}" type="${map[f.type] || 'text'}"${req}${ph} value="${has ? esc(cur) : ''}">`;
 }
+
+/** Full value for the detail page — every field, not just the listed ones. */
+function detailValue(m, f, row) {
+  const v = row[f.name];
+  if (v === null || v === undefined || v === '') return '<span class="muted">—</span>';
+  if (f.type === 'money') return money(v || 0);
+  if (f.type === 'file') return `<a href="/uploads/${esc(v)}" target="_blank">open file</a>`;
+  if (f.type === 'url') return `<a href="${esc(v)}" target="_blank">${esc(String(v).replace(/^https?:\/\//, ''))}</a>`;
+  if (f.type === 'tel') return `<a href="tel:${esc(v)}">${esc(v)}</a>`;
+  if (f.type === 'email') return `<a href="mailto:${esc(v)}">${esc(v)}</a>`;
+  if (f.type === 'select' && typeof f.options === 'function') {
+    const opt = resolveOptions(f).find((o) => String(o.value) === String(v));
+    return opt ? esc(opt.label) : '<span class="muted">—</span>';
+  }
+  if (f.name === m.dateField && f.type === 'date') return `${esc(v)} ${expiryBadge(daysUntil(v))}`;
+  if (f.type === 'textarea') return `<div class="detail-long">${esc(v)}</div>`;
+  return esc(v);
+}
+
+/** The field that names an entry — used for links and page titles. */
+const titleField = (m) => m.fields.find((f) => f.list) || m.fields[0];
+const rowTitle = (m, row) => String(row[titleField(m).name] || `#${row.id}`);
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -268,10 +302,15 @@ function mountModules(app) {
       const flag = m.flag ? m.flag(row) : null;
       const dueWarn = m.dateField && daysUntil(row[m.dateField]) !== null && daysUntil(row[m.dateField]) <= 30;
       const cls = dueWarn || (flag && flag.warn) ? ' class="row-warn"' : '';
-      const cells = listFields.map((f) => `<td${f.type === 'money' ? ' class="num"' : ''}>${cellValue(m, f, row)}</td>`).join('');
+      // The first cell opens the entry — that's where everything you typed
+      // lives, including the fields too wide to fit in the list.
+      const cells = listFields.map((f, i) => {
+        const inner = cellValue(m, f, row);
+        return `<td${f.type === 'money' ? ' class="num"' : ''}>${i === 0 ? `<a class="row-open" href="/c/${m.slug}/${row.id}">${inner}</a>` : inner}</td>`;
+      }).join('');
       const statusCell = m.flag ? `<td>${flag ? `<span class="pill ${flag.cls}">${flag.text}</span>` : '<span class="muted">—</span>'}</td>` : '';
-      const del = m.appendOnly ? '' : `<form method="post" action="/c/${m.slug}/${row.id}/delete" onsubmit="return confirm('Delete this?')" style="margin:0"><button class="link-danger">delete</button></form>`;
-      const actions = (m.rowActions ? m.rowActions(row, m) : '') + del;
+      const view = `<a href="/c/${m.slug}/${row.id}">${m.appendOnly ? 'view' : 'open'}</a>`;
+      const actions = view + (m.rowActions ? m.rowActions(row, m) : '');
       return `<tr${cls}>${cells}${statusCell}<td class="row-actions">${actions}</td></tr>`;
     }).join('');
     const emptyCols = listFields.length + (m.flag ? 1 : 0) + 1;
@@ -300,16 +339,18 @@ function mountModules(app) {
       <a class="back" href="/">← Dashboard</a>
       <div class="page-head">
         <div><h1>${m.icon} ${esc(m.title)}</h1><p class="sub">${esc(m.blurb)}</p></div>
-        <a class="btn btn-primary" href="#add">＋ Add</a>
+        <a class="btn btn-primary" href="#add" onclick="document.getElementById('add-panel').open=true">＋ Add</a>
       </div>
       ${vendorHint}${appendHint}
       ${searchBar}
       ${tableOrEmpty}
-      <h2 id="add">Add ${esc(m.title.toLowerCase().replace(/s$/, '')) || 'entry'}</h2>
-      <form method="post" action="/c/${m.slug}" class="card form grid"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
-        ${formFields}
-        <button class="btn btn-primary" type="submit">Save</button>
-      </form>
+      <details class="add-panel" id="add-panel"${rows.length ? '' : ' open'}>
+        <summary id="add">＋ Add ${esc(m.title.toLowerCase().replace(/s$/, '')) || 'entry'}</summary>
+        <form method="post" action="/c/${m.slug}" class="card form grid"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
+          ${formFields}
+          <button class="btn btn-primary" type="submit">Save</button>
+        </form>
+      </details>
       <script>function modFilter(){var q=(document.getElementById('mod-search').value||'').toLowerCase(),n=0;document.querySelectorAll('#mod-body tr').forEach(function(r){var show=r.textContent.toLowerCase().indexOf(q)!==-1;r.style.display=show?'':'none';if(show)n++;});var c=document.getElementById('mod-count');if(c)c.textContent=n+' items';}</script>`));
   });
 
@@ -332,6 +373,82 @@ function mountModules(app) {
     const cols = m.fields.map((f) => f.name);
     db.prepare(`INSERT INTO ${m.table} (${cols.join(',')}) VALUES (${cols.map((c) => '@' + c).join(',')})`).run(data);
     res.redirect(`/c/${m.slug}?msg=` + encodeURIComponent('Saved.'));
+  });
+
+  // Everything you entered for one entry — including the fields the list is
+  // too narrow to show, which is where most of the useful detail lives.
+  app.get('/c/:slug/:id', (req, res) => {
+    const m = bySlug[req.params.slug];
+    if (!m) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
+    const row = db.prepare(`SELECT * FROM ${m.table} WHERE id = ?`).get(req.params.id);
+    if (!row) return res.status(404).send(layout('Not found', `<h1>That ${esc(m.title.toLowerCase())} entry no longer exists</h1><a class="btn" href="/c/${m.slug}">← Back</a>`));
+
+    const rows = m.fields.map((f) => `
+      <div class="detail-row"><div class="detail-k">${esc(f.label)}</div><div class="detail-v">${detailValue(m, f, row)}</div></div>`).join('');
+    const flag = m.flag ? m.flag(row) : null;
+
+    res.send(layout(rowTitle(m, row), `
+      ${flash(req)}
+      <a class="back" href="/c/${m.slug}">← ${esc(m.title)}</a>
+      <div class="page-head">
+        <div><h1>${esc(rowTitle(m, row))}</h1>
+          <p class="sub">${flag ? `<span class="pill ${flag.cls}">${flag.text}</span> · ` : ''}Added ${esc(String(row.created_at || '').slice(0, 10))}</p></div>
+        ${m.appendOnly ? '' : `<a class="btn btn-primary" href="/c/${m.slug}/${row.id}/edit">Edit</a>`}
+      </div>
+      ${m.appendOnly ? '<p class="muted">This log is append-only, so entries can\'t be changed after the fact.</p>' : ''}
+      <div class="card detail">${rows}</div>
+      ${m.appendOnly ? '' : `
+        <div class="danger-zone">
+          <div><b>Delete this entry</b><p class="muted">Removes it permanently. This can't be undone.</p></div>
+          <form method="post" action="/c/${m.slug}/${row.id}/delete" onsubmit="return confirm('Delete ${esc(rowTitle(m, row)).replace(/'/g, "\\'")}?')" style="margin:0">
+            <button class="btn btn-danger" type="submit">Delete</button>
+          </form>
+        </div>`}
+    `));
+  });
+
+  app.get('/c/:slug/:id/edit', (req, res) => {
+    const m = bySlug[req.params.slug];
+    if (!m || m.appendOnly) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
+    const row = db.prepare(`SELECT * FROM ${m.table} WHERE id = ?`).get(req.params.id);
+    if (!row) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
+    const isMultipart = m.fields.some((f) => f.type === 'file');
+
+    res.send(layout(`Edit ${rowTitle(m, row)}`, `
+      ${flash(req)}
+      <a class="back" href="/c/${m.slug}/${row.id}">← ${esc(rowTitle(m, row))}</a>
+      <h1>Edit ${esc(rowTitle(m, row))}</h1>
+      <form method="post" action="/c/${m.slug}/${row.id}" class="card form grid"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
+        ${m.fields.map((f) => `<label>${esc(f.label)} ${renderInput(f, row)}</label>`).join('')}
+        <button class="btn btn-primary" type="submit">Save changes</button>
+      </form>
+      <p class="muted"><a href="/c/${m.slug}/${row.id}">Cancel</a></p>
+    `));
+  });
+
+  app.post('/c/:slug/:id', upload.any(), (req, res) => {
+    const m = bySlug[req.params.slug];
+    if (!m || m.appendOnly) return res.status(404).end();
+    const row = db.prepare(`SELECT * FROM ${m.table} WHERE id = ?`).get(req.params.id);
+    if (!row) return res.status(404).end();
+
+    const data = { id: row.id };
+    for (const f of m.fields) {
+      if (f.type === 'file') {
+        const file = (req.files || []).find((x) => x.fieldname === f.name && x.filename);
+        // No new upload means keep the existing attachment, not clear it.
+        data[f.name] = file ? file.filename : row[f.name];
+      } else if (f.type === 'money') {
+        data[f.name] = toCents(req.body[f.name]);
+      } else if (f.type === 'number') {
+        data[f.name] = req.body[f.name] === '' ? null : Number(req.body[f.name]);
+      } else {
+        data[f.name] = (req.body[f.name] || '').trim() || null;
+      }
+    }
+    const sets = m.fields.map((f) => `${f.name} = @${f.name}`).join(', ');
+    db.prepare(`UPDATE ${m.table} SET ${sets} WHERE id = @id`).run(data);
+    res.redirect(`/c/${m.slug}/${row.id}?msg=` + encodeURIComponent('Saved.'));
   });
 
   app.post('/c/:slug/:id/delete', (req, res) => {

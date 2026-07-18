@@ -433,3 +433,19 @@ body.bare { background: #0f1e40; }
   .form input, .form select, textarea { padding: 12px; font-size: 16px; } /* 16px stops iOS zooming on focus */
   .seg label { padding: 12px 10px; }
 }
+
+/* --- Entry detail page --------------------------------------------------- */
+.detail { padding: 4px 0; }
+.detail-row { display: flex; gap: 20px; padding: 12px 18px; border-top: 1px solid var(--line); }
+.detail-row:first-child { border-top: 0; }
+.detail-k { flex: 0 0 190px; color: var(--muted); font-size: 12.5px; font-weight: 600; padding-top: 1px; }
+.detail-v { flex: 1; min-width: 0; font-size: 14.5px; color: var(--ink); overflow-wrap: anywhere; }
+.detail-long { white-space: pre-wrap; line-height: 1.6; }
+.row-open { color: var(--ink); font-weight: 600; }
+.row-open:hover { color: var(--primary); text-decoration: none; }
+.file-current { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); font-weight: 500; }
+@media (max-width: 700px) {
+  .detail-row { display: block; padding: 11px 14px; }
+  .detail-k { flex: none; margin-bottom: 3px; text-transform: uppercase; font-size: 11px; letter-spacing: .05em; }
+  .table td:first-child .row-open { color: var(--primary); }
+}
