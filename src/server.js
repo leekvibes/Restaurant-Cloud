@@ -637,6 +637,14 @@ app.get('/shifts/:id/results', (req, res) => {
     if (sk.role === 'busser') notes.push(line);
     else warn.push(line + ` If ${sk.role} was actually working, add them below and the tip-out will apply.`);
   }
+  // Staff who report on the tips page land on the shift with 0 hours until you
+  // enter them. Everything is split by hours, so leaving it at 0 pays them
+  // nothing — including their own share of tips they reported.
+  const noHours = inp.support.filter((p) => !Number(p.hours)).map((p) => p.name);
+  if (noHours.length) {
+    warn.push('No hours entered for: ' + noHours.join(', ')
+      + ' — the pool is split by hours, so they get $0 until you add them.');
+  }
   const missingEmail = [...inp.servers, ...inp.support].filter((p) => !p.email).map((p) => p.name);
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
   const noCash = inp.servers.filter((sv) => !sv.cashEnteredBy).map((sv) => sv.name);
