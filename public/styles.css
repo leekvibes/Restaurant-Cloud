@@ -177,7 +177,9 @@ tr[data-editing] td { background: var(--primary-50); }
 .flash-ok { background: var(--ok-bg); color: #065f46; border-color: #a7f3d0; }
 .flash-err { background: var(--danger-bg); color: #991b1b; border-color: #fecaca; }
 .flash-warn { background: var(--warn-bg); color: #854d0e; border-color: #fde68a; }
-.flash-warn ul { margin: 6px 0 0; padding-left: 18px; }
+/* Neutral "here's what happened" note — not a problem, just worth knowing. */
+.flash-info { background: var(--primary-50); color: var(--primary-700); border-color: var(--primary-200); }
+.flash-warn ul, .flash-info ul { margin: 6px 0 0; padding-left: 18px; }
 
 /* ---------- Attention list (dashboard) ---------- */
 .attn { display: grid; gap: 10px; }

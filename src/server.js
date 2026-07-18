@@ -607,8 +607,17 @@ app.get('/shifts/:id/results', (req, res) => {
   const r = runShift(inp, policyForShift(sh));
 
   const warn = [];
+  const notes = [];
   if (!r.reconciliation.balanced) warn.push('Tip totals do not reconcile — check the numbers.');
   for (const o of r.orphanedPots) warn.push(`${money(o.cents)} is owed to “${o.role}” but nobody worked that role. Add them or the money is unassigned.`);
+  // Nobody worked a tipped-out role, so it wasn't charged. Running without a
+  // busser is a normal short-staffed night; running without a cook is almost
+  // always someone forgotten on the shift, so that one gets flagged louder.
+  for (const sk of r.skippedPots) {
+    const line = `No ${sk.role} worked this shift, so the ${sk.role} tip-out wasn’t charged — servers kept ${money(sk.cents)}.`;
+    if (sk.role === 'busser') notes.push(line);
+    else warn.push(line + ` If ${sk.role} was actually working, add them below and the tip-out will apply.`);
+  }
   const missingEmail = [...inp.servers, ...inp.support].filter((p) => !p.email).map((p) => p.name);
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
   const noCash = inp.servers.filter((sv) => !sv.cashEnteredBy).map((sv) => sv.name);
@@ -654,6 +663,7 @@ app.get('/shifts/:id/results', (req, res) => {
     <div class="page-head"><div><h1>${sh.date} · ${dp(sh.daypart)}</h1><p class="sub">Tip-out results — review, then send everyone their email.</p></div>
       <form method="post" action="/shifts/${sh.id}/send" style="margin:0"><button class="btn btn-primary" type="submit">${mailReady ? '✉ Send emails to all' : '✉ Generate previews'}</button></form></div>
     ${warn.length ? `<div class="flash flash-warn"><div><b>Before you send:</b><ul>${warn.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
+    ${notes.length ? `<div class="flash flash-info"><div><ul>${notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
     <div class="stats">
       <div class="stat"><div class="stat-label">Total tips collected</div><div class="stat-value">${money(totalTips)}</div></div>
       ${Object.keys(r.pots).filter((role) => r.pots[role]).map((role) => `<div class="stat"><div class="stat-label">${role} pool</div><div class="stat-value">${money(r.pots[role])}</div></div>`).join('')}

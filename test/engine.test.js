@@ -138,3 +138,54 @@ test('custom rules: an added food-runner rule is applied', () => {
   const rDefault = runShift({ servers: [one({ food: 1000, cardTips: 100 })], support: [{ employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }] });
   assert.ok(r.pots.busser > rDefault.pots.busser);
 });
+
+// --- short-staffed nights -------------------------------------------------
+// Running without a busser is normal here. Nobody is there to receive that
+// 13%, so it must never be docked from the server and left unassigned.
+
+test('no busser on shift: the busser tip-out is not charged and the server keeps it', () => {
+  const crew = [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 8 }];
+  const full = runShift({ servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })],
+    support: [...crew, { employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }] });
+  const short = runShift({ servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })], support: crew });
+
+  assert.strictEqual(short.servers[0].tipouts.busser, undefined);   // never charged
+  assert.strictEqual(short.pots.busser, undefined);                 // no pot created
+  assert.strictEqual(short.orphanedPots.length, 0);                 // nothing unassigned
+  // The server keeps exactly what the busser would have received.
+  assert.strictEqual(short.servers[0].tipsKept, full.servers[0].tipsKept + full.pots.busser);
+  assert.deepStrictEqual(short.skippedPots, [{ role: 'busser', cents: full.pots.busser }]);
+  // Kitchen is unaffected.
+  assert.strictEqual(short.pots.kitchen, full.pots.kitchen);
+});
+
+test('short-staffed night still reconciles and hands out every cent charged', () => {
+  const r = runShift({
+    servers: [one({ employeeId: 'A', hours: 6, food: 1850.75, coffee: 120.5, cardTips: 305.4, cashTips: 95 }),
+      one({ employeeId: 'B', hours: 5, food: 940.2, cardTips: 188.65, cashTips: 41.25 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 8 }],   // no busser, no barista
+  });
+  assert.ok(r.reconciliation.balanced);
+  const charged = r.servers.reduce((a, s) => a + s.tipoutTotal, 0);
+  const received = r.support.reduce((a, p) => a + p.tipShare, 0);
+  assert.strictEqual(charged, received);          // not a penny stranded
+  assert.strictEqual(r.orphanedPots.length, 0);
+});
+
+test('an unstaffed role leaves more in `remaining`, so the busser takes 13% of the larger pot', () => {
+  const withCook = runShift({ servers: [one({ food: 2000, cardTips: 400 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 8 }, { employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }] });
+  const noCook = runShift({ servers: [one({ food: 2000, cardTips: 400 })],
+    support: [{ employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }] });
+  assert.strictEqual(withCook.pots.busser, toCents(48.10));  // 13% of ($400 - $30)
+  assert.strictEqual(noCook.pots.busser, toCents(52.00));    // 13% of the full $400
+});
+
+test('a busser listed with no hours yet still counts as on shift', () => {
+  const r = runShift({ servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 8 }, { employeeId: 'BU', name: 'b', role: 'busser', hours: 0 }] });
+  assert.ok(r.pots.busser > 0);            // charged, not skipped
+  assert.strictEqual(r.skippedPots.length, 0);
+  const busser = r.support.find((p) => p.role === 'busser');
+  assert.strictEqual(busser.tipShare, r.pots.busser);   // sole busser gets all of it
+});

@@ -64,8 +64,15 @@ function runShift(shift, rules) {
     cashTips: toCents(p.cashTips), cardTips: toCents(p.cardTips),
   }));
 
+  // A tip-out is only charged when somebody actually worked the role that night.
+  // Short a busser? There's nobody to hand that 13% to, so the server keeps it —
+  // the alternative is docking a server for a coworker who was never there and
+  // letting the money sit unassigned.
+  const staffedRoles = new Set(support.map((p) => p.role));
+
   const rolePools = {}; // role -> cents
   const roleSplit = {}; // role -> split method
+  const skippedPots = {}; // role -> cents servers kept because nobody worked it
   const serverPayouts = [];
 
   for (const s of servers) {
@@ -73,18 +80,27 @@ function runShift(shift, rules) {
     const tipouts = {}; // role -> cents (this server)
     let directSum = 0;
 
+    const charge = (role, amt) => {
+      if (staffedRoles.has(role)) {
+        tipouts[role] = (tipouts[role] || 0) + amt;
+        return true;
+      }
+      skippedPots[role] = (skippedPots[role] || 0) + amt;
+      return false;
+    };
+
     for (const r of tipoutRules) {
       if (r.base === 'remaining') continue;
       const amt = pctOf(baseValue(s, r.base), r.percent);
-      tipouts[r.recipient] = (tipouts[r.recipient] || 0) + amt;
-      directSum += amt;
+      if (charge(r.recipient, amt)) directSum += amt;
       roleSplit[r.recipient] = r.split;
     }
+    // Note the ordering: an unstaffed role leaves more in `remaining`, so a
+    // busser correctly takes 13% of the larger pot on a night with no barista.
     const remaining = totalTips - directSum;
     for (const r of tipoutRules) {
       if (r.base !== 'remaining') continue;
-      const amt = pctOf(Math.max(remaining, 0), r.percent);
-      tipouts[r.recipient] = (tipouts[r.recipient] || 0) + amt;
+      charge(r.recipient, pctOf(Math.max(remaining, 0), r.percent));
       roleSplit[r.recipient] = r.split;
     }
 
@@ -164,6 +180,7 @@ function runShift(shift, rules) {
   return {
     servers: serverPayouts, support: supportResult,
     pots: rolePools, pool: { cash, togoCard, total: poolTotal }, orphanedPots,
+    skippedPots: Object.entries(skippedPots).filter(([, c]) => c > 0).map(([role, cents]) => ({ role, cents })),
     reconciliation: { totalTipsCollected, totalKept, totalPots, balanced: totalTipsCollected === totalKept + totalPots },
   };
 }
