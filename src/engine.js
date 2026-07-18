@@ -139,37 +139,53 @@ function runShift(shift, rules) {
   const staffCard = support.reduce((a, p) => a + p.cardTips, 0);
   const cash = toCents(pool.jar) + toCents(legacyCash) + staffCash;
   const togoCard = toCents(pool.togoCard) + staffCard;
-  const sourceAmount = (src) => {
-    if (src === 'togo_card') return togoCard;
-    if (src === 'jar' || src === 'cash') return cash;
-    return cash + togoCard; // 'jar_togo' / everything (and any legacy source)
+  // Allocate each bucket SEPARATELY even when one rule covers both, so we can
+  // tell someone "$X of this was card, $Y was cash out of the jar". Splitting
+  // the allocation keeps it penny-exact either way.
+  const sourceBuckets = (src) => {
+    if (src === 'togo_card') return [['card', togoCard]];
+    if (src === 'jar' || src === 'cash') return [['cash', cash]];
+    return [['cash', cash], ['card', togoCard]]; // 'jar_togo' / legacy
   };
-  const poolShareMap = new Map(); // employeeId -> { <payout>: cents }
+  const poolShareMap = new Map();  // employeeId -> { <payout>: cents }
+  const poolSourceMap = new Map(); // employeeId -> { cash: cents, card: cents }
   let poolTotal = 0;
   for (const r of poolRules) {
-    const amount = sourceAmount(r.source);
-    if (amount === 0) continue;
     const recips = poolRecipients(support, r.among);
-    if (!recips.length) { orphanedPots.push({ role: 'shared pool', cents: amount }); continue; }
-    poolTotal += amount;
     const split = r.split || 'hours';
     const payout = r.payout || 'weekly_cash';
-    const alloc = allocateByWeight(amount, recips.map((p) => ({ id: p.employeeId, weight: split === 'even' ? 1 : p.hours })));
-    for (const [id, c] of alloc) {
-      const cur = poolShareMap.get(id) || {};
-      cur[payout] = (cur[payout] || 0) + c;
-      poolShareMap.set(id, cur);
+    for (const [source, amount] of sourceBuckets(r.source)) {
+      if (amount === 0) continue;
+      if (!recips.length) { orphanedPots.push({ role: 'shared pool', cents: amount }); continue; }
+      poolTotal += amount;
+      const alloc = allocateByWeight(amount, recips.map((p) => ({ id: p.employeeId, weight: split === 'even' ? 1 : p.hours })));
+      for (const [id, c] of alloc) {
+        const byPayout = poolShareMap.get(id) || {};
+        byPayout[payout] = (byPayout[payout] || 0) + c;
+        poolShareMap.set(id, byPayout);
+        const bySource = poolSourceMap.get(id) || {};
+        bySource[source] = (bySource[source] || 0) + c;
+        poolSourceMap.set(id, bySource);
+      }
     }
   }
 
   const supportResult = support.map((p) => {
     const shares = poolShareMap.get(p.employeeId) || {}; // { weekly_cash, paycheck, ... }
+    const bySource = poolSourceMap.get(p.employeeId) || {};
     const poolShare = Object.values(shares).reduce((a, b) => a + b, 0);
+    const tipShare = roleShare.get(p.employeeId) || 0;
     return {
       employeeId: p.employeeId, name: p.name, role: p.role, hours: p.hours,
-      tipShare: roleShare.get(p.employeeId) || 0,   // role tip-out → paycheck
+      tipShare,                                      // role tip-out → paycheck
       poolShare,                                     // total across the shared pool(s)
       poolShares: shares,                            // broken down by payout method
+      poolCash: bySource.cash || 0,                  // their cut of the cash jar
+      poolCard: bySource.card || 0,                  // their cut of to-go card tips
+      // What they earned tonight, grouped the way they get asked about it:
+      // card money rides payroll, jar cash is handed over in person.
+      cardTotal: tipShare + (bySource.card || 0),
+      cashTotal: bySource.cash || 0,
     };
   });
 

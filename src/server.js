@@ -461,6 +461,17 @@ app.get('/shifts/:id', (req, res) => {
       <label>To-go card tips <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
       <button class="btn" type="submit">Save pool</button>
     </form>
+
+    <div class="danger-zone">
+      <div>
+        <b>Delete this shift</b>
+        <p class="muted">Removes the shift and everyone's hours, sales and tips on it. Use this to clear out test data. Emails already sent can't be recalled.</p>
+      </div>
+      <form method="post" action="/shifts/${sh.id}/delete" style="margin:0"
+            onsubmit="return confirm('Delete the ${sh.date} ${dp(sh.daypart)} shift and all ${Object.keys(entries).length} entries on it? This cannot be undone.')">
+        <button class="btn btn-danger" type="submit">Delete shift</button>
+      </form>
+    </div>
     <script>
       var ENTRIES = ${JSON.stringify(entries)};
       function setVal(form, name, v) { var el = form.querySelector('[name="' + name + '"]'); if (el) el.value = v == null ? '' : v; }
@@ -517,6 +528,13 @@ app.get('/shifts/:id', (req, res) => {
       }
     </script>`;
   res.send(layout(`${sh.date} ${sh.daypart}`, body));
+});
+
+app.post('/shifts/:id/delete', (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  s.deleteShift(sh.id);
+  res.redirect('/shifts?msg=' + encodeURIComponent(`Deleted the ${sh.date} ${dp(sh.daypart)} shift and everything on it.`));
 });
 
 app.post('/shifts/:id/server', (req, res) => {

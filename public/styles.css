@@ -324,3 +324,10 @@ body.bare { background: #0f1e40; }
   border-radius: 10px; font-size: 14px; color: var(--ink); background: #fff; font-family: inherit; }
 .row-form input:focus { outline: none; border-color: var(--primary); box-shadow: var(--ring); }
 .row-form button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* --- Destructive action, kept visually separate from normal controls ----- */
+.danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  margin: 28px 0 12px; padding: 16px 18px; background: var(--danger-bg); border: 1px solid #fecaca; border-radius: var(--radius); }
+.danger-zone p { margin: 3px 0 0; max-width: 52ch; }
+.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-danger:hover { background: #b91c1c; border-color: #b91c1c; }

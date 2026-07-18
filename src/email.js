@@ -41,17 +41,27 @@ function shell(title, bodyRows, hero) {
   </div></body></html>`;
 }
 
+// Gmail (and Outlook, and most of the rest) strip `display:flex`, which
+// collapsed every row into "Date2026-07-16". Two-cell tables are the only
+// layout email clients agree on, so every row is its own table.
 function line(label, value, opts = {}) {
-  const strong = opts.strong ? 'font-weight:700;font-size:16px' : 'font-weight:500';
+  const strong = opts.strong ? 'font-weight:700;font-size:16px' : 'font-weight:600';
   const color = opts.color || '#0f172a';
   const border = opts.border === false ? '' : 'border-top:1px solid #eef2f7';
-  return `<div style="display:flex;justify-content:space-between;padding:9px 0;${border}">
-    <span style="color:#64748b">${label}</span>
-    <span style="${strong};color:${color}">${value}</span></div>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;${border}">
+    <tr>
+      <td align="left" style="padding:10px 10px 10px 0;color:#64748b;font-size:14px;line-height:1.4">${label}</td>
+      <td align="right" style="padding:10px 0;font-size:14px;line-height:1.4;white-space:nowrap;${strong};color:${color}">${value}</td>
+    </tr></table>`;
+}
+
+/** Small grey caption under a row, for the "where this comes from" detail. */
+function hint(text) {
+  return `<div style="margin:-4px 0 2px;font-size:12px;color:#94a3b8;line-height:1.5">${text}</div>`;
 }
 
 function section(title) {
-  return `<div style="margin:18px 0 2px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8">${title}</div>`;
+  return `<div style="margin:20px 0 4px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8">${title}</div>`;
 }
 
 /** Build the email for one server. `p` is a server payout object from the engine. */
@@ -79,8 +89,17 @@ function serverEmail(p, ctx) {
   const tipoutRoles = Object.keys(p.tipouts).filter((r) => p.tipouts[r]);
   if (tipoutRoles.length === 0) body += line('No tip-out', fmt(0), { border: false });
   tipoutRoles.forEach((role, i) => {
-    body += line('→ ' + (ROLE_LABEL[role] || role), '-' + fmt(p.tipouts[role]), { border: i === 0 ? false : true, color: '#dc2626' });
+    body += line(ROLE_LABEL[role] || role, '-' + fmt(p.tipouts[role]), { border: i === 0 ? false : true, color: '#dc2626' });
   });
+  if (p.tipoutTotal > 0) body += line('Total tip-out', '-' + fmt(p.tipoutTotal), { color: '#dc2626' });
+  // Explain the roles that DIDN'T take a cut, so a short-staffed night doesn't
+  // read as a missing line the server has to wonder about.
+  const skipped = (ctx.skipped || []).map((sk) => ROLE_LABEL[sk.role] || sk.role);
+  if (skipped.length) {
+    const list = skipped.length === 1 ? skipped[0]
+      : skipped.slice(0, -1).join(', ') + ' or ' + skipped[skipped.length - 1];
+    body += hint(`No ${list.toLowerCase()} worked this shift, so no tip-out went to them — you keep it.`);
+  }
   body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: '#059669' });
 
   // The clarity line: you already took the cash home; here's how it nets out.
@@ -107,20 +126,29 @@ function supportEmail(p, ctx) {
   if (ctx.salaried) body += line('Pay', 'Salaried');
   else if (wage > 0) body += line('Estimated wage', fmt(wage));
 
-  const POOL_LABEL = { weekly_cash: 'Pool share (weekly cash)', paycheck: 'Pool share (on paycheck)', nightly_cash: 'Pool share (cash tonight)' };
-  const shares = p.poolShares || {};
-  const total = (p.tipShare || 0) + (p.poolShare || 0);
+  // Grouped by how the money actually reaches them, not by which rule produced
+  // it: card money rides payroll, jar cash is counted out by hand.
+  const cardTotal = p.cardTotal != null ? p.cardTotal : (p.tipShare || 0);
+  const cashTotal = p.cashTotal != null ? p.cashTotal : 0;
+  const total = cardTotal + cashTotal;
 
-  body += section('Tips');
-  let first = true;
-  if (p.tipShare) { body += line('Tip-out share (on paycheck)', fmt(p.tipShare), { border: false }); first = false; }
-  for (const payout of Object.keys(shares)) {
-    if (!shares[payout]) continue;
-    body += line(POOL_LABEL[payout] || 'Pool share', fmt(shares[payout]), { border: first ? false : true });
-    first = false;
+  body += section('What you made today');
+  body += line('Card tips', fmt(cardTotal), { border: false });
+  if (cardTotal > 0) {
+    const parts = [];
+    if (p.tipShare) parts.push(`${fmt(p.tipShare)} tip-out from servers`);
+    if (p.poolCard) parts.push(`${fmt(p.poolCard)} to-go card tips`);
+    if (parts.length > 1) body += hint(parts.join(' + '));
   }
-  body += line('Total tips', fmt(total), { strong: true, color: '#059669' });
-  body += `<div style="margin-top:8px;font-size:12px;color:#94a3b8;line-height:1.5">Your tip-out share (split by hours) lands on your Gusto paycheck. Shared-pool amounts are paid however the policy sets for each part — weekly cash and/or on your paycheck.</div>`;
+  body += line('Cash tips', fmt(cashTotal));
+  if (cashTotal > 0) body += hint('Your share of the tip jar, split by hours worked.');
+  body += line('Total for today', fmt(total), { strong: true, color: '#059669' });
+
+  body += section('How this reaches you');
+  if (cardTotal > 0) body += line('On your next paycheck', fmt(cardTotal), { border: false });
+  if (cashTotal > 0) body += line('Cash, handed out weekly', fmt(cashTotal), { border: cardTotal > 0 });
+  if (total === 0) body += line('Nothing to report today', fmt(0), { border: false });
+  body += `<div style="margin-top:10px;font-size:12px;color:#94a3b8;line-height:1.5">Card tips can’t be handed out the same night — servers keep their cash, so your share of it comes through payroll. Everything is split by hours worked.</div>`;
 
   const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(total)} in tips`;
   return { to: ctx.email, subject, html: shell(`${ROLE_LABEL[p.role] || p.role} summary`, body, { label: 'Total tips', value: fmt(total) }) };
@@ -134,9 +162,10 @@ function supportEmail(p, ctx) {
  */
 function buildEmails(results, meta, people) {
   const emails = [];
+  const skipped = results.skippedPots || [];
   for (const p of results.servers) {
     const info = people.get(p.employeeId) || {};
-    emails.push({ employeeId: p.employeeId, name: p.name, ...serverEmail(p, { ...meta, email: info.email, hourlyRate: info.hourlyRate, salaried: info.salaried }) });
+    emails.push({ employeeId: p.employeeId, name: p.name, ...serverEmail(p, { ...meta, skipped, email: info.email, hourlyRate: info.hourlyRate, salaried: info.salaried }) });
   }
   for (const p of results.support) {
     const info = people.get(p.employeeId) || {};

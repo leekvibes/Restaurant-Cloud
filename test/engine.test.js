@@ -189,3 +189,60 @@ test('a busser listed with no hours yet still counts as on shift', () => {
   const busser = r.support.find((p) => p.role === 'busser');
   assert.strictEqual(busser.tipShare, r.pots.busser);   // sole busser gets all of it
 });
+
+// --- support staff see card vs cash, not rule internals --------------------
+
+test('pool splits by source: cash jar and to-go card are tracked separately', () => {
+  const r = runShift({
+    servers: [one({ food: 1000, cardTips: 100 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 6 },
+      { employeeId: 'BU', name: 'b', role: 'busser', hours: 2 }],
+    pool: { jar: 80, togoCard: 40 },
+  });
+  const k = r.support.find((p) => p.role === 'kitchen');
+  const b = r.support.find((p) => p.role === 'busser');
+  // 6h vs 2h → 3:1 on each bucket independently.
+  assert.strictEqual(k.poolCash, toCents(60));
+  assert.strictEqual(b.poolCash, toCents(20));
+  assert.strictEqual(k.poolCard, toCents(30));
+  assert.strictEqual(b.poolCard, toCents(10));
+  // Every cent of each bucket is handed out.
+  assert.strictEqual(k.poolCash + b.poolCash, toCents(80));
+  assert.strictEqual(k.poolCard + b.poolCard, toCents(40));
+});
+
+test('card total = server tip-out + to-go card; cash total = the jar only', () => {
+  const r = runShift({
+    servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })],
+    support: [{ employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }],
+    pool: { jar: 50, togoCard: 25 },
+  });
+  const b = r.support[0];
+  assert.strictEqual(b.cardTotal, b.tipShare + b.poolCard);
+  assert.strictEqual(b.cashTotal, b.poolCash);
+  assert.strictEqual(b.poolCash, toCents(50));   // sole recipient takes the jar
+  assert.strictEqual(b.poolCard, toCents(25));
+  assert.strictEqual(b.cardTotal + b.cashTotal, b.tipShare + b.poolShare);
+});
+
+test('splitting the pool by source stays penny-exact on awkward amounts', () => {
+  const r = runShift({
+    servers: [one({ cardTips: 0 })],
+    support: [{ employeeId: 'a', name: 'A', role: 'kitchen', hours: 7 },
+      { employeeId: 'b', name: 'B', role: 'busser', hours: 5 },
+      { employeeId: 'c', name: 'C', role: 'barista', hours: 3 }],
+    pool: { jar: 100.01, togoCard: 33.33 },
+  });
+  assert.strictEqual(r.support.reduce((a, p) => a + p.poolCash, 0), toCents(100.01));
+  assert.strictEqual(r.support.reduce((a, p) => a + p.poolCard, 0), toCents(33.33));
+});
+
+test('a support person with no tips at all reports zeros, not undefined', () => {
+  const r = runShift({ servers: [one({ cardTips: 0 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 6 }] });
+  const k = r.support[0];
+  assert.strictEqual(k.cardTotal, 0);
+  assert.strictEqual(k.cashTotal, 0);
+  assert.strictEqual(k.poolCash, 0);
+  assert.strictEqual(k.poolCard, 0);
+});

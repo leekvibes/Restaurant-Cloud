@@ -118,6 +118,15 @@ const s = {
   setPool: db.prepare('UPDATE shifts SET pool_jar_cents = @jar, pool_togo_card_cents = @togo_card WHERE id = @id'),
 };
 
+// Wipe a shift and everything hanging off it. Wrapped in a transaction so a
+// half-deleted shift can't survive a crash mid-way.
+const deleteShiftTx = db.transaction((shiftId) => {
+  db.prepare('DELETE FROM server_sales WHERE shift_id = ?').run(shiftId);
+  db.prepare('DELETE FROM work WHERE shift_id = ?').run(shiftId);
+  db.prepare('DELETE FROM shifts WHERE id = ?').run(shiftId);
+});
+s.deleteShift = deleteShiftTx;
+
 // ---- Work / sales -------------------------------------------------------
 const w = {
   upsertWork: db.prepare(
