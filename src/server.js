@@ -815,6 +815,14 @@ function rolesForEmployee(emp) {
   return list.length ? list : allRoles().filter((r) => r !== 'manager');
 }
 
+// Staff keep this on a home screen for months, so a cached copy can outlive a
+// change to the form and post fields the server no longer expects. Never cache
+// the HTML — it's a few KB, and a stale copy costs someone their tips at 1am.
+app.use(['/tips', '/tips/start'], (req, res, next) => {
+  res.set('Cache-Control', 'no-store, must-revalidate');
+  next();
+});
+
 app.get('/tips', (req, res) => {
   // Success screen after a submit.
   if (req.query.done === '1') {
@@ -974,10 +982,30 @@ app.post('/tips/start', (req, res) => {
   res.send(tipsFormPage(matches[0]));
 });
 
+/**
+ * A phone still showing the pre-PIN-first page posts a name and PIN with no
+ * token. That page is perfectly valid to its user — they typed their PIN and
+ * pressed submit — so accept it rather than losing their entry. Same check the
+ * old flow made, so no weaker than what it replaced.
+ */
+function legacyAuth(body) {
+  const id = Number(body.employee_id);
+  const pin = String(body.pin || '').trim();
+  if (!id || !pin) return null;
+  const e = q.employee.get(id);
+  if (!e || !e.active || e.role === 'manager') return null;
+  return String(e.pin || '') === pin ? e : null;
+}
+
 app.post('/tips', (req, res) => {
   const fail = (msg) => res.redirect('/tips?err=1&msg=' + encodeURIComponent(msg));
-  const emp = readTipsToken(req.body.token);
-  if (!emp) return fail('Your session timed out. Enter your PIN and try again — nothing was saved.');
+  const emp = readTipsToken(req.body.token) || legacyAuth(req.body);
+  if (!emp) {
+    // Distinguish a genuinely stale token from a wrong PIN on an old page.
+    return fail(req.body.employee_id
+      ? "That PIN doesn't match the name selected. Check it and try again — nothing was saved."
+      : 'That took too long and timed out. Enter your PIN and try again — nothing was saved.');
+  }
 
   const date = String(req.body.date || '').slice(0, 10);
   const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
