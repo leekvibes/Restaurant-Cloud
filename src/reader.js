@@ -61,12 +61,27 @@ async function readReport(files) {
     },
   }));
 
-  const resp = await client.messages.create({
-    model: MODEL,
-    max_tokens: 4096,
-    output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
-    messages: [{ role: 'user', content: [...images, { type: 'text', text: PROMPT }] }],
-  });
+  // Note: no `effort` here on purpose — it's only supported on the Opus /
+  // Sonnet-5 tier and 400s on Haiku, which is the cheap model we recommend.
+  // Structured output is what actually matters for reliable extraction.
+  let resp;
+  try {
+    resp = await client.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      output_config: { format: { type: 'json_schema', schema: SCHEMA } },
+      messages: [{ role: 'user', content: [...images, { type: 'text', text: PROMPT }] }],
+    });
+  } catch (apiErr) {
+    // Turn SDK/API errors into something a restaurant manager can act on.
+    const status = apiErr.status;
+    const detail = apiErr.error?.error?.message || apiErr.message || 'unknown error';
+    if (status === 401) throw new Error('the API key was rejected. Check ANTHROPIC_API_KEY.');
+    if (status === 400 && /model/i.test(detail)) throw new Error(`the model "${MODEL}" rejected the request (${detail}). Try removing READER_MODEL to use the default.`);
+    if (status === 429) throw new Error('rate limited — wait a moment and try again.');
+    if (status === 413 || /too large/i.test(detail)) throw new Error('the photo is too large. Try one page at a time.');
+    throw new Error(detail);
+  }
 
   const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
   let data;
