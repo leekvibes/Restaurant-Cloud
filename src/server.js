@@ -613,6 +613,11 @@ app.get('/shifts/:id/results', (req, res) => {
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
   const noCash = inp.servers.filter((sv) => !sv.cashEnteredBy).map((sv) => sv.name);
   if (noCash.length) warn.push('Cash tips not entered yet for: ' + noCash.join(', ') + '. They can add them on the cash-tip page.');
+  // A server with tips but no sales means the tip-out is being computed off $0.
+  const noSales = inp.servers
+    .filter((sv) => (toCents(sv.cardTips) + toCents(sv.cashTips)) > 0 && (toCents(sv.food) + toCents(sv.coffee) + toCents(sv.alcohol)) === 0)
+    .map((sv) => sv.name);
+  if (noSales.length) warn.push('No sales recorded for: ' + noSales.join(', ') + ' — their tip-out will calculate as $0. Add their sales below.');
 
   const serverCards = r.servers.map((p) => `
     <div class="card">
@@ -705,6 +710,7 @@ app.get('/tips', (req, res) => {
           <div class="tips-receipt">
             <div class="kv"><span>Date</span><b>${esc(req.query.date || '')}${req.query.shift ? ' · ' + esc(req.query.shift) : ''}</b></div>
             ${req.query.position ? `<div class="kv"><span>Worked as</span><b>${esc(String(req.query.position).replace(/^./, (c) => c.toUpperCase()))}</b></div>` : ''}
+            ${req.query.sales ? `<div class="kv"><span>Total sales</span><b>$${esc(req.query.sales)}</b></div>` : ''}
             <div class="kv"><span>Cash tips</span><b>$${esc(req.query.cash || '0.00')}</b></div>
             ${card !== '' ? `<div class="kv"><span>Card tips</span><b>$${esc(card)}</b></div>` : ''}
           </div>
@@ -756,6 +762,20 @@ app.get('/tips', (req, res) => {
             <span class="tips-hint">Fills in from your usual job — only change it if you worked something different today.</span>
           </label>
 
+          <div class="tips-group" id="server-sales">
+            <div class="tips-group-t">Your sales tonight</div>
+            <label class="tips-field">Kitchen food sales
+              <div class="tips-money"><span>$</span><input name="food" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
+            </label>
+            <label class="tips-field">Coffee &amp; beverage sales
+              <div class="tips-money"><span>$</span><input name="coffee" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
+            </label>
+            <label class="tips-field" style="margin-bottom:0">Alcohol sales
+              <div class="tips-money"><span>$</span><input name="alcohol" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
+              <span class="tips-hint">Leave blank or enter 0 if none.</span>
+            </label>
+          </div>
+
           <label class="tips-field">Cash tips you took home
             <div class="tips-money"><span>$</span><input name="cash_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00" required></div>
           </label>
@@ -780,14 +800,23 @@ app.get('/tips', (req, res) => {
         var ROLES = ${JSON.stringify(Object.fromEntries(staff.map((e) => [e.id, e.role])))};
         var name = document.querySelector('[name="employee_id"]');
         var pos = document.getElementById('tip-position');
+        var sales = document.getElementById('server-sales');
         if (!name || !pos) return;
+
+        // Sales only apply to servers — hide them entirely for support roles.
+        function syncSales() {
+          sales.style.display = pos.value === 'server' ? '' : 'none';
+        }
         name.addEventListener('change', function () {
           var r = ROLES[name.value];
           if (!r) return;
           for (var i = 0; i < pos.options.length; i++) {
             if (pos.options[i].value === r) { pos.selectedIndex = i; break; }
           }
+          syncSales();
         });
+        pos.addEventListener('change', syncSales);
+        syncSales();
       })();
     </script>`;
   res.send(layout('Log your tips', body, { bare: true }));
@@ -819,10 +848,25 @@ app.post('/tips', (req, res) => {
   const cardRaw = String(req.body.card_tips || '').trim();
   if (cardRaw !== '') w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(cardRaw) });
 
+  // Servers report their own sales as part of closing. Only write if they
+  // actually entered something, so a blank form never wipes your numbers.
+  let salesNote = '';
+  if (position === 'server') {
+    const anySales = ['food', 'coffee', 'alcohol'].some((k) => String(req.body[k] || '').trim() !== '');
+    if (anySales) {
+      w.setSales.run({
+        shift_id: sh.id, employee_id: emp.id,
+        food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee), alcohol_cents: toCents(req.body.alcohol),
+      });
+      salesNote = (toCents(req.body.food) + toCents(req.body.coffee) + toCents(req.body.alcohol)) / 100;
+    }
+  }
+
   const p = new URLSearchParams({
     done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
     card: cardRaw === '' ? '' : (toCents(cardRaw) / 100).toFixed(2),
     shift: dp(daypart), date, position,
+    sales: salesNote === '' ? '' : Number(salesNote).toFixed(2),
   });
   res.redirect('/tips?' + p.toString());
 });

@@ -279,6 +279,8 @@ body.bare { background: #0f1e40; }
 .tips-title { font-size: 23px; font-weight: 800; letter-spacing: -.025em; line-height: 1.15; }
 .tips-lead { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 0 0 20px; }
 .tips-hint { display: block; color: var(--faint); font-size: 11.5px; font-weight: 500; margin-top: 6px; }
+.tips-group { background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 16px 16px 14px; margin-bottom: 16px; }
+.tips-group-t { font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
 
 /* segmented Café / Dinner control */
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 7px; }

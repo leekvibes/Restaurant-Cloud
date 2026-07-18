@@ -155,6 +155,13 @@ const w = {
      ON CONFLICT(shift_id, employee_id) DO UPDATE SET
        cash_tips_cents = excluded.cash_tips_cents, cash_entered_by = excluded.cash_entered_by`
   ),
+  // Server-reported sales from the tips page (doesn't touch tip columns).
+  setSales: db.prepare(
+    `INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents)
+     VALUES (@shift_id, @employee_id, @food_cents, @coffee_cents, @alcohol_cents)
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+       food_cents = excluded.food_cents, coffee_cents = excluded.coffee_cents, alcohol_cents = excluded.alcohol_cents`
+  ),
   // Staff-reported card tips (doesn't touch sales columns).
   setCardTips: db.prepare(
     `INSERT INTO server_sales (shift_id, employee_id, card_tips_cents)
