@@ -12,7 +12,9 @@ const { db } = require('./db');
 const { layout, flash, esc, money } = require('./views');
 const { toCents } = require('./money');
 
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+// On a host like Render, point UPLOAD_DIR at the mounted persistent disk
+// (e.g. /var/data/uploads) so invoice photos survive restarts and redeploys.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const upload = multer({
   storage: multer.diskStorage({

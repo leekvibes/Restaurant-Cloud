@@ -10,6 +10,9 @@
     "seed": "node src/seed.js",
     "test": "node --test"
   },
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.3",
     "better-sqlite3": "^11.8.1",
