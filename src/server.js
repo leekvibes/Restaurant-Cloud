@@ -365,7 +365,7 @@ app.get('/shifts/:id', (req, res) => {
       <td class="num" data-edit="food" data-step="0.01">${money(toCents(sv.food))}</td>
       <td class="num" data-edit="coffee" data-step="0.01">${money(toCents(sv.coffee))}</td>
       <td class="num" data-edit="card_tips" data-step="0.01">${money(toCents(sv.cardTips))}</td>
-      <td class="num">${sv.cashEnteredBy ? money(toCents(sv.cashTips)) : '<span class="muted">—</span>'}</td>
+      <td class="num" data-edit="cash_tips" data-step="0.01" data-ph="not entered">${sv.cashEnteredBy ? money(toCents(sv.cashTips)) : '<span class="muted">—</span>'}</td>
       <td class="num" data-edit="hours" data-step="0.01">${sv.hours}</td>
       <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(sv.hourlyRate))}</td>
       <td class="row-actions">
@@ -373,18 +373,15 @@ app.get('/shifts/:id', (req, res) => {
         <form method="post" action="/shifts/${sh.id}/remove"><input type="hidden" name="employee_id" value="${sv.employeeId}"><button class="link-danger">remove</button></form></td>
     </tr>`).join('');
 
-  const reported = (p) => {
-    const c = toCents(p.cashTips), k = toCents(p.cardTips);
-    if (!c && !k) return '<span class="muted">—</span>';
-    return [c ? money(c) + ' cash' : '', k ? money(k) + ' card' : ''].filter(Boolean).join(' · ');
-  };
+  const orDash = (c) => (c ? money(c) : '<span class="muted">—</span>');
   const supportRows = inp.support.map((p) => `
     <tr data-emp="${p.employeeId}" data-kind="support">
       <td>${esc(p.name)}</td>
       <td>${p.role}</td>
       <td class="num" data-edit="hours" data-step="0.01">${p.hours}</td>
       <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(p.hourlyRate))}</td>
-      <td class="sub">${reported(p)}</td>
+      <td class="num" data-edit="cash_tips" data-step="0.01" data-ph="none">${orDash(toCents(p.cashTips))}</td>
+      <td class="num" data-edit="card_tips" data-step="0.01" data-ph="none">${orDash(toCents(p.cardTips))}</td>
       <td class="row-actions">
         <button type="button" class="link" onclick="startEdit(${p.employeeId},'support')">edit</button>
         <form method="post" action="/shifts/${sh.id}/remove"><input type="hidden" name="employee_id" value="${p.employeeId}"><button class="link-danger">remove</button></form></td>
@@ -402,7 +399,8 @@ app.get('/shifts/:id', (req, res) => {
     const sr = salesMap.get(row.employee_id) || {};
     entries[row.employee_id] = {
       role: row.role, hours: row.hours || '', wage: d(row.shift_rate_cents),
-      food: d(sr.food_cents), coffee: d(sr.coffee_cents), alcohol: d(sr.alcohol_cents), card_tips: d(sr.card_tips_cents),
+      food: d(sr.food_cents), coffee: d(sr.coffee_cents), alcohol: d(sr.alcohol_cents),
+      card_tips: d(sr.card_tips_cents), cash_tips: d(sr.cash_tips_cents),
     };
   }
 
@@ -416,7 +414,7 @@ app.get('/shifts/:id', (req, res) => {
     </div>
 
     <h2>Servers</h2>
-    <p class="muted">Sales &amp; card tips come from Benugin (enter manually for now). Cash tips come from staff on the <a href="/tips">cash-tip page</a>.</p>
+    <p class="muted">Sales &amp; card tips come from Benugin (enter manually for now). Cash tips come from staff on the <a href="/tips">cash-tip page</a> — tap <b>edit</b> to correct any of it, including cash.</p>
     <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="card form photo-form">
       <div>
         <strong>📸 Read from a report photo</strong>
@@ -441,10 +439,10 @@ app.get('/shifts/:id', (req, res) => {
     </form>
 
     <h2>Support — kitchen, busser, barista</h2>
-    <p class="muted">Their hours (and wage, if different today). “Reported” is what they logged on the tips page — that money goes into the shared pool and is split by hours, not kept by whoever reported it.</p>
+    <p class="muted">Their hours (and wage, if different today). Tips are what they logged on the tips page — that money goes into the shared pool and is split by hours, not kept by whoever reported it. Tap <b>edit</b> to correct anything they mistyped.</p>
     <div class="table-wrap"><table class="table">
-      <thead><tr><th>Name</th><th>Role</th><th class="num">Hours</th><th class="num">Wage</th><th>Reported</th><th></th></tr></thead>
-      <tbody>${supportRows || '<tr><td colspan="6" class="muted">No support staff yet.</td></tr>'}</tbody>
+      <thead><tr><th>Name</th><th>Role</th><th class="num">Hours</th><th class="num">Wage</th><th class="num">Cash tips</th><th class="num">To-go card</th><th></th></tr></thead>
+      <tbody>${supportRows || '<tr><td colspan="7" class="muted">No support staff yet.</td></tr>'}</tbody>
     </table></div>
     <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
       <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
@@ -537,6 +535,19 @@ app.post('/shifts/:id/delete', (req, res) => {
   res.redirect('/shifts?msg=' + encodeURIComponent(`Deleted the ${sh.date} ${dp(sh.daypart)} shift and everything on it.`));
 });
 
+// Blank means "leave it alone", so the add-a-server form (which has no cash
+// field) can't wipe what staff already reported. An explicit 0 still writes —
+// that's how you record someone who genuinely took nothing home.
+function writeTipsIfGiven(shiftId, empId, body) {
+  const given = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
+  if (given('cash_tips')) {
+    w.setCashTips.run({ shift_id: shiftId, employee_id: empId, cash_tips_cents: toCents(body.cash_tips), by: 'manager' });
+  }
+  if (given('card_tips')) {
+    w.setCardTips.run({ shift_id: shiftId, employee_id: empId, card_tips_cents: toCents(body.card_tips) });
+  }
+}
+
 app.post('/shifts/:id/server', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
@@ -547,16 +558,19 @@ app.post('/shifts/:id/server', (req, res) => {
     food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee),
     alcohol_cents: toCents(req.body.alcohol), card_tips_cents: toCents(req.body.card_tips),
   });
+  writeTipsIfGiven(sh.id, empId, req.body);
   res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Server saved.'));
 });
 
 app.post('/shifts/:id/support', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
+  const empId = Number(req.body.employee_id);
   w.upsertWork.run({
-    shift_id: sh.id, employee_id: Number(req.body.employee_id),
+    shift_id: sh.id, employee_id: empId,
     role: req.body.role, hours: Number(req.body.hours) || 0, hourly_rate_cents: toCents(req.body.wage),
   });
+  writeTipsIfGiven(sh.id, empId, req.body);
   res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Support saved.'));
 });
 
