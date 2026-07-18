@@ -41,10 +41,16 @@ function baseValue(server, base) {
   return 0; // 'remaining' handled separately
 }
 
+/**
+ * Who shares a pool. Anyone flagged tipEligible:false is on the clock but out
+ * of the tip system entirely (a trainee, say) — including them would hand them
+ * a share AND shrink everyone else's, since the split is weighted by hours.
+ */
 function poolRecipients(support, among) {
-  if (among === 'kitchen') return support.filter((p) => p.role === 'kitchen');
-  if (among === 'foh') return support.filter((p) => ['busser', 'barista'].includes(p.role));
-  return support.slice(); // all_support
+  const eligible = support.filter((p) => p.tipEligible !== false);
+  if (among === 'kitchen') return eligible.filter((p) => p.role === 'kitchen');
+  if (among === 'foh') return eligible.filter((p) => ['busser', 'barista'].includes(p.role));
+  return eligible; // all_support
 }
 
 /**
@@ -65,13 +71,14 @@ function runShift(shift, rules) {
     employeeId: p.employeeId, name: p.name, role: p.role, hours: Number(p.hours) || 0,
     // Tips a support person reported under their own name — pooled, not kept.
     cashTips: toCents(p.cashTips), cardTips: toCents(p.cardTips),
+    tipEligible: p.tipEligible !== false,
   }));
 
   // A tip-out is only charged when somebody actually worked the role that night.
   // Short a busser? There's nobody to hand that 13% to, so the server keeps it —
   // the alternative is docking a server for a coworker who was never there and
   // letting the money sit unassigned.
-  const staffedRoles = new Set(support.map((p) => p.role));
+  const staffedRoles = new Set(support.filter((p) => p.tipEligible).map((p) => p.role));
 
   const rolePools = {}; // role -> cents
   const roleSplit = {}; // role -> split method
@@ -123,7 +130,7 @@ function runShift(shift, rules) {
   const orphanedPots = [];
   for (const role of Object.keys(rolePools)) {
     if (rolePools[role] === 0) continue;
-    const people = support.filter((p) => p.role === role);
+    const people = support.filter((p) => p.role === role && p.tipEligible);
     if (!people.length) { orphanedPots.push({ role, cents: rolePools[role] }); continue; }
     const split = roleSplit[role] || 'hours';
     const alloc = allocateByWeight(rolePools[role], people.map((p) => ({ id: p.employeeId, weight: split === 'even' ? 1 : p.hours })));

@@ -144,6 +144,44 @@ function supportEmail(p, ctx) {
 }
 
 /**
+ * Pay-period summary for one person — the same money their nightly emails
+ * already covered, totalled up. `r` is a row from aggregatePayroll().
+ */
+function periodEmail(r, ctx) {
+  let body = '';
+  body += line('Pay period', `${ctx.from} → ${ctx.to}`, { border: false });
+  body += line('Shifts worked', String(r.shifts));
+  body += line('Total hours', String(r.hours));
+  if (r.wk1Hours || r.wk2Hours) body += hint(`Week 1: ${r.wk1Hours} hrs · Week 2: ${r.wk2Hours} hrs`);
+
+  body += section('On your paycheck');
+  body += line('Wages', fmt(r.wage), { border: false });
+  body += line('Card tips', fmt(r.paycheckTips));
+  body += line('Total on this check', fmt(r.takeHome), { strong: true, color: '#059669' });
+
+  if (r.cashTips) {
+    body += section('Already paid to you');
+    body += line('Cash tips', fmt(r.cashTips), { border: false });
+    body += hint('You already have this — it is not on the check.');
+  }
+
+  body += `<div style="margin-top:12px;font-size:12px;color:#94a3b8;line-height:1.5">This is a summary of the shift emails you already received, not extra pay. Final amounts are set in payroll.</div>`;
+
+  const subject = `${RESTAURANT}: pay period ${ctx.from} → ${ctx.to} — ${fmt(r.takeHome)} on this check`;
+  return { to: ctx.email, subject, html: shell('Pay period summary', body, { label: 'On this check', value: fmt(r.takeHome) }) };
+}
+
+/** One email per person with anything to report in the period. */
+function buildPeriodEmails(rows, meta, people) {
+  return rows
+    .filter((r) => r.hours > 0 || r.wage > 0 || r.paycheckTips > 0 || r.cashTips > 0)
+    .map((r) => {
+      const info = people.get(r.employeeId) || {};
+      return { employeeId: r.employeeId, name: r.name, ...periodEmail(r, { ...meta, email: info.email }) };
+    });
+}
+
+/**
  * Build every employee's email for a shift.
  * @param results  engine.runShift() output
  * @param meta     { date, daypart }
@@ -296,4 +334,4 @@ async function sendEmails(emails) {
   return out;
 }
 
-module.exports = { buildEmails, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, PREVIEW_DIR, RESTAURANT };
+module.exports = { buildEmails, buildPeriodEmails, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, periodEmail, PREVIEW_DIR, RESTAURANT };

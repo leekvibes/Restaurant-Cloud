@@ -5,9 +5,9 @@ try { process.loadEnvFile(require('path').join(__dirname, '..', '.env')); } catc
 
 const path = require('path');
 const express = require('express');
-const { db, q, s, w, shiftInputs } = require('./db');
+const { db, q, s, w, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
-const { buildEmails, sendEmails, sendTest, mailStatus } = require('./email');
+const { buildEmails, buildPeriodEmails, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
 const { layout, flash, esc, money, dp, RESTAURANT } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
@@ -16,6 +16,7 @@ const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts } = require('./reports');
 const { readReport } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
+const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -32,7 +33,13 @@ for (const f of ['sw.js', 'manifest.webmanifest', 'manifest-tips.webmanifest', '
 
 const PORT = Number(process.env.PORT || 4000);
 const DAYPARTS = ['cafe', 'dinner'];
-const SUPPORT_ROLES = ['kitchen', 'barista', 'bartender', 'busser'];
+// Positions are data now (see the positions table), so these read live rather
+// than being a fixed list — adding a job in Settings shows up everywhere.
+/** Everything someone can be put on a shift as, servers aside. */
+const shiftRoles = () => positions.active.all().filter((p) => p.kind !== 'server').map((p) => p.slug);
+/** Every job, for the staff "main role" picker. */
+const allRoles = () => positions.active.all().map((p) => p.slug);
+const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
 
 // Cash reconciliation — daily drawer over/short by shift.
 db.exec(`CREATE TABLE IF NOT EXISTS cash_recon (
@@ -403,7 +410,7 @@ app.get('/shifts/:id', (req, res) => {
     </tr>`).join('');
 
   const staffOptions = staff.map((e) => `<option value="${e.id}" data-role="${e.role}" data-rate="${((e.hourly_rate_cents || 0) / 100).toFixed(2)}">${esc(e.name)} · ${e.role}</option>`).join('');
-  const roleOpts = (sel) => SUPPORT_ROLES.map((r) => `<option value="${r}"${r === sel ? ' selected' : ''}>${r}</option>`).join('');
+  const roleOpts = (sel) => shiftRoles().map((r) => `<option value="${r}"${r === sel ? ' selected' : ''}>${esc(posName(r))}</option>`).join('');
 
   // Current entries, so picking someone already on the shift pre-fills their
   // numbers (re-adding = editing; no accidental wipe of sales).
@@ -805,7 +812,7 @@ function readTipsToken(raw) {
 function rolesForEmployee(emp) {
   const extra = q.rolesForEmployee.all(emp.id).map((r) => r.role);
   const list = [...new Set([emp.role, ...extra])].filter((r) => r && r !== 'manager');
-  return list.length ? list : ['server', ...SUPPORT_ROLES];
+  return list.length ? list : allRoles().filter((r) => r !== 'manager');
 }
 
 app.get('/tips', (req, res) => {
@@ -1040,7 +1047,7 @@ app.get('/employees', (req, res) => {
       <td>${e.pin ? '••••' : '<span class="muted">—</span>'}</td>
       <td><a href="/employees/${e.id}/edit">edit</a></td></tr>`;
   }).join('');
-  const roles = ['server', ...SUPPORT_ROLES, 'manager'];
+  const roles = [...allRoles(), 'manager'];
   const counts = staff.reduce((a, e) => { a[e.role] = (a[e.role] || 0) + 1; return a; }, {});
   // The PIN is now how staff sign in to the tips page, so no PIN = locked out.
   const noPin = staff.filter((e) => e.role !== 'manager' && !e.pin).map((e) => e.name);
@@ -1100,9 +1107,9 @@ app.post('/employees', (req, res) => {
 app.get('/employees/:id/edit', (req, res) => {
   const e = q.employee.get(Number(req.params.id));
   if (!e) return res.status(404).send(layout('Not found', '<h1>Staff member not found</h1>'));
-  const roles = ['server', ...SUPPORT_ROLES, 'manager'];
+  const roles = [...allRoles(), 'manager'];
   const val = (v) => esc(v == null ? '' : v);
-  const payRoles = ['server', ...SUPPORT_ROLES];
+  const payRoles = allRoles();
   const roleRows = q.rolesForEmployee.all(e.id).map((r) => `
     <tr><td>${r.role}</td><td class="num">${money(r.wage_cents)}/h</td>
       <td><form method="post" action="/employees/${e.id}/roles/delete"><input type="hidden" name="role" value="${r.role}"><button class="link-danger">remove</button></form></td></tr>`).join('');
@@ -1189,10 +1196,125 @@ function shiftBack(dateStr, days) {
   return addDays(dateStr, -days);
 }
 
+// --- Pay period UI ---------------------------------------------------------
+
+/** Period dropdown plus a custom range, so the common case needs no typing. */
+function periodPicker(from, to) {
+  const list = recentPeriods(8);
+  const cur = currentPeriod();
+  const opts = list.map((p) => {
+    const tag = p.start === cur.start ? ' (current)' : (p.start === list[1] && list[1].start === p.start ? '' : '');
+    return `<option value="${p.start}|${p.end}"${p.start === from && p.end === to ? ' selected' : ''}>${esc(labelFor(p))}${tag}</option>`;
+  }).join('');
+  const custom = !isPeriod(from, to);
+  return `
+    <form method="get" action="/payroll" class="card form inline-range">
+      <label>Pay period
+        <select name="period" onchange="var v=this.value.split('|');this.form.from.value=v[0];this.form.to.value=v[1];this.form.submit();">
+          ${custom ? '<option selected>Custom range</option>' : ''}${opts}
+        </select>
+      </label>
+      <label>From <input type="date" name="from" value="${from}"></label>
+      <label>To <input type="date" name="to" value="${to}"></label>
+      <button class="btn" type="submit">Update</button>
+    </form>
+    ${custom ? '<p class="muted">Custom range — the Wk 1 / Wk 2 split assumes the period starts on the From date. Pick a pay period above to be sure it lines up.</p>' : ''}`;
+}
+
+/**
+ * Everything that could make a period's numbers wrong, checked before you send.
+ * Payroll adds up whatever is in the database whether or not you ever reviewed
+ * it, so across a two-week backfill this is where mistakes hide.
+ */
+function periodIssues(from, to, rows) {
+  const issues = [];
+  const shifts = s.shiftsInRange.all(from, to);
+  if (!shifts.length) return [{ text: 'No shifts logged in this period at all.', bad: true }];
+
+  const zeroHours = [];
+  const noSales = [];
+  const noCash = [];
+  for (const sh of shifts) {
+    const inp = shiftInputs(sh.id);
+    const where = `${sh.date} ${dp(sh.daypart)}`;
+    for (const p of [...inp.servers, ...inp.support]) {
+      if (!Number(p.hours) && !p.salaried) zeroHours.push(`${p.name} (${where})`);
+    }
+    for (const sv of inp.servers) {
+      const tips = toCents(sv.cardTips) + toCents(sv.cashTips);
+      const sales = toCents(sv.food) + toCents(sv.coffee) + toCents(sv.alcohol);
+      if (tips > 0 && sales === 0) noSales.push(`${sv.name} (${where})`);
+      if (!sv.cashEnteredBy) noCash.push(`${sv.name} (${where})`);
+    }
+  }
+  const open = shifts.filter((sh) => sh.status !== 'emailed').map((sh) => `${sh.date} ${dp(sh.daypart)}`);
+  const noEmail = rows.filter((r) => !r.email).map((r) => r.name);
+
+  if (zeroHours.length) issues.push({ text: `No hours entered: ${zeroHours.join(', ')} — they earn $0 wages and no share of any pool.`, bad: true });
+  if (noSales.length) issues.push({ text: `Tips but no sales: ${noSales.join(', ')} — their tip-out calculated off $0.`, bad: true });
+  if (noEmail.length) issues.push({ text: `No email on file: ${noEmail.join(', ')} — they won't receive anything.`, bad: true });
+  if (open.length) issues.push({ text: `Never closed out: ${open.join(', ')}. The numbers are still counted, but you haven't reviewed them.`, bad: false });
+  if (noCash.length) issues.push({ text: `Cash tips never entered: ${noCash.join(', ')}.`, bad: false });
+  return issues;
+}
+
+function periodSendBlock(from, to, rows) {
+  if (!isPeriod(from, to)) return '';
+  const p = { start: from, end: to };
+  const done = sendRecord(from);
+  const issues = periodIssues(from, to, rows);
+  const blocking = issues.filter((i) => i.bad);
+  const recipients = rows.filter((r) => r.email && (r.hours > 0 || r.takeHome > 0 || r.cashTips > 0)).length;
+
+  const issueList = issues.length ? `
+    <div class="flash flash-${blocking.length ? 'warn' : 'info'}"><div>
+      <b>${blocking.length ? 'Check these before sending:' : 'Worth knowing:'}</b>
+      <ul>${issues.map((i) => `<li>${esc(i.text)}</li>`).join('')}</ul>
+    </div></div>` : '<div class="flash flash-ok"><div>Nothing looks off in this period.</div></div>';
+
+  const sentNote = done
+    ? `<div class="flash flash-warn"><div>Already sent on <b>${esc(String(done.sent_at).slice(0, 16))}</b> to ${done.sent_count} ${done.sent_count === 1 ? 'person' : 'people'}. Sending again gives everyone a second email — only do it if the numbers changed.</div></div>`
+    : '';
+
+  return `
+    <h2>Send the period summary</h2>
+    <p class="muted">One email each with their hours, wages and card tips for ${esc(labelFor(p))}. It restates the shift emails they already got — it isn't extra pay.</p>
+    ${sentNote}${issueList}
+    <form method="post" action="/payroll/send" onsubmit="return confirm('Email the ${esc(labelFor(p))} summary to ${recipients} people?')" class="card">
+      <input type="hidden" name="from" value="${from}"><input type="hidden" name="to" value="${to}">
+      <button class="btn ${blocking.length ? '' : 'btn-primary'}" type="submit"${recipients ? '' : ' disabled'}>
+        ✉ ${done ? 'Send again' : 'Send'} to ${recipients} ${recipients === 1 ? 'person' : 'people'}
+      </button>
+      ${recipients ? '' : '<span class="muted">Nobody in this period has an email on file.</span>'}
+    </form>`;
+}
+
+app.post('/payroll/send', async (req, res) => {
+  const from = String(req.body.from || '');
+  const to = String(req.body.to || '');
+  const back = (msg, err) => res.redirect(`/payroll?from=${from}&to=${to}&msg=${encodeURIComponent(msg)}${err ? '&err=1' : ''}`);
+  if (!isPeriod(from, to)) return back('That range is not a pay period.', true);
+
+  const { rows } = aggregatePayroll(from, to);
+  const people = new Map(rows.map((r) => [r.employeeId, { email: r.email }]));
+  const emails = buildPeriodEmails(rows, { from, to }, people);
+  if (!emails.length) return back('Nobody in this period to email.', true);
+
+  const out = await sendEmails(emails);
+  markSent(from, to, out.sent || out.previewed);
+  const problems = out.errors.length ? ` ${out.errors.length} problem${out.errors.length === 1 ? '' : 's'}: ${out.errors.join('; ')}` : '';
+  return back(out.sent
+    ? `Sent the ${labelFor({ start: from, end: to })} summary to ${out.sent} people.${problems}`
+    : `Mail isn't connected, so ${out.previewed} previews were written instead.${problems}`, !!out.errors.length);
+});
+
 app.get('/payroll', (req, res) => {
-  const def = defaultRange();
-  const from = req.query.from || def.from;
-  const to = req.query.to || def.to;
+  // Default to the period that just ended — the one you're about to run —
+  // rather than a rolling 14 days, which is never an actual pay period.
+  const cur = currentPeriod();
+  const justEnded = recentPeriods(2)[1];
+  const from = req.query.from || justEnded.start;
+  const to = req.query.to || justEnded.end;
   const { rows, totals, shiftCount, midDate } = aggregatePayroll(from, to);
 
   const body = rows.map((r) => `
@@ -1221,11 +1343,8 @@ app.get('/payroll', (req, res) => {
       <div class="stat"><div class="stat-label">Card tip payout</div><div class="stat-value pos">${money(totals.paycheckTips)}</div><div class="stat-sub">→ enter into Gusto</div></div>
       <div class="stat"><div class="stat-label">Total take-home</div><div class="stat-value">${money(totals.takeHome)}</div><div class="stat-sub">wages + card tips (on the check)</div></div>
     </div>
-    <form method="get" action="/payroll" class="card form inline-range">
-      <label>From <input type="date" name="from" value="${from}"></label>
-      <label>To <input type="date" name="to" value="${to}"></label>
-      <button class="btn" type="submit">Update range</button>
-    </form>
+    ${periodPicker(from, to)}
+    ${periodSendBlock(from, to, rows)}
     <div class="table-wrap"><table class="table">
       <thead><tr>
         <th>Employee</th><th class="num">Shifts</th><th class="num">Total hours</th><th class="num">Wage earning</th>
@@ -1440,6 +1559,102 @@ app.post('/email/test', async (req, res) => {
   } catch (err) {
     res.redirect('/email?err=1&msg=' + encodeURIComponent(err.message));
   }
+});
+
+// ---------------------------------------------------------------------------
+// POSITIONS — the jobs someone can work. `kind` is what decides how their tips
+// are handled, so it's the one field that has real consequences.
+// ---------------------------------------------------------------------------
+const KINDS = {
+  server: { label: 'Server', help: 'Keeps their own tips and tips out to everyone else.' },
+  support: { label: 'Support', help: 'Shares the tip-out pots and the shared pool, split by hours.' },
+  non_tipped: { label: 'Not tipped', help: 'Hourly only — in no pool at all. Use for training.' },
+};
+const slugify = (s) => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+
+app.get('/positions', (req, res) => {
+  const rows = positions.all.all().map((p) => {
+    const used = positions.inUse.get(p.slug).n;
+    return `<tr${p.active ? '' : ' class="row-muted"'}>
+      <td>${esc(p.name)}${p.active ? '' : ' <span class="pill">inactive</span>'}</td>
+      <td><span class="pill ${p.kind === 'non_tipped' ? 'pill-amber' : 'pill-blue'}">${KINDS[p.kind] ? KINDS[p.kind].label : p.kind}</span></td>
+      <td class="sub">${esc(KINDS[p.kind] ? KINDS[p.kind].help : '')}</td>
+      <td class="num">${used}</td>
+      <td class="row-actions">
+        <a href="/positions/${p.id}/edit">edit</a>
+        <form method="post" action="/positions/${p.id}/active" style="margin:0">
+          <input type="hidden" name="active" value="${p.active ? 0 : 1}">
+          <button class="link${p.active ? '-danger' : ''}">${p.active ? 'retire' : 'restore'}</button>
+        </form>
+      </td></tr>`;
+  }).join('');
+
+  res.send(layout('Positions', `
+    ${flash(req)}
+    <div class="page-head"><div><h1>🎓 Positions</h1><p class="sub">The jobs someone can be put on a shift as.</p></div>
+      <a class="btn btn-primary" href="#add" onclick="document.getElementById('add-panel').open=true">＋ Add position</a></div>
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Position</th><th>Tips</th><th>What that means</th><th class="num">Shifts used</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <p class="muted">Retiring a position keeps past shifts intact — it just stops appearing when you add someone new.</p>
+    <details class="add-panel" id="add-panel">
+      <summary id="add">＋ Add a position</summary>
+      <form method="post" action="/positions" class="card form grid">
+        <label>Name <input name="name" required placeholder="e.g. Training"></label>
+        <label>Tip handling <select name="kind">
+          ${Object.entries(KINDS).map(([k, v]) => `<option value="${k}"${k === 'support' ? ' selected' : ''}>${v.label} — ${v.help}</option>`).join('')}
+        </select></label>
+        <button class="btn btn-primary" type="submit">Add position</button>
+      </form>
+    </details>`));
+});
+
+app.post('/positions', (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const kind = KINDS[req.body.kind] ? req.body.kind : 'support';
+  if (!name) return res.redirect('/positions?err=1&msg=' + encodeURIComponent('Give the position a name.'));
+  const slug = slugify(name);
+  if (!slug) return res.redirect('/positions?err=1&msg=' + encodeURIComponent('That name has no letters or numbers in it.'));
+  if (positions.bySlug.get(slug)) {
+    return res.redirect('/positions?err=1&msg=' + encodeURIComponent(`There's already a position called "${name}".`));
+  }
+  const sort = (positions.all.all().reduce((a, p) => Math.max(a, p.sort), 0) || 0) + 10;
+  positions.add.run({ slug, name, kind, sort });
+  res.redirect('/positions?msg=' + encodeURIComponent(`${name} added — you can now put someone on a shift as ${name}.`));
+});
+
+app.get('/positions/:id/edit', (req, res) => {
+  const p = positions.byId.get(Number(req.params.id));
+  if (!p) return res.status(404).send(layout('Not found', '<h1>Position not found</h1>'));
+  const used = positions.inUse.get(p.slug).n;
+  res.send(layout(`Edit ${p.name}`, `
+    ${flash(req)}
+    <a class="back" href="/positions">← Positions</a>
+    <h1>Edit ${esc(p.name)}</h1>
+    ${used ? `<div class="flash flash-warn"><div>Used on <b>${used}</b> shift${used === 1 ? '' : 's'}. Changing how tips are handled affects how those shifts calculate from now on — past emails already sent aren't changed.</div></div>` : ''}
+    <form method="post" action="/positions/${p.id}" class="card form grid">
+      <label>Name <input name="name" value="${esc(p.name)}" required></label>
+      <label>Tip handling <select name="kind">
+        ${Object.entries(KINDS).map(([k, v]) => `<option value="${k}"${k === p.kind ? ' selected' : ''}>${v.label} — ${v.help}</option>`).join('')}
+      </select></label>
+      <button class="btn btn-primary" type="submit">Save</button>
+    </form>`));
+});
+
+app.post('/positions/:id', (req, res) => {
+  const p = positions.byId.get(Number(req.params.id));
+  if (!p) return res.status(404).end();
+  const name = String(req.body.name || '').trim() || p.name;
+  const kind = KINDS[req.body.kind] ? req.body.kind : p.kind;
+  positions.update.run({ id: p.id, name, kind, sort: p.sort });
+  res.redirect('/positions?msg=' + encodeURIComponent(`${name} updated.`));
+});
+
+app.post('/positions/:id/active', (req, res) => {
+  const p = positions.byId.get(Number(req.params.id));
+  if (!p) return res.status(404).end();
+  positions.setActive.run(req.body.active === '1' ? 1 : 0, p.id);
+  res.redirect('/positions?msg=' + encodeURIComponent(`${p.name} ${req.body.active === '1' ? 'restored' : 'retired'}.`));
 });
 
 app.get('/policy', (req, res) => {

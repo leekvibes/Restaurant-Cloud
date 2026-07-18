@@ -70,12 +70,18 @@ function aggregatePayroll(from, to) {
   const shifts = s.shiftsInRange.all(from, to);
   const people = new Map(); // employeeId -> record
 
+  // Email travels with the record so callers can mail a period summary without
+  // re-querying staff and re-matching by name.
+  const emails = new Map();
   const bump = (id, name) => {
     if (!people.has(id)) {
-      people.set(id, { employeeId: id, name, roles: new Set(), hours: 0, wage: 0, paycheckTips: 0,
+      people.set(id, { employeeId: id, name, email: emails.get(id) || null, roles: new Set(),
+        hours: 0, wage: 0, paycheckTips: 0,
         cashHome: 0, weeklyCash: 0, tipsEarned: 0, shifts: 0, wk1Hours: 0, wk2Hours: 0 });
     }
-    return people.get(id);
+    const rec = people.get(id);
+    if (!rec.email && emails.get(id)) rec.email = emails.get(id);
+    return rec;
   };
 
   // Split the period into week 1 / week 2 (Gusto runs a two-week cycle).
@@ -87,6 +93,7 @@ function aggregatePayroll(from, to) {
   for (const sh of shifts) {
     const inp = shiftInputs(sh.id);
     const rateMap = new Map([...inp.servers, ...inp.support].map((p) => [p.employeeId, p.hourlyRate || 0]));
+    for (const p of [...inp.servers, ...inp.support]) if (p.email) emails.set(p.employeeId, p.email);
     const r = runShift(inp, policyForShift(sh));
     const wk = weekKey(sh.date);
 

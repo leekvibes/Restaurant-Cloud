@@ -78,6 +78,51 @@ if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUM
 if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
 if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');
 
+// ---- Positions ----------------------------------------------------------
+// Jobs someone can work, as data rather than a hardcoded list, so new ones can
+// be added from the app. `kind` is what actually drives the money:
+//   server     — keeps their own tips and tips out to the others
+//   support    — shares the tip-out pots and the shared pool, split by hours
+//   non_tipped — on the clock, paid hourly, in no pool at all (e.g. training)
+// non_tipped matters: if a trainee counted as support, their hours would take
+// a slice of the pool away from everyone actually earning tips.
+db.exec(`
+CREATE TABLE IF NOT EXISTS positions (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug   TEXT NOT NULL UNIQUE,
+  name   TEXT NOT NULL,
+  kind   TEXT NOT NULL DEFAULT 'support',
+  sort   INTEGER NOT NULL DEFAULT 100,
+  active INTEGER NOT NULL DEFAULT 1
+);
+`);
+if (db.prepare('SELECT COUNT(*) n FROM positions').get().n === 0) {
+  const ins = db.prepare('INSERT INTO positions (slug, name, kind, sort) VALUES (?, ?, ?, ?)');
+  [['server', 'Server', 'server', 10], ['kitchen', 'Kitchen', 'support', 20],
+    ['barista', 'Barista', 'support', 30], ['bartender', 'Bartender', 'support', 40],
+    ['busser', 'Busser', 'support', 50]].forEach((p) => ins.run(...p));
+}
+
+const positions = {
+  all: db.prepare('SELECT * FROM positions ORDER BY sort, name'),
+  active: db.prepare('SELECT * FROM positions WHERE active = 1 ORDER BY sort, name'),
+  bySlug: db.prepare('SELECT * FROM positions WHERE slug = ?'),
+  byId: db.prepare('SELECT * FROM positions WHERE id = ?'),
+  add: db.prepare('INSERT INTO positions (slug, name, kind, sort) VALUES (@slug, @name, @kind, @sort)'),
+  update: db.prepare('UPDATE positions SET name = @name, kind = @kind, sort = @sort WHERE id = @id'),
+  setActive: db.prepare('UPDATE positions SET active = ? WHERE id = ?'),
+  inUse: db.prepare('SELECT COUNT(*) n FROM work WHERE role = ?'),
+};
+
+/** slug -> kind, for the hot paths that just need to classify a role. */
+function positionKinds() {
+  const map = {};
+  for (const p of positions.all.all()) map[p.slug] = p.kind;
+  return map;
+}
+const kindOf = (slug) => positionKinds()[slug] || 'support';
+const supportSlugs = () => positions.active.all().filter((p) => p.kind === 'support').map((p) => p.slug);
+
 // Migration: a free-text note staff can leave when they submit — a thought,
 // comment or concern, or an explanation of something odd in their numbers.
 const salesCols = db.prepare('PRAGMA table_info(server_sales)').all().map((c) => c.name);
@@ -213,6 +258,7 @@ function shiftInputs(shiftId) {
   const sales = new Map(w.salesForShift.all(shiftId).map((r) => [r.employee_id, r]));
   const servers = [];
   const support = [];
+  const kinds = positionKinds();
   for (const row of workRows) {
     // Wage resolution: salaried → no hourly wage; else per-shift override →
     // the wage set for THIS role → the employee's default rate.
@@ -256,6 +302,9 @@ function shiftInputs(shiftId) {
         salaried,
         cashTips: (sr.cash_tips_cents || 0) / 100,
         cardTips: (sr.card_tips_cents || 0) / 100,
+        // A trainee is on the clock but out of every pool — their hours must
+        // not dilute the split for the people actually earning tips.
+        tipEligible: kinds[row.role] !== 'non_tipped',
       });
     }
   }
@@ -269,4 +318,4 @@ function shiftInputs(shiftId) {
   return { servers, support, pool };
 }
 
-module.exports = { db, q, s, w, shiftInputs, DB_PATH };
+module.exports = { db, q, s, w, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };

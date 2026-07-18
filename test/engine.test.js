@@ -308,3 +308,63 @@ test('decimal hours split the pool exactly, not just quarter hours', () => {
   assert.strictEqual(r.support.reduce((a, p) => a + p.poolCard, 0), toCents(57.77));
   assert.ok(r.support[0].poolCash > r.support[1].poolCash); // more hours, bigger share
 });
+
+// --- non-tipped positions (training) ---------------------------------------
+// Someone learning the job is on the clock but outside the tip system. If they
+// counted as support, their hours would take a slice of every pool AND shrink
+// what the tipped staff get, since the split is weighted by hours.
+
+test('a non-tipped trainee is paid nothing from any pool', () => {
+  const r = runShift({
+    servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 8 },
+      { employeeId: 'T', name: 'Trainee', role: 'training', hours: 6, tipEligible: false }],
+    pool: { jar: 130, togoCard: 70 },
+  });
+  const t = r.support.find((p) => p.name === 'Trainee');
+  assert.strictEqual(t.tipShare, 0);
+  assert.strictEqual(t.poolShare, 0);
+  assert.strictEqual(t.poolCash, 0);
+  assert.strictEqual(t.poolCard, 0);
+});
+
+test('adding a trainee does not change anyone else\'s tips', () => {
+  const crew = () => [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 8 },
+    { employeeId: 'B', name: 'b', role: 'busser', hours: 5 }];
+  const shift = (support) => runShift({
+    servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })], support, pool: { jar: 130, togoCard: 70 },
+  });
+  const without = shift(crew());
+  const withTrainee = shift([...crew(), { employeeId: 'T', name: 't', role: 'training', hours: 6, tipEligible: false }]);
+  for (const id of ['K', 'B']) {
+    const a = without.support.find((p) => p.employeeId === id);
+    const b = withTrainee.support.find((p) => p.employeeId === id);
+    assert.strictEqual(a.tipShare, b.tipShare, `${id} tip-out share unchanged`);
+    assert.strictEqual(a.poolCash, b.poolCash, `${id} cash share unchanged`);
+    assert.strictEqual(a.poolCard, b.poolCard, `${id} card share unchanged`);
+  }
+  // And the pots are still fully paid out.
+  assert.strictEqual(withTrainee.support.reduce((a, p) => a + p.poolCash, 0), toCents(130));
+  assert.strictEqual(withTrainee.support.reduce((a, p) => a + p.poolCard, 0), toCents(70));
+});
+
+test('a shift of only trainees pays nothing out and strands nothing', () => {
+  const r = runShift({
+    servers: [], support: [{ employeeId: 'T', name: 't', role: 'training', hours: 5, tipEligible: false }],
+    pool: { jar: 40, togoCard: 0 },
+  });
+  assert.strictEqual(r.support[0].poolShare, 0);
+  // Nobody eligible means the jar is flagged, not silently handed to a trainee.
+  assert.strictEqual(r.orphanedPots.length, 1);
+  assert.strictEqual(r.orphanedPots[0].cents, toCents(40));
+});
+
+test('a trainee does not count as staffing a tipped-out role', () => {
+  // Busser tip-out must not be charged just because a trainee is on the floor.
+  const r = runShift({
+    servers: [one({ food: 2000, cardTips: 300, cashTips: 100 })],
+    support: [{ employeeId: 'T', name: 't', role: 'busser', hours: 5, tipEligible: false }],
+  });
+  assert.strictEqual(r.servers[0].tipouts.busser, undefined);
+  assert.strictEqual(r.skippedPots.find((x) => x.role === 'busser').cents > 0, true);
+});

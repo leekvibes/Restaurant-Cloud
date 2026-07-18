@@ -15,7 +15,7 @@ const NAV_GROUPS = [
     ['/c/par', '📦', 'Par levels'], ['/c/contacts', '📇', 'Contacts'], ['/c/equipment', '🔧', 'Equipment'], ['/c/documents', '📁', 'Documents'],
   ] },
   { title: 'Tasks & logs', links: [['/c/recurring', '🔁', 'Recurring tasks'], ['/c/incidents', '🚨', 'Incident log'], ['/c/notes', '📝', 'Decisions log']] },
-  { title: 'Settings', links: [['/employees', '🧑‍🍳', 'Staff'], ['/policy', '⚖️', 'Tip-out policy'], ['/email', '✉️', 'Email'], ['/tips', '💵', 'Cash tips (staff)']] },
+  { title: 'Settings', links: [['/employees', '🧑‍🍳', 'Staff'], ['/policy', '⚖️', 'Tip-out policy'], ['/positions', '🎓', 'Positions'], ['/email', '✉️', 'Email'], ['/tips', '💵', 'Cash tips (staff)']] },
 ];
 
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
