@@ -60,11 +60,64 @@ function head(title, opts = {}) {
 
 const swScript = `<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>`;
 
+// A build stamp that changes whenever the code does. Staff keep the tips page
+// on a home screen for months, so a copy can outlive a change to the form and
+// post fields the server no longer understands — which is exactly how one
+// staff member ended up stuck on "session timed out". The page checks this and
+// refreshes itself rather than relying on anyone re-adding a bookmark.
+const BUILD = (() => {
+  const fs = require('fs');
+  const path = require('path');
+  const files = ['server.js', 'views.js'].map((f) => path.join(__dirname, f))
+    .concat([path.join(__dirname, '..', 'public', 'styles.css')]);
+  const h = require('crypto').createHash('sha1');
+  for (const f of files) {
+    try { h.update(fs.readFileSync(f)); } catch { /* missing file — ignore */ }
+  }
+  return h.digest('hex').slice(0, 10);
+})();
+
+/**
+ * Reload a stale page when the user comes back to it, but never mid-entry:
+ * if anything has been typed, leave it alone and let them submit — the server
+ * accepts older submissions too.
+ */
+const freshScript = `<script>
+(function () {
+  var BUILD = ${JSON.stringify(BUILD)};
+  function typedInto() {
+    var els = document.querySelectorAll('input, textarea, select');
+    for (var i = 0; i < els.length; i++) {
+      var e = els[i];
+      if (e.type === 'hidden' || e.type === 'submit' || e.type === 'button') continue;
+      if (e.tagName === 'SELECT') { if (e.selectedIndex > 0) return true; continue; }
+      if (e.type === 'checkbox' || e.type === 'radio') { if (e.checked !== e.defaultChecked) return true; continue; }
+      if (e.value && e.value !== e.defaultValue) return true;
+    }
+    return false;
+  }
+  function check() {
+    if (document.hidden || typedInto()) return;
+    fetch('/version', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.build && d.build !== BUILD && !sessionStorage.getItem('rc_reload_' + d.build)) {
+          sessionStorage.setItem('rc_reload_' + d.build, '1'); // once per version, never a loop
+          location.reload();
+        }
+      })
+      .catch(function () { /* offline — keep what's on screen */ });
+  }
+  document.addEventListener('visibilitychange', check);
+  window.addEventListener('pageshow', check);
+})();
+</script>`;
+
 function layout(title, body, opts = {}) {
   if (opts.bare) {
     // No .wrap here — the staff screen owns the full viewport.
     return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
-      <body class="bare">${body}${swScript}</body></html>`;
+      <body class="bare">${body}${swScript}${freshScript}</body></html>`;
   }
   return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
     <body>
@@ -103,7 +156,7 @@ function layout(title, body, opts = {}) {
           });
         })();
       </script>
-      ${swScript}
+      ${swScript}${freshScript}
     </body></html>`;
 }
 
@@ -114,4 +167,4 @@ function flash(req) {
   return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}">${esc(m)}</div>`;
 }
 
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD };

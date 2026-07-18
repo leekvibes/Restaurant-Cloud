@@ -9,7 +9,7 @@ const { db, q, s, w, positions, kindOf, supportSlugs, shiftInputs } = require('.
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
-const { layout, flash, esc, money, dp, RESTAURANT } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
@@ -818,6 +818,12 @@ function rolesForEmployee(emp) {
 // Staff keep this on a home screen for months, so a cached copy can outlive a
 // change to the form and post fields the server no longer expects. Never cache
 // the HTML — it's a few KB, and a stale copy costs someone their tips at 1am.
+// Tiny endpoint the pages poll to notice they're out of date.
+app.get('/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ build: BUILD });
+});
+
 app.use(['/tips', '/tips/start'], (req, res, next) => {
   res.set('Cache-Control', 'no-store, must-revalidate');
   next();
