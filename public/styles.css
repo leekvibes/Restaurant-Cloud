@@ -342,3 +342,9 @@ body.bare { background: #0f1e40; }
   border-radius: var(--radius-sm); padding: 12px 14px; box-shadow: var(--shadow-sm); }
 .note-who { font-size: 12.5px; font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
 .note-body { font-size: 14px; color: var(--ink-2); line-height: 1.55; white-space: pre-wrap; }
+
+/* --- Tips page: PIN-first sign-in --------------------------------------- */
+.tips-fixed { margin-top: 7px; padding: 14px; font-size: 17px; font-weight: 700; color: var(--ink);
+  background: var(--surface-3); border: 1.5px solid var(--line-2); border-radius: 12px; }
+.tips-signout { display: block; text-align: center; margin-top: 16px; color: var(--muted);
+  font-size: 13px; font-weight: 600; }

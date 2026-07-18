@@ -93,6 +93,13 @@ const q = {
      VALUES (@name, @role, @email, @pin, @hourly_rate_cents, @pos_id, @pay_type, @salary_cents)`
   ),
   employeeByPosId: db.prepare('SELECT * FROM employees WHERE pos_id = ?'),
+  // The PIN is how staff identify themselves on the tips page, so it has to
+  // point at exactly one active person. Second arg excludes the person being
+  // edited (pass 0 when adding).
+  employeeByPin: db.prepare('SELECT * FROM employees WHERE pin = ? AND active = 1 AND id <> ?'),
+  // Sign-in lookup for the tips page. Returns every match so a duplicate PIN
+  // fails loudly instead of silently picking one of them.
+  staffByPin: db.prepare("SELECT * FROM employees WHERE pin = ? AND active = 1 AND role <> 'manager'"),
   // Per-role wages
   roleWage: db.prepare('SELECT wage_cents FROM employee_roles WHERE employee_id = ? AND role = ?'),
   rolesForEmployee: db.prepare('SELECT role, wage_cents FROM employee_roles WHERE employee_id = ? ORDER BY role'),

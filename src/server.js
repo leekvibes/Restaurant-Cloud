@@ -773,6 +773,33 @@ app.post('/shifts/:id/send', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Staff cash-tip page (NO LOGIN — name + PIN)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// STAFF TIP PAGE — PIN in, then the form. The PIN identifies the person, so it
+// never leaves the server: step 2 carries a short-lived signed token instead.
+// ---------------------------------------------------------------------------
+const TIPS_TTL = 45 * 60 * 1000; // long enough to fill the form, short enough to expire on a shared phone
+
+function tipsToken(empId) {
+  const exp = Date.now() + TIPS_TTL;
+  return `${empId}.${exp}.${sign(`tips:${empId}:${exp}`)}`;
+}
+
+function readTipsToken(raw) {
+  const [id, exp, sig] = String(raw || '').split('.');
+  if (!id || !exp || !sig) return null;
+  if (sig !== sign(`tips:${id}:${exp}`)) return null;
+  if (Number(exp) < Date.now()) return null;
+  const emp = q.employee.get(Number(id));
+  return emp && emp.active ? emp : null;
+}
+
+/** The jobs this person can report, from what you've assigned them in Staff. */
+function rolesForEmployee(emp) {
+  const extra = q.rolesForEmployee.all(emp.id).map((r) => r.role);
+  const list = [...new Set([emp.role, ...extra])].filter((r) => r && r !== 'manager');
+  return list.length ? list : ['server', ...SUPPORT_ROLES];
+}
+
 app.get('/tips', (req, res) => {
   // Success screen after a submit.
   if (req.query.done === '1') {
@@ -798,8 +825,8 @@ app.get('/tips', (req, res) => {
     return res.send(layout('Recorded', body, { bare: true }));
   }
 
-  const staff = q.nonManagerList.all();
-  const today = isoDate();
+  // Step 1: just the PIN. Nobody's name is on the page until it's verified, so
+  // an open link no longer publishes the staff roster.
   const err = req.query.err === '1' ? `<div class="tips-error">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
   const body = `
     <div class="tips-screen">
@@ -808,15 +835,56 @@ app.get('/tips', (req, res) => {
           <img src="/static/logo.png" alt="" width="40" height="40">
           <div><div class="tips-brand">${esc(RESTAURANT)}</div><div class="tips-title">Log your tips</div></div>
         </div>
-        <p class="tips-lead">Fill this in at the end of your shift. Your manager only sees the totals — your PIN stays private.</p>
+        <p class="tips-lead">Enter your PIN to start. Ask your manager if you don't have one.</p>
+        ${err}
+        <form method="post" action="/tips/start" class="tips-form">
+          <label class="tips-field">Your PIN
+            <input name="pin" class="tips-in tips-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+              placeholder="••••" autocomplete="off" autofocus required>
+          </label>
+          <button class="tips-submit" type="submit">Continue</button>
+        </form>
+      </div>
+    </div>`;
+  res.send(layout('Log your tips', body, { bare: true }));
+});
+
+// Step 2: the actual form, with the person already identified.
+function tipsFormPage(emp, opts = {}) {
+  const today = isoDate();
+  const err = opts.err ? `<div class="tips-error">${esc(opts.err)}</div>` : '';
+  const token = tipsToken(emp.id);
+
+  // Only the jobs you've given them in Staff. One role each for most people,
+  // so it shows as a fixed line rather than a menu they could get wrong.
+  const roles = rolesForEmployee(emp);
+  const label = (r) => r[0].toUpperCase() + r.slice(1);
+  const positionField = roles.length > 1
+    ? `<label class="tips-field">What you worked
+         <select name="position" id="tip-position" class="tips-in" required>
+           ${roles.map((r) => `<option value="${r}"${r === emp.role ? ' selected' : ''}>${label(r)}</option>`).join('')}
+         </select>
+         <span class="tips-hint">Pick what you actually did today — it decides how your tips are handled.</span>
+       </label>`
+    : `<div class="tips-field">What you worked
+         <div class="tips-fixed">${label(roles[0])}</div>
+         <input type="hidden" name="position" id="tip-position" value="${roles[0]}">
+         <span class="tips-hint">Worked something different today? Tell your manager.</span>
+       </div>`;
+
+  const body = `
+    <div class="tips-screen">
+      <div class="tips-card">
+        <div class="tips-head">
+          <img src="/static/logo.png" alt="" width="40" height="40">
+          <div><div class="tips-brand">${esc(RESTAURANT)}</div><div class="tips-title">Hi ${esc(emp.name.split(' ')[0])}</div></div>
+        </div>
+        <p class="tips-lead">Fill this in at the end of your shift. Your manager only sees the totals.</p>
         ${err}
         <form method="post" action="/tips" class="tips-form">
-          <label class="tips-field">Your name
-            <select name="employee_id" class="tips-in" required>
-              <option value="" disabled selected>Select your name</option>
-              ${staff.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('')}
-            </select>
-          </label>
+          <input type="hidden" name="token" value="${token}">
+
+          ${positionField}
 
           <label class="tips-field">Date you worked
             <input name="date" class="tips-in" type="date" value="${today}" max="${today}" required>
@@ -830,13 +898,6 @@ app.get('/tips', (req, res) => {
               <label for="dp-dinner">Dinner</label>
             </div>
           </div>
-
-          <label class="tips-field">What you worked
-            <select name="position" id="tip-position" class="tips-in" required>
-              ${['server', ...SUPPORT_ROLES].map((r) => `<option value="${r}">${r[0].toUpperCase() + r.slice(1)}</option>`).join('')}
-            </select>
-            <span class="tips-hint">Fills in from your usual job — only change it if you worked something different today.</span>
-          </label>
 
           <div class="tips-group" id="server-sales">
             <div class="tips-group-t">Your sales tonight</div>
@@ -867,52 +928,47 @@ app.get('/tips', (req, res) => {
             <span class="tips-hint">Anything the manager should know — like tips you're reporting for someone else.</span>
           </label>
 
-          <label class="tips-field">Your PIN
-            <input name="pin" class="tips-in tips-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••" required>
-          </label>
-
           <button class="tips-submit" type="submit">Submit</button>
         </form>
+        <a class="tips-signout" href="/tips">Not ${esc(emp.name.split(' ')[0])}? Start over</a>
       </div>
     </div>
     <script>
-      // Picking a name pre-selects that person's usual job, so for almost
-      // everyone this field is already right and they just move past it.
+      // Sales only apply to servers — hide them entirely for support roles.
       (function () {
-        var ROLES = ${JSON.stringify(Object.fromEntries(staff.map((e) => [e.id, e.role])))};
-        var name = document.querySelector('[name="employee_id"]');
         var pos = document.getElementById('tip-position');
         var sales = document.getElementById('server-sales');
-        if (!name || !pos) return;
-
-        // Sales only apply to servers — hide them entirely for support roles.
-        function syncSales() {
-          sales.style.display = pos.value === 'server' ? '' : 'none';
-        }
-        name.addEventListener('change', function () {
-          var r = ROLES[name.value];
-          if (!r) return;
-          for (var i = 0; i < pos.options.length; i++) {
-            if (pos.options[i].value === r) { pos.selectedIndex = i; break; }
-          }
-          syncSales();
-        });
+        if (!pos || !sales) return;
+        function syncSales() { sales.style.display = pos.value === 'server' ? '' : 'none'; }
         pos.addEventListener('change', syncSales);
         syncSales();
       })();
     </script>`;
-  res.send(layout('Log your tips', body, { bare: true }));
+  return layout('Log your tips', body, { bare: true });
+}
+
+app.post('/tips/start', (req, res) => {
+  const pin = String(req.body.pin || '').trim();
+  const matches = pin ? q.staffByPin.all(pin) : [];
+  if (matches.length !== 1) {
+    return res.redirect('/tips?err=1&msg=' + encodeURIComponent(
+      matches.length > 1
+        ? 'That PIN is set up for more than one person. Tell your manager so it can be fixed.'
+        : "That PIN wasn't recognised. Check it and try again, or ask your manager."));
+  }
+  res.send(tipsFormPage(matches[0]));
 });
 
 app.post('/tips', (req, res) => {
   const fail = (msg) => res.redirect('/tips?err=1&msg=' + encodeURIComponent(msg));
-  const emp = q.employee.get(Number(req.body.employee_id));
-  if (!emp) return fail('Please select your name.');
-  if (String(emp.pin || '') !== String(req.body.pin || '')) return fail("That PIN doesn't match your name. Please try again.");
+  const emp = readTipsToken(req.body.token);
+  if (!emp) return fail('Your session timed out. Enter your PIN and try again — nothing was saved.');
 
   const date = String(req.body.date || '').slice(0, 10);
   const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !daypart) return fail('Please choose the date and which shift you worked.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !daypart) {
+    return res.send(tipsFormPage(emp, { err: 'Please choose the date and which shift you worked.' }));
+  }
 
   // Find the shift — or start it. Staff often report before the manager has
   // opened the close, which is what used to leave the picker empty.
@@ -922,8 +978,10 @@ app.post('/tips', (req, res) => {
 
   // What they say they worked drives whether their tips are kept (server) or
   // pooled (support). If you've already put them on the shift, your role wins.
-  const ROLES = ['server', ...SUPPORT_ROLES];
-  const position = ROLES.includes(req.body.position) ? req.body.position : (emp.role || 'server');
+  // Only a job they're actually assigned — a hand-crafted POST can't file
+  // itself as a server (and keep the tips) when they're rostered as support.
+  const allowed = rolesForEmployee(emp);
+  const position = allowed.includes(req.body.position) ? req.body.position : (emp.role || allowed[0]);
   w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
   const cash = toCents(req.body.cash_tips);
   w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
@@ -976,10 +1034,16 @@ app.get('/employees', (req, res) => {
   }).join('');
   const roles = ['server', ...SUPPORT_ROLES, 'manager'];
   const counts = staff.reduce((a, e) => { a[e.role] = (a[e.role] || 0) + 1; return a; }, {});
+  // The PIN is now how staff sign in to the tips page, so no PIN = locked out.
+  const noPin = staff.filter((e) => e.role !== 'manager' && !e.pin).map((e) => e.name);
+  const pinWarn = noPin.length
+    ? `<div class="flash flash-warn"><div><b>No PIN yet:</b> ${esc(noPin.join(', '))}. They sign in to the tips page with their PIN, so they can't log tips until you give them one.</div></div>`
+    : '';
   const body = `
     ${flash(req)}
     <div class="page-head"><div><h1>🧑‍🍳 Staff</h1><p class="sub">${staff.length} on the team · ${counts.server || 0} servers · open anyone to set roles &amp; wages.</p></div>
       <a class="btn btn-primary" href="#add">＋ Add staff</a></div>
+    ${pinWarn}
     ${staff.length > 8 ? '<div class="toolbar"><div class="search"><input type="search" id="mod-search" placeholder="Search staff…" oninput="modFilter()"></div></div>' : ''}
     <div class="table-wrap"><table class="table">
       <thead><tr><th>Name</th><th>Role</th><th class="num">Wage</th><th>Email</th><th>PIN</th><th></th></tr></thead>
@@ -1000,9 +1064,23 @@ app.get('/employees', (req, res) => {
   res.send(layout('Staff', body));
 });
 
+// Staff sign in to the tips page with their PIN alone, so a shared PIN would
+// silently file one person's tips under the other. Caught here, where you can
+// still do something about it, rather than at 1am on a close.
+function pinTaken(pin, exceptId) {
+  const clean = String(pin || '').trim();
+  if (!clean) return null;
+  return q.employeeByPin.get(clean, exceptId || 0) || null;
+}
+
 app.post('/employees', (req, res) => {
   const { name, role, email, pin, rate, pos_id, pay_type } = req.body;
   if (!name || !role) return res.redirect('/employees?err=1&msg=' + encodeURIComponent('Name and role required.'));
+  const clash = pinTaken(pin, 0);
+  if (clash) {
+    return res.redirect('/employees?err=1&msg=' + encodeURIComponent(
+      `${clash.name} already uses PIN ${String(pin).trim()}. Give ${name.trim()} a different one — staff sign in to the tips page with their PIN, so it has to be unique.`));
+  }
   q.addEmployee.run({
     name: name.trim(), role, email: (email || '').trim() || null,
     pin: (pin || '').trim() || null, hourly_rate_cents: toCents(rate), pos_id: (pos_id || '').trim() || null,
@@ -1060,6 +1138,11 @@ app.post('/employees/:id', (req, res) => {
   if (!e) return res.status(404).end();
   const { name, role, email, pin, rate, pos_id, pay_type } = req.body;
   if (!name || !role) return res.redirect(`/employees/${e.id}/edit?err=1&msg=` + encodeURIComponent('Name and role required.'));
+  const clash = pinTaken(pin, e.id);
+  if (clash) {
+    return res.redirect(`/employees/${e.id}/edit?err=1&msg=` + encodeURIComponent(
+      `${clash.name} already uses PIN ${String(pin).trim()}. Pick a different one — staff sign in to the tips page with their PIN.`));
+  }
   q.updateEmployee.run({
     id: e.id, name: name.trim(), role, email: (email || '').trim() || null,
     pin: (pin || '').trim() || null, hourly_rate_cents: toCents(rate), pos_id: (pos_id || '').trim() || null,
