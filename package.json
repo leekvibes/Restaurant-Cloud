@@ -1,5 +1,5 @@
 {
-  "name": "restaurant-ops",
+  "name": "restaurant-cloud",
   "version": "0.1.0",
   "private": true,
   "description": "Back-office tool for a restaurant: tip-outs, daily payroll emails, sales dashboard.",

@@ -21,7 +21,13 @@ const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSiz
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use('/static', express.static(path.join(__dirname, '..', 'public')));
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+app.use('/static', express.static(PUBLIC_DIR));
+// PWA files must be served from the site root so the service worker's scope
+// covers the whole app (a /static/sw.js could only control /static/*).
+for (const f of ['sw.js', 'manifest.webmanifest', 'manifest-tips.webmanifest', 'apple-touch-icon.png']) {
+  app.get('/' + f, (_req, res) => res.sendFile(path.join(PUBLIC_DIR, f)));
+}
 
 const PORT = Number(process.env.PORT || 4000);
 const DAYPARTS = ['cafe', 'dinner'];

@@ -5,7 +5,7 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const { fmt, toCents } = require('./money');
 
-const RESTAURANT = process.env.RESTAURANT_NAME || 'Our Restaurant';
+const RESTAURANT = process.env.RESTAURANT_NAME || 'Restaurant Cloud';
 const PREVIEW_DIR = path.join(__dirname, '..', 'previews');
 
 const ROLE_LABEL = {

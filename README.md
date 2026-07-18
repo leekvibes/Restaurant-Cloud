@@ -1,4 +1,4 @@
-# Restaurant Ops — Phase 1 (Nightly Close)
+# Restaurant Cloud
 
 A back-office tool for the restaurant. Phase 1 covers the daily-friction stuff:
 enter a shift's sales, tips, and hours → the tip-out is calculated to the penny →

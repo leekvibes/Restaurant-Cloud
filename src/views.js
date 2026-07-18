@@ -2,7 +2,10 @@
 
 const { fmt } = require('./money');
 
-const RESTAURANT = process.env.RESTAURANT_NAME || 'Our Restaurant';
+// APP_NAME is the product (shown in the app chrome + PWA). RESTAURANT is the
+// venue's own name, used to brand staff emails — set RESTAURANT_NAME in .env.
+const APP_NAME = 'Restaurant Cloud';
+const RESTAURANT = process.env.RESTAURANT_NAME || APP_NAME;
 
 // Grouped navigation — organized instead of one long list.
 const NAV_GROUPS = [
@@ -25,29 +28,41 @@ function sidebar() {
     ${g.links.map(([href, ico, label]) => `<a class="side-link" href="${href}"><span class="side-ico">${ico}</span>${label}</a>`).join('')}
   `).join('');
   return `<aside class="sidebar">
-    <a href="/" class="side-brand">${esc(RESTAURANT)}</a>
+    <a href="/" class="side-brand"><img src="/static/logo.png" alt="" width="28" height="28">${esc(APP_NAME)}</a>
     <nav class="side-nav">${groups}</nav>
   </aside>`;
 }
 
-function layout(title, body, opts = {}) {
-  if (opts.bare) {
-    return `<!doctype html><html lang="en"><head>
-      <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>${esc(title)} · ${esc(RESTAURANT)}</title>
-      <link rel="stylesheet" href="/static/styles.css"></head>
-      <body class="bare"><main class="wrap">${body}</main></body></html>`;
-  }
-  return `<!doctype html><html lang="en"><head>
-    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>${esc(title)} · ${esc(RESTAURANT)}</title>
+/** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
+function head(title, opts = {}) {
+  const staff = !!opts.bare;
+  return `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <title>${esc(title)} · ${esc(staff ? RESTAURANT : APP_NAME)}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css"></head>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
+    <meta name="theme-color" content="${staff ? '#2563eb' : '#ffffff'}">
+    <link rel="icon" href="/static/icon-192.png">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'black-translucent' : 'default'}">
+    <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : 'Restaurant Cloud'}">
+    <meta name="mobile-web-app-capable" content="yes">`;
+}
+
+const swScript = `<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>`;
+
+function layout(title, body, opts = {}) {
+  if (opts.bare) {
+    return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
+      <body class="bare"><main class="wrap">${body}</main>${swScript}</body></html>`;
+  }
+  return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
     <body>
       <div class="topbar">
         <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="Menu">☰</button>
-        <span class="topbar-brand">${esc(RESTAURANT)}</span>
+        <span class="topbar-brand"><img src="/static/logo.png" alt="" width="22" height="22">${esc(APP_NAME)}</span>
       </div>
       <div class="app">
         ${sidebar()}
@@ -63,6 +78,7 @@ function layout(title, body, opts = {}) {
           });
         })();
       </script>
+      ${swScript}
     </body></html>`;
 }
 
@@ -73,4 +89,4 @@ function flash(req) {
   return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}">${esc(m)}</div>`;
 }
 
-module.exports = { layout, flash, esc, money, dp, RESTAURANT };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME };
