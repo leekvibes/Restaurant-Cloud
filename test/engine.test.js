@@ -76,6 +76,39 @@ test('two buckets: cash jar pays weekly cash, to-go card pays on paycheck', () =
   assert.strictEqual(k.poolShare, toCents(60));
 });
 
+test('support-reported tips are pooled by hours, not kept by the reporter', () => {
+  const rules = [
+    { type: 'pool', source: 'jar', split: 'hours', among: 'all_support', payout: 'weekly_cash' },
+    { type: 'pool', source: 'togo_card', split: 'hours', among: 'all_support', payout: 'paycheck' },
+  ];
+  const r = runShift({
+    servers: [],
+    support: [
+      // The barista reported everything; the busser reported nothing...
+      { employeeId: 'BA', name: 'barista', role: 'barista', hours: 5, cashTips: 60, cardTips: 40 },
+      { employeeId: 'BU', name: 'busser', role: 'busser', hours: 5, cashTips: 0, cardTips: 0 },
+    ],
+  }, rules);
+  const ba = r.support.find((s) => s.employeeId === 'BA');
+  const bu = r.support.find((s) => s.employeeId === 'BU');
+  // ...but equal hours means an equal split of both buckets.
+  assert.strictEqual(ba.poolShares.weekly_cash, toCents(30));
+  assert.strictEqual(bu.poolShares.weekly_cash, toCents(30));
+  assert.strictEqual(ba.poolShares.paycheck, toCents(20));
+  assert.strictEqual(bu.poolShares.paycheck, toCents(20));
+  assert.strictEqual(ba.poolShare + bu.poolShare, toCents(100), 'nothing lost');
+});
+
+test('manager-counted jar and staff-reported tips land in the same pool', () => {
+  const rules = [{ type: 'pool', source: 'jar', split: 'hours', among: 'all_support', payout: 'weekly_cash' }];
+  const r = runShift({
+    servers: [],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 4, cashTips: 25, cardTips: 0 }],
+    pool: { jar: 75 }, // manager counted $75 in the jar, barista reported $25
+  }, rules);
+  assert.strictEqual(r.support[0].poolShares.weekly_cash, toCents(100));
+});
+
 test('cash + card tips both count toward the tip-out base', () => {
   const split = runShift({ servers: [one({ cardTips: 50, cashTips: 50, food: 100 })], support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 1 }] });
   const allCard = runShift({ servers: [one({ cardTips: 100, food: 100 })], support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 1 }] });

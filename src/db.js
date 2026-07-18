@@ -201,6 +201,9 @@ function shiftInputs(shiftId) {
         cashEnteredBy: sr.cash_entered_by || null,
       });
     } else {
+      // Support staff can report tips too (a barista ringing people up, a
+      // busser handed cash). Those get pooled — see the engine.
+      const sr = sales.get(row.employee_id) || {};
       support.push({
         employeeId: row.employee_id,
         name: row.name,
@@ -209,6 +212,8 @@ function shiftInputs(shiftId) {
         hours: row.hours,
         hourlyRate: rateCents / 100,
         salaried,
+        cashTips: (sr.cash_tips_cents || 0) / 100,
+        cardTips: (sr.card_tips_cents || 0) / 100,
       });
     }
   }

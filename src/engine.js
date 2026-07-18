@@ -60,6 +60,8 @@ function runShift(shift, rules) {
   }));
   const support = (shift.support || []).map((p) => ({
     employeeId: p.employeeId, name: p.name, role: p.role, hours: Number(p.hours) || 0,
+    // Tips a support person reported under their own name — pooled, not kept.
+    cashTips: toCents(p.cashTips), cardTips: toCents(p.cardTips),
   }));
 
   const rolePools = {}; // role -> cents
@@ -112,10 +114,15 @@ function runShift(shift, rules) {
   // Two buckets per shift: the CASH tip jar (all cash tips go in the jar) and
   // TO-GO CARD tips. A rule targets one or both. (`togoCash`/`togo` in old data
   // just folds into the cash jar.)
+  // Pool money comes from two places: what the manager counts (jar / to-go
+  // card) and what support staff reported under their own names. Both land in
+  // the same buckets, then get split by hours — nobody keeps their own.
   const pool = shift.pool || {};
   const legacyCash = pool.togoCash != null ? pool.togoCash : pool.togo;
-  const cash = toCents(pool.jar) + toCents(legacyCash);
-  const togoCard = toCents(pool.togoCard);
+  const staffCash = support.reduce((a, p) => a + p.cashTips, 0);
+  const staffCard = support.reduce((a, p) => a + p.cardTips, 0);
+  const cash = toCents(pool.jar) + toCents(legacyCash) + staffCash;
+  const togoCard = toCents(pool.togoCard) + staffCard;
   const sourceAmount = (src) => {
     if (src === 'togo_card') return togoCard;
     if (src === 'jar' || src === 'cash') return cash;

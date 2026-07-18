@@ -373,12 +373,18 @@ app.get('/shifts/:id', (req, res) => {
         <form method="post" action="/shifts/${sh.id}/remove"><input type="hidden" name="employee_id" value="${sv.employeeId}"><button class="link-danger">remove</button></form></td>
     </tr>`).join('');
 
+  const reported = (p) => {
+    const c = toCents(p.cashTips), k = toCents(p.cardTips);
+    if (!c && !k) return '<span class="muted">—</span>';
+    return [c ? money(c) + ' cash' : '', k ? money(k) + ' card' : ''].filter(Boolean).join(' · ');
+  };
   const supportRows = inp.support.map((p) => `
     <tr data-emp="${p.employeeId}" data-kind="support">
       <td>${esc(p.name)}</td>
       <td>${p.role}</td>
       <td class="num" data-edit="hours" data-step="0.25">${p.hours}</td>
       <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(p.hourlyRate))}</td>
+      <td class="sub">${reported(p)}</td>
       <td class="row-actions">
         <button type="button" class="link" onclick="startEdit(${p.employeeId},'support')">edit</button>
         <form method="post" action="/shifts/${sh.id}/remove"><input type="hidden" name="employee_id" value="${p.employeeId}"><button class="link-danger">remove</button></form></td>
@@ -435,11 +441,11 @@ app.get('/shifts/:id', (req, res) => {
     </form>
 
     <h2>Support — kitchen, busser, barista</h2>
-    <p class="muted">Their hours (and wage, if different today). Their tip-out share is the pool split by hours.</p>
-    <table class="table">
-      <thead><tr><th>Name</th><th>Role</th><th class="num">Hours</th><th class="num">Wage</th><th></th></tr></thead>
-      <tbody>${supportRows || '<tr><td colspan="5" class="muted">No support staff yet.</td></tr>'}</tbody>
-    </table>
+    <p class="muted">Their hours (and wage, if different today). “Reported” is what they logged on the tips page — that money goes into the shared pool and is split by hours, not kept by whoever reported it.</p>
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Name</th><th>Role</th><th class="num">Hours</th><th class="num">Wage</th><th>Reported</th><th></th></tr></thead>
+      <tbody>${supportRows || '<tr><td colspan="6" class="muted">No support staff yet.</td></tr>'}</tbody>
+    </table></div>
     <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
       <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
       <label>Role <select name="role" id="support-role">${roleOpts()}</select></label>
@@ -449,7 +455,7 @@ app.get('/shifts/:id', (req, res) => {
     </form>
 
     <h2>Shared tip pool</h2>
-    <p class="muted">Support tips for the shift. How each part is paid out (weekly cash vs. paycheck) is set on the <a href="/policy">tip-out policy</a>.</p>
+    <p class="muted">What <b>you</b> counted. Anything support staff reported on the tips page is added to these automatically — the pool below totals ${money(toCents(inp.pool.jar) + inp.support.reduce((a, p) => a + toCents(p.cashTips), 0))} cash and ${money(toCents(inp.pool.togoCard) + inp.support.reduce((a, p) => a + toCents(p.cardTips), 0))} card. How each is paid out is set on the <a href="/policy">tip-out policy</a>.</p>
     <form method="post" action="/shifts/${sh.id}/pool" class="card form grid">
       <label>Cash tips (jar) <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
       <label>To-go card tips <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
