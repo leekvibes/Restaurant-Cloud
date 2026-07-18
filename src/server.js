@@ -645,6 +645,14 @@ app.get('/shifts/:id/results', (req, res) => {
     warn.push('No hours entered for: ' + noHours.join(', ')
       + ' — the pool is split by hours, so they get $0 until you add them.');
   }
+  // Servers land here too — from the tips page, the photo reader, or the POS
+  // feed, none of which know hours. Their tip-out is sales-based so it stays
+  // right, but the wage on their email and in payroll would read $0.
+  const noHoursServers = inp.servers.filter((p) => !Number(p.hours) && !p.salaried).map((p) => p.name);
+  if (noHoursServers.length) {
+    warn.push('No hours entered for: ' + noHoursServers.join(', ')
+      + ' — their tips are correct, but their wage and payroll hours will be $0.');
+  }
   const missingEmail = [...inp.servers, ...inp.support].filter((p) => !p.email).map((p) => p.name);
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
   const noCash = inp.servers.filter((sv) => !sv.cashEnteredBy).map((sv) => sv.name);
