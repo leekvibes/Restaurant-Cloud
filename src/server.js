@@ -701,11 +701,14 @@ app.get('/tips', (req, res) => {
         <div class="tips-card tips-done">
           <div class="tips-check"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>
           <div class="tips-done-title">Thanks${req.query.name ? ', ' + esc(req.query.name) : ''}</div>
-          <div class="tips-done-sub">Your tips have been recorded${req.query.date ? ' for ' + esc(req.query.date) : ''}${req.query.shift ? ' · ' + esc(req.query.shift) : ''}.</div>
+          <div class="tips-done-sub">Your tips have been recorded.</div>
           <div class="tips-receipt">
+            <div class="kv"><span>Date</span><b>${esc(req.query.date || '')}${req.query.shift ? ' · ' + esc(req.query.shift) : ''}</b></div>
+            ${req.query.position ? `<div class="kv"><span>Worked as</span><b>${esc(String(req.query.position).replace(/^./, (c) => c.toUpperCase()))}</b></div>` : ''}
             <div class="kv"><span>Cash tips</span><b>$${esc(req.query.cash || '0.00')}</b></div>
             ${card !== '' ? `<div class="kv"><span>Card tips</span><b>$${esc(card)}</b></div>` : ''}
           </div>
+          <p class="tips-foot" style="margin-bottom:8px">Wrong? Just submit again with the right details — your manager can correct anything.</p>
           <p class="tips-foot">You'll get an email with your full breakdown once your manager closes the shift.</p>
           <a class="tips-submit" href="/tips">Log another shift</a>
         </div>
@@ -746,6 +749,13 @@ app.get('/tips', (req, res) => {
             </div>
           </div>
 
+          <label class="tips-field">What you worked
+            <select name="position" id="tip-position" class="tips-in" required>
+              ${['server', ...SUPPORT_ROLES].map((r) => `<option value="${r}">${r[0].toUpperCase() + r.slice(1)}</option>`).join('')}
+            </select>
+            <span class="tips-hint">Fills in from your usual job — only change it if you worked something different today.</span>
+          </label>
+
           <label class="tips-field">Cash tips you took home
             <div class="tips-money"><span>$</span><input name="cash_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00" required></div>
           </label>
@@ -762,7 +772,24 @@ app.get('/tips', (req, res) => {
           <button class="tips-submit" type="submit">Submit</button>
         </form>
       </div>
-    </div>`;
+    </div>
+    <script>
+      // Picking a name pre-selects that person's usual job, so for almost
+      // everyone this field is already right and they just move past it.
+      (function () {
+        var ROLES = ${JSON.stringify(Object.fromEntries(staff.map((e) => [e.id, e.role])))};
+        var name = document.querySelector('[name="employee_id"]');
+        var pos = document.getElementById('tip-position');
+        if (!name || !pos) return;
+        name.addEventListener('change', function () {
+          var r = ROLES[name.value];
+          if (!r) return;
+          for (var i = 0; i < pos.options.length; i++) {
+            if (pos.options[i].value === r) { pos.selectedIndex = i; break; }
+          }
+        });
+      })();
+    </script>`;
   res.send(layout('Log your tips', body, { bare: true }));
 });
 
@@ -782,7 +809,11 @@ app.post('/tips', (req, res) => {
   const sh = s.findShift.get(date, daypart);
   policyForShift(sh); // lock in the tip-out policy version that's current now
 
-  w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: emp.role || 'server' });
+  // What they say they worked drives whether their tips are kept (server) or
+  // pooled (support). If you've already put them on the shift, your role wins.
+  const ROLES = ['server', ...SUPPORT_ROLES];
+  const position = ROLES.includes(req.body.position) ? req.body.position : (emp.role || 'server');
+  w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
   const cash = toCents(req.body.cash_tips);
   w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
   const cardRaw = String(req.body.card_tips || '').trim();
@@ -791,7 +822,7 @@ app.post('/tips', (req, res) => {
   const p = new URLSearchParams({
     done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
     card: cardRaw === '' ? '' : (toCents(cardRaw) / 100).toFixed(2),
-    shift: dp(daypart), date,
+    shift: dp(daypart), date, position,
   });
   res.redirect('/tips?' + p.toString());
 });
