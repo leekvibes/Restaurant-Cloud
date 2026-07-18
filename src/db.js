@@ -1,0 +1,219 @@
+'use strict';
+
+const path = require('path');
+const Database = require('better-sqlite3');
+
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data.db');
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS employees (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  role          TEXT NOT NULL,          -- server | kitchen | barista | bartender | busser | manager
+  email         TEXT,
+  pin           TEXT,                   -- 4-digit, for the no-login staff cash-tip page
+  hourly_rate_cents INTEGER DEFAULT 0,  -- from Gusto later; used for wage display
+  pos_id        TEXT,                   -- Benugin's stable server id, for matching
+  active        INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS shifts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  date       TEXT NOT NULL,             -- YYYY-MM-DD
+  daypart    TEXT NOT NULL,             -- cafe | dinner
+  status     TEXT NOT NULL DEFAULT 'open', -- open | emailed
+  policy_id  INTEGER,                   -- tip-out policy version locked in at creation
+  pool_jar_cents  INTEGER NOT NULL DEFAULT 0,  -- shared tip jar (cash) for the shift
+  pool_togo_cents INTEGER NOT NULL DEFAULT 0,  -- to-go tips for the shift
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(date, daypart)
+);
+
+CREATE TABLE IF NOT EXISTS work (
+  shift_id    INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+  employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  role        TEXT NOT NULL,            -- role worked on THIS shift (can differ from default)
+  hours       REAL NOT NULL DEFAULT 0,
+  hourly_rate_cents INTEGER DEFAULT 0,  -- per-shift wage override; 0 = use employee default
+  PRIMARY KEY (shift_id, employee_id)
+);
+
+CREATE TABLE IF NOT EXISTS server_sales (
+  shift_id      INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+  employee_id   INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  food_cents    INTEGER NOT NULL DEFAULT 0,
+  coffee_cents  INTEGER NOT NULL DEFAULT 0,
+  alcohol_cents INTEGER NOT NULL DEFAULT 0,
+  card_tips_cents INTEGER NOT NULL DEFAULT 0,
+  cash_tips_cents INTEGER NOT NULL DEFAULT 0,
+  cash_entered_by TEXT,                 -- 'staff' | 'manager' | 'pos', for trust/trace
+  PRIMARY KEY (shift_id, employee_id)
+);
+`);
+
+// Migration: add the per-shift wage column to older databases that predate it.
+const workCols = db.prepare('PRAGMA table_info(work)').all().map((c) => c.name);
+if (!workCols.includes('hourly_rate_cents')) {
+  db.exec('ALTER TABLE work ADD COLUMN hourly_rate_cents INTEGER DEFAULT 0');
+}
+// Per-employee role+wage pairs — a person can be e.g. server @ $11 AND busser @ $13.
+db.exec(`CREATE TABLE IF NOT EXISTS employee_roles (
+  employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  role        TEXT NOT NULL,
+  wage_cents  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (employee_id, role)
+);`);
+// Migration: hourly vs salary on employees.
+const empCols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
+if (!empCols.includes('pay_type')) db.exec("ALTER TABLE employees ADD COLUMN pay_type TEXT NOT NULL DEFAULT 'hourly'");
+if (!empCols.includes('salary_cents')) db.exec('ALTER TABLE employees ADD COLUMN salary_cents INTEGER NOT NULL DEFAULT 0');
+
+// Migration: add the tip-out policy stamp + shared-pool columns to shifts.
+const shiftCols = db.prepare('PRAGMA table_info(shifts)').all().map((c) => c.name);
+if (!shiftCols.includes('policy_id')) db.exec('ALTER TABLE shifts ADD COLUMN policy_id INTEGER');
+if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_jar_cents INTEGER NOT NULL DEFAULT 0');
+if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
+if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');
+
+// ---- Employees ----------------------------------------------------------
+const q = {
+  allEmployees: db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY role, name'),
+  employee: db.prepare('SELECT * FROM employees WHERE id = ?'),
+  serversList: db.prepare("SELECT * FROM employees WHERE active = 1 AND role = 'server' ORDER BY name"),
+  addEmployee: db.prepare(
+    `INSERT INTO employees (name, role, email, pin, hourly_rate_cents, pos_id, pay_type, salary_cents)
+     VALUES (@name, @role, @email, @pin, @hourly_rate_cents, @pos_id, @pay_type, @salary_cents)`
+  ),
+  employeeByPosId: db.prepare('SELECT * FROM employees WHERE pos_id = ?'),
+  // Per-role wages
+  roleWage: db.prepare('SELECT wage_cents FROM employee_roles WHERE employee_id = ? AND role = ?'),
+  rolesForEmployee: db.prepare('SELECT role, wage_cents FROM employee_roles WHERE employee_id = ? ORDER BY role'),
+  setRole: db.prepare(`INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES (@employee_id, @role, @wage_cents)
+     ON CONFLICT(employee_id, role) DO UPDATE SET wage_cents = excluded.wage_cents`),
+  deleteRole: db.prepare('DELETE FROM employee_roles WHERE employee_id = ? AND role = ?'),
+  // Anyone who can be scheduled on a shift (any role except manager) — a person
+  // can work a different position on a given day, so both close dropdowns use this.
+  nonManagerList: db.prepare("SELECT * FROM employees WHERE active = 1 AND role != 'manager' ORDER BY name"),
+  updateEmployee: db.prepare(
+    `UPDATE employees SET name=@name, role=@role, email=@email, pin=@pin,
+       hourly_rate_cents=@hourly_rate_cents, pos_id=@pos_id, pay_type=@pay_type, salary_cents=@salary_cents WHERE id=@id`
+  ),
+  setActive: db.prepare('UPDATE employees SET active=@active WHERE id=@id'),
+};
+
+// ---- Shifts -------------------------------------------------------------
+const s = {
+  createShift: db.prepare('INSERT INTO shifts (date, daypart) VALUES (?, ?)'),
+  getOrIgnore: db.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)'),
+  findShift: db.prepare('SELECT * FROM shifts WHERE date = ? AND daypart = ?'),
+  shiftById: db.prepare('SELECT * FROM shifts WHERE id = ?'),
+  recentShifts: db.prepare('SELECT * FROM shifts ORDER BY date DESC, daypart DESC LIMIT ?'),
+  allShifts: db.prepare('SELECT * FROM shifts ORDER BY date DESC, daypart DESC'),
+  shiftsInRange: db.prepare('SELECT * FROM shifts WHERE date >= ? AND date <= ? ORDER BY date, daypart'),
+  markEmailed: db.prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?"),
+  setPolicy: db.prepare('UPDATE shifts SET policy_id = ? WHERE id = ?'),
+  setPool: db.prepare('UPDATE shifts SET pool_jar_cents = @jar, pool_togo_card_cents = @togo_card WHERE id = @id'),
+};
+
+// ---- Work / sales -------------------------------------------------------
+const w = {
+  upsertWork: db.prepare(
+    `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
+     VALUES (@shift_id, @employee_id, @role, @hours, @hourly_rate_cents)
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+       role = excluded.role, hours = excluded.hours, hourly_rate_cents = excluded.hourly_rate_cents`
+  ),
+  // Register someone on a shift WITHOUT touching hours/role if they're already
+  // there — used by the cash-tip page and POS webhook so they can't clobber
+  // hours the manager already entered.
+  insertWorkIfAbsent: db.prepare(
+    `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
+     VALUES (@shift_id, @employee_id, @role, 0, 0)
+     ON CONFLICT(shift_id, employee_id) DO NOTHING`
+  ),
+  setHours: db.prepare('UPDATE work SET hours = @hours WHERE shift_id = @shift_id AND employee_id = @employee_id'),
+  deleteWork: db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?'),
+  workForShift: db.prepare(
+    `SELECT w.role, w.hours, w.employee_id,
+            w.hourly_rate_cents AS shift_rate_cents,
+            e.name, e.email, e.hourly_rate_cents AS default_rate_cents, e.pay_type
+     FROM work w JOIN employees e ON e.id = w.employee_id WHERE w.shift_id = ?`
+  ),
+  upsertSales: db.prepare(
+    `INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents, card_tips_cents)
+     VALUES (@shift_id, @employee_id, @food_cents, @coffee_cents, @alcohol_cents, @card_tips_cents)
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+       food_cents = excluded.food_cents, coffee_cents = excluded.coffee_cents,
+       alcohol_cents = excluded.alcohol_cents, card_tips_cents = excluded.card_tips_cents`
+  ),
+  setCashTips: db.prepare(
+    `INSERT INTO server_sales (shift_id, employee_id, cash_tips_cents, cash_entered_by)
+     VALUES (@shift_id, @employee_id, @cash_tips_cents, @by)
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+       cash_tips_cents = excluded.cash_tips_cents, cash_entered_by = excluded.cash_entered_by`
+  ),
+  salesForShift: db.prepare('SELECT * FROM server_sales WHERE shift_id = ?'),
+  salesRow: db.prepare('SELECT * FROM server_sales WHERE shift_id = ? AND employee_id = ?'),
+};
+
+/** Assemble the exact input shape engine.runShift() expects, in DOLLARS. */
+function shiftInputs(shiftId) {
+  const workRows = w.workForShift.all(shiftId);
+  const sales = new Map(w.salesForShift.all(shiftId).map((r) => [r.employee_id, r]));
+  const servers = [];
+  const support = [];
+  for (const row of workRows) {
+    // Wage resolution: salaried → no hourly wage; else per-shift override →
+    // the wage set for THIS role → the employee's default rate.
+    const salaried = row.pay_type === 'salary';
+    let rateCents = 0;
+    if (!salaried) {
+      if (row.shift_rate_cents > 0) {
+        rateCents = row.shift_rate_cents;
+      } else {
+        const rw = q.roleWage.get(row.employee_id, row.role);
+        rateCents = rw && rw.wage_cents ? rw.wage_cents : (row.default_rate_cents || 0);
+      }
+    }
+    if (row.role === 'server') {
+      const sr = sales.get(row.employee_id) || {};
+      servers.push({
+        employeeId: row.employee_id,
+        name: row.name,
+        email: row.email,
+        hours: row.hours,
+        hourlyRate: rateCents / 100,
+        salaried,
+        food: (sr.food_cents || 0) / 100,
+        coffee: (sr.coffee_cents || 0) / 100,
+        alcohol: (sr.alcohol_cents || 0) / 100,
+        cardTips: (sr.card_tips_cents || 0) / 100,
+        cashTips: (sr.cash_tips_cents || 0) / 100,
+        cashEnteredBy: sr.cash_entered_by || null,
+      });
+    } else {
+      support.push({
+        employeeId: row.employee_id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        hours: row.hours,
+        hourlyRate: rateCents / 100,
+        salaried,
+      });
+    }
+  }
+  const sh = s.shiftById.get(shiftId) || {};
+  // The jar holds all cash tips; to-go card tips are tracked separately.
+  const pool = {
+    jar: (sh.pool_jar_cents || 0) / 100,
+    togoCash: (sh.pool_togo_cents || 0) / 100, // legacy column, folds into cash
+    togoCard: (sh.pool_togo_card_cents || 0) / 100,
+  };
+  return { servers, support, pool };
+}
+
+module.exports = { db, q, s, w, shiftInputs, DB_PATH };

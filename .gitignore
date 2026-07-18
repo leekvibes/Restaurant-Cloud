@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+
+# private config — NEVER commit (holds your API key)
+.env
+.env.*
+!.env.example
+
+# your live data & private files
+data.db
+data.db-*
+uploads/
+previews/
+
+# os junk
+.DS_Store

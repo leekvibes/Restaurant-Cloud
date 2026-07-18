@@ -1,0 +1,107 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert');
+const { runShift, defaultRules } = require('../src/engine');
+const { toCents } = require('../src/money');
+
+const one = (over) => ({ employeeId: 'A', name: 'A', hours: 5, food: 0, coffee: 0, alcohol: 0, cardTips: 0, cashTips: 0, ...over });
+
+test('worked example: single server tip-out matches to the penny', () => {
+  const r = runShift({ servers: [one({ food: 3000, coffee: 400, alcohol: 1200, cardTips: 800 })],
+    support: [{ employeeId: 'K', name: 'K', role: 'kitchen', hours: 1 }, { employeeId: 'BA', name: 'BA', role: 'barista', hours: 1 },
+      { employeeId: 'BT', name: 'BT', role: 'bartender', hours: 1 }, { employeeId: 'BU', name: 'BU', role: 'busser', hours: 1 }] });
+  const s = r.servers[0];
+  assert.strictEqual(s.tipouts.kitchen, toCents(45));
+  assert.strictEqual(s.tipouts.barista, toCents(6));
+  assert.strictEqual(s.tipouts.bartender, toCents(60));
+  assert.strictEqual(s.tipouts.busser, toCents(89.57)); // 13% of 689
+  assert.strictEqual(s.tipsKept, toCents(599.43));
+});
+
+test('per-server, no pool: two servers each tip out on their own sales; pots split by hours', () => {
+  const r = runShift({
+    servers: [
+      one({ employeeId: 'A', name: 'Ana', hours: 4, food: 2000, coffee: 200, cardTips: 450 }),
+      one({ employeeId: 'B', name: 'Ben', hours: 6, food: 1500, coffee: 100, cardTips: 300 }),
+    ],
+    support: [{ employeeId: 'K1', name: 'Cook', role: 'kitchen', hours: 8 },
+      { employeeId: 'BU', name: 'Busser', role: 'busser', hours: 6 },
+      { employeeId: 'BA', name: 'Barista', role: 'barista', hours: 5 }],
+  });
+  assert.strictEqual(r.servers.find((s) => s.employeeId === 'A').tipsKept, toCents(362.79));
+  assert.strictEqual(r.servers.find((s) => s.employeeId === 'B').tipsKept, toCents(240.12));
+  assert.strictEqual(r.pots.kitchen, toCents(52.5));
+  assert.strictEqual(r.pots.busser, toCents(90.09));
+  assert.strictEqual(r.support.find((s) => s.employeeId === 'BU').tipShare, toCents(90.09));
+});
+
+test('role pool splits between two people strictly by hours, no penny drift', () => {
+  const r = runShift({ servers: [one({ food: 1000, cardTips: 100 })],
+    support: [{ employeeId: 'K1', name: 'a', role: 'kitchen', hours: 5 }, { employeeId: 'K2', name: 'b', role: 'kitchen', hours: 3 }] });
+  const a = r.support.find((s) => s.employeeId === 'K1').tipShare;
+  const b = r.support.find((s) => s.employeeId === 'K2').tipShare;
+  assert.strictEqual(a + b, r.pots.kitchen);
+  assert.ok(a > b);
+});
+
+test('shared pool (jar + to-go) splits by hours across ALL support, tagged weekly cash', () => {
+  const r = runShift({
+    servers: [one({ food: 1000, cardTips: 50 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 6 },
+      { employeeId: 'BU', name: 'bu', role: 'busser', hours: 4 }],
+    pool: { jar: 60, togo: 40 }, // $100 pool
+  });
+  const k = r.support.find((s) => s.employeeId === 'K');
+  const bu = r.support.find((s) => s.employeeId === 'BU');
+  assert.strictEqual(k.poolShare + bu.poolShare, toCents(100), 'pool fully distributed');
+  assert.strictEqual(k.poolShare, toCents(60)); // 6/10 of 100
+  assert.strictEqual(bu.poolShare, toCents(40)); // 4/10 of 100
+  assert.strictEqual(k.poolShares.weekly_cash, toCents(60)); // default policy pays weekly cash
+});
+
+test('two buckets: cash jar pays weekly cash, to-go card pays on paycheck', () => {
+  const rules = [
+    { type: 'pool', source: 'jar', split: 'hours', among: 'all_support', payout: 'weekly_cash' },
+    { type: 'pool', source: 'togo_card', split: 'hours', among: 'all_support', payout: 'paycheck' },
+  ];
+  const r = runShift({
+    servers: [one({ food: 1000, cardTips: 20 })],
+    support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 6 }, { employeeId: 'BU', name: 'b', role: 'busser', hours: 6 }],
+    pool: { jar: 80, togoCard: 40 }, // cash jar = 80 (weekly), to-go card = 40 (paycheck)
+  }, rules);
+  const k = r.support.find((s) => s.employeeId === 'K');
+  assert.strictEqual(k.poolShares.weekly_cash, toCents(40)); // half of 80
+  assert.strictEqual(k.poolShares.paycheck, toCents(20));    // half of 40
+  assert.strictEqual(k.poolShare, toCents(60));
+});
+
+test('cash + card tips both count toward the tip-out base', () => {
+  const split = runShift({ servers: [one({ cardTips: 50, cashTips: 50, food: 100 })], support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 1 }] });
+  const allCard = runShift({ servers: [one({ cardTips: 100, food: 100 })], support: [{ employeeId: 'K', name: 'k', role: 'kitchen', hours: 1 }] });
+  assert.strictEqual(split.servers[0].tipsKept, allCard.servers[0].tipsKept);
+});
+
+test('everything reconciles: tips collected == kept + all role pools', () => {
+  const r = runShift({
+    servers: [
+      one({ employeeId: 'A', hours: 5, food: 1234.56, coffee: 78.9, cardTips: 211.11, cashTips: 63.5 }),
+      one({ employeeId: 'B', hours: 7, food: 999.99, cardTips: 180.25, cashTips: 40 }),
+      one({ employeeId: 'C', hours: 6, food: 640.4, coffee: 12.35, cardTips: 95.8, cashTips: 22.15 }),
+    ],
+    support: [{ employeeId: 'K1', name: 'a', role: 'kitchen', hours: 8 }, { employeeId: 'BU', name: 'b', role: 'busser', hours: 7 },
+      { employeeId: 'BA', name: 'c', role: 'barista', hours: 4 }],
+    pool: { jar: 88.5, togo: 130.25 },
+  });
+  assert.ok(r.reconciliation.balanced);
+});
+
+test('custom rules: an added food-runner rule is applied', () => {
+  const rules = [...defaultRules(), { type: 'tipout', recipient: 'busser', percent: 2, base: 'food', split: 'hours' }];
+  // (recipient reused as a stand-in role that exists in support)
+  const r = runShift({ servers: [one({ food: 1000, cardTips: 100 })],
+    support: [{ employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }] }, rules);
+  // busser now gets 13% of remaining PLUS 2% of food ($20) → pool bigger than default.
+  const rDefault = runShift({ servers: [one({ food: 1000, cardTips: 100 })], support: [{ employeeId: 'BU', name: 'b', role: 'busser', hours: 5 }] });
+  assert.ok(r.pots.busser > rDefault.pots.busser);
+});

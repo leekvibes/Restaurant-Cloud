@@ -1,0 +1,198 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const nodemailer = require('nodemailer');
+const { fmt, toCents } = require('./money');
+
+const RESTAURANT = process.env.RESTAURANT_NAME || 'Our Restaurant';
+const PREVIEW_DIR = path.join(__dirname, '..', 'previews');
+
+const ROLE_LABEL = {
+  server: 'Server',
+  kitchen: 'Kitchen',
+  barista: 'Barista',
+  bartender: 'Bartender',
+  busser: 'Busser',
+};
+
+function wageCents(hours, hourlyRateDollars) {
+  return Math.round(toCents(hourlyRateDollars) * (Number(hours) || 0)) / 1;
+}
+
+function shell(title, bodyRows, hero) {
+  const heroBlock = hero ? `<div style="padding:22px 22px 6px;text-align:center">
+      <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.05em">${hero.label}</div>
+      <div style="font-size:42px;font-weight:800;color:#2563eb;letter-spacing:-.02em;margin-top:2px;line-height:1">${hero.value}</div>
+    </div>` : '';
+  return `<!doctype html><html><body style="margin:0;background:#f4f7fc;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a">
+  <div style="max-width:520px;margin:0 auto;padding:24px 16px">
+    <div style="background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e6ecf4;box-shadow:0 6px 24px rgba(15,23,42,.06)">
+      <div style="background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%);color:#fff;padding:20px 22px">
+        <div style="font-size:12px;opacity:.85;letter-spacing:.06em;text-transform:uppercase;font-weight:600">${RESTAURANT}</div>
+        <div style="font-size:20px;font-weight:800;margin-top:3px;letter-spacing:-.01em">${title}</div>
+      </div>
+      ${heroBlock}
+      <div style="padding:10px 22px 20px">${bodyRows}</div>
+      <div style="padding:14px 22px;border-top:1px solid #eef2f7;color:#94a3b8;font-size:12px;line-height:1.5">
+        This is a summary, not a pay stub — final amounts are set in payroll.
+      </div>
+    </div>
+  </div></body></html>`;
+}
+
+function line(label, value, opts = {}) {
+  const strong = opts.strong ? 'font-weight:700;font-size:16px' : 'font-weight:500';
+  const color = opts.color || '#0f172a';
+  const border = opts.border === false ? '' : 'border-top:1px solid #eef2f7';
+  return `<div style="display:flex;justify-content:space-between;padding:9px 0;${border}">
+    <span style="color:#64748b">${label}</span>
+    <span style="${strong};color:${color}">${value}</span></div>`;
+}
+
+function section(title) {
+  return `<div style="margin:18px 0 2px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8">${title}</div>`;
+}
+
+/** Build the email for one server. `p` is a server payout object from the engine. */
+function serverEmail(p, ctx) {
+  const wage = wageCents(p.hours, ctx.hourlyRate);
+  const paycheckAdj = p.tipsKept - p.cashTips; // + owed on paycheck, - taken home in excess
+
+  let body = '';
+  body += line('Date', `${ctx.date} · ${ctx.daypart === 'cafe' ? 'Café' : 'Dinner'}`, { border: false });
+  body += line('Hours worked', `${p.hours}`);
+  if (ctx.salaried) body += line('Pay', 'Salaried');
+  else if (wage > 0) body += line('Estimated wage', fmt(wage));
+
+  body += section('Your sales');
+  body += line('Food', fmt(p.sales.food), { border: false });
+  if (p.sales.coffee) body += line('Coffee', fmt(p.sales.coffee));
+  if (p.sales.alcohol) body += line('Alcohol', fmt(p.sales.alcohol));
+
+  body += section('Your tips');
+  body += line('Card tips', fmt(p.cardTips), { border: false });
+  body += line('Cash tips', fmt(p.cashTips));
+  body += line('Total tips collected', fmt(p.totalTips), { strong: true });
+
+  body += section('Tip-out');
+  const tipoutRoles = Object.keys(p.tipouts).filter((r) => p.tipouts[r]);
+  if (tipoutRoles.length === 0) body += line('No tip-out', fmt(0), { border: false });
+  tipoutRoles.forEach((role, i) => {
+    body += line('→ ' + (ROLE_LABEL[role] || role), '-' + fmt(p.tipouts[role]), { border: i === 0 ? false : true, color: '#dc2626' });
+  });
+  body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: '#059669' });
+
+  // The clarity line: you already took the cash home; here's how it nets out.
+  body += section('How this reaches you');
+  body += line('Cash you took home tonight', fmt(p.cashTips), { border: false });
+  if (paycheckAdj >= 0) {
+    body += line('Added to your next paycheck', '+' + fmt(paycheckAdj), { color: '#059669' });
+  } else {
+    body += line('Adjusted from your next paycheck', '-' + fmt(-paycheckAdj), { color: '#dc2626' });
+    body += `<div style="margin-top:8px;font-size:12px;color:#94a3b8;line-height:1.5">You took home more cash than your net tips (because part funds the kitchen/busser tip-out), so your paycheck is reduced by that difference. Your total is still ${fmt(p.tipsKept)}${wage > 0 ? ' in tips, plus your wage' : ''}.</div>`;
+  }
+
+  const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(p.tipsKept)} in tips`;
+  return { to: ctx.email, subject, html: shell(`${ROLE_LABEL.server} summary`, body, { label: 'Tips you keep', value: fmt(p.tipsKept) }) };
+}
+
+/** Build the email for a support-role employee (kitchen/busser/barista/bartender). */
+function supportEmail(p, ctx) {
+  const wage = wageCents(p.hours, ctx.hourlyRate);
+  let body = '';
+  body += line('Date', `${ctx.date} · ${ctx.daypart === 'cafe' ? 'Café' : 'Dinner'}`, { border: false });
+  body += line('Role', ROLE_LABEL[p.role] || p.role);
+  body += line('Hours worked', `${p.hours}`);
+  if (ctx.salaried) body += line('Pay', 'Salaried');
+  else if (wage > 0) body += line('Estimated wage', fmt(wage));
+
+  const POOL_LABEL = { weekly_cash: 'Pool share (weekly cash)', paycheck: 'Pool share (on paycheck)', nightly_cash: 'Pool share (cash tonight)' };
+  const shares = p.poolShares || {};
+  const total = (p.tipShare || 0) + (p.poolShare || 0);
+
+  body += section('Tips');
+  let first = true;
+  if (p.tipShare) { body += line('Tip-out share (on paycheck)', fmt(p.tipShare), { border: false }); first = false; }
+  for (const payout of Object.keys(shares)) {
+    if (!shares[payout]) continue;
+    body += line(POOL_LABEL[payout] || 'Pool share', fmt(shares[payout]), { border: first ? false : true });
+    first = false;
+  }
+  body += line('Total tips', fmt(total), { strong: true, color: '#059669' });
+  body += `<div style="margin-top:8px;font-size:12px;color:#94a3b8;line-height:1.5">Your tip-out share (split by hours) lands on your Gusto paycheck. Shared-pool amounts are paid however the policy sets for each part — weekly cash and/or on your paycheck.</div>`;
+
+  const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(total)} in tips`;
+  return { to: ctx.email, subject, html: shell(`${ROLE_LABEL[p.role] || p.role} summary`, body, { label: 'Total tips', value: fmt(total) }) };
+}
+
+/**
+ * Build every employee's email for a shift.
+ * @param results  engine.runShift() output
+ * @param meta     { date, daypart }
+ * @param people   Map employeeId -> { email, hourlyRate }
+ */
+function buildEmails(results, meta, people) {
+  const emails = [];
+  for (const p of results.servers) {
+    const info = people.get(p.employeeId) || {};
+    emails.push({ employeeId: p.employeeId, name: p.name, ...serverEmail(p, { ...meta, email: info.email, hourlyRate: info.hourlyRate, salaried: info.salaried }) });
+  }
+  for (const p of results.support) {
+    const info = people.get(p.employeeId) || {};
+    emails.push({ employeeId: p.employeeId, name: p.name, ...supportEmail(p, { ...meta, email: info.email, hourlyRate: info.hourlyRate, salaried: info.salaried }) });
+  }
+  return emails;
+}
+
+function transport() {
+  if (!process.env.SMTP_HOST && !process.env.GMAIL_USER) return null;
+  if (process.env.GMAIL_USER) {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+    });
+  }
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+}
+
+/**
+ * Send (or, if no mail is configured, preview) the emails.
+ * Returns { sent, previewed, files, errors }.
+ */
+async function sendEmails(emails) {
+  const t = transport();
+  const from = process.env.MAIL_FROM || process.env.GMAIL_USER || 'noreply@restaurant.local';
+  const out = { sent: 0, previewed: 0, files: [], errors: [] };
+
+  if (!t) {
+    // Preview mode: write HTML files so you can eyeball them before wiring email.
+    fs.mkdirSync(PREVIEW_DIR, { recursive: true });
+    for (const e of emails) {
+      const safe = (e.name || 'employee').replace(/[^a-z0-9]+/gi, '_').toLowerCase();
+      const file = path.join(PREVIEW_DIR, `${safe}.html`);
+      fs.writeFileSync(file, e.html);
+      out.files.push(file);
+      out.previewed++;
+    }
+    return out;
+  }
+
+  for (const e of emails) {
+    if (!e.to) { out.errors.push(`${e.name}: no email on file`); continue; }
+    try {
+      await t.sendMail({ from, to: e.to, subject: e.subject, html: e.html });
+      out.sent++;
+    } catch (err) {
+      out.errors.push(`${e.name}: ${err.message}`);
+    }
+  }
+  return out;
+}
+
+module.exports = { buildEmails, sendEmails, serverEmail, supportEmail, PREVIEW_DIR, RESTAURANT };
