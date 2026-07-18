@@ -50,6 +50,79 @@ const cashQ = {
 };
 
 // ---------------------------------------------------------------------------
+// Auth — one shared manager password. Staff pages (/tips) stay open, since
+// staff authenticate with their own name + PIN. Stateless signed cookie, so a
+// redeploy doesn't sign you out and there's no session store to run.
+// ---------------------------------------------------------------------------
+const crypto = require('crypto');
+const APP_PASSWORD = process.env.APP_PASSWORD || '';
+const SECRET = process.env.SESSION_SECRET || APP_PASSWORD || 'insecure-dev-secret';
+const COOKIE = 'rc_auth';
+const THIRTY_DAYS = 30 * 86400000;
+
+const sign = (v) => crypto.createHmac('sha256', SECRET).update(String(v)).digest('hex').slice(0, 32);
+const makeToken = () => { const exp = Date.now() + THIRTY_DAYS; return `${exp}.${sign(exp)}`; };
+const validToken = (t) => {
+  const [exp, sig] = String(t || '').split('.');
+  return !!exp && sig === sign(exp) && Number(exp) > Date.now();
+};
+const readCookie = (req, name) => {
+  const m = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]) : null;
+};
+function checkPassword(input) {
+  if (!APP_PASSWORD) return false;
+  const a = crypto.createHash('sha256').update(String(input || '')).digest();
+  const b = crypto.createHash('sha256').update(APP_PASSWORD).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+// Anything staff or machines need without the manager password.
+const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips$/, /^\/static\//, /^\/sw\.js$/, /^\/manifest/, /^\/apple-touch-icon\.png$/, /^\/webhook\//];
+
+app.use((req, res, next) => {
+  if (!APP_PASSWORD) return next();                                   // not configured → open (banner warns)
+  if (OPEN_PATHS.some((re) => re.test(req.path))) return next();
+  if (validToken(readCookie(req, COOKIE))) return next();
+  if (req.method === 'GET') return res.redirect('/login?next=' + encodeURIComponent(req.originalUrl));
+  return res.status(401).send('Session expired — reload and sign in again.');
+});
+
+app.get('/login', (req, res) => {
+  if (!APP_PASSWORD) return res.redirect('/');
+  const bad = req.query.bad === '1';
+  res.send(layout('Sign in', `
+    <div class="tips-screen">
+      <div class="tips-card">
+        <div style="text-align:center;margin-bottom:6px"><img src="/static/logo.png" alt="" width="56" height="56" style="border-radius:16px"></div>
+        <div class="tips-title" style="text-align:center">Restaurant Cloud</div>
+        <div class="tips-lead" style="text-align:center">Manager sign-in. Staff logging tips don't need this — they use the tips link.</div>
+        ${bad ? '<div class="tips-error">Wrong password — try again.</div>' : ''}
+        <form method="post" action="/login">
+          <input type="hidden" name="next" value="${esc(req.query.next || '/')}">
+          <label class="tips-field">Password
+            <input name="password" class="tips-in" type="password" autocomplete="current-password" autofocus required>
+          </label>
+          <button class="tips-submit" type="submit">Sign in →</button>
+        </form>
+      </div>
+    </div>`, { bare: true }));
+});
+
+app.post('/login', (req, res) => {
+  const next = typeof req.body.next === 'string' && req.body.next.startsWith('/') ? req.body.next : '/';
+  if (!checkPassword(req.body.password)) return res.redirect('/login?bad=1&next=' + encodeURIComponent(next));
+  const https = req.secure || req.get('x-forwarded-proto') === 'https';
+  res.setHeader('Set-Cookie', `${COOKIE}=${makeToken()}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${THIRTY_DAYS / 1000}${https ? '; Secure' : ''}`);
+  res.redirect(next);
+});
+
+app.get('/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.redirect('/login');
+});
+
+// ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 function salesChart(dailySales, today) {

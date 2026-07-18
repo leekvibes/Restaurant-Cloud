@@ -27,11 +27,18 @@ function sidebar() {
     ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
     ${g.links.map(([href, ico, label]) => `<a class="side-link" href="${href}"><span class="side-ico">${ico}</span>${label}</a>`).join('')}
   `).join('');
+  const signOut = process.env.APP_PASSWORD
+    ? '<div class="side-group">Account</div><a class="side-link" href="/logout"><span class="side-ico">🚪</span>Sign out</a>'
+    : '';
   return `<aside class="sidebar">
     <a href="/" class="side-brand"><img src="/static/logo.png" alt="" width="28" height="28">${esc(APP_NAME)}</a>
-    <nav class="side-nav">${groups}</nav>
+    <nav class="side-nav">${groups}${signOut}</nav>
   </aside>`;
 }
+
+/** Loud warning when the app is reachable with no password set. */
+const openWarning = () => (process.env.APP_PASSWORD ? '' :
+  `<div class="open-warn">⚠️ <b>No password set.</b> Anyone with this link can see payroll and staff data. Set <code>APP_PASSWORD</code> to lock it down.</div>`);
 
 /** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
 function head(title, opts = {}) {
@@ -67,7 +74,7 @@ function layout(title, body, opts = {}) {
       <div class="app">
         ${sidebar()}
         <div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>
-        <main class="content"><div class="wrap">${body}</div></main>
+        <main class="content">${openWarning()}<div class="wrap">${body}</div></main>
       </div>
       <script>
         // Highlight the active nav link.

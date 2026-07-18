@@ -74,6 +74,9 @@ h3 { font-size: 13px; font-weight: 700; margin: 16px 0 8px; }
   .wrap { padding: 20px 16px 64px; }
 }
 
+.open-warn { background: #fef2f2; color: #991b1b; border-bottom: 1px solid #fecaca; padding: 10px 22px; font-size: 13px; }
+.open-warn code { background: #fee2e2; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+
 /* ---------- Page header ---------- */
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
 .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
