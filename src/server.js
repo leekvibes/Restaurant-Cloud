@@ -350,6 +350,21 @@ app.post('/shifts', (req, res) => {
 // ---------------------------------------------------------------------------
 // Shift entry screen
 // ---------------------------------------------------------------------------
+/** Notes staff left with their submission. Renders nothing when there are none. */
+function notesBlock(notes) {
+  if (!notes.length) return '';
+  return `
+    <h2>Notes from staff</h2>
+    <p class="muted">Left with their tip submission — usually someone reporting for a coworker who left early.</p>
+    <div class="notes">
+      ${notes.map((n) => `
+        <div class="note-card">
+          <div class="note-who">${esc(n.name)}${n.role ? ` <span class="pill">${esc(n.role)}</span>` : ''}</div>
+          <div class="note-body">${esc(n.note)}</div>
+        </div>`).join('')}
+    </div>`;
+}
+
 app.get('/shifts/:id', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
@@ -451,6 +466,8 @@ app.get('/shifts/:id', (req, res) => {
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
       <button class="btn" type="submit">Save support</button>
     </form>
+
+    ${notesBlock(w.notesForShift.all(sh.id))}
 
     <h2>Shared tip pool</h2>
     <p class="muted">What <b>you</b> counted. Anything support staff reported on the tips page is added to these automatically — the pool below totals ${money(toCents(inp.pool.jar) + inp.support.reduce((a, p) => a + toCents(p.cashTips), 0))} cash and ${money(toCents(inp.pool.togoCard) + inp.support.reduce((a, p) => a + toCents(p.cardTips), 0))} card. How each is paid out is set on the <a href="/policy">tip-out policy</a>.</p>
@@ -844,6 +861,12 @@ app.get('/tips', (req, res) => {
             <span class="tips-hint">From your closeout slip. Leave blank if you don't have it.</span>
           </label>
 
+          <label class="tips-field">Note <span class="tips-opt">optional</span>
+            <textarea name="note" class="tips-in tips-note" rows="2" maxlength="500"
+              placeholder="e.g. this includes Ingri's to-go tips, she left early"></textarea>
+            <span class="tips-hint">Anything the manager should know — like tips you're reporting for someone else.</span>
+          </label>
+
           <label class="tips-field">Your PIN
             <input name="pin" class="tips-in tips-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••" required>
           </label>
@@ -906,6 +929,9 @@ app.post('/tips', (req, res) => {
   w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
   const cardRaw = String(req.body.card_tips || '').trim();
   if (cardRaw !== '') w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(cardRaw) });
+  // Blank clears a previous note rather than being ignored — resubmitting is
+  // how someone corrects themselves, and a stale note would mislead you.
+  w.setNote.run({ shift_id: sh.id, employee_id: emp.id, note: String(req.body.note || '').trim().slice(0, 500) || null });
 
   // Servers report their own sales as part of closing. Only write if they
   // actually entered something, so a blank form never wipes your numbers.

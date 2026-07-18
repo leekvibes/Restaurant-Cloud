@@ -78,6 +78,11 @@ if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUM
 if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
 if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');
 
+// Migration: a free-text note staff can leave when they submit — e.g. "this
+// includes Ingri's to-go tips, she left early".
+const salesCols = db.prepare('PRAGMA table_info(server_sales)').all().map((c) => c.name);
+if (!salesCols.includes('note')) db.exec('ALTER TABLE server_sales ADD COLUMN note TEXT');
+
 // ---- Employees ----------------------------------------------------------
 const q = {
   allEmployees: db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY role, name'),
@@ -176,6 +181,20 @@ const w = {
     `INSERT INTO server_sales (shift_id, employee_id, card_tips_cents)
      VALUES (@shift_id, @employee_id, @card_tips_cents)
      ON CONFLICT(shift_id, employee_id) DO UPDATE SET card_tips_cents = excluded.card_tips_cents`
+  ),
+  // A note staff left with their submission (doesn't touch any figures).
+  setNote: db.prepare(
+    `INSERT INTO server_sales (shift_id, employee_id, note)
+     VALUES (@shift_id, @employee_id, @note)
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET note = excluded.note`
+  ),
+  notesForShift: db.prepare(
+    `SELECT ss.employee_id, ss.note, e.name, w.role
+       FROM server_sales ss
+       JOIN employees e ON e.id = ss.employee_id
+       LEFT JOIN work w ON w.shift_id = ss.shift_id AND w.employee_id = ss.employee_id
+      WHERE ss.shift_id = ? AND ss.note IS NOT NULL AND TRIM(ss.note) <> ''
+      ORDER BY e.name`
   ),
   salesForShift: db.prepare('SELECT * FROM server_sales WHERE shift_id = ?'),
   salesRow: db.prepare('SELECT * FROM server_sales WHERE shift_id = ? AND employee_id = ?'),
