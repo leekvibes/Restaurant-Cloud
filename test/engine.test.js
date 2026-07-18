@@ -295,3 +295,16 @@ test('default policy: jar pays weekly cash, to-go card pays on the paycheck', ()
   assert.strictEqual(r.support[0].poolShares.paycheck, toCents(60));
   assert.strictEqual(r.poolConflicts.length, 0);
 });
+
+test('decimal hours split the pool exactly, not just quarter hours', () => {
+  const r = runShift({
+    servers: [one({ cardTips: 0 })],
+    support: [{ employeeId: 'a', name: 'A', role: 'kitchen', hours: 7.33 },
+      { employeeId: 'b', name: 'B', role: 'busser', hours: 4.87 },
+      { employeeId: 'c', name: 'C', role: 'barista', hours: 3.05 }],
+    pool: { jar: 100.01, togoCard: 57.77 },
+  });
+  assert.strictEqual(r.support.reduce((a, p) => a + p.poolCash, 0), toCents(100.01));
+  assert.strictEqual(r.support.reduce((a, p) => a + p.poolCard, 0), toCents(57.77));
+  assert.ok(r.support[0].poolCash > r.support[1].poolCash); // more hours, bigger share
+});

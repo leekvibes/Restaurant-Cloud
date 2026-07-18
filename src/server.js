@@ -366,7 +366,7 @@ app.get('/shifts/:id', (req, res) => {
       <td class="num" data-edit="coffee" data-step="0.01">${money(toCents(sv.coffee))}</td>
       <td class="num" data-edit="card_tips" data-step="0.01">${money(toCents(sv.cardTips))}</td>
       <td class="num">${sv.cashEnteredBy ? money(toCents(sv.cashTips)) : '<span class="muted">—</span>'}</td>
-      <td class="num" data-edit="hours" data-step="0.25">${sv.hours}</td>
+      <td class="num" data-edit="hours" data-step="0.01">${sv.hours}</td>
       <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(sv.hourlyRate))}</td>
       <td class="row-actions">
         <button type="button" class="link" onclick="startEdit(${sv.employeeId},'server')">edit</button>
@@ -382,7 +382,7 @@ app.get('/shifts/:id', (req, res) => {
     <tr data-emp="${p.employeeId}" data-kind="support">
       <td>${esc(p.name)}</td>
       <td>${p.role}</td>
-      <td class="num" data-edit="hours" data-step="0.25">${p.hours}</td>
+      <td class="num" data-edit="hours" data-step="0.01">${p.hours}</td>
       <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(p.hourlyRate))}</td>
       <td class="sub">${reported(p)}</td>
       <td class="row-actions">
@@ -435,7 +435,7 @@ app.get('/shifts/:id', (req, res) => {
       <label>Coffee sales <input name="coffee" type="number" step="0.01" min="0" placeholder="0.00"></label>
       <label>Alcohol sales <input name="alcohol" type="number" step="0.01" min="0" placeholder="0.00"></label>
       <label>Card tips <input name="card_tips" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Hours <input name="hours" type="number" step="0.25" min="0" placeholder="0"></label>
+      <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
       <button class="btn" type="submit">Save server</button>
     </form>
@@ -449,7 +449,7 @@ app.get('/shifts/:id', (req, res) => {
     <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
       <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
       <label>Role <select name="role" id="support-role">${roleOpts()}</select></label>
-      <label>Hours <input name="hours" type="number" step="0.25" min="0" placeholder="0" required></label>
+      <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0" required></label>
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
       <button class="btn" type="submit">Save support</button>
     </form>
