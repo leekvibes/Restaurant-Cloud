@@ -78,8 +78,8 @@ if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUM
 if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
 if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');
 
-// Migration: a free-text note staff can leave when they submit — e.g. "this
-// includes Ingri's to-go tips, she left early".
+// Migration: a free-text note staff can leave when they submit — a thought,
+// comment or concern, or an explanation of something odd in their numbers.
 const salesCols = db.prepare('PRAGMA table_info(server_sales)').all().map((c) => c.name);
 if (!salesCols.includes('note')) db.exec('ALTER TABLE server_sales ADD COLUMN note TEXT');
 

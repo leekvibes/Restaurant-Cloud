@@ -355,7 +355,7 @@ function notesBlock(notes) {
   if (!notes.length) return '';
   return `
     <h2>Notes from staff</h2>
-    <p class="muted">Left with their tip submission — usually someone reporting for a coworker who left early.</p>
+    <p class="muted">Thoughts, comments or concerns left with their tip submission.</p>
     <div class="notes">
       ${notes.map((n) => `
         <div class="note-card">
@@ -932,8 +932,8 @@ function tipsFormPage(emp, opts = {}) {
 
           <label class="tips-field">Note <span class="tips-opt">optional</span>
             <textarea name="note" class="tips-in tips-note" rows="2" maxlength="500"
-              placeholder="e.g. this includes Ingri's to-go tips, she left early"></textarea>
-            <span class="tips-hint">Anything the manager should know — like tips you're reporting for someone else.</span>
+              placeholder="Anything you want to pass along…"></textarea>
+            <span class="tips-hint">A thought, comment or concern for your manager — or anything unusual about tonight's numbers.</span>
           </label>
 
           <button class="tips-submit" type="submit">Submit</button>
