@@ -11,6 +11,7 @@ const multer = require('multer');
 const { db } = require('./db');
 const { layout, flash, esc, money } = require('./views');
 const { toCents } = require('./money');
+const { isoDate, startOfToday } = require('./dates');
 
 // On a host like Render, point UPLOAD_DIR at the mounted persistent disk
 // (e.g. /var/data/uploads) so invoice photos survive restarts and redeploys.
@@ -344,14 +345,14 @@ function mountModules(app) {
   app.post('/c/recurring/:id/done', (req, res) => {
     const row = db.prepare('SELECT * FROM m_recurring WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).end();
-    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const today = startOfToday();
     const next = new Date(today);
     const f = (row.frequency || '').toLowerCase();
     if (f.includes('week')) next.setDate(next.getDate() + 7);
     else if (f.includes('quarter')) next.setMonth(next.getMonth() + 3);
     else if (f.includes('annual') || f.includes('year')) next.setFullYear(next.getFullYear() + 1);
     else next.setMonth(next.getMonth() + 1); // monthly default
-    const iso = (d) => d.toISOString().slice(0, 10);
+    const iso = (d) => isoDate(d);
     db.prepare('UPDATE m_recurring SET last_done = ?, next_due = ? WHERE id = ?').run(iso(today), iso(next), row.id);
     res.redirect('/c/recurring?msg=' + encodeURIComponent('Done ✓ — next due ' + iso(next) + '.'));
   });

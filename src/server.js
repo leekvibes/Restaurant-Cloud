@@ -15,6 +15,7 @@ const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertT
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts } = require('./reports');
 const { readReport } = require('./reader');
+const { isoDate, startOfToday, addDays } = require('./dates');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -129,7 +130,7 @@ function salesChart(dailySales, today) {
   const days = [];
   for (let i = 13; i >= 0; i--) {
     const d = new Date(today.getTime() - i * 86400000);
-    const ds = d.toISOString().slice(0, 10);
+    const ds = isoDate(d);
     days.push({ ds, c: dailySales[ds] || 0 });
   }
   const max = Math.max(1, ...days.map((d) => d.c));
@@ -144,11 +145,10 @@ function salesChart(dailySales, today) {
 }
 
 app.get('/', (req, res) => {
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const iso = (d) => d.toISOString().slice(0, 10);
-  const toStr = iso(today);
-  const from7 = iso(new Date(today.getTime() - 6 * 86400000));
-  const from14 = iso(new Date(today.getTime() - 13 * 86400000));
+  const today = startOfToday();
+  const toStr = isoDate(today);
+  const from7 = addDays(toStr, -6);
+  const from14 = addDays(toStr, -13);
 
   const costs = aggregateCosts(from7, toStr); // sales, laborPct, primePct, wow (sales vs prior 7d)
 
@@ -717,7 +717,7 @@ app.get('/tips', (req, res) => {
   }
 
   const staff = q.nonManagerList.all();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = isoDate();
   const err = req.query.err === '1' ? `<div class="tips-error">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
   const body = `
     <div class="tips-screen">
@@ -959,17 +959,14 @@ app.post('/employees/:id/deactivate', (req, res) => {
 // ---------------------------------------------------------------------------
 function defaultRange() {
   // Last 14 days ending today.
-  const today = new Date();
-  const to = today.toISOString().slice(0, 10);
-  const fromD = new Date(today.getTime() - 13 * 86400000);
-  return { from: fromD.toISOString().slice(0, 10), to };
+  const today = startOfToday();
+  const to = isoDate(today);
+  return { from: addDays(to, -13), to };
 }
 
 /** YYYY-MM-DD minus N days (for showing the week-1 end date). */
 function shiftBack(dateStr, days) {
-  const d = new Date(dateStr + 'T00:00:00');
-  d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
+  return addDays(dateStr, -days);
 }
 
 app.get('/payroll', (req, res) => {
@@ -1002,7 +999,7 @@ app.get('/payroll', (req, res) => {
       <div class="stat"><div class="stat-label">Total hours</div><div class="stat-value">${totals.hours}</div><div class="stat-sub">wk1 ${totals.wk1Hours} · wk2 ${totals.wk2Hours}</div></div>
       <div class="stat"><div class="stat-label">Wages</div><div class="stat-value">${money(totals.wage)}</div></div>
       <div class="stat"><div class="stat-label">Card tip payout</div><div class="stat-value pos">${money(totals.paycheckTips)}</div><div class="stat-sub">→ enter into Gusto</div></div>
-      <div class="stat"><div class="stat-label">Total take-home</div><div class="stat-value">${money(totals.takeHome)}</div><div class="stat-sub">wages + all tips</div></div>
+      <div class="stat"><div class="stat-label">Total take-home</div><div class="stat-value">${money(totals.takeHome)}</div><div class="stat-sub">wages + card tips (on the check)</div></div>
     </div>
     <form method="get" action="/payroll" class="card form inline-range">
       <label>From <input type="date" name="from" value="${from}"></label>
@@ -1023,8 +1020,9 @@ app.get('/payroll', (req, res) => {
         <td class="num"><b>${totals.wk1Hours}</b></td><td class="num"><b>${totals.wk2Hours}</b></td>
       </tr></tfoot>
     </table></div>
-    <p class="sub"><b>Card tip payout</b> is what goes into Gusto — it's the tips owed on the paycheck (card tips net of tip-out), and excludes cash they already have.
-      <b>Cash tips</b> = cash taken home nightly + the weekly jar/to-go cash. <b>Total take-home</b> = wages + cash tips + card tip payout.
+    <p class="sub"><b>Card tip payout</b> is what goes into Gusto — tips owed on the paycheck (card tips net of tip-out).
+      <b>Total take-home = wages + card tip payout</b>, i.e. what lands on their check.
+      <b>Cash tips</b> (taken home nightly + weekly jar/to-go) are listed for reference only and are <b>not</b> in take-home — they already have that money.
       Wk 1 = ${from} → ${shiftBack(midDate, 1)}, Wk 2 = ${midDate} → ${to}.</p>`));
 });
 

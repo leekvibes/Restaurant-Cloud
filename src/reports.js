@@ -9,6 +9,7 @@ const { db, s, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
 const { policyForShift } = require('./policy');
 const { toCents, toDollars } = require('./money');
+const { addDays } = require('./dates');
 
 // COGS categories from the invoices module (what you buy to sell food & drink).
 const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
@@ -26,9 +27,7 @@ function salesAndLabor(from, to) {
 }
 
 function shiftDate(d, days) {
-  const t = new Date(d + 'T00:00:00');
-  t.setDate(t.getDate() + days);
-  return t.toISOString().slice(0, 10);
+  return addDays(d, days);
 }
 
 /**
@@ -117,8 +116,10 @@ function aggregatePayroll(from, to) {
 
   // Derived per-person columns for running payroll.
   const rows = [...people.values()].sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
-    const cashTips = r.cashHome + r.weeklyCash;      // all cash they physically receive
-    return { ...r, roles: [...r.roles].join(', '), cashTips, takeHome: r.wage + cashTips + r.paycheckTips };
+    const cashTips = r.cashHome + r.weeklyCash;   // shown for reference only
+    // Take-home = what actually lands on the paycheck. Cash is excluded
+    // because they already walked out with it.
+    return { ...r, roles: [...r.roles].join(', '), cashTips, takeHome: r.wage + r.paycheckTips };
   });
   const sum = (k) => rows.reduce((t, r) => t + r[k], 0);
   const totals = {
@@ -158,7 +159,7 @@ async function buildWorkbook(from, to, restaurant) {
   totalRow.font = { bold: true };
   pay.columns = [{ width: 20 }, { width: 16 }, { width: 8 }, { width: 12 }, { width: 14 }, { width: 12 }, { width: 16 }, { width: 16 }, { width: 11 }, { width: 11 }];
   [5, 6, 7, 8].forEach((i) => pay.getColumn(i).numFmt = MONEY_FMT);
-  pay.getCell('A' + (pay.rowCount + 2)).value = 'Card tip payout = what to enter into Gusto (tips owed on the check; excludes cash they already have). Cash tips = cash taken home + weekly jar/to-go. Total take-home = wages + cash tips + card tip payout.';
+  pay.getCell('A' + (pay.rowCount + 2)).value = 'Card tip payout = what to enter into Gusto (tips owed on the check). Total take-home = wages + card tip payout (what lands on the check). Cash tips = cash taken home + weekly jar/to-go — reference only, NOT included in take-home since they already received it.';
 
   // --- Shift detail sheet ---
   const det = wb.addWorksheet('Shift detail');
