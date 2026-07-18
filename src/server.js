@@ -86,7 +86,12 @@ function checkPassword(input) {
 }
 
 // Anything staff or machines need without the manager password.
-const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips$/, /^\/static\//, /^\/sw\.js$/, /^\/manifest/, /^\/apple-touch-icon\.png$/, /^\/webhook\//];
+// The whole /tips area is the staff area — they authenticate with their PIN,
+// not the manager password. Matching only /tips exactly meant /tips/start (the
+// PIN step) hit the manager sign-in wall and answered "Session expired", which
+// staff can do nothing about. Any future /tips/* route is covered too.
+const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips(\/|$)/, /^\/version$/,
+  /^\/static\//, /^\/sw\.js$/, /^\/manifest/, /^\/apple-touch-icon\.png$/, /^\/webhook\//];
 
 app.use((req, res, next) => {
   if (!APP_PASSWORD) return next();                                   // not configured → open (banner warns)
