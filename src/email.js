@@ -147,9 +147,17 @@ function supportEmail(p, ctx) {
  * Pay-period summary for one person — the same money their nightly emails
  * already covered, totalled up. `r` is a row from aggregatePayroll().
  */
+/** "2026-07-04" -> "Jul 4". Kept local so email.js stays free of db imports. */
+function shortDate(iso) {
+  const [, m, d] = String(iso).split('-').map(Number);
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return MON[m - 1] ? `${MON[m - 1]} ${d}` : iso;
+}
+
 function periodEmail(r, ctx) {
+  const range = `${shortDate(ctx.from)} – ${shortDate(ctx.to)}`;
   let body = '';
-  body += line('Pay period', `${ctx.from} → ${ctx.to}`, { border: false });
+  body += line('Pay period', range, { border: false });
   body += line('Shifts worked', String(r.shifts));
   body += line('Total hours', String(r.hours));
   if (r.wk1Hours || r.wk2Hours) body += hint(`Week 1: ${r.wk1Hours} hrs · Week 2: ${r.wk2Hours} hrs`);
@@ -165,9 +173,11 @@ function periodEmail(r, ctx) {
     body += hint('You already have this — it is not on the check.');
   }
 
-  body += `<div style="margin-top:12px;font-size:12px;color:#94a3b8;line-height:1.5">This is a summary of the shift emails you already received, not extra pay. Final amounts are set in payroll.</div>`;
+  // The shell footer already covers "not a pay stub" — this only needs to make
+  // the one point staff would otherwise get wrong: it isn't additional money.
+  body += `<div style="margin-top:12px;font-size:12px;color:#94a3b8;line-height:1.5">This adds up the shift emails you already received — it isn't extra pay.</div>`;
 
-  const subject = `${RESTAURANT}: pay period ${ctx.from} → ${ctx.to} — ${fmt(r.takeHome)} on this check`;
+  const subject = `${RESTAURANT}: pay period ${range} — ${fmt(r.takeHome)} on this check`;
   return { to: ctx.email, subject, html: shell('Pay period summary', body, { label: 'On this check', value: fmt(r.takeHome) }) };
 }
 
