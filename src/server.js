@@ -1051,14 +1051,27 @@ app.get('/employees', (req, res) => {
   const counts = staff.reduce((a, e) => { a[e.role] = (a[e.role] || 0) + 1; return a; }, {});
   // The PIN is now how staff sign in to the tips page, so no PIN = locked out.
   const noPin = staff.filter((e) => e.role !== 'manager' && !e.pin).map((e) => e.name);
-  const pinWarn = noPin.length
-    ? `<div class="flash flash-warn"><div><b>No PIN yet:</b> ${esc(noPin.join(', '))}. They sign in to the tips page with their PIN, so they can't log tips until you give them one.</div></div>`
+  // Duplicates can predate the uniqueness guard (or arrive by import), and a
+  // shared PIN blocks BOTH people from signing in — worth catching here rather
+  // than when someone can't log their tips at close.
+  const byPin = {};
+  for (const e of staff) {
+    if (!e.pin || e.role === 'manager') continue;
+    (byPin[e.pin] = byPin[e.pin] || []).push(e.name);
+  }
+  const dupes = Object.values(byPin).filter((names) => names.length > 1);
+  const pinWarn = [
+    dupes.length ? `<b>Same PIN:</b> ${dupes.map((n) => esc(n.join(' and '))).join('; ')}. Neither can sign in until each has their own — give one of them a different PIN.` : '',
+    noPin.length ? `<b>No PIN yet:</b> ${esc(noPin.join(', '))}. They sign in to the tips page with their PIN, so they can't log tips until you give them one.` : '',
+  ].filter(Boolean);
+  const pinBanner = pinWarn.length
+    ? `<div class="flash flash-warn"><div><ul>${pinWarn.map((w) => `<li>${w}</li>`).join('')}</ul></div></div>`
     : '';
   const body = `
     ${flash(req)}
     <div class="page-head"><div><h1>🧑‍🍳 Staff</h1><p class="sub">${staff.length} on the team · ${counts.server || 0} servers · open anyone to set roles &amp; wages.</p></div>
       <a class="btn btn-primary" href="#add">＋ Add staff</a></div>
-    ${pinWarn}
+    ${pinBanner}
     ${staff.length > 8 ? '<div class="toolbar"><div class="search"><input type="search" id="mod-search" placeholder="Search staff…" oninput="modFilter()"></div></div>' : ''}
     <div class="table-wrap"><table class="table">
       <thead><tr><th>Name</th><th>Role</th><th class="num">Wage</th><th>Email</th><th>PIN</th><th></th></tr></thead>
