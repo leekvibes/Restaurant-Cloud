@@ -857,6 +857,9 @@ app.get('/tips', (req, res) => {
   // Step 1: just the PIN. Nobody's name is on the page until it's verified, so
   // an open link no longer publishes the staff roster.
   const err = req.query.err === '1' ? `<div class="tips-error">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
+  // Version marker: when a staff member reports a problem, this says instantly
+  // whether their phone is running current code or a cached older page.
+  const stamp = `<div class="tips-build">v${esc(BUILD)}</div>`;
   const body = `
     <div class="tips-screen">
       <div class="tips-card">
@@ -873,6 +876,7 @@ app.get('/tips', (req, res) => {
           </label>
           <button class="tips-submit" type="submit">Continue</button>
         </form>
+        ${stamp}
       </div>
     </div>`;
   res.send(layout('Log your tips', body, { bare: true }));
@@ -960,6 +964,7 @@ function tipsFormPage(emp, opts = {}) {
           <button class="tips-submit" type="submit">Submit</button>
         </form>
         <a class="tips-signout" href="/tips">Not ${esc(emp.name.split(' ')[0])}? Start over</a>
+        <div class="tips-build">v${esc(BUILD)}</div>
       </div>
     </div>
     <script>
