@@ -852,10 +852,18 @@ function rolesForEmployee(emp) {
 // Staff keep this on a home screen for months, so a cached copy can outlive a
 // change to the form and post fields the server no longer expects. Never cache
 // the HTML — it's a few KB, and a stale copy costs someone their tips at 1am.
-// Tiny endpoint the pages poll to notice they're out of date.
+// Tiny endpoint the pages poll to notice they're out of date. It also reports
+// the server's clock: every business date comes from local time, so a host left
+// on UTC files a late close under the next day with nothing looking wrong.
 app.get('/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ build: BUILD });
+  const now = new Date();
+  res.json({
+    build: BUILD,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
+    businessDate: isoDate(now),
+    localTime: now.toLocaleString('en-US', { hour12: true }),
+  });
 });
 
 app.use(['/tips', '/tips/start'], (req, res, next) => {
