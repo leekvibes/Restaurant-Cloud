@@ -368,3 +368,14 @@ test('a trainee does not count as staffing a tipped-out role', () => {
   assert.strictEqual(r.servers[0].tipouts.busser, undefined);
   assert.strictEqual(r.skippedPots.find((x) => x.role === 'busser').cents > 0, true);
 });
+
+// --- total sales vs server-attributed sales --------------------------------
+
+test('shiftTotalSales adds the four categories, 0 when nothing is entered', () => {
+  const { shiftTotalSales } = require('../src/reports');
+  assert.strictEqual(shiftTotalSales({
+    total_food_cents: 420050, total_coffee_cents: 185000,
+    total_alcohol_cents: 0, total_other_cents: 12575,
+  }), 617625);
+  assert.strictEqual(shiftTotalSales({}), 0, 'not entered reads as 0, so callers can fall back');
+});

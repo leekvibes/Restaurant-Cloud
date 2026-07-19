@@ -13,7 +13,7 @@ const { layout, flash, esc, money, dp, RESTAURANT, BUILD } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
-const { aggregatePayroll, buildWorkbook, aggregateCosts } = require('./reports');
+const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales } = require('./reports');
 const { readReport } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
@@ -170,7 +170,7 @@ app.get('/', (req, res) => {
   for (const sh of s.shiftsInRange.all(from14, toStr)) {
     const inp = shiftInputs(sh.id);
     const r = runShift(inp, policyForShift(sh));
-    const sales = r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
+    const sales = shiftTotalSales(sh) || r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
     dailySales[sh.date] = (dailySales[sh.date] || 0) + sales;
     if (sh.date >= from7) tips7 += r.reconciliation.totalTipsCollected;
     else tipsPrev += r.reconciliation.totalTipsCollected;
@@ -203,7 +203,7 @@ app.get('/', (req, res) => {
   const recent = s.recentShifts.all(6).map((sh) => {
     const inp = shiftInputs(sh.id);
     const r = runShift(inp, policyForShift(sh));
-    const sales = r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
+    const sales = shiftTotalSales(sh) || r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
     return `<tr>
       <td><a href="/shifts/${sh.id}">${sh.date}</a></td><td>${dp(sh.daypart)}</td>
       <td class="num">${money(sales)}</td><td class="num">${money(r.reconciliation.totalTipsCollected)}</td>
@@ -250,7 +250,7 @@ app.get('/shifts', (req, res) => {
   const all = s.allShifts.all().map((sh) => {
     const inp = shiftInputs(sh.id);
     const r = runShift(inp, policyForShift(sh));
-    const sales = r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
+    const sales = shiftTotalSales(sh) || r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
     return { sh, sales, tips: r.reconciliation.totalTipsCollected, staff: inp.servers.length + inp.support.length };
   });
 
@@ -1653,6 +1653,121 @@ app.post('/email/test', async (req, res) => {
   } catch (err) {
     res.redirect('/email?err=1&msg=' + encodeURIComponent(err.message));
   }
+});
+
+// ---------------------------------------------------------------------------
+// SALES — what the whole restaurant rang, not just what went through a server.
+// Server sales stay per-person for tip-outs; these totals are what labor %,
+// food cost % and prime cost are measured against.
+// ---------------------------------------------------------------------------
+app.get('/sales', (req, res) => {
+  const def = defaultRange();
+  const from = req.query.from || def.from;
+  const to = req.query.to || def.to;
+  const shifts = s.shiftsInRange.all(from, to).slice().reverse();
+  const c = aggregateCosts(from, to);
+
+  const cat = (k) => shifts.reduce((a, sh) => a + (sh[k] || 0), 0);
+  const food = cat('total_food_cents'); const coffee = cat('total_coffee_cents');
+  const alcohol = cat('total_alcohol_cents'); const other = cat('total_other_cents');
+  const entered = food + coffee + alcohol + other;
+  const missing = shifts.filter((sh) => !(sh.total_food_cents + sh.total_coffee_cents + sh.total_alcohol_cents + sh.total_other_cents));
+  const share = (v) => (entered ? Math.round((v / entered) * 100) : 0);
+  const days = new Set(shifts.map((sh) => sh.date)).size;
+
+  const rows = shifts.map((sh) => {
+    const total = sh.total_food_cents + sh.total_coffee_cents + sh.total_alcohol_cents + sh.total_other_cents;
+    const inp = shiftInputs(sh.id);
+    const rung = inp.servers.reduce((a, p) => a + toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol), 0);
+    // Servers can't ring more than the restaurant took — that's a data error.
+    const bad = total > 0 && rung > total;
+    return `<tr${total ? (bad ? ' class="row-warn"' : '') : ' class="row-warn"'}>
+      <td><a class="row-open" href="/sales/${sh.id}">${sh.date}</a></td>
+      <td>${dp(sh.daypart)}</td>
+      <td class="num">${total ? money(sh.total_food_cents) : '<span class="muted">—</span>'}</td>
+      <td class="num">${total ? money(sh.total_coffee_cents) : '<span class="muted">—</span>'}</td>
+      <td class="num">${total ? money(sh.total_alcohol_cents) : '<span class="muted">—</span>'}</td>
+      <td class="num">${total ? money(sh.total_other_cents) : '<span class="muted">—</span>'}</td>
+      <td class="num strong">${total ? money(total) : '<span class="muted">not entered</span>'}</td>
+      <td class="num ${bad ? 'neg' : 'muted'}">${money(rung)}</td>
+      <td class="row-actions"><a href="/sales/${sh.id}">enter</a></td>
+    </tr>`;
+  }).join('');
+
+  const pill = (label, value, sub, cls) =>
+    `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls || ''}">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+  const band = (v, warn, bad) => (v == null ? '' : v >= bad ? 'stat-bad' : v >= warn ? 'stat-warn' : 'stat-ok');
+  const arrow = c.wow == null ? '' : `<span class="delta ${c.wow >= 0 ? 'up' : 'down'}">${c.wow >= 0 ? '▲' : '▼'} ${Math.abs(c.wow)}%</span> vs previous`;
+
+  res.send(layout('Sales', `
+    ${flash(req)}
+    <div class="page-head"><div><h1>📈 Sales</h1>
+      <p class="sub">${shifts.length} shift${shifts.length === 1 ? '' : 's'} · ${from} → ${to}. Everything the restaurant rang — counter and to-go included.</p></div></div>
+
+    <div class="stats">
+      ${pill('Total sales', money(c.sales), arrow)}
+      ${pill('Labor %', c.laborPct == null ? '—' : c.laborPct + '%', 'wages ÷ sales', band(c.laborPct, 30, 35))}
+      ${pill('Food cost %', c.foodPct == null ? '—' : c.foodPct + '%', 'invoices ÷ sales', band(c.foodPct, 32, 38))}
+      ${pill('Prime cost %', c.primePct == null ? '—' : c.primePct + '%', 'labor + goods', band(c.primePct, 60, 68))}
+    </div>
+    <div class="stats">
+      ${pill('Food', money(food), share(food) + '% of sales')}
+      ${pill('Coffee', money(coffee), share(coffee) + '% of sales')}
+      ${pill('Alcohol', money(alcohol), share(alcohol) + '% of sales')}
+      ${pill('Per day', days ? money(Math.round(entered / days)) : '—', days + ' day' + (days === 1 ? '' : 's') + ' with a shift')}
+    </div>
+
+    ${missing.length ? `<div class="flash flash-warn"><div><b>${missing.length} shift${missing.length === 1 ? '' : 's'} without totals.</b>
+      Until you enter them, those days fall back to server sales only, which makes labor % read higher than it is:
+      ${esc(missing.slice(0, 6).map((sh) => `${sh.date} ${dp(sh.daypart)}`).join(', '))}${missing.length > 6 ? '…' : ''}</div></div>` : ''}
+
+    <form method="get" action="/sales" class="card form inline-range">
+      <label>From <input type="date" name="from" value="${from}"></label>
+      <label>To <input type="date" name="to" value="${to}"></label>
+      <button class="btn" type="submit">Update</button>
+    </form>
+
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Date</th><th>Service</th><th class="num">Food</th><th class="num">Coffee</th>
+        <th class="num">Alcohol</th><th class="num">Other</th><th class="num">Total</th><th class="num">Servers rang</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="9" class="muted">No shifts in this range.</td></tr>'}</tbody>
+    </table></div>
+    <p class="sub"><b>Servers rang</b> is the part that went through a named server — it drives tip-outs. The difference is counter,
+      to-go and anything rung without a server. If it ever exceeds the total, one of the two numbers is wrong.</p>`));
+});
+
+app.get('/sales/:id', (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
+  const inp = shiftInputs(sh.id);
+  const rung = inp.servers.reduce((a, p) => a + toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol), 0);
+  const v = (c) => (c ? (c / 100).toFixed(2) : '');
+
+  res.send(layout(`Sales · ${sh.date}`, `
+    ${flash(req)}
+    <a class="back" href="/sales">← Sales</a>
+    <h1>${sh.date} · ${dp(sh.daypart)}</h1>
+    <p class="sub">Total rung for the whole service. Servers accounted for ${money(rung)} of it${rung ? ' — the rest is counter, to-go and anything without a server' : ''}.</p>
+    <form method="post" action="/sales/${sh.id}" class="card form grid">
+      <label>Food sales <input name="food" type="number" step="0.01" min="0" value="${v(sh.total_food_cents)}" placeholder="0.00"></label>
+      <label>Coffee &amp; beverage <input name="coffee" type="number" step="0.01" min="0" value="${v(sh.total_coffee_cents)}" placeholder="0.00"></label>
+      <label>Alcohol <input name="alcohol" type="number" step="0.01" min="0" value="${v(sh.total_alcohol_cents)}" placeholder="0.00"></label>
+      <label>Other <input name="other" type="number" step="0.01" min="0" value="${v(sh.total_other_cents)}" placeholder="0.00"></label>
+      <label class="wide">Note <input name="note" value="${esc(sh.sales_note || '')}" placeholder="optional — e.g. POS was down for an hour"></label>
+      <button class="btn btn-primary" type="submit">Save sales</button>
+    </form>
+    <p class="muted">These are net sales as your POS reports them — before tips, excluding tax. Leave a category at 0 if you don't sell it.</p>`));
+});
+
+app.post('/sales/:id', (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  s.setTotalSales.run({
+    id: sh.id, food: toCents(req.body.food), coffee: toCents(req.body.coffee),
+    alcohol: toCents(req.body.alcohol), other: toCents(req.body.other),
+    note: (req.body.note || '').trim() || null,
+  });
+  res.redirect('/sales?msg=' + encodeURIComponent(`Sales saved for ${sh.date} ${dp(sh.daypart)}.`));
 });
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ const RESTAURANT = process.env.RESTAURANT_NAME || APP_NAME;
 
 // Grouped navigation — organized instead of one long list.
 const NAV_GROUPS = [
-  { title: null, links: [['/', '🏠', 'Dashboard'], ['/shifts', '📋', 'Shifts'], ['/costs', '📈', 'Cost %'], ['/cash', '💵', 'Cash count'], ['/payroll', '💰', 'Payroll']] },
+  { title: null, links: [['/', '🏠', 'Dashboard'], ['/shifts', '📋', 'Shifts'], ['/sales', '📈', 'Sales'], ['/costs', '🧮', 'Cost %'], ['/cash', '💵', 'Cash count'], ['/payroll', '💰', 'Payroll']] },
   { title: 'Track', links: [
     ['/c/expirations', '⏰', 'Expirations'], ['/c/invoices', '🧾', 'Invoices'], ['/c/vendors', '🚚', 'Vendors'],
     ['/c/par', '📦', 'Par levels'], ['/c/contacts', '📇', 'Contacts'], ['/c/equipment', '🔧', 'Equipment'], ['/c/documents', '📁', 'Documents'],

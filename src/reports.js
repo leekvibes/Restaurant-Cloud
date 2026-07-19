@@ -15,15 +15,31 @@ const { addDays } = require('./dates');
 const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
 
 /** Sales (food+coffee+alcohol) and labor (wages) for a date range, in cents. */
+/** Everything a shift rang, if you've entered it. 0 means not entered yet. */
+function shiftTotalSales(sh) {
+  return (sh.total_food_cents || 0) + (sh.total_coffee_cents || 0)
+    + (sh.total_alcohol_cents || 0) + (sh.total_other_cents || 0);
+}
+
+/**
+ * Sales for the business metrics. Prefers the shift's total — counter, to-go
+ * and bar sales never carry a server's name, so server sales alone understate
+ * the denominator and make labor % look far worse than it is. Falls back to
+ * server sales for shifts entered before totals existed, so history still
+ * reads sensibly instead of dropping to zero.
+ */
 function salesAndLabor(from, to) {
-  let sales = 0, labor = 0;
+  let sales = 0, labor = 0, serverSales = 0, shiftsWithTotal = 0, shiftsWithout = 0;
   for (const sh of s.shiftsInRange.all(from, to)) {
     const inp = shiftInputs(sh.id);
     const r = runShift(inp, policyForShift(sh));
-    for (const p of r.servers) sales += p.sales.food + p.sales.coffee + p.sales.alcohol;
+    const rung = r.servers.reduce((a, p) => a + p.sales.food + p.sales.coffee + p.sales.alcohol, 0);
+    const total = shiftTotalSales(sh);
+    serverSales += rung;
+    if (total > 0) { sales += total; shiftsWithTotal++; } else { sales += rung; shiftsWithout++; }
     for (const p of [...inp.servers, ...inp.support]) labor += Math.round(toCents(p.hourlyRate || 0) * (p.hours || 0));
   }
-  return { sales, labor };
+  return { sales, labor, serverSales, shiftsWithTotal, shiftsWithout };
 }
 
 function shiftDate(d, days) {
@@ -35,7 +51,7 @@ function shiftDate(d, days) {
  * cost %, and sales vs. the previous equal-length period. Money in cents.
  */
 function aggregateCosts(from, to) {
-  const { sales, labor } = salesAndLabor(from, to);
+  const { sales, labor, serverSales, shiftsWithout } = salesAndLabor(from, to);
 
   // Cost of goods sold = invoices in the COGS categories over the range.
   const cogsRow = db.prepare(
@@ -53,6 +69,7 @@ function aggregateCosts(from, to) {
   const pct = (num, den) => (den ? Math.round((num / den) * 1000) / 10 : null);
   return {
     sales, labor, cogs, prime, prevSales: prev.sales, wow,
+    serverSales, shiftsWithout,   // for "servers rang X of Y" and the missing-totals nudge
     laborPct: pct(labor, sales),
     foodPct: pct(cogs, sales),
     primePct: pct(prime, sales),
@@ -181,4 +198,4 @@ async function buildWorkbook(from, to, restaurant) {
   return wb;
 }
 
-module.exports = { aggregatePayroll, buildWorkbook, aggregateCosts };
+module.exports = { shiftTotalSales, salesAndLabor, aggregatePayroll, buildWorkbook, aggregateCosts };

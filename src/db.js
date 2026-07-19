@@ -123,6 +123,16 @@ function positionKinds() {
 const kindOf = (slug) => positionKinds()[slug] || 'support';
 const supportSlugs = () => positions.active.all().filter((p) => p.kind === 'support').map((p) => p.slug);
 
+// Migration: total sales for the whole shift, not just what servers rang up.
+// Server sales stay per-person because tip-outs are a percentage of each
+// server's OWN sales. But counter, to-go and bar sales never touch a server's
+// name, so using server sales as the denominator made labor % read far higher
+// than it is. These are the authoritative business numbers.
+for (const c of ['total_food_cents', 'total_coffee_cents', 'total_alcohol_cents', 'total_other_cents']) {
+  if (!shiftCols.includes(c)) db.exec(`ALTER TABLE shifts ADD COLUMN ${c} INTEGER NOT NULL DEFAULT 0`);
+}
+if (!shiftCols.includes('sales_note')) db.exec('ALTER TABLE shifts ADD COLUMN sales_note TEXT');
+
 // Migration: a free-text note staff can leave when they submit — a thought,
 // comment or concern, or an explanation of something odd in their numbers.
 const salesCols = db.prepare('PRAGMA table_info(server_sales)').all().map((c) => c.name);
@@ -173,6 +183,10 @@ const s = {
   markEmailed: db.prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?"),
   setPolicy: db.prepare('UPDATE shifts SET policy_id = ? WHERE id = ?'),
   setPool: db.prepare('UPDATE shifts SET pool_jar_cents = @jar, pool_togo_card_cents = @togo_card WHERE id = @id'),
+  setTotalSales: db.prepare(`UPDATE shifts SET
+     total_food_cents = @food, total_coffee_cents = @coffee,
+     total_alcohol_cents = @alcohol, total_other_cents = @other, sales_note = @note
+   WHERE id = @id`),
 };
 
 // Wipe a shift and everything hanging off it. Wrapped in a transaction so a
