@@ -70,6 +70,10 @@ h3 { font-size: 13px; font-weight: 700; margin: 16px 0 8px; }
 .sidebar::-webkit-scrollbar { width: 0; }
 .sidebar:hover { width: var(--side); box-shadow: var(--shadow-lg); }
 html.side-pinned .sidebar { width: var(--side); box-shadow: none; }
+/* After unpinning, the cursor is still on the rail — hover would snap it right
+   back open and the click would look like it did nothing. Suppress the peek
+   until the pointer actually leaves. */
+html.no-peek .sidebar:hover { width: var(--rail); box-shadow: none; }
 
 .content { flex: 1; min-width: 0; margin-left: var(--rail); transition: margin-left .25s ease-out; }
 html.side-pinned .content { margin-left: var(--side); }
@@ -78,44 +82,58 @@ html.side-pinned .content { margin-left: var(--side); }
 .wrap { max-width: none; margin: 0; padding: var(--shell-y) var(--shell-x) 56px; }
 
 /* --- brand + pin toggle --- */
-.side-top { display: flex; align-items: center; gap: 8px; padding: 4px 5px 12px; min-height: 44px; }
-.side-brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-weight: 800;
-  font-size: 15px; letter-spacing: -.01em; text-decoration: none; flex: 1; min-width: 0; }
+.side-top { display: flex; align-items: center; gap: 10px; padding: 5px 6px 14px; min-height: 46px; }
+.side-brand { display: flex; align-items: center; gap: 11px; color: var(--ink); font-weight: 750;
+  font-size: 14.5px; letter-spacing: -.015em; text-decoration: none; flex: 1; min-width: 0; }
+.side-brand span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-brand:hover { text-decoration: none; }
-.side-brand img { border-radius: 8px; flex-shrink: 0; box-shadow: 0 2px 6px rgba(15,23,42,.18); }
-.side-pin { flex-shrink: 0; width: 26px; height: 26px; border: 0; border-radius: 7px; cursor: pointer;
-  background: none; color: var(--faint); font-size: 15px; line-height: 1; display: none;
-  align-items: center; justify-content: center; transition: background .12s, color .12s; }
+.side-brand img { border-radius: 9px; flex-shrink: 0; box-shadow: 0 2px 8px rgba(15,23,42,.16); }
+/* 34px, and it stays put — a 27px target that only appears on hover is a
+   coin-flip to hit, which reads as "the button doesn't work". */
+.side-pin { flex-shrink: 0; width: 34px; height: 34px; border: 0; border-radius: 9px; cursor: pointer;
+  background: none; color: var(--muted); line-height: 1; display: none;
+  align-items: center; justify-content: center; transition: background .12s, color .12s, transform .2s; }
+.side-pin svg { width: 18px; height: 18px; display: block; }
 .side-pin:hover { background: var(--surface-3); color: var(--ink); }
+.side-pin:active { background: var(--line); }
+html.side-pinned .side-pin { transform: rotate(180deg); color: var(--ink-2); }
 .sidebar:hover .side-pin, html.side-pinned .side-pin { display: flex; }
 
 /* --- nav items --- */
 .side-group { color: var(--faint); font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: .09em; padding: 14px 11px 5px; white-space: nowrap; }
+  letter-spacing: .1em; padding: 16px 12px 6px; white-space: nowrap; }
 .side-link {
   position: relative; display: flex; align-items: center; gap: 12px;
-  color: var(--ink-2); padding: 9px 9px; border-radius: 9px; font-size: 13.5px; font-weight: 500;
-  text-decoration: none; margin-bottom: 2px; white-space: nowrap;
+  color: var(--ink-2); padding: 7px 8px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
+  text-decoration: none; margin-bottom: 3px; white-space: nowrap;
   transition: background .12s, color .12s;
 }
 .side-link:hover { background: var(--surface-3); color: var(--ink); text-decoration: none; }
-.side-ico { flex-shrink: 0; width: 26px; height: 26px; border-radius: 7px; display: flex;
-  align-items: center; justify-content: center; font-size: 14px; line-height: 1;
-  background: var(--surface-3); transition: background .12s; }
-.side-link:hover .side-ico { background: var(--surface-2); }
-/* Active: tinted pill in the item's own accent, plus a bar on the rail edge so
-   it still reads when collapsed to icons. */
+
+/* Icon tile carries the item's accent — that's what makes the collapsed rail
+   scannable, since at 62px wide the label is gone and colour is all you have. */
+.side-ico { flex-shrink: 0; width: 30px; height: 30px; border-radius: 9px; display: flex;
+  align-items: center; justify-content: center;
+  background: var(--ac-soft, var(--primary-50)); color: var(--ac, var(--primary));
+  transition: background .14s, color .14s, box-shadow .14s; }
+.side-ico svg { width: 17px; height: 17px; display: block; }
+.side-link:hover .side-ico { background: var(--ac-soft2, var(--primary-100)); }
+
+/* Active: solid accent tile with a white glyph, plus a bar on the rail edge. */
 .side-link.active { color: var(--ac, var(--primary-700)); font-weight: 650; background: var(--ac-soft, var(--primary-50)); }
-.side-link.active .side-ico { background: var(--ac-soft2, var(--primary-100)); }
-.side-link.active::before { content: ''; position: absolute; left: -9px; top: 7px; bottom: 7px;
+.side-link.active .side-ico { background: var(--ac, var(--primary)); color: #fff;
+  box-shadow: 0 2px 8px var(--ac-soft2, rgba(37,99,235,.25)); }
+.side-link.active::before { content: ''; position: absolute; left: -9px; top: 8px; bottom: 8px;
   width: 3px; border-radius: 0 3px 3px 0; background: var(--ac, var(--primary)); }
 
 /* Labels and group headings fade in with the rail. */
 .side-label, .side-group { opacity: 0; transition: opacity .16s ease-out; }
 .sidebar:hover .side-label, .sidebar:hover .side-group,
 html.side-pinned .side-label, html.side-pinned .side-group { opacity: 1; }
+html.no-peek .sidebar:hover .side-label, html.no-peek .sidebar:hover .side-group { opacity: 0; }
 .side-brand span { opacity: 0; transition: opacity .16s ease-out; }
 .sidebar:hover .side-brand span, html.side-pinned .side-brand span { opacity: 1; }
+html.no-peek .sidebar:hover .side-brand span { opacity: 0; }
 .side-nav { flex: 1; }
 
 /* --- mobile: overlay drawer --- */

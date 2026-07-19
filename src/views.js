@@ -8,29 +8,60 @@ const APP_NAME = 'Restaurant Cloud';
 const RESTAURANT = process.env.RESTAURANT_NAME || APP_NAME;
 
 // Grouped navigation — organized instead of one long list.
+
+// Line icons drawn at 24×24 in currentColor. Emoji were the single biggest
+// thing making the rail look unfinished — they render differently on every
+// platform, sit off the baseline, and can't take the item's accent colour.
+const ICON = {
+  dashboard: '<path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/>',
+  shifts: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3h6v3H9zM9 11h6M9 15h4"/>',
+  sales: '<path d="M4 19h16"/><path d="m5 15 4-5 3.5 3L19 6"/><path d="M19 6h-3.5M19 6v3.5"/>',
+  costs: '<circle cx="9" cy="9" r="2"/><circle cx="15" cy="15" r="2"/><path d="M18 6 6 18"/>',
+  cash: '<rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 12h.01M17.5 12h.01"/>',
+  payroll: '<path d="M3 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2"/><rect x="3" y="8" width="18" height="11" rx="2"/><path d="M16 13h2"/>',
+  expirations: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/>',
+  invoices: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z"/><path d="M9.5 8h5M9.5 12h5"/>',
+  vendors: '<path d="M3 7h11v9H3zM14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/>',
+  par: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',
+  contacts: '<rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="12" cy="10" r="2.4"/><path d="M8 16.5a4.2 4.2 0 0 1 8 0"/>',
+  equipment: '<path d="M15.5 4.5a4.5 4.5 0 0 0-5.9 5.9L4 16v4h4l5.6-5.6a4.5 4.5 0 0 0 5.9-5.9L16.5 12 12 7.5l3.5-3Z"/>',
+  documents: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>',
+  recurring: '<path d="M4 11a8 8 0 0 1 13.3-5.9L20 7"/><path d="M20 3v4h-4"/><path d="M20 13a8 8 0 0 1-13.3 5.9L4 17"/><path d="M4 21v-4h4"/>',
+  incidents: '<path d="M12 4 2.5 20h19L12 4Z"/><path d="M12 10v4M12 17h.01"/>',
+  notes: '<path d="M5 4h9l5 5v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/><path d="M14 4v5h5M8 13h8M8 17h5"/>',
+  staff: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 6.2a3.2 3.2 0 0 1 0 6M17 14.5a5.5 5.5 0 0 1 4 4.5"/>',
+  policy: '<path d="M12 4v16M7 20h10M5 8h14"/><path d="M5 8 2.5 14h5L5 8ZM19 8l-2.5 6h5L19 8Z"/>',
+  positions: '<path d="m12 5 9 4-9 4-9-4 9-4Z"/><path d="M7 11v4.5c0 1.4 2.2 2.5 5 2.5s5-1.1 5-2.5V11"/>',
+  email: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 7 8.5 6 8.5-6"/>',
+  tips: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v10M14.5 9.5A2.5 2.5 0 0 0 12 8h-.4a2.1 2.1 0 0 0-.4 4.1l1.6.3a2.1 2.1 0 0 1-.4 4.2H12a2.5 2.5 0 0 1-2.5-1.5"/>',
+  signout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 8 6 12l4 4M6 12h10"/>',
+  pin: '<path d="M4 5v14"/><path d="M20 12H9"/><path d="m13 8-4 4 4 4"/>',
+};
+const icon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k] || ICON.dashboard}</svg>`;
+
 // Each item carries its own accent. Colour here is wayfinding, not decoration:
 // the rail stays recognisable when collapsed to icons, and the page you're on
 // picks up its accent in the header — so Payroll never looks like Sales.
 const NAV_GROUPS = [
   { title: null, links: [
-    ['/', '🏠', 'Dashboard', '#2563eb'], ['/shifts', '📋', 'Shifts', '#4f46e5'],
-    ['/sales', '📈', 'Sales', '#059669'], ['/costs', '🧮', 'Cost %', '#0891b2'],
-    ['/cash', '💵', 'Cash count', '#d97706'], ['/payroll', '💰', 'Payroll', '#7c3aed'],
+    ['/', 'dashboard', 'Dashboard', '#2563eb'], ['/shifts', 'shifts', 'Shifts', '#4f46e5'],
+    ['/sales', 'sales', 'Sales', '#059669'], ['/costs', 'costs', 'Cost %', '#0891b2'],
+    ['/cash', 'cash', 'Cash count', '#d97706'], ['/payroll', 'payroll', 'Payroll', '#7c3aed'],
   ] },
   { title: 'Track', links: [
-    ['/c/expirations', '⏰', 'Expirations', '#dc2626'], ['/c/invoices', '🧾', 'Invoices', '#0891b2'],
-    ['/c/vendors', '🚚', 'Vendors', '#ea580c'], ['/c/par', '📦', 'Par levels', '#ca8a04'],
-    ['/c/contacts', '📇', 'Contacts', '#0d9488'], ['/c/equipment', '🔧', 'Equipment', '#64748b'],
-    ['/c/documents', '📁', 'Documents', '#6366f1'],
+    ['/c/expirations', 'expirations', 'Expirations', '#dc2626'], ['/c/invoices', 'invoices', 'Invoices', '#0891b2'],
+    ['/c/vendors', 'vendors', 'Vendors', '#ea580c'], ['/c/par', 'par', 'Par levels', '#ca8a04'],
+    ['/c/contacts', 'contacts', 'Contacts', '#0d9488'], ['/c/equipment', 'equipment', 'Equipment', '#64748b'],
+    ['/c/documents', 'documents', 'Documents', '#6366f1'],
   ] },
   { title: 'Tasks & logs', links: [
-    ['/c/recurring', '🔁', 'Recurring tasks', '#059669'], ['/c/incidents', '🚨', 'Incident log', '#dc2626'],
-    ['/c/notes', '📝', 'Decisions log', '#7c3aed'],
+    ['/c/recurring', 'recurring', 'Recurring tasks', '#059669'], ['/c/incidents', 'incidents', 'Incident log', '#dc2626'],
+    ['/c/notes', 'notes', 'Decisions log', '#7c3aed'],
   ] },
   { title: 'Settings', links: [
-    ['/employees', '🧑‍🍳', 'Staff', '#2563eb'], ['/policy', '⚖️', 'Tip-out policy', '#0891b2'],
-    ['/positions', '🎓', 'Positions', '#7c3aed'], ['/email', '✉️', 'Email', '#0d9488'],
-    ['/tips', '💵', 'Cash tips (staff)', '#059669'],
+    ['/employees', 'staff', 'Staff', '#2563eb'], ['/policy', 'policy', 'Tip-out policy', '#0891b2'],
+    ['/positions', 'positions', 'Positions', '#7c3aed'], ['/email', 'email', 'Email', '#0d9488'],
+    ['/tips', 'tips', 'Cash tips (staff)', '#059669'],
   ] },
 ];
 
@@ -44,15 +75,15 @@ const dp = (d) => (d === 'cafe' ? 'Café' : 'Dinner');
 function sidebar() {
   const groups = NAV_GROUPS.map((g) => `
     ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
-    ${g.links.map(([href, ico, label, accent]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${ico}</span><span class="side-label">${label}</span></a>`).join('')}
+    ${g.links.map(([href, ico, label, accent]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}</span></a>`).join('')}
   `).join('');
   const signOut = process.env.APP_PASSWORD
-    ? '<div class="side-group">Account</div><a class="side-link" href="/logout" style="--ac:#64748b;--ac-soft:#64748b14;--ac-soft2:#64748b24"><span class="side-ico">🚪</span><span class="side-label">Sign out</span></a>'
+    ? `<div class="side-group">Account</div><a class="side-link" href="/logout" style="--ac:#64748b;--ac-soft:#64748b14;--ac-soft2:#64748b24"><span class="side-ico">${icon('signout')}</span><span class="side-label">Sign out</span></a>`
     : '';
   return `<aside class="sidebar">
     <div class="side-top">
       <a href="/" class="side-brand" title="${esc(APP_NAME)}"><img src="/static/logo.png" alt="" width="30" height="30"><span>${esc(APP_NAME)}</span></a>
-      <button class="side-pin" type="button" onclick="rcPin()" aria-label="Pin the menu open" title="Pin the menu open">⇥</button>
+      <button class="side-pin" type="button" onclick="rcPin()" aria-label="Collapse or pin the menu" title="Collapse / pin the menu">${icon('pin')}</button>
     </div>
     <nav class="side-nav">${groups}${signOut}</nav>
   </aside>`;
@@ -69,7 +100,7 @@ function head(title, opts = {}) {
     <title>${esc(title)} · ${esc(staff ? RESTAURANT : APP_NAME)}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=${BUILD}">
     <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
     <meta name="theme-color" content="${staff ? '#2563eb' : '#ffffff'}">
     <link rel="icon" href="/static/icon-192.png">
@@ -159,8 +190,20 @@ function layout(title, body, opts = {}) {
       <script>
         // Pin / unpin the rail, remembered between sessions.
         function rcPin() {
-          var on = document.documentElement.classList.toggle('side-pinned');
+          var root = document.documentElement;
+          var on = root.classList.toggle('side-pinned');
           try { localStorage.setItem('rc_side', on ? 'pinned' : 'rail'); } catch (e) {}
+          if (!on) {
+            // The pointer is still over the rail after the click, so hover
+            // would immediately re-open it. Hold the peek off until the mouse
+            // genuinely leaves, or the toggle looks like it did nothing.
+            root.classList.add('no-peek');
+            var sb = document.querySelector('.sidebar');
+            sb.addEventListener('mouseleave', function off() {
+              root.classList.remove('no-peek');
+              sb.removeEventListener('mouseleave', off);
+            });
+          }
         }
         // Highlight the active nav link, and let the page borrow its accent so
         // each screen reads as its own place rather than another blue page.
