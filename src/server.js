@@ -7,7 +7,7 @@ const path = require('path');
 const express = require('express');
 const { db, q, s, w, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
-const { buildEmails, buildPeriodEmails, sendEmails, sendTest, mailStatus } = require('./email');
+const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
@@ -669,12 +669,11 @@ function peopleMap(inp) {
   return m;
 }
 
-app.get('/shifts/:id/results', (req, res) => {
-  const sh = s.shiftById.get(req.params.id);
-  if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
-  const inp = shiftInputs(sh.id);
-  const r = runShift(inp, policyForShift(sh));
-
+/**
+ * Everything worth knowing before a shift's emails go out. Shared by the
+ * results page and the manager's own copy, so the two can't drift apart.
+ */
+function shiftWarnings(sh, inp, r) {
   const warn = [];
   const notes = [];
   if (!r.reconciliation.balanced) warn.push('Tip totals do not reconcile — check the numbers.');
@@ -713,6 +712,15 @@ app.get('/shifts/:id/results', (req, res) => {
     .filter((sv) => (toCents(sv.cardTips) + toCents(sv.cashTips)) > 0 && (toCents(sv.food) + toCents(sv.coffee) + toCents(sv.alcohol)) === 0)
     .map((sv) => sv.name);
   if (noSales.length) warn.push('No sales recorded for: ' + noSales.join(', ') + ' — their tip-out will calculate as $0. Add their sales below.');
+  return { warn, notes };
+}
+
+app.get('/shifts/:id/results', (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
+  const inp = shiftInputs(sh.id);
+  const r = runShift(inp, policyForShift(sh));
+  const { warn, notes } = shiftWarnings(sh, inp, r);
 
   const serverCards = r.servers.map((p) => `
     <div class="card">
@@ -776,6 +784,12 @@ app.get('/shifts/:id/email/:employeeId', (req, res) => {
   res.send(one.html);
 });
 
+/** Where the manager's own copy goes. */
+function managerEmail() {
+  const mgr = q.allEmployees.all().find((e) => e.role === 'manager' && e.email);
+  return (mgr && mgr.email) || process.env.MAIL_FROM || process.env.GMAIL_USER || null;
+}
+
 app.post('/shifts/:id/send', async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
@@ -784,8 +798,23 @@ app.post('/shifts/:id/send', async (req, res) => {
   const emails = buildEmails(r, { date: sh.date, daypart: sh.daypart }, peopleMap(inp));
   const result = await sendEmails(emails);
   s.markEmailed.run(sh.id);
+
+  // Your own copy: confirmation of who received what, and the totals. Sent
+  // after the staff emails so it reports what actually happened, and kept
+  // separate so a failure here can't stop staff getting theirs.
+  const to = managerEmail();
+  if (to) {
+    try {
+      const receipt = managerShiftEmail(r, {
+        date: sh.date, daypart: sh.daypart, managerEmail: to,
+        warnings: shiftWarnings(sh, inp, r).warn,
+      }, result);
+      await sendEmails([{ ...receipt, name: 'manager-receipt' }]);
+    } catch { /* your copy is a convenience — never let it break the send */ }
+  }
+
   let msg;
-  if (result.sent) msg = `Sent ${result.sent} emails.` + (result.errors.length ? ` ${result.errors.length} failed.` : '');
+  if (result.sent) msg = `Sent ${result.sent} emails.` + (result.errors.length ? ` ${result.errors.length} failed.` : '') + (to ? ` A copy went to ${to}.` : '');
   else msg = `Wrote ${result.previewed} preview files to /previews (open them to see each email).`;
   res.redirect(`/shifts/${sh.id}/results?msg=` + encodeURIComponent(msg) + (result.errors.length ? '&err=1' : ''));
 });

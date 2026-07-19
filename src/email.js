@@ -147,6 +147,71 @@ function supportEmail(p, ctx) {
  * Pay-period summary for one person — the same money their nightly emails
  * already covered, totalled up. `r` is a row from aggregatePayroll().
  */
+/**
+ * Your receipt after sending a shift: who actually received their numbers, who
+ * didn't and why, and the totals — so a failed send is something you find in
+ * your inbox rather than next payday.
+ *
+ * @param results  engine.runShift() output
+ * @param delivery { sent, previewed, errors:[], recipients:[{name,to,total}] }
+ */
+function managerShiftEmail(results, meta, delivery) {
+  const dayLabel = meta.daypart === 'cafe' ? 'Café' : 'Dinner';
+  const failed = delivery.errors || [];
+  const ok = delivery.recipients || [];
+  const preview = !delivery.sent && delivery.previewed;
+
+  let body = '';
+  body += line('Shift', `${meta.date} · ${dayLabel}`, { border: false });
+  body += line(preview ? 'Previews written' : 'Emails delivered',
+    preview ? String(delivery.previewed) : `${delivery.sent} of ${ok.length + failed.length}`,
+    { strong: true, color: failed.length ? '#dc2626' : '#059669' });
+
+  if (failed.length) {
+    body += section('Did not go out');
+    failed.forEach((e, i) => { body += line(String(e), '', { border: i !== 0, color: '#dc2626' }); });
+    body += hint('These people have no summary for tonight — fix and send again from the shift page.');
+  }
+
+  const totalTips = results.reconciliation.totalTipsCollected;
+  const potsTotal = Object.values(results.pots).reduce((a, b) => a + b, 0);
+  body += section('Tonight');
+  body += line('Tips collected', fmt(totalTips), { border: false });
+  body += line('Tipped out to support', fmt(potsTotal));
+  body += line('Shared pool', fmt(results.pool.cash + results.pool.togoCard));
+  if (!results.reconciliation.balanced) {
+    body += line('Reconciles', 'NO — check the shift', { strong: true, color: '#dc2626' });
+  }
+
+  if (results.servers.length) {
+    body += section('Servers');
+    results.servers.forEach((p, i) => {
+      body += line(p.name, `${fmt(p.tipsKept)} kept`, { border: i !== 0 });
+    });
+  }
+  if (results.support.length) {
+    body += section('Support');
+    results.support.forEach((p, i) => {
+      const total = (p.tipShare || 0) + (p.poolShare || 0);
+      body += line(`${p.name} · ${p.role}`, fmt(total), { border: i !== 0 });
+    });
+  }
+
+  // Things that were true at send time and are easy to miss on the screen.
+  if ((meta.warnings || []).length) {
+    body += section('Worth checking');
+    meta.warnings.forEach((w, i) => { body += line(String(w), '', { border: i !== 0, color: '#b45309' }); });
+  }
+
+  const headline = preview ? `${delivery.previewed} previews` : `${delivery.sent} sent`;
+  const subject = `${RESTAURANT}: ${meta.date} ${dayLabel} — ${headline}${failed.length ? `, ${failed.length} failed` : ''}`;
+  return {
+    to: meta.managerEmail,
+    subject,
+    html: shell('Shift sent', body, { label: preview ? 'Previews' : 'Emails sent', value: preview ? String(delivery.previewed) : String(delivery.sent) }),
+  };
+}
+
 /** "2026-07-04" -> "Jul 4". Kept local so email.js stays free of db imports. */
 function shortDate(iso) {
   const [, m, d] = String(iso).split('-').map(Number);
@@ -308,7 +373,7 @@ async function sendTest(to) {
 async function sendEmails(emails) {
   const t = transport();
   const from = fromAddress();
-  const out = { sent: 0, previewed: 0, files: [], errors: [] };
+  const out = { sent: 0, previewed: 0, files: [], errors: [], recipients: [] };
 
   if (!t) {
     // Preview mode: write HTML files so you can eyeball them before wiring email.
@@ -319,6 +384,7 @@ async function sendEmails(emails) {
       fs.writeFileSync(file, e.html);
       out.files.push(file);
       out.previewed++;
+      out.recipients.push({ name: e.name, to: e.to });
     }
     return out;
   }
@@ -337,6 +403,7 @@ async function sendEmails(emails) {
     try {
       await t.sendMail({ from, to: e.to, subject: e.subject, html: e.html });
       out.sent++;
+      out.recipients.push({ name: e.name, to: e.to });
     } catch (err) {
       out.errors.push(`${e.name}: ${friendlyMailError(err)}`);
     }
@@ -344,4 +411,4 @@ async function sendEmails(emails) {
   return out;
 }
 
-module.exports = { buildEmails, buildPeriodEmails, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, periodEmail, PREVIEW_DIR, RESTAURANT };
+module.exports = { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, periodEmail, PREVIEW_DIR, RESTAURANT };
