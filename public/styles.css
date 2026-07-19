@@ -534,3 +534,92 @@ body.bare { background: #0f1e40; }
 }
 .row-muted td { opacity: .55; }
 .tips-build { text-align: center; margin-top: 14px; color: #cbd5e1; font-size: 10.5px; letter-spacing: .04em; }
+
+/* ===========================================================================
+   RECURRING TASKS
+   One rule throughout: colour encodes urgency and nothing else. A calm week
+   is a calm page, so when something is red it actually means something.
+   =========================================================================== */
+.head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* View switch */
+.seg-view { display: inline-flex; background: var(--surface-3); border-radius: 10px; padding: 3px; gap: 2px; }
+.seg-view a { padding: 7px 14px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-decoration: none; }
+.seg-view a:hover { color: var(--ink); text-decoration: none; }
+.seg-view a.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+
+/* Stat pill variants — the number itself carries the state. */
+.stat-danger { border-color: #fecaca; background: linear-gradient(180deg, #fff6f6, var(--surface)); }
+.stat-danger .stat-value { color: var(--danger); }
+.stat-amberize { border-color: #fde68a; background: linear-gradient(180deg, #fffbeb, var(--surface)); }
+.stat-amberize .stat-value { color: var(--warn); }
+.stat-okize .stat-value { color: var(--ok); }
+
+.sec-h { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 10px; }
+.sec-n { background: var(--surface-3); color: var(--ink-2); border-radius: 20px; padding: 1px 9px; font-size: 12px; letter-spacing: 0; }
+
+/* --- task rows --- */
+.task-list { display: grid; gap: 8px; }
+.task { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 16px;
+  background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--line-2);
+  border-radius: var(--radius); padding: 13px 16px; box-shadow: var(--shadow-sm); }
+.task-name { font-weight: 650; font-size: 15px; color: var(--ink); }
+.task-name:hover { color: var(--primary); text-decoration: none; }
+.task-meta { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-top: 4px; font-size: 12.5px; color: var(--muted); }
+.chip { background: var(--surface-3); color: var(--ink-2); border-radius: 6px; padding: 2px 8px; font-size: 11.5px; font-weight: 600; }
+.task-last { color: var(--faint); }
+.task-due { text-align: right; min-width: 108px; }
+.task-date { font-size: 13.5px; font-weight: 650; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.task-when { font-size: 12px; margin-top: 2px; }
+
+/* Urgency — border, and the "when" line, are the only things that change. */
+.u-over  { border-left-color: var(--danger); background: linear-gradient(90deg, #fff5f5, var(--surface) 55%); }
+.u-over  .task-when { color: var(--danger); font-weight: 700; }
+.u-today { border-left-color: #ea580c; background: linear-gradient(90deg, #fff8f3, var(--surface) 55%); }
+.u-today .task-when { color: #c2410c; font-weight: 700; }
+.u-soon  { border-left-color: #d97706; }
+.u-soon  .task-when { color: var(--warn); font-weight: 600; }
+.u-month { border-left-color: #ca8a04; }
+.u-month .task-when { color: var(--muted); }
+.u-later { border-left-color: var(--line-2); }
+.u-later .task-when { color: var(--faint); }
+.u-none  { border-left-color: var(--line-2); }
+
+/* --- calendar --- */
+.cal-head { display: flex; align-items: center; gap: 10px; margin: 18px 0 10px; }
+.cal-head strong { font-size: 15.5px; letter-spacing: -.01em; min-width: 168px; }
+.cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--line);
+  border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.cal-dow { background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em; padding: 9px 10px; text-align: center; }
+.cal-cell { background: var(--surface); min-height: 104px; padding: 7px 7px 9px; }
+.cal-out { background: var(--surface-2); }
+.cal-day { font-size: 12px; font-weight: 650; color: var(--faint); margin-bottom: 5px; }
+.cal-today { background: var(--primary-50); }
+.cal-today .cal-day { color: var(--primary-700); background: var(--primary); color: #fff;
+  width: 21px; height: 21px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.cal-task { display: block; font-size: 11.5px; font-weight: 600; padding: 3px 7px; border-radius: 6px;
+  margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--surface-3); color: var(--ink-2); border-left: 2px solid var(--line-2); }
+.cal-task:hover { text-decoration: none; filter: brightness(.97); }
+.cal-task.u-over  { background: var(--danger-bg); color: #991b1b; border-left-color: var(--danger); }
+.cal-task.u-today { background: #ffedd5; color: #9a3412; border-left-color: #ea580c; }
+.cal-task.u-soon  { background: var(--warn-bg); color: #854d0e; border-left-color: #d97706; }
+.cal-task.u-month { background: #fefce8; color: #854d0e; border-left-color: #ca8a04; }
+.cal-task.u-later { background: var(--surface-3); color: var(--ink-2); }
+/* Projections are the cycle continuing, not a scheduled date — kept quiet. */
+.cal-proj { background: transparent; color: var(--faint); border: 1px dashed var(--line-2); border-left: 2px dashed var(--line-2); font-weight: 500; }
+
+@media (max-width: 820px) {
+  .task { grid-template-columns: 1fr auto; gap: 10px; }
+  .task-act { grid-column: 1 / -1; }
+  .task-act .btn { width: 100%; justify-content: center; }
+  .cal-cell { min-height: 74px; padding: 5px 4px 6px; }
+  .cal-task { font-size: 10px; padding: 2px 4px; }
+  .cal-dow { padding: 7px 2px; font-size: 9.5px; }
+  .cal-head strong { min-width: 0; flex: 1; font-size: 14px; }
+}
+.flash > span { flex: 1; }
+.flash-undo { margin: 0; }
+.flash-undo .link { color: inherit; text-decoration: underline; font-weight: 700; }

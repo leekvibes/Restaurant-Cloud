@@ -254,7 +254,14 @@ function flash(req) {
   const m = req.query.msg;
   if (!m) return '';
   const err = req.query.err === '1';
-  return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}">${esc(m)}</div>`;
+  // An action that moved a date can pass ?undo=<path> to offer a way back.
+  // Only same-site paths, so a crafted link can't post anywhere else.
+  const undo = String(req.query.undo || '');
+  const safeUndo = /^\/[A-Za-z0-9/_?=&.%-]*$/.test(undo) ? undo : '';
+  const undoBtn = safeUndo
+    ? `<form method="post" action="${esc(safeUndo)}" class="flash-undo"><button class="link" type="submit">Undo</button></form>`
+    : '';
+  return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
 }
 
 module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD };
