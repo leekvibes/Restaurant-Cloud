@@ -8,15 +8,34 @@ const APP_NAME = 'Restaurant Cloud';
 const RESTAURANT = process.env.RESTAURANT_NAME || APP_NAME;
 
 // Grouped navigation — organized instead of one long list.
+// Each item carries its own accent. Colour here is wayfinding, not decoration:
+// the rail stays recognisable when collapsed to icons, and the page you're on
+// picks up its accent in the header — so Payroll never looks like Sales.
 const NAV_GROUPS = [
-  { title: null, links: [['/', '🏠', 'Dashboard'], ['/shifts', '📋', 'Shifts'], ['/sales', '📈', 'Sales'], ['/costs', '🧮', 'Cost %'], ['/cash', '💵', 'Cash count'], ['/payroll', '💰', 'Payroll']] },
-  { title: 'Track', links: [
-    ['/c/expirations', '⏰', 'Expirations'], ['/c/invoices', '🧾', 'Invoices'], ['/c/vendors', '🚚', 'Vendors'],
-    ['/c/par', '📦', 'Par levels'], ['/c/contacts', '📇', 'Contacts'], ['/c/equipment', '🔧', 'Equipment'], ['/c/documents', '📁', 'Documents'],
+  { title: null, links: [
+    ['/', '🏠', 'Dashboard', '#2563eb'], ['/shifts', '📋', 'Shifts', '#4f46e5'],
+    ['/sales', '📈', 'Sales', '#059669'], ['/costs', '🧮', 'Cost %', '#0891b2'],
+    ['/cash', '💵', 'Cash count', '#d97706'], ['/payroll', '💰', 'Payroll', '#7c3aed'],
   ] },
-  { title: 'Tasks & logs', links: [['/c/recurring', '🔁', 'Recurring tasks'], ['/c/incidents', '🚨', 'Incident log'], ['/c/notes', '📝', 'Decisions log']] },
-  { title: 'Settings', links: [['/employees', '🧑‍🍳', 'Staff'], ['/policy', '⚖️', 'Tip-out policy'], ['/positions', '🎓', 'Positions'], ['/email', '✉️', 'Email'], ['/tips', '💵', 'Cash tips (staff)']] },
+  { title: 'Track', links: [
+    ['/c/expirations', '⏰', 'Expirations', '#dc2626'], ['/c/invoices', '🧾', 'Invoices', '#0891b2'],
+    ['/c/vendors', '🚚', 'Vendors', '#ea580c'], ['/c/par', '📦', 'Par levels', '#ca8a04'],
+    ['/c/contacts', '📇', 'Contacts', '#0d9488'], ['/c/equipment', '🔧', 'Equipment', '#64748b'],
+    ['/c/documents', '📁', 'Documents', '#6366f1'],
+  ] },
+  { title: 'Tasks & logs', links: [
+    ['/c/recurring', '🔁', 'Recurring tasks', '#059669'], ['/c/incidents', '🚨', 'Incident log', '#dc2626'],
+    ['/c/notes', '📝', 'Decisions log', '#7c3aed'],
+  ] },
+  { title: 'Settings', links: [
+    ['/employees', '🧑‍🍳', 'Staff', '#2563eb'], ['/policy', '⚖️', 'Tip-out policy', '#0891b2'],
+    ['/positions', '🎓', 'Positions', '#7c3aed'], ['/email', '✉️', 'Email', '#0d9488'],
+    ['/tips', '💵', 'Cash tips (staff)', '#059669'],
+  ] },
 ];
+
+/** Accent plus the two tints the active pill needs, from one hex. */
+const accentVars = (hex) => `--ac:${hex};--ac-soft:${hex}14;--ac-soft2:${hex}24`;
 
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
 const money = (c) => fmt(c);
@@ -25,13 +44,16 @@ const dp = (d) => (d === 'cafe' ? 'Café' : 'Dinner');
 function sidebar() {
   const groups = NAV_GROUPS.map((g) => `
     ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
-    ${g.links.map(([href, ico, label]) => `<a class="side-link" href="${href}"><span class="side-ico">${ico}</span>${label}</a>`).join('')}
+    ${g.links.map(([href, ico, label, accent]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${ico}</span><span class="side-label">${label}</span></a>`).join('')}
   `).join('');
   const signOut = process.env.APP_PASSWORD
-    ? '<div class="side-group">Account</div><a class="side-link" href="/logout"><span class="side-ico">🚪</span>Sign out</a>'
+    ? '<div class="side-group">Account</div><a class="side-link" href="/logout" style="--ac:#64748b;--ac-soft:#64748b14;--ac-soft2:#64748b24"><span class="side-ico">🚪</span><span class="side-label">Sign out</span></a>'
     : '';
   return `<aside class="sidebar">
-    <a href="/" class="side-brand"><img src="/static/logo.png" alt="" width="28" height="28">${esc(APP_NAME)}</a>
+    <div class="side-top">
+      <a href="/" class="side-brand" title="${esc(APP_NAME)}"><img src="/static/logo.png" alt="" width="30" height="30"><span>${esc(APP_NAME)}</span></a>
+      <button class="side-pin" type="button" onclick="rcPin()" aria-label="Pin the menu open" title="Pin the menu open">⇥</button>
+    </div>
     <nav class="side-nav">${groups}${signOut}</nav>
   </aside>`;
 }
@@ -55,7 +77,11 @@ function head(title, opts = {}) {
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'black-translucent' : 'default'}">
     <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : 'Restaurant Cloud'}">
-    <meta name="mobile-web-app-capable" content="yes">`;
+    <meta name="mobile-web-app-capable" content="yes">
+    <script>
+      // Runs before first paint so a pinned sidebar never flashes collapsed.
+      try { if (localStorage.getItem('rc_side') === 'pinned') document.documentElement.classList.add('side-pinned'); } catch (e) {}
+    </script>`;
 }
 
 const swScript = `<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>`;
@@ -131,12 +157,33 @@ function layout(title, body, opts = {}) {
         <main class="content">${openWarning()}<div class="wrap">${body}</div></main>
       </div>
       <script>
-        // Highlight the active nav link.
+        // Pin / unpin the rail, remembered between sessions.
+        function rcPin() {
+          var on = document.documentElement.classList.toggle('side-pinned');
+          try { localStorage.setItem('rc_side', on ? 'pinned' : 'rail'); } catch (e) {}
+        }
+        // Highlight the active nav link, and let the page borrow its accent so
+        // each screen reads as its own place rather than another blue page.
         (function () {
           var p = location.pathname;
+          var best = null;
           document.querySelectorAll('.side-link').forEach(function (a) {
-            if (a.getAttribute('href') === p) a.classList.add('active');
+            var href = a.getAttribute('href');
+            // Longest matching prefix wins, so /c/recurring/3 still lights up
+            // Recurring tasks rather than falling back to Dashboard.
+            if (p === href || (href !== '/' && p.indexOf(href) === 0)) {
+              if (!best || href.length > best.getAttribute('href').length) best = a;
+            }
           });
+          if (best) {
+            best.classList.add('active');
+            var ac = best.style.getPropertyValue('--ac');
+            if (ac) {
+              var r = document.documentElement.style;
+              r.setProperty('--accent', ac.trim());
+              r.setProperty('--accent-soft', ac.trim() + '14');
+            }
+          }
         })();
         // Copy each column's heading onto its cells so tables can restack as
         // cards on a phone (see the mobile table rules in styles.css). Doing it
