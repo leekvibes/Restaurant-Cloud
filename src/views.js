@@ -36,6 +36,7 @@ const ICON = {
   tips: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v10M14.5 9.5A2.5 2.5 0 0 0 12 8h-.4a2.1 2.1 0 0 0-.4 4.1l1.6.3a2.1 2.1 0 0 1-.4 4.2H12a2.5 2.5 0 0 1-2.5-1.5"/>',
   signout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 8 6 12l4 4M6 12h10"/>',
   pin: '<path d="M4 5v14"/><path d="M20 12H9"/><path d="m13 8-4 4 4 4"/>',
+  users: '<circle cx="9" cy="8" r="3.2"/><path d="M2.5 19a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9.5" r="2.4"/><path d="M16.5 14.6a5 5 0 0 1 5 4.4"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
   list: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
   calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
@@ -65,7 +66,7 @@ const NAV_GROUPS = [
   ] },
   { title: 'Settings', links: [
     ['/employees', 'staff', 'Staff', '#2563eb'], ['/policy', 'policy', 'Tip-out policy', '#0891b2'],
-    ['/positions', 'positions', 'Positions', '#7c3aed'], ['/email', 'email', 'Email', '#0d9488'],
+    ['/positions', 'positions', 'Positions', '#7c3aed'], ['/email', 'email', 'Email', '#0d9488'], ['/users', 'users', 'Users', '#4f46e5'],
     ['/tips', 'tips', 'Cash tips (staff)', '#059669'],
   ] },
 ];
@@ -77,13 +78,44 @@ const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': 
 const money = (c) => fmt(c);
 const dp = (d) => (d === 'cafe' ? 'Café' : 'Dinner');
 
+// Set by server.js so the nav can be drawn for whoever is signed in, without
+// threading a user object through every layout() call site.
+let viewCtx = null;
+const setViewContext = (als) => { viewCtx = als; };
+const currentViewUser = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().user : null);
+
+/** Which nav areas this account can open. Null user = auth off, show all. */
+function navAllowed(href) {
+  const u = currentViewUser();
+  if (!u || u.master || !u.features || !u.features.length) return true;
+  const key = href === '/' ? 'dashboard'
+    : href.startsWith('/shifts') ? 'shifts'
+    : href.startsWith('/sales') ? 'sales'
+    : href.startsWith('/costs') ? 'costs'
+    : href.startsWith('/cash') ? 'cash'
+    : href.startsWith('/payroll') ? 'payroll'
+    : href.startsWith('/c/') ? 'trackers'
+    : href.startsWith('/employees') ? 'staff'
+    // /tips is a public staff page; this is just the manager's shortcut to it,
+    // so it follows Settings rather than showing to an owner who has no others.
+    : ['/policy', '/positions', '/email', '/users', '/tips'].some((x) => href.startsWith(x)) ? 'settings'
+    : null;
+  return !key || u.features.includes(key);
+}
+
 function sidebar() {
-  const groups = NAV_GROUPS.map((g) => `
+  const groups = NAV_GROUPS.map((g) => {
+    const links = g.links.filter(([href]) => navAllowed(href));
+    if (!links.length) return '';           // a group with nothing left just goes
+    return `
     ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
-    ${g.links.map(([href, ico, label, accent]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}</span></a>`).join('')}
-  `).join('');
+    ${links.map(([href, ico, label, accent]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}</span></a>`).join('')}
+  `;
+  }).join('');
+  const who = currentViewUser();
   const signOut = process.env.APP_PASSWORD
-    ? `<div class="side-group">Account</div><a class="side-link" href="/logout" style="--ac:#64748b;--ac-soft:#64748b14;--ac-soft2:#64748b24"><span class="side-ico">${icon('signout')}</span><span class="side-label">Sign out</span></a>`
+    ? `<div class="side-group">${who && !who.master ? esc(who.name) : 'Account'}</div>
+       <a class="side-link" href="/logout" style="--ac:#64748b;--ac-soft:#64748b14;--ac-soft2:#64748b24"><span class="side-ico">${icon('signout')}</span><span class="side-label">Sign out</span></a>`
     : '';
   return `<aside class="sidebar">
     <div class="side-top">
@@ -269,4 +301,4 @@ function flash(req) {
   return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
 }
 
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext };

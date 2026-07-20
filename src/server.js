@@ -5,11 +5,11 @@ try { process.loadEnvFile(require('path').join(__dirname, '..', '.env')); } catc
 
 const path = require('path');
 const express = require('express');
-const { db, q, s, w, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
+const { db, q, s, w, users, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
-const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
@@ -63,21 +63,28 @@ const cashQ = {
 // redeploy doesn't sign you out and there's no session store to run.
 // ---------------------------------------------------------------------------
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const SECRET = process.env.SESSION_SECRET || APP_PASSWORD || 'insecure-dev-secret';
 const COOKIE = 'rc_auth';
 const THIRTY_DAYS = 30 * 86400000;
 
 const sign = (v) => crypto.createHmac('sha256', SECRET).update(String(v)).digest('hex').slice(0, 32);
-const makeToken = () => { const exp = Date.now() + THIRTY_DAYS; return `${exp}.${sign(exp)}`; };
-const validToken = (t) => {
-  const [exp, sig] = String(t || '').split('.');
-  return !!exp && sig === sign(exp) && Number(exp) > Date.now();
-};
-const readCookie = (req, name) => {
-  const m = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-  return m ? decodeURIComponent(m[1]) : null;
-};
+
+// --- passwords: scrypt, which ships with Node — no dependency to add -------
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16);
+  return `scrypt$${salt.toString('hex')}$${crypto.scryptSync(String(pw), salt, 64).toString('hex')}`;
+}
+function verifyPassword(pw, stored) {
+  const [scheme, saltHex, keyHex] = String(stored || '').split('$');
+  if (scheme !== 'scrypt' || !saltHex || !keyHex) return false;
+  const want = Buffer.from(keyHex, 'hex');
+  const got = crypto.scryptSync(String(pw), Buffer.from(saltHex, 'hex'), want.length);
+  return crypto.timingSafeEqual(got, want);
+}
+
+/** The master owner password, compared in constant time. */
 function checkPassword(input) {
   if (!APP_PASSWORD) return false;
   const a = crypto.createHash('sha256').update(String(input || '')).digest();
@@ -85,20 +92,92 @@ function checkPassword(input) {
   return crypto.timingSafeEqual(a, b);
 }
 
-// Anything staff or machines need without the manager password.
-// The whole /tips area is the staff area — they authenticate with their PIN,
-// not the manager password. Matching only /tips exactly meant /tips/start (the
-// PIN step) hit the manager sign-in wall and answered "Session expired", which
-// staff can do nothing about. Any future /tips/* route is covered too.
+// --- session token ---------------------------------------------------------
+// Carries WHO, so the app can tell accounts apart. `m` is the master session
+// from APP_PASSWORD, kept so you can never lock yourself out of your own app.
+const makeToken = (uid) => {
+  const exp = Date.now() + THIRTY_DAYS;
+  return `${uid}.${exp}.${sign(`${uid}.${exp}`)}`;
+};
+function readToken(t) {
+  const [uid, exp, sig] = String(t || '').split('.');
+  if (!uid || !exp || sig !== sign(`${uid}.${exp}`)) return null;
+  if (Number(exp) < Date.now()) return null;
+  return uid;
+}
+const readCookie = (req, name) => {
+  const m = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]) : null;
+};
+
+// --- what an account can reach --------------------------------------------
+// Page-level, deliberately. Finer rules (edit shifts but not delete, see
+// payroll totals but not individual wages) get impossible to hold in your head,
+// and access control you can't state plainly is access control you can't trust.
+const FEATURES = [
+  { key: 'dashboard', label: 'Dashboard',        test: (p) => p === '/' },
+  { key: 'shifts',    label: 'Shifts & tip-outs', test: (p) => p.startsWith('/shifts') },
+  { key: 'sales',     label: 'Sales',            test: (p) => p.startsWith('/sales') },
+  { key: 'costs',     label: 'Cost %',           test: (p) => p.startsWith('/costs') },
+  { key: 'cash',      label: 'Cash count',       test: (p) => p.startsWith('/cash') },
+  { key: 'payroll',   label: 'Payroll',          test: (p) => p.startsWith('/payroll') },
+  { key: 'trackers',  label: 'Trackers & logs',  test: (p) => p.startsWith('/c/') },
+  { key: 'staff',     label: 'Staff',            test: (p) => p.startsWith('/employees') },
+  { key: 'settings',  label: 'Settings & users', test: (p) => ['/policy', '/positions', '/email', '/users'].some((x) => p.startsWith(x)) },
+];
+const featureFor = (path) => (FEATURES.find((f) => f.test(path)) || {}).key || null;
+const MASTER = { id: 'm', name: 'Owner', role: 'editor', features: [], master: true };
+
+function currentUser(req) {
+  const uid = readToken(readCookie(req, COOKIE));
+  if (!uid) return null;
+  if (uid === 'm') return MASTER;
+  const row = users.byId.get(Number(uid));
+  // Checked every request, so deactivating someone signs them out on their
+  // next click rather than whenever a 30-day cookie happens to lapse.
+  if (!row || !row.active) return null;
+  return {
+    id: row.id, name: row.name, email: row.email, role: row.role,
+    features: row.features ? row.features.split(',').filter(Boolean) : [],
+    master: false,
+  };
+}
+const canSee = (user, key) => !user ? false : (user.master || !user.features.length || !key || user.features.includes(key));
+
+// Nav and page rendering need the current user without threading it through
+// every layout() call. AsyncLocalStorage keeps it correct across awaits.
+const reqCtx = new AsyncLocalStorage();
+setViewContext(reqCtx);
+
 const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips(\/|$)/, /^\/version$/,
   /^\/static\//, /^\/sw\.js$/, /^\/manifest/, /^\/apple-touch-icon\.png$/, /^\/webhook\//];
 
 app.use((req, res, next) => {
-  if (!APP_PASSWORD) return next();                                   // not configured → open (banner warns)
-  if (OPEN_PATHS.some((re) => re.test(req.path))) return next();
-  if (validToken(readCookie(req, COOKIE))) return next();
-  if (req.method === 'GET') return res.redirect('/login?next=' + encodeURIComponent(req.originalUrl));
-  return res.status(401).send('Session expired — reload and sign in again.');
+  const user = currentUser(req);
+  req.user = user;
+  reqCtx.run({ user }, () => {
+    if (!APP_PASSWORD) return next();                               // not configured → open (banner warns)
+    if (OPEN_PATHS.some((re) => re.test(req.path))) return next();
+    if (!user) {
+      if (req.method === 'GET') return res.redirect('/login?next=' + encodeURIComponent(req.originalUrl));
+      return res.status(401).send('Session expired — reload and sign in again.');
+    }
+    // View-only accounts can open anything they're allowed to see, and change
+    // none of it. Blocking at the verb is what makes that actually true.
+    if (user.role === 'viewer' && req.method !== 'GET') {
+      return res.status(403).send('Your account is view-only.');
+    }
+    const key = featureFor(req.path);
+    if (!canSee(user, key)) {
+      if (req.method === 'GET') return res.status(403).send(layout('Not available', `
+        <div class="empty2"><div class="empty2-t">You don't have access to this area</div>
+        <div class="empty2-s">Ask ${esc(RESTAURANT)} to turn it on for your account.</div>
+        <a class="btn btn-primary" href="/">Back to the dashboard</a></div>`));
+      return res.status(403).send('Not available on your account.');
+    }
+    if (!user.master) users.seen.run(user.id);
+    next();
+  });
 });
 
 app.get('/login', (req, res) => {
@@ -108,13 +187,17 @@ app.get('/login', (req, res) => {
     <div class="tips-screen">
       <div class="tips-card">
         <div style="text-align:center;margin-bottom:6px"><img src="/static/logo.png" alt="" width="56" height="56" style="border-radius:16px"></div>
-        <div class="tips-title" style="text-align:center">Restaurant Cloud</div>
-        <div class="tips-lead" style="text-align:center">Manager sign-in. Staff logging tips don't need this — they use the tips link.</div>
-        ${bad ? '<div class="tips-error">Wrong password — try again.</div>' : ''}
+        <div class="tips-title" style="text-align:center">${esc(RESTAURANT)}</div>
+        <div class="tips-lead" style="text-align:center">Back-office sign-in. Staff logging tips don't need this — they use the tips link.</div>
+        ${bad ? '<div class="tips-error">That email and password don\'t match. Try again.</div>' : ''}
         <form method="post" action="/login">
           <input type="hidden" name="next" value="${esc(req.query.next || '/')}">
+          <label class="tips-field">Email
+            <input name="email" class="tips-in" type="email" autocomplete="username" autofocus placeholder="you@restaurant.com">
+            <span class="tips-hint">Leave blank if you sign in with the owner password.</span>
+          </label>
           <label class="tips-field">Password
-            <input name="password" class="tips-in" type="password" autocomplete="current-password" autofocus required>
+            <input name="password" class="tips-in" type="password" autocomplete="current-password" required>
           </label>
           <button class="tips-submit" type="submit">Sign in →</button>
         </form>
@@ -124,9 +207,24 @@ app.get('/login', (req, res) => {
 
 app.post('/login', (req, res) => {
   const next = typeof req.body.next === 'string' && req.body.next.startsWith('/') ? req.body.next : '/';
-  if (!checkPassword(req.body.password)) return res.redirect('/login?bad=1&next=' + encodeURIComponent(next));
+  const fail = () => res.redirect('/login?bad=1&next=' + encodeURIComponent(next));
+  const email = String(req.body.email || '').trim();
+  const password = String(req.body.password || '');
+
+  let uid = null;
+  if (email) {
+    const u = users.byEmail.get(email);
+    // Hash regardless of whether the account exists, so a wrong email and a
+    // wrong password take the same time and can't be told apart.
+    const ok = verifyPassword(password, u ? u.pass_hash : hashPassword('no-such-account'));
+    if (u && u.active && ok) uid = String(u.id);
+  } else if (checkPassword(password)) {
+    uid = 'm';
+  }
+  if (!uid) return fail();
+
   const https = req.secure || req.get('x-forwarded-proto') === 'https';
-  res.setHeader('Set-Cookie', `${COOKIE}=${makeToken()}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${THIRTY_DAYS / 1000}${https ? '; Secure' : ''}`);
+  res.setHeader('Set-Cookie', `${COOKIE}=${makeToken(uid)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${THIRTY_DAYS / 1000}${https ? '; Secure' : ''}`);
   res.redirect(next);
 });
 
@@ -1910,6 +2008,211 @@ app.post('/positions/:id/active', (req, res) => {
   if (!p) return res.status(404).end();
   positions.setActive.run(req.body.active === '1' ? 1 : 0, p.id);
   res.redirect('/positions?msg=' + encodeURIComponent(`${p.name} ${req.body.active === '1' ? 'restored' : 'retired'}.`));
+});
+
+
+// ---------------------------------------------------------------------------
+// USERS — logins for owners, partners and anyone else who needs the back
+// office. Only accounts with Settings access can reach this page.
+// ---------------------------------------------------------------------------
+const ROLE_LABEL = { editor: 'Editor', viewer: 'View only' };
+
+app.get('/users', (req, res) => {
+  const rows = users.all.all();
+  const me = req.user || {};
+
+  const cards = rows.map((u) => {
+    const feats = u.features ? u.features.split(',').filter(Boolean) : [];
+    const seeing = feats.length
+      ? feats.map((k) => (FEATURES.find((f) => f.key === k) || {}).label).filter(Boolean).join(', ')
+      : 'Everything';
+    return `
+    <article class="ucard${u.active ? '' : ' ucard-off'}">
+      <div class="ucard-top">
+        <div class="uavatar">${esc(u.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase())}</div>
+        <div class="ucard-head">
+          <div class="ucard-name">${esc(u.name)}${u.active ? '' : ' <span class="pill">disabled</span>'}</div>
+          <div class="ucard-email">${esc(u.email)}</div>
+        </div>
+        <span class="urole ur-${u.role}">${ROLE_LABEL[u.role] || u.role}</span>
+      </div>
+      <div class="ucard-facts">
+        <div class="tfact"><span>Can open</span><b>${esc(seeing)}</b></div>
+        <div class="tfact"><span>Last signed in</span><b>${u.last_seen ? esc(String(u.last_seen).slice(0, 10)) : '<i class="unset">Never</i>'}</b></div>
+      </div>
+      <div class="ucard-act">
+        <a class="btn btn-sm" href="/users/${u.id}/edit">Edit</a>
+        <form method="post" action="/users/${u.id}/active" style="margin:0">
+          <input type="hidden" name="active" value="${u.active ? 0 : 1}">
+          <button class="btn btn-sm ${u.active ? 'btn-ghost' : 'btn-primary'}" type="submit">${u.active ? 'Disable' : 'Re-enable'}</button>
+        </form>
+      </div>
+    </article>`;
+  }).join('');
+
+  res.send(layout('Users', `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t"><h1>Users</h1>
+        <p class="phead-s">Logins for owners and partners. Staff logging tips don't need one.</p></div>
+      <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New user</button>
+    </div>
+
+    <div class="flash flash-info"><div>
+      You're signed in ${me.master ? 'with the <b>owner password</b>, which always has full access' : `as <b>${esc(me.name || '')}</b>`}.
+      Disabling someone takes effect on their next click, not whenever their session expires.
+    </div></div>
+
+    ${rows.length ? `<div class="ugrid">${cards}</div>` : `
+      <div class="empty2">
+        <div class="empty2-t">No user accounts yet</div>
+        <div class="empty2-s">Create one for each owner or partner. They sign in with their own email, so you can disable one without changing anything for everyone else.</div>
+        <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New user</button>
+      </div>`}
+
+    <div class="drawer-scrim" onclick="rcDrawer(false)"></div>
+    <aside class="drawer" id="rc-drawer" aria-label="New user">
+      <div class="drawer-h">
+        <div><div class="drawer-t">New user</div><div class="drawer-s">They sign in with this email and password.</div></div>
+        <button class="drawer-x" type="button" onclick="rcDrawer(false)" aria-label="Close">✕</button>
+      </div>
+      <form method="post" action="/users" class="drawer-b">
+        <label class="fld">Name <input name="name" required placeholder="e.g. Dana Reyes"></label>
+        <label class="fld">Email <input name="email" type="email" required placeholder="dana@example.com"></label>
+        <label class="fld">Starting password
+          <input name="password" required minlength="8" placeholder="At least 8 characters">
+          <span class="fldhint">Tell them this directly — they can't reset it themselves yet.</span>
+        </label>
+        <label class="fld">Access
+          <select name="role">
+            <option value="viewer" selected>View only — sees everything, changes nothing</option>
+            <option value="editor">Editor — can add and change</option>
+          </select>
+        </label>
+        <div class="fld">What they can open
+          <div class="fgrid">
+            ${FEATURES.map((f) => `<label class="fcheck"><input type="checkbox" name="features" value="${f.key}" checked><span>${f.label}</span></label>`).join('')}
+          </div>
+          <span class="fldhint">Untick anything they shouldn't see. Payroll and Staff include wages and personal details.</span>
+        </div>
+        <div class="drawer-f">
+          <button class="btn btn-ghost" type="button" onclick="rcDrawer(false)">Cancel</button>
+          <button class="btn btn-primary" type="submit">Create user</button>
+        </div>
+      </form>
+    </aside>
+    <script>
+      function rcDrawer(open) {
+        document.body.classList.toggle('drawer-open', !!open);
+        if (open) setTimeout(function () { var f = document.querySelector('#rc-drawer input[name=name]'); if (f) f.focus(); }, 180);
+      }
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') rcDrawer(false); });
+    </script>`));
+});
+
+const featureList = (body) => {
+  const raw = body.features;
+  const picked = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter((k) => FEATURES.some((f) => f.key === k));
+  // All ticked is stored as "everything", so a feature added later is included
+  // rather than silently hidden from people who already had full access.
+  return picked.length === FEATURES.length ? '' : picked.join(',');
+};
+
+app.post('/users', (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const email = String(req.body.email || '').trim();
+  const password = String(req.body.password || '');
+  const back = (msg) => res.redirect('/users?err=1&msg=' + encodeURIComponent(msg));
+  if (!name || !email) return back('Name and email are both needed.');
+  if (password.length < 8) return back('Give them a starting password of at least 8 characters.');
+  if (users.byEmail.get(email)) return back(`${email} already has an account.`);
+  users.add.run({
+    name, email, pass_hash: hashPassword(password),
+    role: req.body.role === 'editor' ? 'editor' : 'viewer',
+    features: featureList(req.body),
+  });
+  res.redirect('/users?msg=' + encodeURIComponent(`${name} can now sign in with ${email}.`));
+});
+
+app.get('/users/:id/edit', (req, res) => {
+  const u = users.byId.get(Number(req.params.id));
+  if (!u) return res.status(404).send(layout('Not found', '<h1>User not found</h1>'));
+  const has = u.features ? u.features.split(',').filter(Boolean) : [];
+  const on = (k) => (!has.length || has.includes(k) ? ' checked' : '');
+  res.send(layout(`Edit ${u.name}`, `
+    ${flash(req)}
+    <a class="back" href="/users">← Users</a>
+    <h1>${esc(u.name)}</h1>
+    <p class="sub">${esc(u.email)} · ${ROLE_LABEL[u.role] || u.role}${u.active ? '' : ' · disabled'}</p>
+
+    <form method="post" action="/users/${u.id}" class="card form grid">
+      <label>Name <input name="name" value="${esc(u.name)}" required></label>
+      <label>Email <input name="email" type="email" value="${esc(u.email)}" required></label>
+      <label>Access <select name="role">
+        <option value="viewer"${u.role === 'viewer' ? ' selected' : ''}>View only — sees everything, changes nothing</option>
+        <option value="editor"${u.role === 'editor' ? ' selected' : ''}>Editor — can add and change</option>
+      </select></label>
+      <div class="wide">What they can open
+        <div class="fgrid">
+          ${FEATURES.map((f) => `<label class="fcheck"><input type="checkbox" name="features" value="${f.key}"${on(f.key)}><span>${f.label}</span></label>`).join('')}
+        </div>
+      </div>
+      <button class="btn btn-primary" type="submit">Save changes</button>
+    </form>
+
+    <h2>Set a new password</h2>
+    <form method="post" action="/users/${u.id}/password" class="card form grid">
+      <label>New password <input name="password" required minlength="8" placeholder="At least 8 characters"></label>
+      <button class="btn" type="submit">Change password</button>
+    </form>
+
+    <div class="danger-zone">
+      <div><b>Delete this account</b><p class="muted">Removes the login entirely. Disabling is usually better — it keeps the record of who had access.</p></div>
+      <form method="post" action="/users/${u.id}/delete" style="margin:0"
+            onsubmit="return confirm('Delete ${esc(u.name)}\\'s account? Disabling keeps the record instead.')">
+        <button class="btn btn-danger" type="submit">Delete</button>
+      </form>
+    </div>`));
+});
+
+app.post('/users/:id', (req, res) => {
+  const u = users.byId.get(Number(req.params.id));
+  if (!u) return res.status(404).end();
+  const email = String(req.body.email || '').trim();
+  const clash = users.byEmail.get(email);
+  if (clash && clash.id !== u.id) {
+    return res.redirect(`/users/${u.id}/edit?err=1&msg=` + encodeURIComponent(`${email} is already used by ${clash.name}.`));
+  }
+  users.update.run({
+    id: u.id, name: String(req.body.name || '').trim() || u.name, email: email || u.email,
+    role: req.body.role === 'editor' ? 'editor' : 'viewer',
+    features: featureList(req.body),
+  });
+  res.redirect('/users?msg=' + encodeURIComponent(`${req.body.name || u.name} updated.`));
+});
+
+app.post('/users/:id/password', (req, res) => {
+  const u = users.byId.get(Number(req.params.id));
+  if (!u) return res.status(404).end();
+  const pw = String(req.body.password || '');
+  if (pw.length < 8) return res.redirect(`/users/${u.id}/edit?err=1&msg=` + encodeURIComponent('Use at least 8 characters.'));
+  users.setPass.run(hashPassword(pw), u.id);
+  res.redirect('/users?msg=' + encodeURIComponent(`${u.name}'s password changed — tell them the new one.`));
+});
+
+app.post('/users/:id/active', (req, res) => {
+  const u = users.byId.get(Number(req.params.id));
+  if (!u) return res.status(404).end();
+  const on = req.body.active === '1';
+  users.setActive.run(on ? 1 : 0, u.id);
+  res.redirect('/users?msg=' + encodeURIComponent(`${u.name} ${on ? 're-enabled' : 'disabled — they lose access on their next click'}.`));
+});
+
+app.post('/users/:id/delete', (req, res) => {
+  const u = users.byId.get(Number(req.params.id));
+  if (!u) return res.status(404).end();
+  users.del.run(u.id);
+  res.redirect('/users?msg=' + encodeURIComponent(`${u.name}'s account deleted.`));
 });
 
 app.get('/policy', (req, res) => {

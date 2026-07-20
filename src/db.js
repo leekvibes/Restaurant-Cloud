@@ -138,6 +138,40 @@ if (!shiftCols.includes('sales_note')) db.exec('ALTER TABLE shifts ADD COLUMN sa
 const salesCols = db.prepare('PRAGMA table_info(server_sales)').all().map((c) => c.name);
 if (!salesCols.includes('note')) db.exec('ALTER TABLE server_sales ADD COLUMN note TEXT');
 
+// ---- Users --------------------------------------------------------------
+// People who sign in to the back office. Separate from `employees` on purpose:
+// an employee is someone you pay, a user is someone with a login, and an owner
+// is usually one without being the other.
+//   role     — editor (can change things) | viewer (sees, changes nothing)
+//   features — comma list of areas they can open; empty means everything
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  email      TEXT NOT NULL COLLATE NOCASE,
+  pass_hash  TEXT NOT NULL,
+  role       TEXT NOT NULL DEFAULT 'viewer',
+  features   TEXT NOT NULL DEFAULT '',
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users (email COLLATE NOCASE);
+`);
+
+const users = {
+  all: db.prepare('SELECT * FROM users ORDER BY active DESC, name'),
+  byId: db.prepare('SELECT * FROM users WHERE id = ?'),
+  byEmail: db.prepare('SELECT * FROM users WHERE email = ? COLLATE NOCASE'),
+  add: db.prepare(`INSERT INTO users (name, email, pass_hash, role, features)
+                   VALUES (@name, @email, @pass_hash, @role, @features)`),
+  update: db.prepare('UPDATE users SET name=@name, email=@email, role=@role, features=@features WHERE id=@id'),
+  setPass: db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?'),
+  setActive: db.prepare('UPDATE users SET active = ? WHERE id = ?'),
+  seen: db.prepare("UPDATE users SET last_seen = datetime('now') WHERE id = ?"),
+  del: db.prepare('DELETE FROM users WHERE id = ?'),
+};
+
 // ---- Employees ----------------------------------------------------------
 const q = {
   allEmployees: db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY role, name'),
@@ -332,4 +366,4 @@ function shiftInputs(shiftId) {
   return { servers, support, pool };
 }
 
-module.exports = { db, q, s, w, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };
+module.exports = { db, q, s, w, users, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };

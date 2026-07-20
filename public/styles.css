@@ -738,3 +738,31 @@ body.drawer-open .drawer { transform: translateX(0); visibility: visible; }
 .send-acts form { display: inline; }
 .card-send-none { color: var(--danger); font-weight: 600; }
 .card-send-none .btn { flex-shrink: 0; }
+
+/* --- Users -------------------------------------------------------------- */
+.ugrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.ucard { background: var(--surface); border: 1px solid var(--line); border-radius: 15px;
+  padding: 16px 17px 14px; box-shadow: 0 1px 2px rgba(15,23,42,.04); transition: transform .16s, box-shadow .16s; }
+.ucard:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(15,23,42,.09); }
+.ucard-off { opacity: .58; }
+.ucard-top { display: flex; align-items: flex-start; gap: 12px; }
+.uavatar { flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px; display: flex; align-items: center;
+  justify-content: center; background: var(--primary-100); color: var(--primary-700); font-weight: 700; font-size: 13px; }
+.ucard-head { flex: 1; min-width: 0; }
+.ucard-name { font-size: 15.5px; font-weight: 680; letter-spacing: -.015em; }
+.ucard-email { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.urole { flex-shrink: 0; font-size: 11.5px; font-weight: 700; padding: 4px 10px; border-radius: 20px; white-space: nowrap; }
+.ur-editor { background: #ede9fe; color: #6d28d9; }
+.ur-viewer { background: var(--surface-3); color: var(--ink-2); }
+.ucard-facts { display: grid; gap: 10px; margin: 14px 0 13px; padding-top: 12px; border-top: 1px solid var(--line); }
+.ucard-act { display: flex; gap: 8px; }
+.ucard-act .btn { flex: 1; justify-content: center; }
+
+/* checkbox grid for feature access */
+.fgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin-top: 8px; }
+.fcheck { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid var(--line-2);
+  border-radius: 9px; font-size: 13px; font-weight: 500; color: var(--ink-2); cursor: pointer; background: var(--surface); }
+.fcheck:hover { border-color: var(--primary-200); }
+.fcheck input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary); flex-shrink: 0; }
+.fcheck input:checked + span { color: var(--ink); font-weight: 600; }
+.fldhint { display: block; margin-top: 6px; font-size: 11.5px; color: var(--faint); font-weight: 500; }

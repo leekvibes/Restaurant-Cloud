@@ -66,3 +66,65 @@ test('manager POSTs are refused without the password', async () => {
   const found = db.prepare('SELECT COUNT(*) n FROM employees WHERE name = ?').get('Should Not Exist').n;
   assert.strictEqual(found, 0, 'blocked POST must not write anything');
 });
+
+// --- user accounts, roles and per-area access -------------------------------
+// Access control is worth testing precisely because it fails silently: a page
+// that should be blocked and isn't looks completely normal to whoever opens it.
+
+const { users } = require('../src/db');
+
+async function login(body) {
+  const res = await post('/login', body);
+  const c = res.headers.get('set-cookie') || '';
+  return (c.match(/rc_auth=([^;]*)/) || [])[1] || '';
+}
+const as = (cookie, p, opts = {}) => fetch(BASE + p, {
+  ...opts, redirect: 'manual', headers: { cookie: `rc_auth=${cookie}`, ...(opts.headers || {}) },
+});
+
+test('a view-only account can open its areas and is refused every write', async () => {
+  users.byEmail.get('viewer@test.local') && users.del.run(users.byEmail.get('viewer@test.local').id);
+  const owner = await login({ password: 'test-manager-password' });
+  await as(owner, '/users', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams([['name', 'Read Only'], ['email', 'viewer@test.local'],
+      ['password', 'viewer-password-1'], ['role', 'viewer'],
+      ['features', 'dashboard'], ['features', 'sales']]).toString(),
+  });
+  const v = await login({ email: 'viewer@test.local', password: 'viewer-password-1' });
+  assert.ok(v, 'the account can sign in');
+
+  assert.strictEqual((await as(v, '/')).status, 200, 'dashboard allowed');
+  assert.strictEqual((await as(v, '/sales')).status, 200, 'sales allowed');
+  assert.strictEqual((await as(v, '/payroll')).status, 403, 'payroll withheld');
+  assert.strictEqual((await as(v, '/employees')).status, 403, 'staff withheld');
+  assert.strictEqual((await as(v, '/users')).status, 403, 'cannot reach user admin');
+
+  // View-only means view-only even on a page they ARE allowed to open.
+  const write = await as(v, '/sales/1', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'food=999999',
+  });
+  assert.strictEqual(write.status, 403, 'writes refused');
+});
+
+test('disabling an account revokes it immediately, not at cookie expiry', async () => {
+  const v = await login({ email: 'viewer@test.local', password: 'viewer-password-1' });
+  assert.strictEqual((await as(v, '/sales')).status, 200);
+
+  const row = users.byEmail.get('viewer@test.local');
+  users.setActive.run(0, row.id);
+  // Same cookie: still correctly signed, still unexpired. Access is gone
+  // because the account is re-checked on every request.
+  assert.strictEqual((await as(v, '/sales')).status, 302, 'bounced to login');
+
+  users.setActive.run(1, row.id);
+  assert.strictEqual((await as(v, '/sales')).status, 200, 're-enabling restores it');
+  users.del.run(row.id);
+});
+
+test('a wrong password is refused, and a forged cookie gets nothing', async () => {
+  assert.strictEqual(await login({ email: 'viewer@test.local', password: 'wrong' }), '');
+  const forged = '1.' + (Date.now() + 8.64e7) + '.deadbeefdeadbeefdeadbeefdeadbeef';
+  assert.strictEqual((await as(forged, '/payroll')).status, 302, 'forged token rejected');
+});
