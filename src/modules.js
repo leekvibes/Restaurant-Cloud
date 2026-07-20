@@ -67,6 +67,10 @@ const MODULES = [
       { name: 'status', label: 'Status', type: 'select', list: true, options: ['Unpaid', 'Paid'] },
       { name: 'file', label: 'Invoice file (PDF or photo)', type: 'file', list: true },
       { name: 'notes', label: 'Notes', type: 'textarea' },
+      // How this invoice got its figures: read by AI, read then corrected, or
+      // typed by hand. Drives the badge that says which ones to double-check.
+      { name: 'ai_status', label: 'Entered by', type: 'text' },
+      { name: 'ai_confidence', label: 'Read confidence', type: 'text' },
     ],
   },
   {

@@ -2929,8 +2929,8 @@ const invCat = (c) => INV_CATEGORIES[c] || INV_CATEGORIES.Other;
 const invQ = {
   all: db.prepare('SELECT * FROM m_invoices ORDER BY invoice_date DESC, id DESC'),
   add: db.prepare(`INSERT INTO m_invoices
-    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, file, notes)
-    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @file, @notes)`),
+    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, file, notes, ai_status, ai_confidence)
+    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @file, @notes, @ai_status, @ai_confidence)`),
   vendors: db.prepare('SELECT id, name FROM m_vendors ORDER BY name'),
   addVendor: db.prepare('INSERT INTO m_vendors (name) VALUES (?)'),
 };
@@ -2960,95 +2960,217 @@ function matchVendor(name) {
     || null;
 }
 
+/**
+ * The expanded half of an invoice row. Rendered on demand rather than inside
+ * every row: at ~1.7KB each it was three quarters of the page weight, for
+ * detail that is closed until you ask for it. A year of a busy restaurant's
+ * invoices would have been a multi-megabyte page.
+ */
+function invoicePanel(r, vName) {
+  const ai = aiBadge(r);
+  const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
+  return `
+        <div class="inv-open">
+          <div class="inv-openl">
+            <a class="ithumb${r.file ? '' : ' ithumb-none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''}>
+              ${isImg ? `<img src="/uploads/${esc(r.file)}" alt="">` : icon(r.file ? 'invoices' : 'documents')}
+            </a>
+            <span class="aibadge ${ai.cls}" title="${esc(ai.title)}">${ai.label}</span>
+          </div>
+          <div class="inv-openr">
+            <div class="inv-grid">
+              <div class="tfact"><span>Invoice #</span><b>${r.invoice_number ? esc(r.invoice_number) : '<i class="unset">none</i>'}</b></div>
+              <div class="tfact"><span>Subtotal</span><b>${r.subtotal_cents ? money(r.subtotal_cents) : '<i class="unset">—</i>'}</b></div>
+              <div class="tfact"><span>Tax</span><b>${r.tax_cents ? money(r.tax_cents) : '<i class="unset">—</i>'}</b></div>
+              <div class="tfact"><span>Due</span><b>${r.due_date ? esc(niceDate(r.due_date)) : '<i class="unset">—</i>'}</b></div>
+            </div>
+            ${r.notes ? `<div class="inv-notes">${esc(r.notes)}</div>` : ''}
+            <div class="inv-acts">
+              <form method="post" action="/c/invoices/${r.id}/status" style="margin:0">
+                <input type="hidden" name="status" value="${r.status === 'Paid' ? 'Unpaid' : 'Paid'}">
+                <button class="btn btn-sm ${r.status === 'Paid' ? 'btn-ghost' : 'btn-primary'}" type="submit">${r.status === 'Paid' ? 'Mark unpaid' : 'Mark paid'}</button>
+              </form>
+              <a class="btn btn-sm" href="/c/invoices/${r.id}/edit">Edit</a>
+              ${r.file ? `<a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" target="_blank">Open original</a>
+                          <a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
+              ${r.vendor_id ? `<a class="btn btn-sm btn-ghost" href="/c/vendors/${Number(r.vendor_id)}">Vendor</a>` : ''}
+            </div>
+          </div>
+        </div>`;
+}
+
+app.get('/c/invoices/:id/panel', (req, res) => {
+  const r = db.prepare('SELECT * FROM m_invoices WHERE id = ?').get(Number(req.params.id));
+  if (!r) return res.status(404).send('<div class="panel-empty">That invoice is gone.</div>');
+  res.send(invoicePanel(r));
+});
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+/**
+ * How this invoice got its numbers. Read-by-AI and read-then-corrected are
+ * different things: the first still wants a glance, the second has already had
+ * one. Low confidence is the only state that actually asks for attention.
+ */
+function aiBadge(row) {
+  const st = row.ai_status || (row.file ? 'manual' : 'manual');
+  if (st === 'ai_edited') return { label: 'Edited', cls: 'ai-edit', title: 'Read by AI, then corrected by you' };
+  if (st === 'ai') {
+    return (row.ai_confidence === 'low' || row.ai_confidence === 'medium')
+      ? { label: 'Check', cls: 'ai-check', title: `Read by AI with ${row.ai_confidence} confidence — worth verifying` }
+      : { label: 'AI read', cls: 'ai-ok', title: 'Read by AI with high confidence' };
+  }
+  return { label: 'Manual', cls: 'ai-man', title: 'Entered by hand' };
+}
+
 app.get('/c/invoices', (req, res) => {
-  const rows = invQ.all.all();
+  const all = invQ.all.all();
   const vendors = invQ.vendors.all();
-  // Keyed by number: the vendor_id column is TEXT (the module schema builds
-  // selects as TEXT), and binding a JS number to it stores "1.0" rather than
-  // "1". Comparing as numbers works whatever shape a row was written in.
   const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
   const today = isoDate(startOfToday());
   const thisMonth = today.slice(0, 7);
-  const st = rows.map((r) => ({ r, s: invStatus(r) }));
 
-  const spendMonth = rows.filter((r) => (r.invoice_date || '').slice(0, 7) === thisMonth)
+  // Years present in the data, newest first. One year is loaded at a time:
+  // a restaurant with several years of history would otherwise ship every
+  // invoice it has ever had into one page of HTML.
+  const years = [...new Set(all.map((r) => (r.invoice_date || '').slice(0, 4)).filter(Boolean))].sort().reverse();
+  const year = years.includes(req.query.y) ? req.query.y : (years[0] || today.slice(0, 4));
+  const rows = all.filter((r) => (r.invoice_date || '').slice(0, 4) === year);
+
+  // KPIs stay whole-history where that's the useful reading, and year-scoped
+  // where it isn't — "spend this month" means nothing scoped to 2024.
+  const spendMonth = all.filter((r) => (r.invoice_date || '').slice(0, 7) === thisMonth)
     .reduce((a, r) => a + (r.amount_cents || 0), 0);
-  const paidMonth = rows.filter((r) => r.status === 'Paid' && (r.invoice_date || '').slice(0, 7) === thisMonth)
-    .reduce((a, r) => a + (r.amount_cents || 0), 0);
-  const unpaid = st.filter((x) => x.s.key !== 'paid');
-  const overdue = st.filter((x) => x.s.key === 'overdue');
-  const outstanding = unpaid.reduce((a, x) => a + (x.r.amount_cents || 0), 0);
+  const stAll = all.map((r) => ({ r, s: invStatus(r) }));
+  const unpaid = stAll.filter((x) => x.s.key !== 'paid');
+  const overdue = stAll.filter((x) => x.s.key === 'overdue');
+  const yearSpend = rows.reduce((a, r) => a + (r.amount_cents || 0), 0);
 
   const card = (tone, ico, label, value, sub) => `
-    <div class="mcard mcard-${tone}">
-      <div class="mcard-ico">${icon(ico)}</div>
-      <div class="mcard-body">
-        <div class="mcard-label">${label}</div>
-        <div class="mcard-value">${value}</div>
-        <div class="mcard-sub">${sub}</div>
-      </div>
-    </div>`;
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
 
   const cards = `<div class="mcards">
-    ${card('blue', 'invoices', 'Spend this month', money(spendMonth), `${rows.filter((r) => (r.invoice_date || '').slice(0, 7) === thisMonth).length} invoices`)}
-    ${card('amber', 'expirations', 'Outstanding', money(outstanding), unpaid.length ? `${unpaid.length} unpaid` : 'All settled')}
+    ${card('blue', 'invoices', 'Spend this month', money(spendMonth), MONTH_NAMES[Number(thisMonth.slice(5, 7)) - 1] + ' ' + thisMonth.slice(0, 4))}
+    ${card('amber', 'expirations', 'Outstanding', money(unpaid.reduce((a, x) => a + (x.r.amount_cents || 0), 0)), unpaid.length ? `${unpaid.length} unpaid` : 'All settled')}
     ${card('red', 'incidents', 'Overdue', String(overdue.length), overdue.length ? esc(vName.get(Number(overdue[0].r.vendor_id)) || 'Unknown vendor') : 'Nothing past due')}
-    ${card('green', 'policy', 'Paid this month', money(paidMonth), paidMonth ? 'Settled' : 'Nothing yet')}
+    ${card('green', 'payroll', `Spend in ${esc(year)}`, money(yearSpend), `${rows.length} invoice${rows.length === 1 ? '' : 's'}`)}
   </div>`;
+
+  // --- month groups -------------------------------------------------------
+  const byMonth = new Map();
+  for (const r of rows) {
+    const m = (r.invoice_date || '').slice(0, 7) || 'undated';
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(r);
+  }
+  const months = [...byMonth.keys()].sort().reverse();
+
+  const monthBlocks = months.map((m, idx) => {
+    const list = byMonth.get(m).slice().sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || '') || b.id - a.id);
+    const sts = list.map((r) => invStatus(r));
+    const paid = sts.filter((s) => s.key === 'paid').length;
+    const over = sts.filter((s) => s.key === 'overdue').length;
+    const out = list.length - paid;
+    const total = list.reduce((a, r) => a + (r.amount_cents || 0), 0);
+    const label = m === 'undated' ? 'No date' : `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+
+    const items = list.map((r) => {
+      const s = invStatus(r);
+      const c = invCat(r.category || 'Other');
+      const ai = aiBadge(r);
+      const vn = vName.get(Number(r.vendor_id)) || 'Unknown vendor';
+      const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
+      const search = [vn, r.invoice_number, r.category, r.notes, ((r.amount_cents || 0) / 100).toFixed(2)]
+        .filter(Boolean).join(' ').toLowerCase();
+      return `
+      <details class="inv" data-inv data-id="${r.id}" data-status="${s.key}" data-cat="${esc(r.category || 'Other')}"
+        data-vendor="${esc(String(r.vendor_id || ''))}" data-amt="${(r.amount_cents || 0) / 100}"
+        data-date="${esc(r.invoice_date || '')}" data-due="${esc(r.due_date || '')}"
+        data-vname="${esc(vn.toLowerCase())}" data-added="${esc(String(r.created_at || ''))}"
+        data-search="${esc(search)}" style="--c:${c.color};--ct:${c.tint}">
+        <summary class="inv-row">
+          <span class="inv-dot"></span>
+          <span class="inv-vendor">${esc(vn)}</span>
+          <span class="inv-cat">${esc(r.category || 'Other')}</span>
+          <span class="tstatus ${s.cls} inv-st">${esc(s.label)}</span>
+          <span class="inv-date">${esc(niceDate(r.invoice_date))}</span>
+          <span class="inv-amt">${money(r.amount_cents || 0)}</span>
+        </summary>
+        <div class="inv-lazy"><div class="inv-spin"></div></div>
+      </details>`;
+    }).join('');
+
+    // Only the newest month opens by default — an accountant scrolling 2024
+    // wants the headline figures, not 60 rows they have to scroll past.
+    return `
+      <details class="mgroup" data-month${idx === 0 ? ' open' : ''}>
+        <summary class="mgroup-h">
+          <span class="mgroup-chev">▸</span>
+          <span class="mgroup-name">${esc(label)}</span>
+          <span class="mgroup-stats">
+            <span>${list.length} invoice${list.length === 1 ? '' : 's'}</span>
+            <span class="mg-total">${money(total)}</span>
+            <span class="mg-paid">${paid} paid</span>
+            ${out ? `<span class="mg-out">${out} outstanding</span>` : ''}
+            ${over ? `<span class="mg-over">${over} overdue</span>` : ''}
+          </span>
+        </summary>
+        <div class="invs">${items}</div>
+      </details>`;
+  }).join('');
 
   const usedCats = [...new Set(rows.map((r) => r.category || 'Other'))];
-  const toolbar = `<div class="toolbar2">
-    <div class="searchbox">${icon('search')}
-      <input id="isearch" type="search" placeholder="Search vendor, number, notes…" autocomplete="off"></div>
+  const usedVendors = vendors.filter((v) => rows.some((r) => Number(r.vendor_id) === Number(v.id)));
+
+  const toolbar = `
+    <div class="yearbar">
+      ${years.map((y) => `<a class="ytab${y === year ? ' on' : ''}" href="/c/invoices?y=${y}">${y}</a>`).join('')}
+      ${years.length ? '' : `<span class="ytab on">${esc(year)}</span>`}
+    </div>
+    <div class="toolbar2">
+      <div class="searchbox">${icon('search')}
+        <input id="isearch" type="search" placeholder="Vendor, invoice #, notes, amount…" autocomplete="off"></div>
+      <select id="isort" class="minisel">
+        <option value="date-desc">Newest first</option>
+        <option value="date-asc">Oldest first</option>
+        <option value="amt-desc">Amount, high to low</option>
+        <option value="amt-asc">Amount, low to high</option>
+        <option value="vendor">Vendor A–Z</option>
+        <option value="due">Due date</option>
+        <option value="added">Recently uploaded</option>
+      </select>
+      <select id="ivendor" class="minisel">
+        <option value="">All vendors</option>
+        ${usedVendors.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
+      </select>
+      <select id="iamt" class="minisel">
+        <option value="">Any amount</option>
+        <option value="0-100">Under $100</option>
+        <option value="100-500">$100 – $500</option>
+        <option value="500-1000">$500 – $1,000</option>
+        <option value="1000-999999">Over $1,000</option>
+      </select>
+    </div>
     <div class="fchips">
       <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
-      <button class="fchip" data-f="status" data-v="unpaid" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Unpaid<span class="fcount">${unpaid.length}</span></button>
-      <button class="fchip" data-f="status" data-v="overdue" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Overdue<span class="fcount">${overdue.length}</span></button>
-      <button class="fchip" data-f="status" data-v="paid" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Paid<span class="fcount">${rows.length - unpaid.length}</span></button>
-      ${usedCats.map((c) => { const cc = invCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}<span class="fcount">${rows.filter((r) => (r.category || 'Other') === c).length}</span></button>`; }).join('')}
-    </div>
-  </div>`;
-
-  const list = rows.length ? `<div class="igrid">${st.map(({ r, s }) => {
-    const c = invCat(r.category || 'Other');
-    const vn = vName.get(Number(r.vendor_id)) || 'Unknown vendor';
-    const search = [vn, r.invoice_number, r.category, r.notes].filter(Boolean).join(' ').toLowerCase();
-    const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
-    return `
-    <article class="icard" data-inv data-status="${s.key}" data-cat="${esc(r.category || 'Other')}" data-search="${esc(search)}" style="--c:${c.color};--ct:${c.tint}">
-      <div class="icard-top">
-        <a class="ithumb${r.file ? '' : ' ithumb-none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''} title="${r.file ? 'Open the original' : 'No file attached'}">
-          ${isImg ? `<img src="/uploads/${esc(r.file)}" alt="">` : icon(r.file ? 'invoices' : 'documents')}
-        </a>
-        <div class="icard-head">
-          <a class="icard-vendor" href="/c/invoices/${r.id}">${esc(vn)}</a>
-          <div class="icard-meta"><span class="icat" style="color:${c.color}">${esc(r.category || 'Other')}</span>${r.invoice_number ? ` · #${esc(r.invoice_number)}` : ''}</div>
-        </div>
-        <div class="icard-amt">
-          <div class="iamt">${money(r.amount_cents || 0)}</div>
-          ${r.tax_cents ? `<div class="iamt-sub">incl. ${money(r.tax_cents)} tax</div>` : ''}
-        </div>
-      </div>
-      <div class="icard-foot">
-        <span class="tstatus ${s.cls}">${esc(s.label)}</span>
-        <span class="idates">${esc(niceDate(r.invoice_date))}${r.due_date ? ` → due ${esc(niceDate(r.due_date))}` : ''}</span>
-        <span class="iacts">
-          ${r.status === 'Paid'
-            ? `<form method="post" action="/c/invoices/${r.id}/status" style="margin:0"><input type="hidden" name="status" value="Unpaid"><button class="link" type="submit">Mark unpaid</button></form>`
-            : `<form method="post" action="/c/invoices/${r.id}/status" style="margin:0"><input type="hidden" name="status" value="Paid"><button class="link" type="submit">Mark paid</button></form>`}
-          <a href="/c/invoices/${r.id}/edit">Edit</a>
-        </span>
-      </div>
-    </article>`;
-  }).join('')}</div>
-  <div class="empty2" id="inone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>`
-  : `<div class="upload-hero">
-      <div class="uh-ico">${icon('invoices')}</div>
-      <div class="uh-t">No invoices yet</div>
-      <div class="uh-s">Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.</div>
-      <button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>
-      <div class="uh-ways"><span>📷 Take a photo</span><span>📄 Upload a PDF</span><span>📁 Drag &amp; drop</span></div>
+      <button class="fchip" data-f="status" data-v="unpaid" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Unpaid</button>
+      <button class="fchip" data-f="status" data-v="overdue" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Overdue</button>
+      <button class="fchip" data-f="status" data-v="paid" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Paid</button>
+      ${usedCats.map((c) => { const cc = invCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}</button>`; }).join('')}
     </div>`;
+
+  const body = rows.length ? monthBlocks : (all.length
+    ? `<div class="empty2"><div class="empty2-t">No invoices in ${esc(year)}</div><div class="empty2-s">Pick another year above.</div></div>`
+    : `<div class="upload-hero">
+        <div class="uh-ico">${icon('invoices')}</div>
+        <div class="uh-t">No invoices yet</div>
+        <div class="uh-s">Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.</div>
+        <button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>
+        <div class="uh-ways"><span>📷 Take a photo</span><span>📄 Upload a PDF</span><span>📁 Drag &amp; drop</span></div>
+      </div>`);
 
   res.send(layout('Invoices', `
     ${flash(req)}
@@ -3057,26 +3179,67 @@ app.get('/c/invoices', (req, res) => {
         <p class="phead-s">Photograph or drop an invoice — it reads the details for you.</p></div>
       <button class="btn btn-primary" type="button" onclick="invDrawer(true)">＋ Upload invoice</button>
     </div>
-    ${rows.length ? cards + toolbar : ''}
-    ${list}
+    ${all.length ? cards : ''}
+    ${all.length ? toolbar : ''}
+    ${body}
+    <div class="empty2" id="inone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>
     ${invoiceDrawer(vendors, today)}
     <script>
+      // Filters combine, and sorting reorders within each month rather than
+      // flattening the grouping — the month totals are the point of the page.
       (function () {
-        var q = '', mode = 'all', val = '';
+        var q = '', mode = 'all', val = '', vendor = '', amt = '';
+        function pass(el) {
+          if (mode === 'status' && el.getAttribute('data-status') !== val) return false;
+          if (mode === 'cat' && el.getAttribute('data-cat') !== val) return false;
+          if (vendor && el.getAttribute('data-vendor') !== vendor) return false;
+          if (amt) {
+            var a = parseFloat(el.getAttribute('data-amt')) || 0, p = amt.split('-');
+            if (a < parseFloat(p[0]) || a > parseFloat(p[1])) return false;
+          }
+          if (q && el.getAttribute('data-search').indexOf(q) === -1) return false;
+          return true;
+        }
         function apply() {
           var shown = 0;
-          document.querySelectorAll('[data-inv]').forEach(function (el) {
-            var ok = mode === 'all'
-              || (mode === 'status' && el.getAttribute('data-status') === val)
-              || (mode === 'cat' && el.getAttribute('data-cat') === val);
-            if (ok && q) ok = el.getAttribute('data-search').indexOf(q) !== -1;
-            el.style.display = ok ? '' : 'none';
-            if (ok) shown++;
+          document.querySelectorAll('[data-month]').forEach(function (g) {
+            var n = 0;
+            g.querySelectorAll('[data-inv]').forEach(function (el) {
+              var ok = pass(el); el.style.display = ok ? '' : 'none'; if (ok) { n++; shown++; }
+            });
+            g.style.display = n ? '' : 'none';
+            // Anything narrowed down is worth showing straight away.
+            if (n && (q || mode !== 'all' || vendor || amt)) g.open = true;
           });
-          var n = document.getElementById('inone'); if (n) n.style.display = shown ? 'none' : '';
+          var none = document.getElementById('inone');
+          if (none) none.style.display = shown ? 'none' : '';
+        }
+        function sortNow(how) {
+          document.querySelectorAll('[data-month] .invs').forEach(function (box) {
+            var items = [].slice.call(box.querySelectorAll('[data-inv]'));
+            items.sort(function (a, b) {
+              var A = function (k) { return a.getAttribute(k) || ''; }, B = function (k) { return b.getAttribute(k) || ''; };
+              switch (how) {
+                case 'date-asc': return A('data-date').localeCompare(B('data-date'));
+                case 'amt-desc': return parseFloat(B('data-amt')) - parseFloat(A('data-amt'));
+                case 'amt-asc': return parseFloat(A('data-amt')) - parseFloat(B('data-amt'));
+                case 'vendor': return A('data-vname').localeCompare(B('data-vname'));
+                case 'due': return (A('data-due') || '9999').localeCompare(B('data-due') || '9999');
+                case 'added': return B('data-added').localeCompare(A('data-added'));
+                default: return B('data-date').localeCompare(A('data-date'));
+              }
+            });
+            items.forEach(function (el) { box.appendChild(el); });
+          });
         }
         var si = document.getElementById('isearch');
         if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        var sv = document.getElementById('ivendor');
+        if (sv) sv.addEventListener('change', function () { vendor = this.value; apply(); });
+        var sa = document.getElementById('iamt');
+        if (sa) sa.addEventListener('change', function () { amt = this.value; apply(); });
+        var so = document.getElementById('isort');
+        if (so) so.addEventListener('change', function () { sortNow(this.value); });
         document.querySelectorAll('.fchip').forEach(function (b) {
           b.addEventListener('click', function () {
             document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
@@ -3085,6 +3248,18 @@ app.get('/c/invoices', (req, res) => {
           });
         });
       })();
+      // Detail is fetched the first time a row opens, then kept.
+      document.addEventListener('toggle', function (e) {
+        var el = e.target;
+        if (!el.matches || !el.matches('[data-inv]') || !el.open) return;
+        var box = el.querySelector('.inv-lazy');
+        if (!box || box.dataset.loaded) return;
+        box.dataset.loaded = '1';
+        fetch('/c/invoices/' + el.getAttribute('data-id') + '/panel')
+          .then(function (r) { return r.text(); })
+          .then(function (h) { box.outerHTML = h; })
+          .catch(function () { box.innerHTML = '<div class="panel-empty">Could not load that invoice.</div>'; });
+      }, true);
     </script>
     ${invoiceDrawerScript()}`));
 });
@@ -3134,6 +3309,9 @@ function invoiceDrawer(vendors, today) {
       <form method="post" action="/c/invoices" enctype="multipart/form-data" class="drawer-b inv-hide" id="inv-review">
         <div class="ai-note inv-hide" id="inv-ai-note"></div>
         <input type="hidden" name="upload_token" id="inv-token">
+        <input type="hidden" name="ai_status" id="inv-ai-status" value="manual">
+        <input type="hidden" name="ai_confidence" id="inv-ai-conf" value="">
+        <input type="hidden" name="ai_snapshot" id="inv-ai-snap" value="">
         <label class="fld">Vendor
           <select name="vendor_id" id="inv-vendor">
             <option value="">— choose —</option>
@@ -3279,6 +3457,11 @@ function invoiceDrawerScript() {
       chk.classList.remove('inv-hide');
     } else { chk.classList.add('inv-hide'); }
 
+    document.getElementById('inv-ai-status').value = 'ai';
+    document.getElementById('inv-ai-conf').value = d.confidence || '';
+    // Snapshot what the AI said, so the save can tell whether you changed it.
+    document.getElementById('inv-ai-snap').value = [d.total, d.subtotal, d.tax, d.vendor_id || '', d.category || ''].join('|');
+
     var n = document.getElementById('inv-ai-note');
     n.className = 'ai-note' + (d.confidence === 'low' ? ' ai-note-bad' : d.confidence === 'medium' ? ' ai-note-warn' : '');
     n.textContent = d.confidence === 'low'
@@ -3316,6 +3499,20 @@ app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
 app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
   const total = toCents(req.body.amount);
   if (!total) return res.redirect('/c/invoices?err=1&msg=' + encodeURIComponent('An invoice needs a total.'));
+
+  // Read-and-kept and read-then-corrected are different states: the first still
+  // wants a glance, the second has already had one.
+  let aiStatus = req.body.ai_status === 'ai' ? 'ai' : 'manual';
+  if (aiStatus === 'ai') {
+    const now = [req.body.amount, req.body.subtotal, req.body.tax, req.body.vendor_id || '', req.body.category || ''].join('|');
+    const wasNums = String(req.body.ai_snapshot || '').split('|');
+    const nowNums = now.split('|');
+    const changed = nowNums.some((v, i) => {
+      const a = parseFloat(v), b = parseFloat(wasNums[i]);
+      return (Number.isFinite(a) && Number.isFinite(b)) ? Math.abs(a - b) > 0.005 : String(v) !== String(wasNums[i] || '');
+    });
+    if (changed) aiStatus = 'ai_edited';
+  }
   invQ.add.run({
     invoice_date: String(req.body.invoice_date || '').slice(0, 10) || null,
     due_date: String(req.body.due_date || '').slice(0, 10) || null,
@@ -3328,6 +3525,8 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
     status: req.body.status === 'Paid' ? 'Paid' : 'Unpaid',
     file: req.file ? req.file.filename : null,
     notes: String(req.body.notes || '').trim() || null,
+    ai_status: aiStatus,
+    ai_confidence: String(req.body.ai_confidence || '').trim() || null,
   });
   res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
 });
