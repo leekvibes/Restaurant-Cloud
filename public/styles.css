@@ -727,3 +727,14 @@ body.drawer-open .drawer { transform: translateX(0); visibility: visible; }
 .flash > span { flex: 1; }
 .flash-undo { margin: 0; }
 .flash-undo .link { color: inherit; text-decoration: underline; font-weight: 700; }
+
+/* --- per-person send, on each results card --------------------------------
+   The address is shown, not hidden: a wrong address is the usual reason one
+   person didn't get theirs, and you can't spot a typo you can't see.        */
+.card-send { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.send-to { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.send-acts { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.send-acts form { display: inline; }
+.card-send-none { color: var(--danger); font-weight: 600; }
+.card-send-none .btn { flex-shrink: 0; }

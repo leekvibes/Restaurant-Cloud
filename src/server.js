@@ -722,13 +722,39 @@ app.get('/shifts/:id/results', (req, res) => {
   const r = runShift(inp, policyForShift(sh));
   const { warn, notes } = shiftWarnings(sh, inp, r);
 
+
+  // Per-person send. Someone not receiving theirs shouldn't mean re-sending to
+  // everybody — and showing the address inline is how you spot the typo that
+  // caused it in the first place.
+  const emailOf = new Map([...inp.servers, ...inp.support].map((p) => [p.employeeId, p.email]));
+  const sendRow = (empId, name) => {
+    const to = emailOf.get(empId);
+    if (!to) {
+      return `<div class="card-send card-send-none">
+        <span title="Add an address under Staff">No email on file</span>
+        <a class="btn btn-sm" href="/employees">Add it</a>
+      </div>`;
+    }
+    return `<div class="card-send">
+      <span class="send-to" title="${esc(to)}">${esc(to)}</span>
+      <span class="send-acts">
+        <a class="link" href="/shifts/${sh.id}/email/${empId}" target="_blank">Preview</a>
+        <form method="post" action="/shifts/${sh.id}/send-one" style="margin:0"
+              onsubmit="return confirm('Send ${esc(name).replace(/'/g, "\\'")} their summary again?')">
+          <input type="hidden" name="employee_id" value="${empId}">
+          <button class="link" type="submit">Send</button>
+        </form>
+      </span>
+    </div>`;
+  };
+
   const serverCards = r.servers.map((p) => `
     <div class="card">
       <div class="card-head"><strong>${esc(p.name)}</strong><span class="pill">server · ${p.hours}h</span></div>
       <div class="kv"><span>Total tips</span><b>${money(p.totalTips)}</b></div>
       <div class="kv sub"><span>tip-out</span><span>-${money(p.tipoutTotal)}</span></div>
       <div class="kv total"><span>Keeps</span><b class="pos">${money(p.tipsKept)}</b></div>
-      <a class="view-email" href="/shifts/${sh.id}/email/${p.employeeId}" target="_blank">View email →</a>
+      ${sendRow(p.employeeId, p.name)}
     </div>`).join('');
 
   const poolLbl = { weekly_cash: 'Pool (weekly cash)', paycheck: 'Pool (paycheck)', nightly_cash: 'Pool (cash tonight)' };
@@ -741,7 +767,7 @@ app.get('/shifts/:id/results', (req, res) => {
       ${p.tipShare ? `<div class="kv"><span>Tip-out (paycheck)</span><b>${money(p.tipShare)}</b></div>` : ''}
       ${poolLines}
       <div class="kv total"><span>Total</span><b class="pos">${money(p.tipShare + p.poolShare)}</b></div>
-      <a class="view-email" href="/shifts/${sh.id}/email/${p.employeeId}" target="_blank">View email →</a>
+      ${sendRow(p.employeeId, p.name)}
     </div>`;
   }).join('');
 
@@ -789,6 +815,26 @@ function managerEmail() {
   const mgr = q.allEmployees.all().find((e) => e.role === 'manager' && e.email);
   return (mgr && mgr.email) || process.env.MAIL_FROM || process.env.GMAIL_USER || null;
 }
+
+app.post('/shifts/:id/send-one', async (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  const empId = Number(req.body.employee_id);
+  const back = (msg, err) => res.redirect(`/shifts/${sh.id}/results?msg=` + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+
+  const inp = shiftInputs(sh.id);
+  const r = runShift(inp, policyForShift(sh));
+  const one = buildEmails(r, { date: sh.date, daypart: sh.daypart }, peopleMap(inp))
+    .find((e) => e.employeeId === empId);
+  if (!one) return back('That person is not on this shift.', true);
+  if (!one.to) return back(`${one.name} has no email address. Add one under Staff, then send again.`, true);
+
+  const out = await sendEmails([one]);
+  if (out.errors.length) return back(`Could not send to ${one.name}: ${out.errors[0]}`, true);
+  return back(out.sent
+    ? `Sent ${one.name}'s summary to ${one.to}.`
+    : `Mail isn't connected, so ${one.name}'s email was written as a preview file instead.`, !out.sent);
+});
 
 app.post('/shifts/:id/send', async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
