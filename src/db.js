@@ -172,6 +172,39 @@ const users = {
   del: db.prepare('DELETE FROM users WHERE id = ?'),
 };
 
+// ---- Tip submissions ----------------------------------------------------
+// Append-only record of every submission and manager edit. The work and
+// server_sales rows only ever hold the CURRENT figures — someone resubmitting
+// to fix a typo overwrote what they first said, and there was no way to see
+// that a correction had even happened, let alone what changed.
+db.exec(`
+CREATE TABLE IF NOT EXISTS tip_submissions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  shift_id     INTEGER NOT NULL,
+  employee_id  INTEGER NOT NULL,
+  role         TEXT,
+  cash_tips_cents INTEGER,
+  card_tips_cents INTEGER,
+  food_cents      INTEGER,
+  coffee_cents    INTEGER,
+  alcohol_cents   INTEGER,
+  note         TEXT,
+  source       TEXT NOT NULL DEFAULT 'staff',   -- staff | manager
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS tip_sub_shift ON tip_submissions (shift_id, created_at DESC);
+`);
+
+const submissions = {
+  add: db.prepare(`INSERT INTO tip_submissions
+    (shift_id, employee_id, role, cash_tips_cents, card_tips_cents, food_cents, coffee_cents, alcohol_cents, note, source)
+    VALUES (@shift_id, @employee_id, @role, @cash_tips_cents, @card_tips_cents, @food_cents, @coffee_cents, @alcohol_cents, @note, @source)`),
+  forShift: db.prepare(`SELECT ts.*, e.name FROM tip_submissions ts
+                        JOIN employees e ON e.id = ts.employee_id
+                        WHERE ts.shift_id = ? ORDER BY ts.created_at DESC, ts.id DESC`),
+  countForShift: db.prepare('SELECT COUNT(*) n FROM tip_submissions WHERE shift_id = ?'),
+};
+
 // ---- Employees ----------------------------------------------------------
 const q = {
   allEmployees: db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY role, name'),
@@ -228,6 +261,10 @@ const s = {
 const deleteShiftTx = db.transaction((shiftId) => {
   db.prepare('DELETE FROM server_sales WHERE shift_id = ?').run(shiftId);
   db.prepare('DELETE FROM work WHERE shift_id = ?').run(shiftId);
+  // The submission log has no foreign key (it deliberately outlives edits to
+  // work/server_sales), so it has to be cleared explicitly or a deleted shift
+  // leaves its history orphaned behind it.
+  db.prepare('DELETE FROM tip_submissions WHERE shift_id = ?').run(shiftId);
   db.prepare('DELETE FROM shifts WHERE id = ?').run(shiftId);
 });
 s.deleteShift = deleteShiftTx;
@@ -366,4 +403,4 @@ function shiftInputs(shiftId) {
   return { servers, support, pool };
 }
 
-module.exports = { db, q, s, w, users, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };
+module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };

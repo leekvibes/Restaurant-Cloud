@@ -5,7 +5,7 @@ try { process.loadEnvFile(require('path').join(__dirname, '..', '.env')); } catc
 
 const path = require('path');
 const express = require('express');
-const { db, q, s, w, users, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
+const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
@@ -475,6 +475,58 @@ function notesBlock(notes) {
     </div>`;
 }
 
+/**
+ * Every submission for a shift, newest first. The most recent per person is
+ * what the shift currently holds; earlier ones are marked superseded, since
+ * the point of keeping them is seeing what someone said BEFORE they corrected
+ * it — and whether the correction was theirs or yours.
+ */
+function submissionsPanel(shiftId) {
+  const rows = submissions.forShift.all(shiftId);
+  if (!rows.length) {
+    return `
+    <h2>Submissions</h2>
+    <p class="muted">Nothing submitted yet. Every entry staff make on the tips page — and every change you make here — is recorded, so a corrected figure never hides what it replaced.</p>`;
+  }
+  const seen = new Set();
+  const money0 = (c) => (c === null || c === undefined ? null : money(c));
+
+  const items = rows.map((r) => {
+    const key = r.employee_id;
+    const current = !seen.has(key);
+    seen.add(key);
+    const when = String(r.created_at || '').replace('T', ' ').slice(0, 16);
+    const figures = [
+      ['Cash', money0(r.cash_tips_cents)], ['Card', money0(r.card_tips_cents)],
+      ['Food', money0(r.food_cents)], ['Coffee', money0(r.coffee_cents)], ['Alcohol', money0(r.alcohol_cents)],
+    ].filter(([, v]) => v !== null);
+
+    return `
+    <details class="sub${current ? '' : ' sub-old'}">
+      <summary>
+        <span class="sub-dot ${r.source === 'manager' ? 'sub-mgr' : 'sub-staff'}"></span>
+        <span class="sub-who">${esc(r.name)}</span>
+        <span class="sub-role">${esc(r.role || '')}</span>
+        <span class="sub-tag">${r.source === 'manager' ? 'you edited' : 'submitted'}</span>
+        ${current ? '<span class="sub-cur">current</span>' : '<span class="sub-sup">superseded</span>'}
+        <span class="sub-when">${esc(when)}</span>
+      </summary>
+      <div class="sub-body">
+        ${figures.length
+          ? `<div class="sub-figs">${figures.map(([k, v]) => `<div class="sub-fig"><span>${k}</span><b>${v}</b></div>`).join('')}</div>`
+          : '<div class="panel-empty">No figures in this entry.</div>'}
+        ${r.note ? `<div class="sub-note">${esc(r.note)}</div>` : ''}
+      </div>
+    </details>`;
+  }).join('');
+
+  const dupes = rows.length - seen.size;
+  return `
+    <h2>Submissions <span class="sec-n">${rows.length}</span></h2>
+    <p class="muted">Newest first. ${dupes ? `<b>${dupes}</b> ${dupes === 1 ? 'entry was' : 'entries were'} later replaced — open one to see what it said.` : 'Nothing has been resubmitted.'}</p>
+    <div class="subs">${items}</div>`;
+}
+
 app.get('/shifts/:id', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
@@ -587,6 +639,8 @@ app.get('/shifts/:id', (req, res) => {
 
     ${notesBlock(w.notesForShift.all(sh.id))}
 
+    ${submissionsPanel(sh.id)}
+
     <h2>Shared tip pool</h2>
     <p class="muted">What <b>you</b> counted. Anything support staff reported on the tips page is added to these automatically — the pool below totals ${money(toCents(inp.pool.jar) + inp.support.reduce((a, p) => a + toCents(p.cashTips), 0))} cash and ${money(toCents(inp.pool.togoCard) + inp.support.reduce((a, p) => a + toCents(p.cardTips), 0))} card. How each is paid out is set on the <a href="/policy">tip-out policy</a>.</p>
     <form method="post" action="/shifts/${sh.id}/pool" class="card form grid">
@@ -683,6 +737,25 @@ function writeTipsIfGiven(shiftId, empId, body) {
   }
 }
 
+/**
+ * Record a manager edit alongside staff submissions, so the history answers
+ * "who changed this" and not just "what did staff say". Only logged when a
+ * figure was actually supplied — saving hours alone isn't a tip correction.
+ */
+function logManagerEdit(shiftId, empId, role, body) {
+  const given = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
+  if (!['cash_tips', 'card_tips', 'food', 'coffee', 'alcohol'].some(given)) return;
+  submissions.add.run({
+    shift_id: shiftId, employee_id: empId, role: role || null,
+    cash_tips_cents: given('cash_tips') ? toCents(body.cash_tips) : null,
+    card_tips_cents: given('card_tips') ? toCents(body.card_tips) : null,
+    food_cents: given('food') ? toCents(body.food) : null,
+    coffee_cents: given('coffee') ? toCents(body.coffee) : null,
+    alcohol_cents: given('alcohol') ? toCents(body.alcohol) : null,
+    note: null, source: 'manager',
+  });
+}
+
 app.post('/shifts/:id/server', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
@@ -694,6 +767,7 @@ app.post('/shifts/:id/server', (req, res) => {
     alcohol_cents: toCents(req.body.alcohol), card_tips_cents: toCents(req.body.card_tips),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
+  logManagerEdit(sh.id, empId, 'server', req.body);
   res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Server saved.'));
 });
 
@@ -706,6 +780,7 @@ app.post('/shifts/:id/support', (req, res) => {
     role: req.body.role, hours: Number(req.body.hours) || 0, hourly_rate_cents: toCents(req.body.wage),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
+  logManagerEdit(sh.id, empId, req.body.role, req.body);
   res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Support saved.'));
 });
 
@@ -1244,6 +1319,19 @@ app.post('/tips', (req, res) => {
       salesNote = (toCents(req.body.food) + toCents(req.body.coffee) + toCents(req.body.alcohol)) / 100;
     }
   }
+
+  // Log it before redirecting. Append-only, so a resubmission to fix a typo
+  // leaves both the original and the correction visible.
+  submissions.add.run({
+    shift_id: sh.id, employee_id: emp.id, role: position,
+    cash_tips_cents: cash,
+    card_tips_cents: cardRaw === '' ? null : toCents(cardRaw),
+    food_cents: position === 'server' ? toCents(req.body.food) : null,
+    coffee_cents: position === 'server' ? toCents(req.body.coffee) : null,
+    alcohol_cents: position === 'server' ? toCents(req.body.alcohol) : null,
+    note: String(req.body.note || '').trim() || null,
+    source: 'staff',
+  });
 
   const p = new URLSearchParams({
     done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
