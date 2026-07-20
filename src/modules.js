@@ -53,8 +53,15 @@ const MODULES = [
     orderBy: 'invoice_date DESC, id DESC',
     fields: [
       { name: 'invoice_date', label: 'Date', type: 'date', list: true },
+      { name: 'due_date', label: 'Due date', type: 'date', list: true },
       { name: 'vendor_id', label: 'Vendor', type: 'select', list: true, options: vendorOptions },
-      { name: 'amount_cents', label: 'Amount', type: 'money', list: true },
+      { name: 'invoice_number', label: 'Invoice #', type: 'text' },
+      // Total INCLUDES tax — it's money actually paid, so it's what cost
+      // percentages should measure. Subtotal and tax are kept alongside it so
+      // the split is visible rather than buried in one figure.
+      { name: 'amount_cents', label: 'Total', type: 'money', list: true },
+      { name: 'subtotal_cents', label: 'Subtotal (before tax)', type: 'money' },
+      { name: 'tax_cents', label: 'Tax', type: 'money' },
       { name: 'category', label: 'Category', type: 'select', list: true,
         options: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Supplies', 'Repairs', 'Services', 'Other'] },
       { name: 'status', label: 'Status', type: 'select', list: true, options: ['Unpaid', 'Paid'] },

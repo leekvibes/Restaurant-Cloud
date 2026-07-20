@@ -14,7 +14,7 @@ const { mountModules, MODULES, expiringSoon } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales } = require('./reports');
-const { readReport } = require('./reader');
+const { readReport, readInvoice } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
 const multer = require('multer');
@@ -2664,6 +2664,414 @@ app.post('/c/recurring/:id/undo', (req, res) => {
   });
   res.redirect('/c/recurring?msg=' + encodeURIComponent(`Undone — ${row.name} is back to ${niceDate(req.query.d)}.`));
 });
+
+// ---------------------------------------------------------------------------
+// INVOICES
+// Built around capture, not data entry: photograph or drop an invoice, the AI
+// reads it, you check the numbers and save. Manual entry stays available, but
+// it's the fallback rather than the design.
+// ---------------------------------------------------------------------------
+const INV_CATEGORIES = {
+  Food:     { color: '#059669', tint: '#ecfdf5' },
+  Coffee:   { color: '#b45309', tint: '#fffbeb' },
+  Beverage: { color: '#0891b2', tint: '#ecfeff' },
+  Alcohol:  { color: '#7c3aed', tint: '#f5f3ff' },
+  Supplies: { color: '#2563eb', tint: '#eff6ff' },
+  Repairs:  { color: '#ea580c', tint: '#fff7ed' },
+  Services: { color: '#0d9488', tint: '#f0fdfa' },
+  Other:    { color: '#64748b', tint: '#f8fafc' },
+};
+const invCat = (c) => INV_CATEGORIES[c] || INV_CATEGORIES.Other;
+
+const invQ = {
+  all: db.prepare('SELECT * FROM m_invoices ORDER BY invoice_date DESC, id DESC'),
+  add: db.prepare(`INSERT INTO m_invoices
+    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, file, notes)
+    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @file, @notes)`),
+  vendors: db.prepare('SELECT id, name FROM m_vendors ORDER BY name'),
+  addVendor: db.prepare('INSERT INTO m_vendors (name) VALUES (?)'),
+};
+
+/**
+ * Unpaid + past due = Overdue. Derived rather than stored, so it can't go stale
+ * — a stored status would need something to sweep it every night.
+ */
+function invStatus(row) {
+  if (row.status === 'Paid') return { key: 'paid', label: 'Paid', cls: 's-done' };
+  const d = row.due_date ? Math.round((new Date(row.due_date + 'T00:00:00') - startOfToday()) / 86400000) : null;
+  if (d === null) return { key: 'unpaid', label: 'Unpaid', cls: 's-sched' };
+  if (d < 0) return { key: 'overdue', label: d === -1 ? '1 day overdue' : `${-d} days overdue`, cls: 's-over' };
+  if (d <= 7) return { key: 'due', label: d === 0 ? 'Due today' : `Due in ${d} days`, cls: 's-soon' };
+  return { key: 'unpaid', label: `Due ${niceDate(row.due_date)}`, cls: 's-sched' };
+}
+
+/** Match an extracted supplier name to a vendor you already have. */
+function matchVendor(name) {
+  const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const n = norm(name);
+  if (!n) return null;
+  const list = invQ.vendors.all();
+  return list.find((v) => norm(v.name) === n)
+    || list.find((v) => n.startsWith(norm(v.name)) || norm(v.name).startsWith(n))
+    || list.find((v) => n.includes(norm(v.name)) || norm(v.name).includes(n))
+    || null;
+}
+
+app.get('/c/invoices', (req, res) => {
+  const rows = invQ.all.all();
+  const vendors = invQ.vendors.all();
+  // Keyed by number: the vendor_id column is TEXT (the module schema builds
+  // selects as TEXT), and binding a JS number to it stores "1.0" rather than
+  // "1". Comparing as numbers works whatever shape a row was written in.
+  const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
+  const today = isoDate(startOfToday());
+  const thisMonth = today.slice(0, 7);
+  const st = rows.map((r) => ({ r, s: invStatus(r) }));
+
+  const spendMonth = rows.filter((r) => (r.invoice_date || '').slice(0, 7) === thisMonth)
+    .reduce((a, r) => a + (r.amount_cents || 0), 0);
+  const paidMonth = rows.filter((r) => r.status === 'Paid' && (r.invoice_date || '').slice(0, 7) === thisMonth)
+    .reduce((a, r) => a + (r.amount_cents || 0), 0);
+  const unpaid = st.filter((x) => x.s.key !== 'paid');
+  const overdue = st.filter((x) => x.s.key === 'overdue');
+  const outstanding = unpaid.reduce((a, x) => a + (x.r.amount_cents || 0), 0);
+
+  const card = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}">
+      <div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body">
+        <div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div>
+        <div class="mcard-sub">${sub}</div>
+      </div>
+    </div>`;
+
+  const cards = `<div class="mcards">
+    ${card('blue', 'invoices', 'Spend this month', money(spendMonth), `${rows.filter((r) => (r.invoice_date || '').slice(0, 7) === thisMonth).length} invoices`)}
+    ${card('amber', 'expirations', 'Outstanding', money(outstanding), unpaid.length ? `${unpaid.length} unpaid` : 'All settled')}
+    ${card('red', 'incidents', 'Overdue', String(overdue.length), overdue.length ? esc(vName.get(Number(overdue[0].r.vendor_id)) || 'Unknown vendor') : 'Nothing past due')}
+    ${card('green', 'policy', 'Paid this month', money(paidMonth), paidMonth ? 'Settled' : 'Nothing yet')}
+  </div>`;
+
+  const usedCats = [...new Set(rows.map((r) => r.category || 'Other'))];
+  const toolbar = `<div class="toolbar2">
+    <div class="searchbox">${icon('search')}
+      <input id="isearch" type="search" placeholder="Search vendor, number, notes…" autocomplete="off"></div>
+    <div class="fchips">
+      <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
+      <button class="fchip" data-f="status" data-v="unpaid" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Unpaid<span class="fcount">${unpaid.length}</span></button>
+      <button class="fchip" data-f="status" data-v="overdue" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Overdue<span class="fcount">${overdue.length}</span></button>
+      <button class="fchip" data-f="status" data-v="paid" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Paid<span class="fcount">${rows.length - unpaid.length}</span></button>
+      ${usedCats.map((c) => { const cc = invCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}<span class="fcount">${rows.filter((r) => (r.category || 'Other') === c).length}</span></button>`; }).join('')}
+    </div>
+  </div>`;
+
+  const list = rows.length ? `<div class="igrid">${st.map(({ r, s }) => {
+    const c = invCat(r.category || 'Other');
+    const vn = vName.get(Number(r.vendor_id)) || 'Unknown vendor';
+    const search = [vn, r.invoice_number, r.category, r.notes].filter(Boolean).join(' ').toLowerCase();
+    const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
+    return `
+    <article class="icard" data-inv data-status="${s.key}" data-cat="${esc(r.category || 'Other')}" data-search="${esc(search)}" style="--c:${c.color};--ct:${c.tint}">
+      <div class="icard-top">
+        <a class="ithumb${r.file ? '' : ' ithumb-none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''} title="${r.file ? 'Open the original' : 'No file attached'}">
+          ${isImg ? `<img src="/uploads/${esc(r.file)}" alt="">` : icon(r.file ? 'invoices' : 'documents')}
+        </a>
+        <div class="icard-head">
+          <a class="icard-vendor" href="/c/invoices/${r.id}">${esc(vn)}</a>
+          <div class="icard-meta"><span class="icat" style="color:${c.color}">${esc(r.category || 'Other')}</span>${r.invoice_number ? ` · #${esc(r.invoice_number)}` : ''}</div>
+        </div>
+        <div class="icard-amt">
+          <div class="iamt">${money(r.amount_cents || 0)}</div>
+          ${r.tax_cents ? `<div class="iamt-sub">incl. ${money(r.tax_cents)} tax</div>` : ''}
+        </div>
+      </div>
+      <div class="icard-foot">
+        <span class="tstatus ${s.cls}">${esc(s.label)}</span>
+        <span class="idates">${esc(niceDate(r.invoice_date))}${r.due_date ? ` → due ${esc(niceDate(r.due_date))}` : ''}</span>
+        <span class="iacts">
+          ${r.status === 'Paid'
+            ? `<form method="post" action="/c/invoices/${r.id}/status" style="margin:0"><input type="hidden" name="status" value="Unpaid"><button class="link" type="submit">Mark unpaid</button></form>`
+            : `<form method="post" action="/c/invoices/${r.id}/status" style="margin:0"><input type="hidden" name="status" value="Paid"><button class="link" type="submit">Mark paid</button></form>`}
+          <a href="/c/invoices/${r.id}/edit">Edit</a>
+        </span>
+      </div>
+    </article>`;
+  }).join('')}</div>
+  <div class="empty2" id="inone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>`
+  : `<div class="upload-hero">
+      <div class="uh-ico">${icon('invoices')}</div>
+      <div class="uh-t">No invoices yet</div>
+      <div class="uh-s">Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.</div>
+      <button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>
+      <div class="uh-ways"><span>📷 Take a photo</span><span>📄 Upload a PDF</span><span>📁 Drag &amp; drop</span></div>
+    </div>`;
+
+  res.send(layout('Invoices', `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t"><h1>Invoices</h1>
+        <p class="phead-s">Photograph or drop an invoice — it reads the details for you.</p></div>
+      <button class="btn btn-primary" type="button" onclick="invDrawer(true)">＋ Upload invoice</button>
+    </div>
+    ${rows.length ? cards + toolbar : ''}
+    ${list}
+    ${invoiceDrawer(vendors, today)}
+    <script>
+      (function () {
+        var q = '', mode = 'all', val = '';
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-inv]').forEach(function (el) {
+            var ok = mode === 'all'
+              || (mode === 'status' && el.getAttribute('data-status') === val)
+              || (mode === 'cat' && el.getAttribute('data-cat') === val);
+            if (ok && q) ok = el.getAttribute('data-search').indexOf(q) !== -1;
+            el.style.display = ok ? '' : 'none';
+            if (ok) shown++;
+          });
+          var n = document.getElementById('inone'); if (n) n.style.display = shown ? 'none' : '';
+        }
+        var si = document.getElementById('isearch');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        document.querySelectorAll('.fchip').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
+          });
+        });
+      })();
+    </script>
+    ${invoiceDrawerScript()}`));
+});
+
+const INV_CATS = Object.keys(INV_CATEGORIES);
+
+/** Upload → analysing → review. One drawer, three states. */
+function invoiceDrawer(vendors, today) {
+  return `
+    <div class="drawer-scrim" onclick="invDrawer(false)"></div>
+    <aside class="drawer drawer-wide" id="inv-drawer" aria-label="Upload invoice">
+      <div class="drawer-h">
+        <div><div class="drawer-t">Add an invoice</div><div class="drawer-s" id="inv-step-s">Drop it in and the details fill themselves.</div></div>
+        <button class="drawer-x" type="button" onclick="invDrawer(false)" aria-label="Close">✕</button>
+      </div>
+
+      <!-- 1. capture -->
+      <div class="drawer-b" id="inv-capture">
+        <div class="dropzone" id="inv-drop">
+          <div class="dz-ico">${icon('invoices')}</div>
+          <div class="dz-t">Drag an invoice here</div>
+          <div class="dz-s">Photo or PDF · several pages of one invoice is fine</div>
+          <div class="dz-btns">
+            <label class="btn btn-primary">📷 Take photo
+              <input type="file" accept="image/*" capture="environment" hidden onchange="invPick(this.files)"></label>
+            <label class="btn">📄 Choose file
+              <input type="file" accept="image/*,application/pdf" multiple hidden onchange="invPick(this.files)"></label>
+          </div>
+          ${process.env.ANTHROPIC_API_KEY ? '' : '<div class="dz-warn">Reading needs an ANTHROPIC_API_KEY in .env. You can still enter one by hand below.</div>'}
+        </div>
+        <button class="link dz-manual" type="button" onclick="invManual()">Or enter it by hand →</button>
+      </div>
+
+      <!-- 2. analysing -->
+      <div class="drawer-b inv-hide" id="inv-working">
+        <div class="analyse">
+          <div class="analyse-doc">
+            <div class="analyse-scan"></div>
+            ${icon('invoices')}
+          </div>
+          <div class="analyse-t">Reading the invoice…</div>
+          <div class="analyse-s" id="inv-working-s">Finding the vendor, dates and totals</div>
+        </div>
+      </div>
+
+      <!-- 3. review -->
+      <form method="post" action="/c/invoices" enctype="multipart/form-data" class="drawer-b inv-hide" id="inv-review">
+        <div class="ai-note inv-hide" id="inv-ai-note"></div>
+        <input type="hidden" name="upload_token" id="inv-token">
+        <label class="fld">Vendor
+          <select name="vendor_id" id="inv-vendor">
+            <option value="">— choose —</option>
+            ${vendors.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
+          </select>
+          <span class="fldhint inv-hide" id="inv-newvendor"></span>
+        </label>
+        <div class="fld-row">
+          <label class="fld">Invoice date <input name="invoice_date" id="inv-date" type="date" value="${today}"></label>
+          <label class="fld">Due date <input name="due_date" id="inv-due" type="date"></label>
+        </div>
+        <label class="fld">Invoice # <input name="invoice_number" id="inv-num" placeholder="Optional"></label>
+        <div class="fld-row3">
+          <label class="fld">Subtotal <input name="subtotal" id="inv-sub" type="number" step="0.01" placeholder="0.00"></label>
+          <label class="fld">Tax <input name="tax" id="inv-tax" type="number" step="0.01" placeholder="0.00"></label>
+          <label class="fld">Total <input name="amount" id="inv-total" type="number" step="0.01" placeholder="0.00" required></label>
+        </div>
+        <div class="totalcheck inv-hide" id="inv-check"></div>
+        <div class="fld-row">
+          <label class="fld">Category <select name="category" id="inv-cat">${INV_CATS.map((c) => `<option>${c}</option>`).join('')}</select></label>
+          <label class="fld">Status <select name="status" id="inv-status"><option>Unpaid</option><option>Paid</option></select></label>
+        </div>
+        <label class="fld">Notes <textarea name="notes" id="inv-notes" rows="2" placeholder="Optional"></textarea></label>
+        <input type="file" name="file" id="inv-file" hidden>
+        <div class="drawer-f">
+          <button class="btn btn-ghost" type="button" onclick="invBack()">Back</button>
+          <button class="btn btn-primary" type="submit">Save invoice</button>
+        </div>
+      </form>
+    </aside>`;
+}
+
+function invoiceDrawerScript() {
+  return `<script>
+  var invFiles = null;
+  function invShow(step) {
+    ['inv-capture', 'inv-working', 'inv-review'].forEach(function (id) {
+      document.getElementById(id).classList.toggle('inv-hide', id !== step);
+    });
+    var s = document.getElementById('inv-step-s');
+    s.textContent = step === 'inv-review' ? 'Check the numbers, then save.'
+      : step === 'inv-working' ? 'This takes a few seconds.'
+      : 'Drop it in and the details fill themselves.';
+  }
+  function invDrawer(open) {
+    document.body.classList.toggle('drawer-open', !!open);
+    if (open) invShow('inv-capture');
+  }
+  function invBack() { invShow('inv-capture'); }
+  function invManual() { document.getElementById('inv-ai-note').classList.add('inv-hide'); invShow('inv-review'); }
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') invDrawer(false); });
+
+  var dz = document.getElementById('inv-drop');
+  if (dz) {
+    ['dragenter', 'dragover'].forEach(function (t) {
+      dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.add('dz-over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (t) {
+      dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.remove('dz-over'); });
+    });
+    dz.addEventListener('drop', function (e) { invPick(e.dataTransfer.files); });
+  }
+
+  function invPick(files) {
+    if (!files || !files.length) return;
+    invFiles = files;
+    // Carry the actual file into the save, so the original stays attached to
+    // the record — the extraction is a convenience, the document is the proof.
+    var dt = new DataTransfer();
+    dt.items.add(files[0]);
+    document.getElementById('inv-file').files = dt.files;
+
+    invShow('inv-working');
+    var fd = new FormData();
+    for (var i = 0; i < files.length; i++) fd.append('scan', files[i]);
+    var msgs = ['Finding the vendor, dates and totals', 'Checking subtotal against tax', 'Working out the category'];
+    var mi = 0;
+    var tick = setInterval(function () {
+      mi = (mi + 1) % msgs.length;
+      document.getElementById('inv-working-s').textContent = msgs[mi];
+    }, 1600);
+
+    fetch('/c/invoices/read', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        clearInterval(tick);
+        if (d.error) { invFail(d.error); return; }
+        invFill(d);
+        invShow('inv-review');
+      })
+      .catch(function () { clearInterval(tick); invFail('Something went wrong reading that file.'); });
+  }
+
+  function invFail(msg) {
+    var n = document.getElementById('inv-ai-note');
+    n.className = 'ai-note ai-note-bad';
+    n.textContent = msg + ' Enter the details by hand below — the file is still attached.';
+    invShow('inv-review');
+  }
+
+  function invFill(d) {
+    var set = function (id, v) { if (v !== undefined && v !== null && v !== '') document.getElementById(id).value = v; };
+    set('inv-date', d.invoice_date); set('inv-due', d.due_date); set('inv-num', d.invoice_number);
+    set('inv-sub', d.subtotal); set('inv-tax', d.tax); set('inv-total', d.total);
+    set('inv-cat', d.category); set('inv-notes', d.notes);
+    if (d.vendor_id) document.getElementById('inv-vendor').value = d.vendor_id;
+
+    var nv = document.getElementById('inv-newvendor');
+    if (!d.vendor_id && d.vendor_name) {
+      nv.textContent = 'Read as "' + d.vendor_name + '" — no match in your vendor list, so pick one or add it under Vendors first.';
+      nv.classList.remove('inv-hide');
+    } else { nv.classList.add('inv-hide'); }
+
+    // Say when the parts don't add up, rather than presenting one confident
+    // total. Getting this wrong is silent, so it should never be silent.
+    var chk = document.getElementById('inv-check');
+    var sub = parseFloat(d.subtotal) || 0, tax = parseFloat(d.tax) || 0, tot = parseFloat(d.total) || 0;
+    if (sub && Math.abs((sub + tax) - tot) > 0.02) {
+      chk.textContent = 'Subtotal + tax = ' + (sub + tax).toFixed(2) + ', but the total reads ' + tot.toFixed(2) + '. Check which is right.';
+      chk.classList.remove('inv-hide');
+    } else { chk.classList.add('inv-hide'); }
+
+    var n = document.getElementById('inv-ai-note');
+    n.className = 'ai-note' + (d.confidence === 'low' ? ' ai-note-bad' : d.confidence === 'medium' ? ' ai-note-warn' : '');
+    n.textContent = d.confidence === 'low'
+      ? 'Read with low confidence — check every field before saving.'
+      : d.confidence === 'medium'
+      ? 'Read, but check the amounts.'
+      : 'Read it. Check the total, then save.';
+    n.classList.remove('inv-hide');
+  }
+  </script>`;
+}
+
+// The AI step: returns JSON for the drawer to fill in. Kept separate from the
+// save so a failed read never costs you the upload.
+const INV_UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
+const invoiceUpload = multer({
+  storage: multer.diskStorage({
+    destination: INV_UPLOAD_DIR,
+    filename: (rq, file, cb) => cb(null, crypto.randomUUID() + path.extname(file.originalname || '')),
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
+const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
+  try {
+    if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
+    const data = await readInvoice(req.files);
+    const match = matchVendor(data.vendor_name);
+    res.json({ ...data, vendor_id: match ? match.id : null, matched_vendor: match ? match.name : null });
+  } catch (e) {
+    res.json({ error: e.message || 'Could not read that invoice.' });
+  }
+});
+
+app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
+  const total = toCents(req.body.amount);
+  if (!total) return res.redirect('/c/invoices?err=1&msg=' + encodeURIComponent('An invoice needs a total.'));
+  invQ.add.run({
+    invoice_date: String(req.body.invoice_date || '').slice(0, 10) || null,
+    due_date: String(req.body.due_date || '').slice(0, 10) || null,
+    vendor_id: req.body.vendor_id ? String(Number(req.body.vendor_id)) : null,
+    invoice_number: String(req.body.invoice_number || '').trim() || null,
+    amount_cents: total,
+    subtotal_cents: toCents(req.body.subtotal),
+    tax_cents: toCents(req.body.tax),
+    category: INV_CATS.includes(req.body.category) ? req.body.category : 'Other',
+    status: req.body.status === 'Paid' ? 'Paid' : 'Unpaid',
+    file: req.file ? req.file.filename : null,
+    notes: String(req.body.notes || '').trim() || null,
+  });
+  res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
+});
+
+app.post('/c/invoices/:id/status', (req, res) => {
+  db.prepare('UPDATE m_invoices SET status = ? WHERE id = ?')
+    .run(req.body.status === 'Paid' ? 'Paid' : 'Unpaid', Number(req.params.id));
+  res.redirect('/c/invoices?msg=' + encodeURIComponent(`Marked ${req.body.status === 'Paid' ? 'paid' : 'unpaid'}.`));
+});
+
 
 mountModules(app);
 

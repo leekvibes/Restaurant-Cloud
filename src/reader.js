@@ -96,3 +96,101 @@ async function readReport(files) {
 }
 
 module.exports = { readReport, MODEL };
+
+// ---------------------------------------------------------------------------
+// INVOICE READER
+// Deliberately extracts subtotal, tax and total as three separate numbers. An
+// invoice shows several plausible totals — subtotal, tax, freight, deposits,
+// sometimes a previous balance and an "amount due" that differs from the
+// invoice total. Picking one silently is the failure that matters, because a
+// wrong total looks exactly as reasonable as a right one.
+// ---------------------------------------------------------------------------
+const INVOICE_SCHEMA = {
+  type: 'object',
+  properties: {
+    vendor_name: { type: 'string', description: 'Supplier name as printed, e.g. "Sysco Food Services"' },
+    invoice_number: { type: 'string' },
+    invoice_date: { type: 'string', description: 'YYYY-MM-DD' },
+    due_date: { type: 'string', description: 'YYYY-MM-DD, empty if not shown' },
+    subtotal: { type: 'number', description: 'Before tax. 0 if not shown.' },
+    tax: { type: 'number', description: '0 if none' },
+    total: { type: 'number', description: 'Final amount payable for THIS invoice, including tax' },
+    is_credit: { type: 'boolean', description: 'True for a credit memo / refund, where the total reduces what is owed' },
+    category: { type: 'string', enum: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Supplies', 'Repairs', 'Services', 'Other'] },
+    notes: { type: 'string', description: 'One short line: what was bought, or anything unusual like a handwritten adjustment' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low if the image is unclear or the totals are ambiguous' },
+  },
+  required: ['vendor_name', 'total', 'category', 'confidence'],
+  additionalProperties: false,
+};
+
+const INVOICE_PROMPT =
+  'This is a supplier invoice for a restaurant. Extract the fields exactly as printed — do not calculate or infer numbers that are not shown.\n' +
+  'TOTAL: the amount payable for THIS invoice including tax. If the document shows a previous balance or account balance, ignore it — we want this invoice only. ' +
+  'If "amount due" and "invoice total" differ, use the invoice total.\n' +
+  'Return money as plain numbers (1240.5), no currency symbols or commas. Use 0 for anything not shown, and "" for missing text.\n' +
+  'CATEGORY: pick from the list based on what was actually bought. Produce, meat, dry goods → Food. Coffee beans → Coffee. Soda, juice → Beverage. ' +
+  'Beer, wine, spirits → Alcohol. Paper goods, cleaning, to-go containers → Supplies. Repairs and maintenance → Repairs. Pest control, linen, services → Services.\n' +
+  'If the invoice is mixed, choose the category covering the largest share and say so in notes.\n' +
+  'CONFIDENCE: use "low" if the image is blurry or cut off, or if you had to choose between competing totals. Say why in notes.\n' +
+  'If several pages are provided they are one invoice — merge them.';
+
+/**
+ * @param {Array<{buffer:Buffer, mimetype:string}>} files  images and/or PDFs
+ */
+async function readInvoice(files) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    const e = new Error('No ANTHROPIC_API_KEY set — add one to .env to enable invoice reading.');
+    e.code = 'NO_KEY';
+    throw e;
+  }
+  const client = new Anthropic();
+  const content = files.map((f) => {
+    // PDFs go as documents, not images — the API reads them natively, which is
+    // far better than rasterising a page and hoping the small print survives.
+    if (/pdf/i.test(f.mimetype)) {
+      return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: f.buffer.toString('base64') } };
+    }
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: /png|webp|gif/.test(f.mimetype) ? f.mimetype : 'image/jpeg',
+        data: f.buffer.toString('base64'),
+      },
+    };
+  });
+
+  let resp;
+  try {
+    resp = await client.messages.create({
+      model: MODEL,
+      max_tokens: 2048,
+      output_config: { format: { type: 'json_schema', schema: INVOICE_SCHEMA } },
+      messages: [{ role: 'user', content: [...content, { type: 'text', text: INVOICE_PROMPT }] }],
+    });
+  } catch (apiErr) {
+    const status = apiErr.status;
+    const detail = apiErr.error?.error?.message || apiErr.message || 'unknown error';
+    if (status === 401) throw new Error('the API key was rejected. Check ANTHROPIC_API_KEY.');
+    if (status === 400 && /model/i.test(detail)) throw new Error(`the model "${MODEL}" rejected the request (${detail}).`);
+    if (status === 429) throw new Error('rate limited — wait a moment and try again.');
+    if (status === 413 || /too large/i.test(detail)) throw new Error('that file is too large. Try a photo instead of a scan, or one page at a time.');
+    throw new Error(detail);
+  }
+
+  const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error('Could not read that invoice — try a clearer photo, or enter it by hand.');
+  }
+  // A credit memo reduces what you owe, so it belongs in the ledger as negative.
+  if (data.is_credit) {
+    for (const k of ['subtotal', 'tax', 'total']) if (data[k] > 0) data[k] = -data[k];
+  }
+  return data;
+}
+
+module.exports.readInvoice = readInvoice;
