@@ -3000,8 +3000,31 @@ function invoiceDrawerScript() {
 
     var nv = document.getElementById('inv-newvendor');
     if (!d.vendor_id && d.vendor_name) {
-      nv.textContent = 'Read as "' + d.vendor_name + '" — no match in your vendor list, so pick one or add it under Vendors first.';
+      // Offer to create it right here — walking off to the Vendors page to add
+      // one would mean abandoning a half-finished invoice.
+      nv.innerHTML = 'Read as <b>' + d.vendor_name.replace(/[<>&]/g, '') + '</b>, which is not in your vendor list yet. ' +
+        '<button type="button" class="link" id="inv-addvendor">Add it as a vendor</button>';
       nv.classList.remove('inv-hide');
+      document.getElementById('inv-addvendor').onclick = function () {
+        var b = this; b.textContent = 'Adding…'; b.disabled = true;
+        // urlencoded, not FormData: this route has no multipart parser, and
+        // multipart would arrive with an empty body.
+        fetch('/c/vendors/quick', {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ name: d.vendor_name, category: 'Other' }).toString(),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (out) {
+            if (out.error) { b.textContent = out.error; return; }
+            var sel = document.getElementById('inv-vendor');
+            var opt = document.createElement('option');
+            opt.value = out.id; opt.textContent = out.name; opt.selected = true;
+            sel.appendChild(opt);
+            nv.innerHTML = 'Added <b>' + out.name.replace(/[<>&]/g, '') + '</b> and selected it. Fill in their details later under Vendors.';
+          })
+          .catch(function () { b.textContent = 'Could not add it — pick a vendor instead.'; });
+      };
     } else { nv.classList.add('inv-hide'); }
 
     // Say when the parts don't add up, rather than presenting one confident
@@ -3070,6 +3093,380 @@ app.post('/c/invoices/:id/status', (req, res) => {
   db.prepare('UPDATE m_invoices SET status = ? WHERE id = ?')
     .run(req.body.status === 'Paid' ? 'Paid' : 'Unpaid', Number(req.params.id));
   res.redirect('/c/invoices?msg=' + encodeURIComponent(`Marked ${req.body.status === 'Paid' ? 'paid' : 'unpaid'}.`));
+});
+
+
+// ---------------------------------------------------------------------------
+// VENDORS — the directory everything else points at. Invoices match against it,
+// and purchase orders, deliveries and contracts will hang off the same record,
+// so the profile is built in sections that take another one without a redesign.
+// ---------------------------------------------------------------------------
+const VEND_CATEGORIES = {
+  'Produce':     { color: '#059669', tint: '#ecfdf5', icon: 'par' },
+  'Meat':        { color: '#dc2626', tint: '#fef2f2', icon: 'vendors' },
+  'Seafood':     { color: '#0891b2', tint: '#ecfeff', icon: 'vendors' },
+  'Dairy':       { color: '#ca8a04', tint: '#fefce8', icon: 'par' },
+  'Dry goods':   { color: '#a16207', tint: '#fefce8', icon: 'par' },
+  'Coffee':      { color: '#92400e', tint: '#fef3c7', icon: 'tips' },
+  'Beverage':    { color: '#7c3aed', tint: '#f5f3ff', icon: 'tips' },
+  'Alcohol':     { color: '#9333ea', tint: '#faf5ff', icon: 'tips' },
+  'Cleaning':    { color: '#2563eb', tint: '#eff6ff', icon: 'cleaning' },
+  'Paper goods': { color: '#64748b', tint: '#f8fafc', icon: 'documents' },
+  'Equipment':   { color: '#ea580c', tint: '#fff7ed', icon: 'equipment' },
+  'Services':    { color: '#0d9488', tint: '#f0fdfa', icon: 'policy' },
+  'Other':       { color: '#64748b', tint: '#f8fafc', icon: 'vendors' },
+};
+const vendCat = (c) => VEND_CATEGORIES[c] || VEND_CATEGORIES.Other;
+const VEND_CATS = Object.keys(VEND_CATEGORIES);
+const ORDER_METHODS = ['Rep / text', 'Phone', 'Email', 'Online portal', 'App', 'Standing order'];
+const yes = (v) => v === '1' || v === 1 || v === 'yes' || v === 'on';
+
+const vendQ = {
+  all: db.prepare('SELECT * FROM m_vendors ORDER BY name'),
+  one: db.prepare('SELECT * FROM m_vendors WHERE id = ?'),
+  add: db.prepare(`INSERT INTO m_vendors
+    (name, category, ordering_method, favorite, inactive, website, account_number,
+     login_username, login_hint, rep_name, phone, email, order_notes)
+    VALUES (@name, @category, @ordering_method, @favorite, @inactive, @website, @account_number,
+            @login_username, @login_hint, @rep_name, @phone, @email, @order_notes)`),
+  update: db.prepare(`UPDATE m_vendors SET
+    name=@name, category=@category, ordering_method=@ordering_method, favorite=@favorite, inactive=@inactive,
+    website=@website, account_number=@account_number, login_username=@login_username, login_hint=@login_hint,
+    rep_name=@rep_name, phone=@phone, email=@email, order_notes=@order_notes WHERE id=@id`),
+  toggle: db.prepare('UPDATE m_vendors SET favorite = ? WHERE id = ?'),
+  setInactive: db.prepare('UPDATE m_vendors SET inactive = ? WHERE id = ?'),
+  // Invoice rollups. vendor_id is TEXT in the module schema, so compare as a
+  // number — rows written by different paths hold "1" or "1.0".
+  stats: db.prepare(`SELECT COUNT(*) n, MAX(invoice_date) last, COALESCE(SUM(amount_cents),0) spend
+                     FROM m_invoices WHERE CAST(vendor_id AS INTEGER) = ?`),
+  invoices: db.prepare(`SELECT * FROM m_invoices WHERE CAST(vendor_id AS INTEGER) = ?
+                        ORDER BY invoice_date DESC, id DESC LIMIT 12`),
+};
+
+const hasContact = (v) => !!(v.phone || v.email || v.rep_name);
+
+app.get('/c/vendors', (req, res) => {
+  const rows = vendQ.all.all().map((v) => ({ ...v, ...vendQ.stats.get(v.id) }));
+  const active = rows.filter((v) => !yes(v.inactive));
+  const cats = [...new Set(active.map((v) => v.category || 'Other'))];
+  const noContact = rows.filter((v) => !yes(v.inactive) && !hasContact(v));
+  const recent = rows.filter((v) => v.created_at && Date.now() - new Date(v.created_at + 'Z').getTime() < 30 * 86400000);
+
+  const card = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+
+  const cards = `<div class="mcards">
+    ${card('blue', 'vendors', 'Vendors', String(active.length), rows.length > active.length ? `${rows.length - active.length} no longer used` : 'All in use')}
+    ${card('green', 'par', 'Categories', String(cats.length), cats.length ? esc(cats.slice(0, 3).join(', ')) : 'None yet')}
+    ${card('amber', 'invoices', 'Invoiced this year', money(rows.reduce((a, v) => a + (v.spend || 0), 0)), `${rows.reduce((a, v) => a + (v.n || 0), 0)} invoices`)}
+    ${card(noContact.length ? 'red' : 'green', noContact.length ? 'incidents' : 'contacts', 'Missing contact', String(noContact.length),
+      noContact.length ? esc(noContact.slice(0, 2).map((v) => v.name).join(', ')) : 'Everyone reachable')}
+  </div>`;
+
+  const toolbar = `<div class="toolbar2">
+    <div class="searchbox">${icon('search')}
+      <input id="vsearch" type="search" placeholder="Search vendor, rep, category…" autocomplete="off"></div>
+    <div class="fchips">
+      <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${active.length}</span></button>
+      <button class="fchip" data-f="fav" data-v="1" style="--c:#ca8a04;--ct:#fefce8"><i class="fdot"></i>Preferred<span class="fcount">${active.filter((v) => yes(v.favorite)).length}</span></button>
+      ${cats.map((c) => { const cc = vendCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}<span class="fcount">${active.filter((v) => (v.category || 'Other') === c).length}</span></button>`; }).join('')}
+      ${rows.length > active.length ? `<button class="fchip" data-f="off" data-v="1" style="--c:#64748b;--ct:#f1f5f9"><i class="fdot"></i>No longer used<span class="fcount">${rows.length - active.length}</span></button>` : ''}
+    </div>
+  </div>`;
+
+  const grid = rows.length ? `<div class="vgrid">${rows.map((v) => {
+    const c = vendCat(v.category || 'Other');
+    const off = yes(v.inactive);
+    const search = [v.name, v.category, v.rep_name, v.email, v.phone, v.account_number].filter(Boolean).join(' ').toLowerCase();
+    return `
+    <article class="vcard${off ? ' vcard-off' : ''}" data-vend data-cat="${esc(v.category || 'Other')}"
+      data-fav="${yes(v.favorite) ? '1' : ''}" data-off="${off ? '1' : ''}" data-search="${esc(search)}"
+      style="--c:${c.color};--ct:${c.tint}">
+      <div class="vcard-top">
+        <div class="vcard-ico">${icon(c.icon)}</div>
+        <div class="vcard-head">
+          <a class="vcard-name" href="/c/vendors/${v.id}">${esc(v.name)}${yes(v.favorite) ? ' <span class="vstar" title="Preferred vendor">★</span>' : ''}</a>
+          <div class="vcard-cat">${esc(v.category || 'Other')}${off ? ' · no longer used' : ''}</div>
+        </div>
+        <form method="post" action="/c/vendors/${v.id}/favorite" style="margin:0">
+          <input type="hidden" name="favorite" value="${yes(v.favorite) ? '' : '1'}">
+          <button class="vfav${yes(v.favorite) ? ' on' : ''}" type="submit" title="${yes(v.favorite) ? 'Remove from preferred' : 'Mark preferred'}">★</button>
+        </form>
+      </div>
+      <div class="vcard-facts">
+        <div class="tfact"><span>Rep</span><b>${v.rep_name ? esc(v.rep_name) : '<i class="unset">None</i>'}</b></div>
+        <div class="tfact"><span>Invoices</span><b>${v.n || 0}${v.last ? ` · last ${esc(niceDate(v.last))}` : ''}</b></div>
+      </div>
+      <div class="vcard-contact">
+        ${v.phone ? `<a href="tel:${esc(v.phone)}" title="Call">${icon('contacts')}${esc(v.phone)}</a>` : ''}
+        ${v.email ? `<a href="mailto:${esc(v.email)}" title="Email">${icon('email')}Email</a>` : ''}
+        ${v.website ? `<a href="${esc(v.website)}" target="_blank" title="Website">${icon('documents')}Site</a>` : ''}
+        ${!hasContact(v) ? '<span class="vmissing">No contact details</span>' : ''}
+      </div>
+    </article>`;
+  }).join('')}</div>
+  <div class="empty2" id="vnone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or category.</div></div>`
+  : `<div class="upload-hero">
+      <div class="uh-ico">${icon('vendors')}</div>
+      <div class="uh-t">No vendors yet</div>
+      <div class="uh-s">Vendors added here show up automatically when you upload an invoice — and later for purchase orders, deliveries and inventory.</div>
+      <button class="btn btn-primary btn-lg" type="button" onclick="vDrawer(true)">＋ Add your first vendor</button>
+    </div>`;
+
+  res.send(layout('Vendors', `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t"><h1>Vendors</h1>
+        <p class="phead-s">Everyone you order from. Invoices match against this list automatically.</p></div>
+      <button class="btn btn-primary" type="button" onclick="vDrawer(true)">＋ Add vendor</button>
+    </div>
+    ${rows.length ? cards + toolbar : ''}
+    ${grid}
+    ${vendorDrawer()}
+    <script>
+      (function () {
+        var q = '', mode = 'all', val = '';
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-vend]').forEach(function (el) {
+            var off = el.getAttribute('data-off') === '1';
+            var ok = mode === 'off' ? off
+              : off ? false
+              : mode === 'all' ? true
+              : mode === 'fav' ? el.getAttribute('data-fav') === '1'
+              : el.getAttribute('data-cat') === val;
+            if (ok && q) ok = el.getAttribute('data-search').indexOf(q) !== -1;
+            el.style.display = ok ? '' : 'none';
+            if (ok) shown++;
+          });
+          var n = document.getElementById('vnone'); if (n) n.style.display = shown ? 'none' : '';
+        }
+        var si = document.getElementById('vsearch');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        document.querySelectorAll('.fchip').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
+          });
+        });
+        apply();
+      })();
+      function vDrawer(open) {
+        document.body.classList.toggle('drawer-open', !!open);
+        if (open) setTimeout(function () { var f = document.querySelector('#v-drawer input[name=name]'); if (f) f.focus(); }, 180);
+      }
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') vDrawer(false); });
+    </script>`));
+});
+
+function vendorDrawer() {
+  return `
+    <div class="drawer-scrim" onclick="vDrawer(false)"></div>
+    <aside class="drawer" id="v-drawer" aria-label="Add vendor">
+      <div class="drawer-h">
+        <div><div class="drawer-t">Add a vendor</div><div class="drawer-s">They'll appear whenever you upload an invoice.</div></div>
+        <button class="drawer-x" type="button" onclick="vDrawer(false)" aria-label="Close">✕</button>
+      </div>
+      <form method="post" action="/c/vendors" class="drawer-b">
+        <label class="fld">Vendor name <input name="name" required placeholder="e.g. Baldor Specialty Foods"></label>
+        <div class="fld-row">
+          <label class="fld">Supplies <select name="category">${VEND_CATS.map((c) => `<option${c === 'Produce' ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
+          <label class="fld">How you order <select name="ordering_method"><option value="">—</option>${ORDER_METHODS.map((m) => `<option>${m}</option>`).join('')}</select></label>
+        </div>
+        <label class="fld">Your rep <input name="rep_name" placeholder="Optional"></label>
+        <div class="fld-row">
+          <label class="fld">Phone <input name="phone" type="tel" placeholder="Optional"></label>
+          <label class="fld">Email <input name="email" type="email" placeholder="Optional"></label>
+        </div>
+        <label class="fld">Website <input name="website" type="url" placeholder="https://…"></label>
+        <label class="fld">Account # <input name="account_number" placeholder="Optional"></label>
+        <div class="portal-box">
+          <div class="portal-t">Portal login</div>
+          <label class="fld">Username <input name="login_username" placeholder="Optional"></label>
+          <label class="fld">Where the password is kept <input name="login_hint" placeholder="e.g. 1Password"></label>
+          <div class="portal-warn">Never type the password itself — this database isn't encrypted. Store the location, not the secret.</div>
+        </div>
+        <label class="fld">Ordering notes <textarea name="order_notes" rows="3" placeholder="e.g. Delivers Tue &amp; Fri, order by 4pm, $250 minimum"></textarea></label>
+        <label class="fcheck"><input type="checkbox" name="favorite" value="1"><span>Preferred vendor</span></label>
+        <div class="drawer-f">
+          <button class="btn btn-ghost" type="button" onclick="vDrawer(false)">Cancel</button>
+          <button class="btn btn-primary" type="submit">Add vendor</button>
+        </div>
+      </form>
+    </aside>`;
+}
+
+const vendorBody = (b) => ({
+  name: String(b.name || '').trim(),
+  category: VEND_CATS.includes(b.category) ? b.category : 'Other',
+  ordering_method: ORDER_METHODS.includes(b.ordering_method) ? b.ordering_method : null,
+  favorite: b.favorite ? '1' : null,
+  inactive: b.inactive ? '1' : null,
+  website: String(b.website || '').trim() || null,
+  account_number: String(b.account_number || '').trim() || null,
+  login_username: String(b.login_username || '').trim() || null,
+  login_hint: String(b.login_hint || '').trim() || null,
+  rep_name: String(b.rep_name || '').trim() || null,
+  phone: String(b.phone || '').trim() || null,
+  email: String(b.email || '').trim() || null,
+  order_notes: String(b.order_notes || '').trim() || null,
+});
+
+app.post('/c/vendors', (req, res) => {
+  const data = vendorBody(req.body);
+  if (!data.name) return res.redirect('/c/vendors?err=1&msg=' + encodeURIComponent('A vendor needs a name.'));
+  vendQ.add.run(data);
+  res.redirect('/c/vendors?msg=' + encodeURIComponent(`${data.name} added.`));
+});
+
+app.post('/c/vendors/:id/favorite', (req, res) => {
+  vendQ.toggle.run(req.body.favorite ? '1' : null, Number(req.params.id));
+  res.redirect('/c/vendors');
+});
+
+app.post('/c/vendors/:id/inactive', (req, res) => {
+  const v = vendQ.one.get(Number(req.params.id));
+  if (!v) return res.status(404).end();
+  const off = req.body.inactive === '1';
+  vendQ.setInactive.run(off ? '1' : null, v.id);
+  res.redirect(`/c/vendors/${v.id}?msg=` + encodeURIComponent(`${v.name} marked ${off ? 'no longer used' : 'in use'}.`));
+});
+
+// Called from the invoice drawer when the AI reads a vendor with no match, so
+// you never have to leave the invoice half-finished to go and create one.
+app.post('/c/vendors/quick', (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return res.json({ error: 'A vendor needs a name.' });
+  const existing = vendQ.all.all().find((v) => v.name.toLowerCase() === name.toLowerCase());
+  if (existing) return res.json({ id: existing.id, name: existing.name, existed: true });
+  const info = vendQ.add.run({ ...vendorBody({ name }), category: req.body.category || 'Other' });
+  res.json({ id: info.lastInsertRowid, name });
+});
+
+app.get('/c/vendors/:id', (req, res) => {
+  const v = vendQ.one.get(Number(req.params.id));
+  if (!v) return res.status(404).send(layout('Not found', '<h1>Vendor not found</h1>'));
+  const c = vendCat(v.category || 'Other');
+  const stats = vendQ.stats.get(v.id);
+  const invs = vendQ.invoices.all(v.id);
+  const off = yes(v.inactive);
+
+  const row = (label, value, raw) => `<div class="prow"><div class="prow-k">${label}</div><div class="prow-v">${raw ? value : (value ? esc(value) : '<i class="unset">Not set</i>')}</div></div>`;
+  const unpaid = invs.filter((i) => i.status !== 'Paid');
+
+  res.send(layout(v.name, `
+    ${flash(req)}
+    <a class="back" href="/c/vendors">← Vendors</a>
+    <div class="vhead" style="--c:${c.color};--ct:${c.tint}">
+      <div class="vhead-ico">${icon(c.icon)}</div>
+      <div class="vhead-t">
+        <h1>${esc(v.name)}${yes(v.favorite) ? ' <span class="vstar">★</span>' : ''}</h1>
+        <div class="vhead-s"><span class="vcatbadge">${esc(v.category || 'Other')}</span>${off ? '<span class="pill">no longer used</span>' : ''}${v.ordering_method ? ` · order by ${esc(v.ordering_method)}` : ''}</div>
+      </div>
+      <div class="vhead-acts">
+        ${v.phone ? `<a class="btn btn-sm" href="tel:${esc(v.phone)}">Call</a>` : ''}
+        ${v.email ? `<a class="btn btn-sm" href="mailto:${esc(v.email)}">Email</a>` : ''}
+        <a class="btn btn-sm btn-primary" href="/c/vendors/${v.id}/edit">Edit</a>
+      </div>
+    </div>
+
+    <div class="mcards">
+      <div class="mcard mcard-blue"><div class="mcard-ico">${icon('invoices')}</div><div class="mcard-body">
+        <div class="mcard-label">Invoices</div><div class="mcard-value">${stats.n || 0}</div>
+        <div class="mcard-sub">${stats.last ? 'Last ' + esc(niceDate(stats.last)) : 'None yet'}</div></div></div>
+      <div class="mcard mcard-green"><div class="mcard-ico">${icon('payroll')}</div><div class="mcard-body">
+        <div class="mcard-label">Total invoiced</div><div class="mcard-value">${money(stats.spend || 0)}</div>
+        <div class="mcard-sub">${stats.n ? 'Avg ' + money(Math.round(stats.spend / stats.n)) : 'No spend yet'}</div></div></div>
+      <div class="mcard mcard-${unpaid.length ? 'amber' : 'green'}"><div class="mcard-ico">${icon('expirations')}</div><div class="mcard-body">
+        <div class="mcard-label">Unpaid</div><div class="mcard-value">${money(unpaid.reduce((a, i) => a + (i.amount_cents || 0), 0))}</div>
+        <div class="mcard-sub">${unpaid.length ? unpaid.length + ' outstanding' : 'All settled'}</div></div></div>
+    </div>
+
+    <div class="vpanels">
+      <section class="panel">
+        <div class="panel-h">${icon('contacts')}<span>Contact</span></div>
+        ${row('Representative', v.rep_name)}
+        ${row('Phone', v.phone ? `<a href="tel:${esc(v.phone)}">${esc(v.phone)}</a>` : '', true)}
+        ${row('Email', v.email ? `<a href="mailto:${esc(v.email)}">${esc(v.email)}</a>` : '', true)}
+        ${row('Website', v.website ? `<a href="${esc(v.website)}" target="_blank">${esc(String(v.website).replace(/^https?:\/\//, ''))}</a>` : '', true)}
+        ${row('Account #', v.account_number)}
+        ${row('How you order', v.ordering_method)}
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">${icon('policy')}<span>Portal</span></div>
+        ${row('Username', v.login_username)}
+        ${row('Password kept in', v.login_hint)}
+        <div class="panel-note">Passwords are never stored here — this database isn't encrypted. Keep the secret in your password manager and note its location above.</div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-h">${icon('notes')}<span>Ordering notes</span></div>
+        ${v.order_notes ? `<div class="panel-body">${esc(v.order_notes)}</div>`
+          : '<div class="panel-empty">Nothing noted. Delivery days, order cut-offs and minimums go here.</div>'}
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-h">${icon('invoices')}<span>Invoice history</span>
+          <a class="panel-link" href="/c/invoices">All invoices →</a></div>
+        ${invs.length ? `<div class="vinv">${invs.map((i) => {
+          const s = invStatus(i);
+          return `<a class="vinv-row" href="/c/invoices/${i.id}">
+            <span class="vinv-date">${esc(niceDate(i.invoice_date))}</span>
+            <span class="vinv-num">${i.invoice_number ? '#' + esc(i.invoice_number) : '<i class="unset">no number</i>'}</span>
+            <span class="tstatus ${s.cls}">${esc(s.label)}</span>
+            <span class="vinv-amt">${money(i.amount_cents || 0)}</span>
+          </a>`;
+        }).join('')}</div>` : '<div class="panel-empty">No invoices from this vendor yet. Upload one and it will match here automatically.</div>'}
+      </section>
+    </div>
+
+    <div class="danger-zone">
+      <div><b>${off ? 'Bring this vendor back' : 'Stop using this vendor'}</b>
+        <p class="muted">${off ? 'They will show in the list and be offered on invoices again.'
+          : 'They stay on past invoices and keep their history — they just stop appearing as a choice.'}</p></div>
+      <form method="post" action="/c/vendors/${v.id}/inactive" style="margin:0">
+        <input type="hidden" name="inactive" value="${off ? '0' : '1'}">
+        <button class="btn ${off ? 'btn-primary' : 'btn-danger'}" type="submit">${off ? 'Mark in use' : 'No longer used'}</button>
+      </form>
+    </div>`));
+});
+
+app.get('/c/vendors/:id/edit', (req, res) => {
+  const v = vendQ.one.get(Number(req.params.id));
+  if (!v) return res.status(404).send(layout('Not found', '<h1>Vendor not found</h1>'));
+  const val = (x) => esc(v[x] == null ? '' : v[x]);
+  res.send(layout(`Edit ${v.name}`, `
+    ${flash(req)}
+    <a class="back" href="/c/vendors/${v.id}">← ${esc(v.name)}</a>
+    <h1>Edit ${esc(v.name)}</h1>
+    <form method="post" action="/c/vendors/${v.id}" class="card form grid">
+      <label>Vendor name <input name="name" value="${val('name')}" required></label>
+      <label>Supplies <select name="category">${VEND_CATS.map((c) => `<option${c === v.category ? ' selected' : ''}>${c}</option>`).join('')}</select></label>
+      <label>How you order <select name="ordering_method"><option value="">—</option>${ORDER_METHODS.map((m) => `<option${m === v.ordering_method ? ' selected' : ''}>${m}</option>`).join('')}</select></label>
+      <label>Your rep <input name="rep_name" value="${val('rep_name')}"></label>
+      <label>Phone <input name="phone" type="tel" value="${val('phone')}"></label>
+      <label>Email <input name="email" type="email" value="${val('email')}"></label>
+      <label>Website <input name="website" type="url" value="${val('website')}"></label>
+      <label>Account # <input name="account_number" value="${val('account_number')}"></label>
+      <label>Portal username <input name="login_username" value="${val('login_username')}"></label>
+      <label>Where the password is kept <input name="login_hint" value="${val('login_hint')}" placeholder="e.g. 1Password — never the password itself"></label>
+      <label class="wide">Ordering notes <textarea name="order_notes" rows="3">${val('order_notes')}</textarea></label>
+      <label class="fcheck"><input type="checkbox" name="favorite" value="1"${yes(v.favorite) ? ' checked' : ''}><span>Preferred vendor</span></label>
+      <button class="btn btn-primary" type="submit">Save changes</button>
+    </form>`));
+});
+
+app.post('/c/vendors/:id', (req, res) => {
+  const v = vendQ.one.get(Number(req.params.id));
+  if (!v) return res.status(404).end();
+  const data = vendorBody(req.body);
+  if (!data.name) return res.redirect(`/c/vendors/${v.id}/edit?err=1&msg=` + encodeURIComponent('A vendor needs a name.'));
+  vendQ.update.run({ ...data, inactive: v.inactive, id: v.id });
+  res.redirect(`/c/vendors/${v.id}?msg=` + encodeURIComponent('Saved.'));
 });
 
 
