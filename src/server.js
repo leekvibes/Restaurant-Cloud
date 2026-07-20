@@ -9,7 +9,7 @@ const { db, q, s, w, positions, kindOf, supportSlugs, shiftInputs } = require('.
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
-const { layout, flash, esc, money, dp, RESTAURANT, BUILD } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon } = require('./views');
 const { mountModules, MODULES, expiringSoon } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
@@ -1986,14 +1986,22 @@ app.post('/webhook/benugin', (req, res) => {
 // equipment, incident log, notes/decisions log).
 
 // ---------------------------------------------------------------------------
-// RECURRING TASKS — its own page. The generic tracker table sorted by date, so
-// an overdue grease trap looked identical to one due in three months. Here the
-// only thing colour encodes is urgency, and a calendar view projects the cycle
-// forward so you can see the month before it arrives.
+// RECURRING TASKS
+// Category drives colour, status drives urgency, and the two are kept apart on
+// purpose: category tells you what kind of job it is, status tells you whether
+// you're late. Mixing them into one colour would lose both signals.
 // ---------------------------------------------------------------------------
 const FREQ = ['Weekly', 'Monthly', 'Quarterly', 'Annual'];
+const CATEGORIES = {
+  'Cleaning':     { color: '#2563eb', tint: '#eff6ff', icon: 'cleaning' },
+  'Maintenance':  { color: '#ea580c', tint: '#fff7ed', icon: 'equipment' },
+  'Safety':       { color: '#dc2626', tint: '#fef2f2', icon: 'incidents' },
+  'Pest Control': { color: '#059669', tint: '#ecfdf5', icon: 'pest' },
+  'Compliance':   { color: '#7c3aed', tint: '#f5f3ff', icon: 'policy' },
+  'Other':        { color: '#64748b', tint: '#f8fafc', icon: 'recurring' },
+};
+const catOf = (name) => CATEGORIES[name] || CATEGORIES.Other;
 
-/** Next occurrence after `iso` for a frequency. Mirrors "mark done". */
 function advanceDate(iso, frequency) {
   const d = new Date(iso + 'T00:00:00');
   const f = String(frequency || '').toLowerCase();
@@ -2003,19 +2011,23 @@ function advanceDate(iso, frequency) {
   else d.setMonth(d.getMonth() + 1);
   return isoDate(d);
 }
-
 const daysTo = (iso) => (iso ? Math.round((new Date(iso + 'T00:00:00') - startOfToday()) / 86400000) : null);
 
-/** One vocabulary for urgency, so the list and the calendar can't disagree. */
-function urgency(iso) {
-  const d = daysTo(iso);
-  if (d === null) return { key: 'none', cls: 'u-none', label: 'No date' };
-  if (d < 0) return { key: 'over', cls: 'u-over', label: d === -1 ? '1 day late' : `${-d} days late` };
-  if (d === 0) return { key: 'today', cls: 'u-today', label: 'Today' };
-  if (d <= 7) return { key: 'soon', cls: 'u-soon', label: d === 1 ? 'Tomorrow' : `in ${d} days` };
-  if (d <= 30) return { key: 'month', cls: 'u-month', label: `in ${d} days` };
-  return { key: 'later', cls: 'u-later', label: `in ${d} days` };
+/** Red overdue → amber due-soon → blue scheduled, plus green when just done. */
+function statusOf(row) {
+  const today = isoDate(startOfToday());
+  if (row.last_done === today) return { key: 'done', label: 'Complete', cls: 's-done' };
+  const d = daysTo(row.next_due);
+  if (d === null) return { key: 'none', label: 'No date', cls: 's-none' };
+  if (d < 0) return { key: 'over', label: d === -1 ? '1 day late' : `${-d} days late`, cls: 's-over' };
+  if (d === 0) return { key: 'soon', label: 'Due today', cls: 's-soon' };
+  if (d <= 7) return { key: 'soon', label: d === 1 ? 'Due tomorrow' : `Due in ${d} days`, cls: 's-soon' };
+  return { key: 'sched', label: `In ${d} days`, cls: 's-sched' };
 }
+
+const niceDate = (iso) => (iso
+  ? new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  : '—');
 
 const recurQ = {
   all: db.prepare('SELECT * FROM m_recurring ORDER BY next_due IS NULL, next_due, name'),
@@ -2025,98 +2037,195 @@ const recurQ = {
 
 app.get('/c/recurring', (req, res) => {
   const rows = recurQ.all.all();
-  const view = req.query.view === 'calendar' ? 'calendar' : 'list';
+  const view = req.query.view === 'calendar' ? 'calendar' : 'board';
   const today = isoDate(startOfToday());
+  const st = rows.map((r) => ({ r, s: statusOf(r) }));
 
-  const overdue = rows.filter((r) => daysTo(r.next_due) !== null && daysTo(r.next_due) < 0);
-  const week = rows.filter((r) => { const d = daysTo(r.next_due); return d !== null && d >= 0 && d <= 7; });
-  const doneThisMonth = rows.filter((r) => r.last_done && r.last_done.slice(0, 7) === today.slice(0, 7));
-  const next = rows.filter((r) => daysTo(r.next_due) !== null && daysTo(r.next_due) >= 0)[0];
+  const overdue = st.filter((x) => x.s.key === 'over');
+  const week = st.filter((x) => x.s.key === 'soon');
+  const doneMonth = rows.filter((r) => r.last_done && r.last_done.slice(0, 7) === today.slice(0, 7));
+  const nextUp = st.find((x) => x.s.key === 'soon' || x.s.key === 'sched');
 
-  const pill = (label, value, sub, cls) =>
-    `<div class="stat ${cls || ''}"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
-
-  const stats = `<div class="stats">
-    ${pill('Overdue', String(overdue.length), overdue.length ? esc(overdue.map((r) => r.name).slice(0, 2).join(', ')) : 'nothing late', overdue.length ? 'stat-danger' : '')}
-    ${pill('Due this week', String(week.length), week.length ? esc(week[0].name) + (week.length > 1 ? ` +${week.length - 1}` : '') : 'clear', week.length ? 'stat-amberize' : '')}
-    ${pill('Done this month', String(doneThisMonth.length), doneThisMonth.length ? 'logged' : 'none yet', doneThisMonth.length ? 'stat-okize' : '')}
-    ${pill('Next up', next ? esc(next.name) : '—', next ? `${next.next_due} · ${urgency(next.next_due).label}` : 'nothing scheduled')}
+  // --- summary cards: tinted, iconned, one number each --------------------
+  const card = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}">
+      <div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body">
+        <div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div>
+        <div class="mcard-sub">${sub}</div>
+      </div>
+    </div>`;
+  const cards = `<div class="mcards">
+    ${card('red', 'incidents', 'Overdue', String(overdue.length),
+      overdue.length ? esc(overdue[0].r.name) + (overdue.length > 1 ? ` +${overdue.length - 1} more` : '') : 'Nothing late')}
+    ${card('amber', 'expirations', 'Due this week', String(week.length),
+      week.length ? esc(week[0].r.name) + (week.length > 1 ? ` +${week.length - 1} more` : '') : 'Clear this week')}
+    ${card('blue', 'recurring', 'Active tasks', String(rows.length), `${new Set(rows.map((r) => r.category || 'Other')).size} categories`)}
+    ${card('green', 'policy', 'Done this month', String(doneMonth.length),
+      nextUp ? `Next: ${esc(nextUp.r.name)}` : 'Nothing scheduled')}
   </div>`;
 
-  const toggle = `<div class="seg seg-view">
-    <a class="${view === 'list' ? 'on' : ''}" href="/c/recurring">☰ List</a>
-    <a class="${view === 'calendar' ? 'on' : ''}" href="/c/recurring?view=calendar">▦ Calendar</a>
+  // --- filter bar ---------------------------------------------------------
+  const used = [...new Set(rows.map((r) => r.category || 'Other'))];
+  const chips = used.map((c) => {
+    const cc = catOf(c);
+    return `<button class="fchip" data-cat="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}">
+      <i class="fdot"></i>${esc(c)}<span class="fcount">${rows.filter((r) => (r.category || 'Other') === c).length}</span></button>`;
+  }).join('');
+
+  const toolbar = `<div class="toolbar2">
+    <div class="searchbox">
+      ${icon('search')}
+      <input id="tsearch" type="search" placeholder="Search tasks, people, categories…" autocomplete="off">
+    </div>
+    <div class="fchips">
+      <button class="fchip on" data-cat="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
+      ${chips}
+    </div>
+    <div class="seg-view">
+      <a class="${view === 'board' ? 'on' : ''}" href="/c/recurring">${icon('list')} List</a>
+      <a class="${view === 'calendar' ? 'on' : ''}" href="/c/recurring?view=calendar">${icon('calendar')} Calendar</a>
+    </div>
   </div>`;
 
-  const body = view === 'calendar'
-    ? recurringCalendar(rows, req.query.m || today.slice(0, 7), today)
-    : recurringList(rows);
+  const main = view === 'calendar' ? recurCalendar(rows, req.query.m || today.slice(0, 7), today) : recurBoard(st);
 
   res.send(layout('Recurring tasks', `
     ${flash(req)}
-    <div class="page-head">
-      <div><h1>Recurring tasks</h1><p class="sub">Grease trap, hood, pest control, deep cleans — what has to happen again.</p></div>
-      <div class="head-actions">${toggle}<a class="btn btn-primary" href="#add" onclick="document.getElementById('add-panel').open=true">＋ Add task</a></div>
+    <div class="phead">
+      <div class="phead-t">
+        <h1>Recurring tasks</h1>
+        <p class="phead-s">Everything that has to happen again — and how close it is.</p>
+      </div>
+      <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>
     </div>
-    ${stats}
-    ${body}
-    <details class="add-panel" id="add-panel"${rows.length ? '' : ' open'}>
-      <summary id="add">＋ Add a recurring task</summary>
-      <form method="post" action="/c/recurring" class="card form grid">
-        <label>Task <input name="name" required placeholder="Hood cleaning"></label>
-        <label>How often <select name="frequency">${FREQ.map((f) => `<option>${f}</option>`).join('')}</select></label>
-        <label>Next due <input name="next_due" type="date" value="${today}"></label>
-        <label>Who <input name="responsible" placeholder="optional"></label>
-        <label class="wide">Notes <input name="notes" placeholder="optional"></label>
-        <button class="btn btn-primary" type="submit">Add task</button>
-      </form>
-    </details>`));
+    ${cards}
+    ${toolbar}
+    ${main}
+    ${recurDrawer(today)}
+    <script>
+      // Live filter: search text + category chip, both narrowing the same set.
+      (function () {
+        var q = '', cat = '';
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-task]').forEach(function (el) {
+            var okCat = !cat || el.getAttribute('data-cat') === cat;
+            var okQ = !q || el.getAttribute('data-search').indexOf(q) !== -1;
+            var on = okCat && okQ;
+            el.style.display = on ? '' : 'none';
+            if (on) shown++;
+          });
+          document.querySelectorAll('[data-group]').forEach(function (g) {
+            var any = g.querySelectorAll('[data-task]:not([style*="none"])').length;
+            g.style.display = any ? '' : 'none';
+          });
+          var none = document.getElementById('tnone');
+          if (none) none.style.display = shown ? 'none' : '';
+        }
+        var si = document.getElementById('tsearch');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        document.querySelectorAll('.fchip').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            cat = b.getAttribute('data-cat');
+            apply();
+          });
+        });
+      })();
+      function rcDrawer(open) {
+        document.body.classList.toggle('drawer-open', !!open);
+        if (open) setTimeout(function () { var f = document.querySelector('#rc-drawer input[name=name]'); if (f) f.focus(); }, 180);
+      }
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') rcDrawer(false); });
+    </script>`));
 });
 
-/** Grouped by urgency — an overdue task and one due in March aren't the same. */
-function recurringList(rows) {
-  if (!rows.length) {
-    return '<div class="empty"><div class="empty-ico">🔁</div><div class="empty-t">No recurring tasks yet</div><div class="empty-s">Add the ones that bite when forgotten — hood, grease trap, pest control.</div></div>';
+/** Task cards, grouped by urgency. */
+function recurBoard(st) {
+  if (!st.length) {
+    return `<div class="empty2">
+      <div class="empty2-ico">${icon('recurring')}</div>
+      <div class="empty2-t">No recurring tasks yet</div>
+      <div class="empty2-s">Add the ones that bite when they're forgotten — hood cleaning, grease trap, pest control.</div>
+      <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>
+    </div>`;
   }
   const groups = [
-    { key: 'over', title: 'Overdue', rows: [] },
-    { key: 'soon', title: 'Next 7 days', rows: [] },
-    { key: 'month', title: 'This month', rows: [] },
-    { key: 'later', title: 'Later', rows: [] },
-  ];
-  for (const r of rows) {
-    const u = urgency(r.next_due);
-    const g = u.key === 'over' ? 'over' : (u.key === 'today' || u.key === 'soon') ? 'soon'
-      : u.key === 'month' ? 'month' : 'later';
-    groups.find((x) => x.key === g).rows.push({ r, u });
-  }
+    { key: 'over', title: 'Overdue', items: st.filter((x) => x.s.key === 'over') },
+    { key: 'soon', title: 'This week', items: st.filter((x) => x.s.key === 'soon') },
+    { key: 'sched', title: 'Scheduled', items: st.filter((x) => x.s.key === 'sched') },
+    { key: 'done', title: 'Completed today', items: st.filter((x) => x.s.key === 'done') },
+    { key: 'none', title: 'No date set', items: st.filter((x) => x.s.key === 'none') },
+  ].filter((g) => g.items.length);
 
-  return groups.filter((g) => g.rows.length).map((g) => `
-    <h2 class="sec-h">${g.title} <span class="sec-n">${g.rows.length}</span></h2>
-    <div class="task-list">
-      ${g.rows.map(({ r, u }) => `
-        <div class="task ${u.cls}">
-          <div class="task-main">
-            <a class="task-name" href="/c/recurring/${r.id}">${esc(r.name)}</a>
-            <div class="task-meta">
-              <span class="chip">${esc(r.frequency || 'Monthly')}</span>
-              ${r.responsible ? `<span class="task-who">${esc(r.responsible)}</span>` : ''}
-              ${r.last_done ? `<span class="task-last">last done ${esc(r.last_done)}</span>` : '<span class="task-last">never done</span>'}
+  return groups.map((g) => `
+    <section class="tgroup" data-group>
+      <div class="tgroup-h"><span class="tgroup-dot t-${g.key}"></span>${g.title}<span class="tgroup-n">${g.items.length}</span></div>
+      <div class="tgrid">
+        ${g.items.map(({ r, s }) => {
+          const c = catOf(r.category || 'Other');
+          const search = [r.name, r.category, r.responsible, r.frequency].filter(Boolean).join(' ').toLowerCase();
+          return `
+          <article class="tcard ${s.cls}" data-task data-cat="${esc(r.category || 'Other')}" data-search="${esc(search)}" style="--c:${c.color};--ct:${c.tint}">
+            <div class="tcard-top">
+              <div class="tcard-ico">${icon(c.icon)}</div>
+              <div class="tcard-head">
+                <a class="tcard-name" href="/c/recurring/${r.id}">${esc(r.name)}</a>
+                <div class="tcard-cat">${esc(r.category || 'Other')}</div>
+              </div>
+              <span class="tstatus ${s.cls}">${esc(s.label)}</span>
             </div>
-          </div>
-          <div class="task-due">
-            <div class="task-date">${esc(r.next_due || '—')}</div>
-            <div class="task-when">${esc(u.label)}</div>
-          </div>
-          <form method="post" action="/c/recurring/${r.id}/done" class="task-act">
-            <button class="btn btn-sm ${u.key === 'over' || u.key === 'today' ? 'btn-primary' : ''}" type="submit">Mark done</button>
-          </form>
-        </div>`).join('')}
-    </div>`).join('');
+            <div class="tcard-facts">
+              <div class="tfact"><span>Next due</span><b>${esc(niceDate(r.next_due))}</b></div>
+              <div class="tfact"><span>Frequency</span><b>${esc(r.frequency || 'Monthly')}</b></div>
+              <div class="tfact"><span>Assigned</span><b>${r.responsible ? esc(r.responsible) : '<i class="unset">Unassigned</i>'}</b></div>
+              <div class="tfact"><span>Last done</span><b>${r.last_done ? esc(niceDate(r.last_done)) : '<i class="unset">Never</i>'}</b></div>
+            </div>
+            <div class="tcard-act">
+              <form method="post" action="/c/recurring/${r.id}/done" style="margin:0">
+                <button class="btn btn-sm ${s.key === 'over' || s.key === 'soon' ? 'btn-primary' : ''}" type="submit">✓ Mark done</button>
+              </form>
+              <a class="btn btn-sm btn-ghost" href="/c/recurring/${r.id}/edit">Edit</a>
+            </div>
+          </article>`;
+        }).join('')}
+      </div>
+    </section>`).join('')
+    + '<div class="empty2" id="tnone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or category.</div></div>';
 }
 
-/** Month grid. Projects the cycle forward so a monthly task shows every month. */
-function recurringCalendar(rows, month, today) {
+/** Slide-in panel — creating a task shouldn't cost the page half its height. */
+function recurDrawer(today) {
+  return `
+    <div class="drawer-scrim" onclick="rcDrawer(false)"></div>
+    <aside class="drawer" id="rc-drawer" aria-label="New recurring task">
+      <div class="drawer-h">
+        <div><div class="drawer-t">New recurring task</div><div class="drawer-s">It'll reappear on its own schedule.</div></div>
+        <button class="drawer-x" type="button" onclick="rcDrawer(false)" aria-label="Close">✕</button>
+      </div>
+      <form method="post" action="/c/recurring" class="drawer-b">
+        <label class="fld">Task name <input name="name" required placeholder="e.g. Hood cleaning"></label>
+        <label class="fld">Category
+          <select name="category">${Object.keys(CATEGORIES).map((c) => `<option${c === 'Cleaning' ? ' selected' : ''}>${c}</option>`).join('')}</select>
+        </label>
+        <div class="fld-row">
+          <label class="fld">How often <select name="frequency">${FREQ.map((f) => `<option${f === 'Monthly' ? ' selected' : ''}>${f}</option>`).join('')}</select></label>
+          <label class="fld">Next due <input name="next_due" type="date" value="${today}"></label>
+        </div>
+        <label class="fld">Assigned to <input name="responsible" placeholder="Optional — who owns it"></label>
+        <label class="fld">Notes <textarea name="notes" rows="3" placeholder="Optional — vendor, access notes, anything worth remembering"></textarea></label>
+        <div class="drawer-f">
+          <button class="btn btn-ghost" type="button" onclick="rcDrawer(false)">Cancel</button>
+          <button class="btn btn-primary" type="submit">Create task</button>
+        </div>
+      </form>
+    </aside>`;
+}
+
+function recurCalendar(rows, month, today) {
   const [y, mo] = month.split('-').map(Number);
   if (!y || !mo) return '<p class="muted">Bad month.</p>';
   const pad = (n) => String(n).padStart(2, '0');
@@ -2125,8 +2234,6 @@ function recurringCalendar(rows, month, today) {
   const monthEnd = `${y}-${pad(mo)}-${pad(daysInMonth)}`;
   const firstWeekday = new Date(y, mo - 1, 1).getDay();
 
-  // Occurrences per day: the stored next_due is real, anything after it is a
-  // projection of the cycle — shown fainter so the two aren't confused.
   const byDay = {};
   for (const r of rows) {
     if (!r.next_due) continue;
@@ -2137,7 +2244,6 @@ function recurringCalendar(rows, month, today) {
       first = false;
     }
   }
-
   const prev = mo === 1 ? `${y - 1}-12` : `${y}-${pad(mo - 1)}`;
   const nextM = mo === 12 ? `${y + 1}-01` : `${y}-${pad(mo + 1)}`;
   const title = new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
@@ -2150,8 +2256,10 @@ function recurringCalendar(rows, month, today) {
     cells += `<div class="cal-cell${iso === today ? ' cal-today' : ''}">
       <div class="cal-day">${day}</div>
       ${items.map(({ r, projected }) => {
-        const u = urgency(iso);
-        return `<a class="cal-task ${projected ? 'cal-proj' : u.cls}" href="/c/recurring/${r.id}" title="${esc(r.name)} · ${esc(r.frequency || '')}${projected ? ' (projected)' : ''}">${esc(r.name)}</a>`;
+        const c = catOf(r.category || 'Other');
+        const s = statusOf({ ...r, next_due: iso });
+        return `<a class="cal-task ${projected ? 'cal-proj' : s.cls}" style="--c:${c.color};--ct:${c.tint}"
+          href="/c/recurring/${r.id}" title="${esc(r.name)} · ${esc(r.category || 'Other')}${projected ? ' (projected)' : ''}">${esc(r.name)}</a>`;
       }).join('')}
     </div>`;
   }
@@ -2161,21 +2269,23 @@ function recurringCalendar(rows, month, today) {
       <a class="btn btn-sm" href="/c/recurring?view=calendar&m=${prev}">←</a>
       <strong>${esc(title)}</strong>
       <a class="btn btn-sm" href="/c/recurring?view=calendar&m=${nextM}">→</a>
-      <a class="btn btn-sm" href="/c/recurring?view=calendar">Today</a>
+      <a class="btn btn-sm btn-ghost" href="/c/recurring?view=calendar">Today</a>
     </div>
     <div class="cal">
       ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="cal-dow">${d}</div>`).join('')}
       ${cells}
     </div>
-    <p class="sub">Solid chips are the actual next due date. Faded ones are the cycle projected forward — they'll firm up as each task is marked done.</p>`;
+    <p class="calnote">Solid chips are real due dates. Dashed ones are the cycle projected forward — they firm up as each task is marked done.</p>`;
 }
 
 app.post('/c/recurring', (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return res.redirect('/c/recurring?err=1&msg=' + encodeURIComponent('Give the task a name.'));
-  db.prepare(`INSERT INTO m_recurring (name, frequency, next_due, responsible, notes)
-              VALUES (@name, @frequency, @next_due, @responsible, @notes)`).run({
-    name, frequency: FREQ.includes(req.body.frequency) ? req.body.frequency : 'Monthly',
+  db.prepare(`INSERT INTO m_recurring (name, category, frequency, next_due, responsible, notes)
+              VALUES (@name, @category, @frequency, @next_due, @responsible, @notes)`).run({
+    name,
+    category: CATEGORIES[req.body.category] ? req.body.category : 'Other',
+    frequency: FREQ.includes(req.body.frequency) ? req.body.frequency : 'Monthly',
     next_due: String(req.body.next_due || '').slice(0, 10) || null,
     responsible: String(req.body.responsible || '').trim() || null,
     notes: String(req.body.notes || '').trim() || null,
@@ -2183,9 +2293,8 @@ app.post('/c/recurring', (req, res) => {
   res.redirect('/c/recurring?msg=' + encodeURIComponent(`${name} added.`));
 });
 
-// Mark done → stamp today, advance by the frequency. The undo matters: a
-// mis-tap on a quarterly task pushes it three months out, and without this
-// there's no way back short of editing the date by hand.
+// Undo matters here: this advances by the frequency, so a mis-tap on a
+// quarterly task pushes it three months out with no way back by hand.
 app.post('/c/recurring/:id/done', (req, res) => {
   const row = recurQ.one.get(Number(req.params.id));
   if (!row) return res.status(404).end();
@@ -2193,7 +2302,7 @@ app.post('/c/recurring/:id/done', (req, res) => {
   const next = advanceDate(today, row.frequency);
   recurQ.setDates.run({ id: row.id, last_done: today, next_due: next });
   const undo = `/c/recurring/${row.id}/undo?d=${encodeURIComponent(row.next_due || '')}&l=${encodeURIComponent(row.last_done || '')}`;
-  res.redirect('/c/recurring?msg=' + encodeURIComponent(`${row.name} done — next due ${next}.`) + '&undo=' + encodeURIComponent(undo));
+  res.redirect('/c/recurring?msg=' + encodeURIComponent(`${row.name} done — next due ${niceDate(next)}.`) + '&undo=' + encodeURIComponent(undo));
 });
 
 app.post('/c/recurring/:id/undo', (req, res) => {
@@ -2204,7 +2313,7 @@ app.post('/c/recurring/:id/undo', (req, res) => {
     next_due: String(req.query.d || '').slice(0, 10) || null,
     last_done: String(req.query.l || '').slice(0, 10) || null,
   });
-  res.redirect('/c/recurring?msg=' + encodeURIComponent(`Undone — ${row.name} is back to ${req.query.d || 'no date'}.`));
+  res.redirect('/c/recurring?msg=' + encodeURIComponent(`Undone — ${row.name} is back to ${niceDate(req.query.d)}.`));
 });
 
 mountModules(app);

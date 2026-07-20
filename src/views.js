@@ -36,6 +36,11 @@ const ICON = {
   tips: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7v10M14.5 9.5A2.5 2.5 0 0 0 12 8h-.4a2.1 2.1 0 0 0-.4 4.1l1.6.3a2.1 2.1 0 0 1-.4 4.2H12a2.5 2.5 0 0 1-2.5-1.5"/>',
   signout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 8 6 12l4 4M6 12h10"/>',
   pin: '<path d="M4 5v14"/><path d="M20 12H9"/><path d="m13 8-4 4 4 4"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
+  list: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  cleaning: '<path d="M12 3v6.5"/><path d="M9.2 9.5h5.6l1.2 4.5H8l1.2-4.5Z"/><path d="M8 14h8v4.5a2.5 2.5 0 0 1-2.5 2.5h-3A2.5 2.5 0 0 1 8 18.5V14Z"/>',
+  pest: '<ellipse cx="12" cy="13.5" rx="4" ry="5"/><path d="M12 8.5V6M10.5 4.5 12 6l1.5-1.5"/><path d="M8 11H4.5M8 14.5H4M8 18H5M16 11h3.5M16 14.5h4M16 18h3"/>',
 };
 const icon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k] || ICON.dashboard}</svg>`;
 
@@ -264,4 +269,4 @@ function flash(req) {
   return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
 }
 
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon };

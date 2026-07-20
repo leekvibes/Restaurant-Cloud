@@ -170,6 +170,8 @@ const MODULES = [
     rowActions: (row) => `<form method="post" action="/c/recurring/${row.id}/done" style="margin:0"><button class="link">mark done</button></form>`,
     fields: [
       { name: 'name', label: 'Task', type: 'text', required: true, list: true, placeholder: 'Hood cleaning' },
+      { name: 'category', label: 'Category', type: 'select', list: true,
+        options: ['Cleaning', 'Maintenance', 'Safety', 'Pest Control', 'Compliance', 'Other'] },
       { name: 'frequency', label: 'How often', type: 'select', list: true, options: ['Weekly', 'Monthly', 'Quarterly', 'Annual'] },
       { name: 'next_due', label: 'Next due', type: 'date', list: true },
       { name: 'last_done', label: 'Last done', type: 'date', list: true },
@@ -196,6 +198,13 @@ for (const m of MODULES) {
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
 ${cols}
   );`);
+  // CREATE IF NOT EXISTS does nothing to a table that already exists, so a
+  // field added to the config above would silently never appear on an existing
+  // database — the column just wouldn't be there, and writes to it would throw.
+  const have = db.prepare(`PRAGMA table_info(${m.table})`).all().map((c) => c.name);
+  for (const f of m.fields) {
+    if (!have.includes(f.name)) db.exec(`ALTER TABLE ${m.table} ADD COLUMN ${f.name} ${sqlType(f)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
