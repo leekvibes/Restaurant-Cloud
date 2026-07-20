@@ -536,45 +536,108 @@ app.get('/shifts/:id', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
   const inp = shiftInputs(sh.id);
-  // Anyone (except managers) can be dropped into either section — position and
-  // wage are per-shift, so someone can server one day and busse the next.
+  const r = runShift(inp, policyForShift(sh));
+  const { warn, notes } = shiftWarnings(sh, inp, r);
   const staff = q.nonManagerList.all();
-  const rate = (c) => (c ? money(c) + '/h' : '<span class="muted">default</span>');
+  const people = [...inp.servers, ...inp.support];
 
-  const serverRows = inp.servers.map((sv) => `
-    <tr data-emp="${sv.employeeId}" data-kind="server">
-      <td>${esc(sv.name)}</td>
-      <td class="num" data-edit="food" data-step="0.01">${money(toCents(sv.food))}</td>
-      <td class="num" data-edit="coffee" data-step="0.01">${money(toCents(sv.coffee))}</td>
-      <td class="num" data-edit="card_tips" data-step="0.01">${money(toCents(sv.cardTips))}</td>
-      <td class="num" data-edit="cash_tips" data-step="0.01" data-ph="not entered">${sv.cashEnteredBy ? money(toCents(sv.cashTips)) : '<span class="muted">—</span>'}</td>
-      <td class="num" data-edit="hours" data-step="0.01">${sv.hours}</td>
-      <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(sv.hourlyRate))}</td>
-      <td class="row-actions">
-        <button type="button" class="link" onclick="startEdit(${sv.employeeId},'server')">edit</button>
-        <form method="post" action="/shifts/${sh.id}/remove"><input type="hidden" name="employee_id" value="${sv.employeeId}"><button class="link-danger">remove</button></form></td>
-    </tr>`).join('');
+  // --- per-person state -------------------------------------------------
+  // What still needs doing for THIS person, so the fix is next to the card
+  // that needs it rather than in a list at the top you have to map back.
+  const stateOf = (p, isServer) => {
+    const miss = [];
+    if (!Number(p.hours) && !p.salaried) miss.push('hours');
+    if (isServer) {
+      const tips = toCents(p.cardTips) + toCents(p.cashTips);
+      const sales = toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol);
+      if (!p.cashEnteredBy) miss.push('cash tips');
+      if (tips > 0 && sales === 0) miss.push('sales');
+    }
+    if (!p.email) miss.push('email');
+    if (!miss.length) return { key: 'ok', label: 'Ready', cls: 's-done', miss };
+    if (miss.includes('hours')) return { key: 'blocked', label: 'Needs hours', cls: 's-over', miss };
+    return { key: 'check', label: 'Needs ' + miss[0], cls: 's-soon', miss };
+  };
 
-  const orDash = (c) => (c ? money(c) : '<span class="muted">—</span>');
-  const supportRows = inp.support.map((p) => `
-    <tr data-emp="${p.employeeId}" data-kind="support">
-      <td>${esc(p.name)}</td>
-      <td>${p.role}</td>
-      <td class="num" data-edit="hours" data-step="0.01">${p.hours}</td>
-      <td class="num" data-edit="wage" data-step="0.01" data-ph="default">${rate(toCents(p.hourlyRate))}</td>
-      <td class="num" data-edit="cash_tips" data-step="0.01" data-ph="none">${orDash(toCents(p.cashTips))}</td>
-      <td class="num" data-edit="card_tips" data-step="0.01" data-ph="none">${orDash(toCents(p.cardTips))}</td>
-      <td class="row-actions">
-        <button type="button" class="link" onclick="startEdit(${p.employeeId},'support')">edit</button>
-        <form method="post" action="/shifts/${sh.id}/remove"><input type="hidden" name="employee_id" value="${p.employeeId}"><button class="link-danger">remove</button></form></td>
-    </tr>`).join('');
+  const serverStates = inp.servers.map((p) => ({ p, st: stateOf(p, true) }));
+  const supportStates = inp.support.map((p) => ({ p, st: stateOf(p, false) }));
+  const allStates = [...serverStates, ...supportStates];
+  const ready = allStates.filter((x) => x.st.key === 'ok').length;
+  const withHours = people.filter((p) => Number(p.hours) || p.salaried).length;
 
-  const staffOptions = staff.map((e) => `<option value="${e.id}" data-role="${e.role}" data-rate="${((e.hourly_rate_cents || 0) / 100).toFixed(2)}">${esc(e.name)} · ${e.role}</option>`).join('');
-  const roleOpts = (sel) => shiftRoles().map((r) => `<option value="${r}"${r === sel ? ' selected' : ''}>${esc(posName(r))}</option>`).join('');
+  const totalSales = inp.servers.reduce((a, p) => a + toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol), 0);
+  const totalTips = r.reconciliation.totalTipsCollected;
+  const poolCash = r.pool.cash;
+  const poolCard = r.pool.togoCard;
 
-  // Current entries, so picking someone already on the shift pre-fills their
-  // numbers (re-adding = editing; no accidental wipe of sales).
-  const salesMap = new Map(w.salesForShift.all(sh.id).map((r) => [r.employee_id, r]));
+  // --- header + KPIs ----------------------------------------------------
+  const pct = people.length ? Math.round((withHours / people.length) * 100) : 0;
+  const statusPill = sh.status === 'emailed'
+    ? '<span class="tstatus s-done">Emails sent</span>'
+    : warn.length ? '<span class="tstatus s-soon">Needs review</span>' : '<span class="tstatus s-sched">Ready to send</span>';
+
+  const kpi = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+
+  // --- attention panel --------------------------------------------------
+  const attention = warn.length || notes.length ? `
+    <section class="attn${warn.length ? '' : ' attn-soft'}">
+      <div class="attn-h">${icon(warn.length ? 'incidents' : 'expirations')}
+        <span>${warn.length ? `${warn.length} thing${warn.length === 1 ? '' : 's'} to sort out` : 'Worth knowing'}</span></div>
+      <ul class="attn-list">
+        ${warn.map((wn) => `<li class="attn-bad">${esc(wn)}</li>`).join('')}
+        ${notes.map((n) => `<li class="attn-note">${esc(n)}</li>`).join('')}
+      </ul>
+    </section>`
+    : `<section class="attn attn-ok">
+        <div class="attn-h">${icon('policy')}<span>Everything checks out</span></div>
+        <p>Hours are in for everyone, tips reconcile, and nobody is missing an email. This shift is ready to send.</p>
+      </section>`;
+
+  // --- person card ------------------------------------------------------
+  const initials = (n) => n.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  const fig = (label, value, editKey, step, ph) => `
+    <div class="pfig"${editKey ? ` data-edit="${editKey}" data-step="${step || '0.01'}"${ph ? ` data-ph="${ph}"` : ''}` : ''}>
+      <span>${label}</span><b>${value}</b></div>`;
+
+  const personCard = ({ p, st }, kind) => {
+    const isServer = kind === 'server';
+    const c = isServer ? '#4f46e5' : '#0d9488';
+    return `
+    <article class="pcard ${st.cls}" data-emp="${p.employeeId}" data-kind="${kind}" style="--c:${c}">
+      <div class="pcard-top">
+        <span class="pavatar">${esc(initials(p.name))}</span>
+        <div class="pcard-head">
+          <div class="pcard-name">${esc(p.name)}</div>
+          <div class="pcard-role">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</div>
+        </div>
+        <span class="tstatus ${st.cls}">${esc(st.label)}</span>
+      </div>
+      <div class="pfigs">
+        ${isServer ? fig('Food', money(toCents(p.food)), 'food') : ''}
+        ${isServer ? fig('Coffee', money(toCents(p.coffee)), 'coffee') : ''}
+        ${isServer ? fig('Card tips', money(toCents(p.cardTips)), 'card_tips') : ''}
+        ${isServer
+          ? fig('Cash tips', p.cashEnteredBy ? money(toCents(p.cashTips)) : '<i class="unset">not in</i>', 'cash_tips', '0.01', 'not entered')
+          : fig('Cash tips', toCents(p.cashTips) ? money(toCents(p.cashTips)) : '<i class="unset">none</i>', 'cash_tips', '0.01', 'none')}
+        ${isServer ? '' : fig('To-go card', toCents(p.cardTips) ? money(toCents(p.cardTips)) : '<i class="unset">none</i>', 'card_tips', '0.01', 'none')}
+        ${fig('Hours', Number(p.hours) ? p.hours : '<i class="unset">—</i>', 'hours', '0.01', '0')}
+        ${fig('Wage', toCents(p.hourlyRate) ? money(toCents(p.hourlyRate)) + '/h' : '<i class="unset">default</i>', 'wage', '0.01', 'default')}
+      </div>
+      <div class="pcard-act row-actions">
+        <button type="button" class="btn btn-sm" onclick="startEdit(${p.employeeId},'${kind}')">Edit</button>
+        <form method="post" action="/shifts/${sh.id}/remove" onsubmit="return confirm('Take ${esc(p.name).replace(/'/g, "\\'")} off this shift?')" style="margin:0">
+          <input type="hidden" name="employee_id" value="${p.employeeId}">
+          <button class="btn btn-sm btn-ghost">Remove</button>
+        </form>
+      </div>
+    </article>`;
+  };
+
+  // --- prefill map for the add forms (re-adding = editing) --------------
+  const salesMap = new Map(w.salesForShift.all(sh.id).map((x) => [x.employee_id, x]));
   const entries = {};
   const d = (c) => (c ? (c / 100).toFixed(2) : '');
   for (const row of w.workForShift.all(sh.id)) {
@@ -585,89 +648,172 @@ app.get('/shifts/:id', (req, res) => {
       card_tips: d(sr.card_tips_cents), cash_tips: d(sr.cash_tips_cents),
     };
   }
+  const staffOptions = staff.map((e) => `<option value="${e.id}" data-role="${e.role}" data-rate="${((e.hourly_rate_cents || 0) / 100).toFixed(2)}">${esc(e.name)} · ${e.role}</option>`).join('');
+  const roleOpts = (sel) => shiftRoles().map((x) => `<option value="${x}"${x === sel ? ' selected' : ''}>${esc(posName(x))}</option>`).join('');
+
+  // --- notes as message cards -------------------------------------------
+  const noteRows = w.notesForShift.all(sh.id);
+  const notesSection = noteRows.length ? `
+    <section class="sect">
+      <div class="sect-h"><h2>${icon('notes')} Notes from staff</h2>
+        <span class="sect-n">${noteRows.length}</span></div>
+      <div class="msgs">
+        ${noteRows.map((n) => `
+          <div class="msg">
+            <span class="pavatar msg-av">${esc(initials(n.name))}</span>
+            <div class="msg-b">
+              <div class="msg-h"><b>${esc(n.name)}</b>${n.role ? `<span class="msg-role">${esc(n.role)}</span>` : ''}</div>
+              <div class="msg-t">${esc(n.note)}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+    </section>` : '';
+
+  // --- tip pool ----------------------------------------------------------
+  const eligible = r.support.filter((p) => p.tipEligible !== false);
+  const poolSection = `
+    <section class="sect">
+      <div class="sect-h"><h2>${icon('cash')} Shared tip pool</h2></div>
+      <div class="pool">
+        <div class="pool-side">
+          <div class="pool-box pool-cash">
+            <div class="pool-lbl">Cash pool</div>
+            <div class="pool-amt">${money(poolCash)}</div>
+            <div class="pool-parts">
+              <span>You counted <b>${money(toCents(inp.pool.jar))}</b></span>
+              <span>Staff reported <b>${money(poolCash - toCents(inp.pool.jar))}</b></span>
+            </div>
+          </div>
+          <div class="pool-box pool-card">
+            <div class="pool-lbl">To-go card pool</div>
+            <div class="pool-amt">${money(poolCard)}</div>
+            <div class="pool-parts">
+              <span>You counted <b>${money(toCents(inp.pool.togoCard))}</b></span>
+              <span>Staff reported <b>${money(poolCard - toCents(inp.pool.togoCard))}</b></span>
+            </div>
+          </div>
+          <form method="post" action="/shifts/${sh.id}/pool" class="pool-form">
+            <label>Cash you counted <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
+            <label>To-go card you counted <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
+            <button class="btn" type="submit">Save pool</button>
+          </form>
+          <p class="pool-hint">Enter only what <b>you</b> counted — anything staff reported on the tips page is already added above.</p>
+        </div>
+        <div class="pool-dist">
+          <div class="pool-lbl">Where it goes${eligible.length ? ` · split by hours across ${eligible.length}` : ''}</div>
+          ${eligible.length ? `<div class="dist">${eligible.map((p) => `
+            <div class="dist-row">
+              <span class="dist-who">${esc(p.name)}<i>${esc(p.role)} · ${p.hours}h</i></span>
+              <span class="dist-amt">${money(p.poolCash + p.poolCard)}</span>
+            </div>`).join('')}</div>`
+            : '<div class="panel-empty">Nobody eligible on this shift yet — add support staff and the pool will split across them.</div>'}
+          ${(poolCash + poolCard) > 0 && !eligible.length
+            ? `<div class="dist-warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</div>` : ''}
+        </div>
+      </div>
+    </section>`;
 
   const body = `
     ${flash(req)}
     <a class="back" href="/shifts">← Shifts</a>
-    <div class="page-head">
-      <div><h1>${sh.date} · ${dp(sh.daypart)} ${sh.status === 'emailed' ? '<span class="pill pill-ok">emailed</span>' : '<span class="pill pill-blue">open</span>'}</h1>
-        <p class="sub">Enter sales, tips &amp; hours. Tap <b>edit</b> on any row to change numbers in place.</p></div>
-      <a class="btn btn-primary" href="/shifts/${sh.id}/results">Preview &amp; send →</a>
+
+    <div class="shead">
+      <div class="shead-main">
+        <div class="shead-day">${icon('shifts')}</div>
+        <div>
+          <h1>${sh.date} · ${dp(sh.daypart)}</h1>
+          <div class="shead-s">${statusPill}<span>${people.length} on shift</span><span>${ready} of ${people.length} ready</span></div>
+        </div>
+      </div>
+      <div class="shead-prog" title="${withHours} of ${people.length} have hours entered">
+        <div class="prog"><div class="prog-fill" style="width:${pct}%"></div></div>
+        <span>${withHours}/${people.length} hours in</span>
+      </div>
     </div>
 
-    <h2>Servers</h2>
-    <p class="muted">Sales &amp; card tips come from Benugin (enter manually for now). Cash tips come from staff on the <a href="/tips">cash-tip page</a> — tap <b>edit</b> to correct any of it, including cash.</p>
-    <details class="add-panel">
-      <summary>📸 Read from a report photo</summary>
-      <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="card form photo-form">
-        <div>
-          <p class="muted" style="margin:0">Snap the end-of-day report (several photos OK). It fills in each server's sales + card tips below for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p>
-        </div>
-        <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
-        <button class="btn" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
-      </form>
-    </details>
-    <table class="table">
-      <thead><tr><th>Server</th><th class="num">Food</th><th class="num">Coffee</th><th class="num">Card tips</th><th class="num">Cash tips</th><th class="num">Hours</th><th class="num">Wage</th><th></th></tr></thead>
-      <tbody>${serverRows || '<tr><td colspan="8" class="muted">No servers yet.</td></tr>'}</tbody>
-    </table>
-    <details class="add-panel">
-      <summary>＋ Add a server / edit their numbers</summary>
-    <form method="post" action="/shifts/${sh.id}/server" class="card form grid" id="server-form">
-      <label>Server <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
-      <label>Food sales <input name="food" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Coffee sales <input name="coffee" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Alcohol sales <input name="alcohol" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Card tips <input name="card_tips" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
-      <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
-      <button class="btn" type="submit">Save server</button>
-    </form>
-    </details>
+    ${attention}
 
-    <h2>Support — kitchen, busser, barista</h2>
-    <p class="muted">Their hours (and wage, if different today). Tips are what they logged on the tips page — that money goes into the shared pool and is split by hours, not kept by whoever reported it. Tap <b>edit</b> to correct anything they mistyped.</p>
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Name</th><th>Role</th><th class="num">Hours</th><th class="num">Wage</th><th class="num">Cash tips</th><th class="num">To-go card</th><th></th></tr></thead>
-      <tbody>${supportRows || '<tr><td colspan="7" class="muted">No support staff yet.</td></tr>'}</tbody>
-    </table></div>
-    <details class="add-panel">
-      <summary>＋ Add support staff / edit their numbers</summary>
-    <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
-      <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
-      <label>Role <select name="role" id="support-role">${roleOpts()}</select></label>
-      <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0" required></label>
-      <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
-      <button class="btn" type="submit">Save support</button>
-    </form>
-    </details>
+    <div class="mcards">
+      ${kpi('blue', 'sales', 'Server sales', money(totalSales), `${inp.servers.length} server${inp.servers.length === 1 ? '' : 's'}`)}
+      ${kpi('green', 'tips', 'Tips collected', money(totalTips), 'card + cash')}
+      ${kpi('amber', 'cash', 'Shared pool', money(poolCash + poolCard), `${money(poolCash)} cash · ${money(poolCard)} card`)}
+      ${kpi(warn.length ? 'red' : 'green', warn.length ? 'incidents' : 'policy', 'To sort out', String(warn.length), warn.length ? 'see above' : 'nothing outstanding')}
+    </div>
 
-    ${notesBlock(w.notesForShift.all(sh.id))}
+    <section class="sect">
+      <div class="sect-h"><h2>${icon('staff')} Servers</h2><span class="sect-n">${inp.servers.length}</span></div>
+      <details class="add-panel">
+        <summary>📸 Read from a report photo</summary>
+        <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="card form photo-form">
+          <div><p class="muted" style="margin:0">Snap the end-of-day report (several photos OK). It fills in each server's sales + card tips below for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p></div>
+          <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
+          <button class="btn" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
+        </form>
+      </details>
+      ${serverStates.length ? `<div class="pgrid">${serverStates.map((x) => personCard(x, 'server')).join('')}</div>`
+        : '<div class="panel-empty">No servers on this shift yet. They appear here when they submit, or add one below.</div>'}
+      <details class="add-panel">
+        <summary>＋ Add a server / edit their numbers</summary>
+        <form method="post" action="/shifts/${sh.id}/server" class="card form grid" id="server-form">
+          <label>Server <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
+          <label>Food sales <input name="food" type="number" step="0.01" min="0" placeholder="0.00"></label>
+          <label>Coffee sales <input name="coffee" type="number" step="0.01" min="0" placeholder="0.00"></label>
+          <label>Alcohol sales <input name="alcohol" type="number" step="0.01" min="0" placeholder="0.00"></label>
+          <label>Card tips <input name="card_tips" type="number" step="0.01" min="0" placeholder="0.00"></label>
+          <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
+          <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
+          <button class="btn" type="submit">Save server</button>
+        </form>
+      </details>
+    </section>
 
-    ${submissionsPanel(sh.id)}
+    <section class="sect">
+      <div class="sect-h"><h2>${icon('positions')} Support</h2><span class="sect-n">${inp.support.length}</span></div>
+      <p class="sect-s">Tips they logged go into the shared pool and split by hours — not kept by whoever reported them.</p>
+      ${supportStates.length ? `<div class="pgrid">${supportStates.map((x) => personCard(x, 'support')).join('')}</div>`
+        : '<div class="panel-empty">Nobody yet. Kitchen, baristas and bussers appear here when they submit, or add them below.</div>'}
+      <details class="add-panel">
+        <summary>＋ Add support staff / edit their numbers</summary>
+        <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
+          <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
+          <label>Role <select name="role" id="support-role">${roleOpts()}</select></label>
+          <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0" required></label>
+          <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
+          <button class="btn" type="submit">Save support</button>
+        </form>
+      </details>
+    </section>
 
-    <h2>Shared tip pool</h2>
-    <p class="muted">What <b>you</b> counted. Anything support staff reported on the tips page is added to these automatically — the pool below totals ${money(toCents(inp.pool.jar) + inp.support.reduce((a, p) => a + toCents(p.cashTips), 0))} cash and ${money(toCents(inp.pool.togoCard) + inp.support.reduce((a, p) => a + toCents(p.cardTips), 0))} card. How each is paid out is set on the <a href="/policy">tip-out policy</a>.</p>
-    <form method="post" action="/shifts/${sh.id}/pool" class="card form grid">
-      <label>Cash tips (jar) <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
-      <label>To-go card tips <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
-      <button class="btn" type="submit">Save pool</button>
-    </form>
+    ${notesSection}
+    ${poolSection}
+
+    <section class="sect">
+      <div class="sect-h"><h2>${icon('recurring')} Submissions</h2></div>
+      ${submissionsPanel(sh.id)}
+    </section>
 
     <div class="danger-zone">
-      <div>
-        <b>Delete this shift</b>
-        <p class="muted">Removes the shift and everyone's hours, sales and tips on it. Use this to clear out test data. Emails already sent can't be recalled.</p>
-      </div>
+      <div><b>Delete this shift</b>
+        <p class="muted">Removes the shift and everyone's hours, sales and tips on it. Emails already sent can't be recalled.</p></div>
       <form method="post" action="/shifts/${sh.id}/delete" style="margin:0"
             onsubmit="return confirm('Delete the ${sh.date} ${dp(sh.daypart)} shift and all ${Object.keys(entries).length} entries on it? This cannot be undone.')">
         <button class="btn btn-danger" type="submit">Delete shift</button>
       </form>
     </div>
+
+    <div class="stickybar">
+      <div class="sticky-in">
+        <div class="sticky-txt">
+          <b>${sh.date} · ${dp(sh.daypart)}</b>
+          <span>${warn.length ? `${warn.length} to sort out` : 'Nothing outstanding'} · ${withHours}/${people.length} hours in</span>
+        </div>
+        <a class="btn btn-primary" href="/shifts/${sh.id}/results">Preview &amp; send →</a>
+      </div>
+    </div>
+
     <script>
       var ENTRIES = ${JSON.stringify(entries)};
       function setVal(form, name, v) { var el = form.querySelector('[name="' + name + '"]'); if (el) el.value = v == null ? '' : v; }
-      // Server form: picking someone already on the shift loads their current numbers.
       (function () {
         var f = document.getElementById('server-form'), emp = document.getElementById('server-emp');
         if (!f || !emp) return;
@@ -677,45 +823,49 @@ app.get('/shifts/:id', (req, res) => {
         }
         emp.addEventListener('change', sync); sync();
       })();
-      // Support form: default role to their usual position; load hours/wage if already on shift.
       (function () {
         var f = document.getElementById('support-form'), emp = document.getElementById('support-emp'), role = document.getElementById('support-role');
-        if (!f || !emp || !role) return;
+        if (!f || !emp) return;
         function sync() {
-          var opt = emp.options[emp.selectedIndex], e = ENTRIES[emp.value] || {};
-          var r = e.role || opt.getAttribute('data-role');
-          for (var i = 0; i < role.options.length; i++) if (role.options[i].value === r) role.selectedIndex = i;
-          setVal(f, 'hours', e.hours); setVal(f, 'wage', e.wage);
+          var e = ENTRIES[emp.value] || {};
+          var opt = emp.options[emp.selectedIndex];
+          if (role) role.value = e.role || (opt && opt.getAttribute('data-role')) || role.value;
+          ['hours', 'wage'].forEach(function (k) { setVal(f, k, e[k]); });
         }
         emp.addEventListener('change', sync); sync();
       })();
-      // Inline row editing — turn the cells into inputs right where they are.
-      var SHIFT = ${sh.id};
+
+      // In-place editing, kept from the table version: tapping Edit swaps just
+      // that card's figures for inputs. No modal, no page jump, no losing your
+      // place halfway down a shift.
       function startEdit(emp, kind) {
-        var tr = document.querySelector('tr[data-emp="' + emp + '"][data-kind="' + kind + '"]');
-        if (!tr || tr.dataset.editing) return;
-        tr.dataset.editing = '1';
+        var card = document.querySelector('.pcard[data-emp="' + emp + '"][data-kind="' + kind + '"]');
         var e = ENTRIES[emp] || {};
-        tr.querySelectorAll('[data-edit]').forEach(function (td) {
-          var f = td.getAttribute('data-edit'), step = td.getAttribute('data-step') || '0.01', ph = td.getAttribute('data-ph') || '';
-          td.innerHTML = '<input class="cell-in" data-f="' + f + '" type="number" step="' + step + '" min="0" placeholder="' + ph + '" value="' + (e[f] == null ? '' : e[f]) + '">';
+        card.classList.add('pcard-editing');
+        card.querySelectorAll('[data-edit]').forEach(function (cell) {
+          var f = cell.getAttribute('data-edit'),
+              step = cell.getAttribute('data-step') || '0.01',
+              ph = cell.getAttribute('data-ph') || '';
+          var lab = cell.querySelector('span').textContent;
+          cell.innerHTML = '<span>' + lab + '</span>' +
+            '<input class="cell-in" data-f="' + f + '" type="number" step="' + step + '" min="0" placeholder="' + ph + '" value="' + (e[f] == null ? '' : e[f]) + '">';
         });
-        tr.querySelector('.row-actions').innerHTML =
-          '<button type="button" class="link" onclick="saveEdit(' + emp + ',\\'' + kind + '\\')">save</button>' +
-          '<button type="button" class="link-danger" onclick="location.reload()">cancel</button>';
-        var first = tr.querySelector('.cell-in'); if (first) first.focus();
+        card.querySelector('.pcard-act').innerHTML =
+          '<button type="button" class="btn btn-sm btn-primary" onclick="saveEdit(' + emp + ',\\'' + kind + '\\')">Save</button>' +
+          '<button type="button" class="btn btn-sm btn-ghost" onclick="location.reload()">Cancel</button>';
+        var first = card.querySelector('.cell-in'); if (first) first.focus();
       }
       function saveEdit(emp, kind) {
-        var tr = document.querySelector('tr[data-emp="' + emp + '"][data-kind="' + kind + '"]');
+        var card = document.querySelector('.pcard[data-emp="' + emp + '"][data-kind="' + kind + '"]');
         var e = ENTRIES[emp] || {};
         var form = document.createElement('form');
         form.method = 'post';
-        form.action = '/shifts/' + SHIFT + '/' + (kind === 'server' ? 'server' : 'support');
+        form.action = '/shifts/${sh.id}/' + (kind === 'server' ? 'server' : 'support');
         function add(n, v) { var i = document.createElement('input'); i.type = 'hidden'; i.name = n; i.value = v == null ? '' : v; form.appendChild(i); }
         add('employee_id', emp);
-        tr.querySelectorAll('.cell-in').forEach(function (inp) { add(inp.getAttribute('data-f'), inp.value); });
-        if (kind === 'server') { add('alcohol', e.alcohol || 0); }       // not shown, keep it
-        else { add('role', e.role); }                                    // keep their role
+        card.querySelectorAll('.cell-in').forEach(function (inp) { add(inp.getAttribute('data-f'), inp.value); });
+        if (kind === 'server') { add('alcohol', e.alcohol || 0); }   // not shown on the card, keep it
+        else { add('role', e.role); }                                 // keep their role
         document.body.appendChild(form); form.submit();
       }
     </script>`;
