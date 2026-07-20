@@ -495,7 +495,11 @@ function submissionsPanel(shiftId) {
     const key = r.employee_id;
     const current = !seen.has(key);
     seen.add(key);
-    const when = String(r.created_at || '').replace('T', ' ').slice(0, 16);
+    const imported = r.source === 'imported';
+    // An imported row is a reconstruction from the current figures, not a
+    // recorded event — so it shows the shift date, not a time it never had.
+    const when = imported ? String(r.created_at || '').slice(0, 10)
+      : String(r.created_at || '').replace('T', ' ').slice(0, 16);
     const figures = [
       ['Cash', money0(r.cash_tips_cents)], ['Card', money0(r.card_tips_cents)],
       ['Food', money0(r.food_cents)], ['Coffee', money0(r.coffee_cents)], ['Alcohol', money0(r.alcohol_cents)],
@@ -504,10 +508,10 @@ function submissionsPanel(shiftId) {
     return `
     <details class="sub${current ? '' : ' sub-old'}">
       <summary>
-        <span class="sub-dot ${r.source === 'manager' ? 'sub-mgr' : 'sub-staff'}"></span>
+        <span class="sub-dot ${imported ? 'sub-imp' : r.source === 'manager' ? 'sub-mgr' : 'sub-staff'}"></span>
         <span class="sub-who">${esc(r.name)}</span>
         <span class="sub-role">${esc(r.role || '')}</span>
-        <span class="sub-tag">${r.source === 'manager' ? 'you edited' : 'submitted'}</span>
+        <span class="sub-tag">${imported ? 'on file before logging started' : r.source === 'manager' ? 'you edited' : 'submitted'}</span>
         ${current ? '<span class="sub-cur">current</span>' : '<span class="sub-sup">superseded</span>'}
         <span class="sub-when">${esc(when)}</span>
       </summary>
@@ -516,11 +520,12 @@ function submissionsPanel(shiftId) {
           ? `<div class="sub-figs">${figures.map(([k, v]) => `<div class="sub-fig"><span>${k}</span><b>${v}</b></div>`).join('')}</div>`
           : '<div class="panel-empty">No figures in this entry.</div>'}
         ${r.note ? `<div class="sub-note">${esc(r.note)}</div>` : ''}
+        ${imported ? '<div class="sub-imp-note">Reconstructed from what this shift currently holds. Anything it replaced was overwritten before submissions were logged and can\'t be recovered.</div>' : ''}
       </div>
     </details>`;
   }).join('');
 
-  const dupes = rows.length - seen.size;
+  const dupes = rows.filter((r) => r.source !== 'imported').length - new Set(rows.filter((r) => r.source !== 'imported').map((r) => r.employee_id)).size;
   return `
     <h2>Submissions <span class="sec-n">${rows.length}</span></h2>
     <p class="muted">Newest first. ${dupes ? `<b>${dupes}</b> ${dupes === 1 ? 'entry was' : 'entries were'} later replaced — open one to see what it said.` : 'Nothing has been resubmitted.'}</p>

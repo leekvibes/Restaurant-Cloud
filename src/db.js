@@ -205,6 +205,37 @@ const submissions = {
   countForShift: db.prepare('SELECT COUNT(*) n FROM tip_submissions WHERE shift_id = ?'),
 };
 
+// One-time backfill. Logging started partway through, so shifts closed before
+// it have nothing to show. server_sales holds each person's CURRENT figures,
+// which is all that survives — the versions they replaced were overwritten and
+// are genuinely gone. These are marked 'imported' rather than dressed up as
+// real submissions with invented timestamps.
+db.transaction(() => {
+  const rows = db.prepare(`
+    SELECT ss.*, sh.date FROM server_sales ss
+    JOIN shifts sh ON sh.id = ss.shift_id
+    WHERE (ss.cash_tips_cents > 0 OR ss.card_tips_cents > 0
+        OR ss.food_cents > 0 OR ss.coffee_cents > 0 OR ss.alcohol_cents > 0)
+      AND NOT EXISTS (SELECT 1 FROM tip_submissions ts
+                      WHERE ts.shift_id = ss.shift_id AND ts.employee_id = ss.employee_id)
+  `).all();
+  if (!rows.length) return;
+  const roleOf = db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?');
+  const ins = db.prepare(`INSERT INTO tip_submissions
+    (shift_id, employee_id, role, cash_tips_cents, card_tips_cents, food_cents, coffee_cents, alcohol_cents, note, source, created_at)
+    VALUES (@shift_id, @employee_id, @role, @cash, @card, @food, @coffee, @alcohol, @note, 'imported', @at)`);
+  for (const r of rows) {
+    const w = roleOf.get(r.shift_id, r.employee_id);
+    ins.run({
+      shift_id: r.shift_id, employee_id: r.employee_id, role: w ? w.role : null,
+      cash: r.cash_tips_cents || null, card: r.card_tips_cents || null,
+      food: r.food_cents || null, coffee: r.coffee_cents || null, alcohol: r.alcohol_cents || null,
+      note: r.note || null,
+      at: `${r.date} 00:00`,   // the shift's own date; no clock time is known
+    });
+  }
+})();
+
 // ---- Employees ----------------------------------------------------------
 const q = {
   allEmployees: db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY role, name'),
