@@ -6179,6 +6179,27 @@ app.get('/settings', (req, res) => {
 app.get('/performance', (_req, res) => res.redirect(301, '/costs'));
 
 
+// ---------------------------------------------------------------------------
+// SEARCH — one endpoint, filtered by what the account may open.
+// ---------------------------------------------------------------------------
+const { search: runSearch } = require('./search');
+
+// Deliberately outside the area map, unlike every page. /menu was accidentally
+// area-less and therefore open, so the distinction matters: search must be
+// reachable by every signed-in account because it filters its own results, and
+// the callback below is that filter. Anonymous requests never get here — the
+// auth middleware redirects them. test/search.test.js holds this to it.
+app.get('/search', (req, res) => {
+  const out = runSearch(req.query.q, (area) => {
+    const store = reqCtx.getStore();
+    const u = store && store.user;
+    if (!u || u.master || !u.features || !u.features.length) return true;
+    return u.features.includes(area);
+  });
+  res.json(out);
+});
+
+
 mountModules(app);
 
 app.listen(PORT, () => {

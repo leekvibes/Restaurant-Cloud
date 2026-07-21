@@ -105,6 +105,9 @@ function topbar() {
       <!-- A label, not a picker. There is one restaurant in the data and a
            dropdown would promise switching that does not exist. -->
       <span class="topbar-site" title="${esc(RESTAURANT)}">${esc(RESTAURANT)}</span>
+      <button type="button" class="tsearch" onclick="rcSearch(true)" aria-label="Search">
+        ${icon('search')}<span>Search…</span><kbd>⌘K</kbd>
+      </button>
       <span class="topbar-gap"></span>
       ${canWrite() && create.length ? `
       <details class="tmenu" id="tb-create">
@@ -124,6 +127,92 @@ function topbar() {
         </div>
       </details>
     </header>`;
+}
+
+/** The search palette. One per page, hidden until asked for. */
+function palette() {
+  return `
+  <div class="pal" id="rc-pal" hidden>
+    <div class="pal-scrim" onclick="rcSearch(false)"></div>
+    <div class="pal-box" role="dialog" aria-label="Search">
+      <div class="pal-in">${icon('search')}
+        <input id="rc-q" type="search" autocomplete="off" spellcheck="false" placeholder="Search products, invoices, vendors, staff, shifts…">
+        <kbd>esc</kbd>
+      </div>
+      <div class="pal-out" id="rc-out"><div class="pal-hint">Type at least two characters.</div></div>
+    </div>
+  </div>`;
+}
+
+function searchScript() {
+  return `
+  var RCS = { seq: 0, items: [], sel: 0, timer: null };
+  function rcSearch(on) {
+    var pal = document.getElementById('rc-pal');
+    if (!pal) return;
+    pal.hidden = !on;
+    document.body.classList.toggle('pal-open', !!on);
+    if (on) { var q = document.getElementById('rc-q'); q.value=''; q.focus(); rcPaint(null); }
+  }
+  function rcPaint(d) {
+    var out = document.getElementById('rc-out');
+    RCS.items = []; RCS.sel = 0;
+    if (!d) { out.innerHTML = '<div class="pal-hint">Type at least two characters.</div>'; return; }
+    if (!d.groups.length) { out.innerHTML = '<div class="pal-hint">Nothing found.</div>'; return; }
+    var html = '';
+    d.groups.forEach(function (g) {
+      html += '<div class="pal-g">' + g.label + '</div>';
+      g.results.forEach(function (r) {
+        RCS.items.push(r.href);
+        html += '<a class="pal-r" href="' + r.href + '" data-i="' + (RCS.items.length-1) + '">'
+          + '<span class="pal-t">' + rcEsc(r.title) + '</span>'
+          + (r.sub ? '<span class="pal-s">' + rcEsc(r.sub) + '</span>' : '') + '</a>';
+      });
+    });
+    if (d.truncated) html += '<div class="pal-hint">More matches than shown — keep typing to narrow it.</div>';
+    out.innerHTML = html;
+    rcSel(0);
+  }
+  function rcEsc(s) { return String(s == null ? '' : s).replace(/[<>&]/g, function (c) { return { '<':'&lt;','>':'&gt;','&':'&amp;' }[c]; }); }
+  function rcSel(i) {
+    var rows = document.querySelectorAll('#rc-out .pal-r');
+    if (!rows.length) return;
+    RCS.sel = (i + rows.length) % rows.length;
+    rows.forEach(function (r, n) { r.classList.toggle('on', n === RCS.sel); });
+    rows[RCS.sel].scrollIntoView({ block: 'nearest' });
+  }
+  (function () {
+    document.addEventListener('keydown', function (e) {
+      // The one shortcut. Ignored while typing somewhere else, so it can't
+      // steal a keystroke from a recipe quantity.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); rcSearch(true); return; }
+      var pal = document.getElementById('rc-pal');
+      if (!pal || pal.hidden) return;
+      if (e.key === 'Escape') { rcSearch(false); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); rcSel(RCS.sel + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); rcSel(RCS.sel - 1); }
+      else if (e.key === 'Enter') {
+        var rows = document.querySelectorAll('#rc-out .pal-r');
+        if (rows[RCS.sel]) { e.preventDefault(); location.href = rows[RCS.sel].getAttribute('href'); }
+      }
+    });
+    var q = document.getElementById('rc-q');
+    if (!q) return;
+    q.addEventListener('input', function () {
+      var term = this.value.trim();
+      clearTimeout(RCS.timer);
+      if (term.length < 2) { rcPaint(null); return; }
+      RCS.timer = setTimeout(function () {
+        // Sequence-checked: typing fast puts several in flight and a slow
+        // earlier reply must not overwrite a newer one.
+        var seq = ++RCS.seq;
+        fetch('/search?q=' + encodeURIComponent(term))
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (seq === RCS.seq) rcPaint(d); })
+          .catch(function () { if (seq === RCS.seq) document.getElementById('rc-out').innerHTML = '<div class="pal-hint">Search is not answering right now.</div>'; });
+      }, 160);
+    });
+  })();`;
 }
 
 function sidebar() {
@@ -248,6 +337,8 @@ function layout(title, body, opts = {}) {
         <div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>
         <main class="content">${openWarning()}${viewerNote()}<div class="wrap">${body}</div></main>
       </div>
+      ${palette()}
+      <script>${searchScript()}</script>
       <script>
         // Pin / unpin the rail, remembered between sessions.
         function rcPin() {
