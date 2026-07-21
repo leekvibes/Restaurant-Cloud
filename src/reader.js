@@ -105,7 +105,17 @@ module.exports = { readReport, MODEL };
 // invoice total. Picking one silently is the failure that matters, because a
 // wrong total looks exactly as reasonable as a right one.
 // ---------------------------------------------------------------------------
-const INVOICE_SCHEMA = {
+// Two schemas, deliberately. Constrained decoding compiles the schema into a
+// grammar before generating, and the combined header-plus-line-items schema
+// was too big for that: the API spent three minutes on it and then refused
+// with "Schema is too complex". Measured separately, the header compiles in
+// ~2s and the line items in ~10s. So they are two calls.
+//
+// It is also the safer shape. The header is what the books need and it must
+// not fail; the line items feed Products and can be retried or skipped. One
+// schema meant a line-item field could break invoice entry entirely, which is
+// exactly what happened.
+const HEADER_SCHEMA = {
   type: 'object',
   properties: {
     vendor_name: { type: 'string', description: 'Supplier name as printed, e.g. "Sysco Food Services"' },
@@ -119,10 +129,14 @@ const INVOICE_SCHEMA = {
     category: { type: 'string', enum: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Supplies', 'Repairs', 'Services', 'Other'] },
     notes: { type: 'string', description: 'One short line: what was bought, or anything unusual like a handwritten adjustment' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low if the image is unclear or the totals are ambiguous' },
-    // Line items feed the Products section. Not in `required` on purpose: a
-    // photo can be legible enough to trust the total and too creased to read
-    // the middle of the table, and an empty list is a better answer than a
-    // guessed one — the invoice still saves, there's just nothing to import.
+  },
+  required: ['vendor_name', 'total', 'category', 'confidence'],
+  additionalProperties: false,
+};
+
+const LINES_SCHEMA = {
+  type: 'object',
+  properties: {
     line_items: {
       type: 'array',
       description: 'Every product line on the invoice. Empty if the lines cannot be read clearly.',
@@ -130,9 +144,6 @@ const INVOICE_SCHEMA = {
         type: 'object',
         properties: {
           description: { type: 'string', description: 'The product as printed, e.g. "TOMATO ROMA 25LB"' },
-          // The item code is the strongest signal there is for recognising a
-          // product again: two vendors print the same tomato completely
-          // differently, but each is consistent with itself.
           code: { type: 'string', description: 'Vendor item code / SKU / product number for the line. "" if not shown.' },
           brand: { type: 'string', description: 'Brand or label if printed separately from the description. "" if not shown.' },
           pack_size: { type: 'string', description: 'Pack or size as printed, e.g. "6/#10", "25 LB", "4/3 L". "" if not shown.' },
@@ -146,7 +157,7 @@ const INVOICE_SCHEMA = {
       },
     },
   },
-  required: ['vendor_name', 'total', 'category', 'confidence'],
+  required: ['line_items'],
   additionalProperties: false,
 };
 
@@ -159,25 +170,21 @@ const INVOICE_PROMPT =
   'Beer, wine, spirits → Alcohol. Paper goods, cleaning, to-go containers → Supplies. Repairs and maintenance → Repairs. Pest control, linen, services → Services.\n' +
   'If the invoice is mixed, choose the category covering the largest share and say so in notes.\n' +
   'CONFIDENCE: use "low" if the image is blurry or cut off, or if you had to choose between competing totals. Say why in notes.\n' +
-  'LINE ITEMS: list every product line, using the description exactly as printed — abbreviations and all. ' +
-  'Capture the vendor item code / SKU column if the invoice has one, and the pack size and brand when they are printed separately. ' +
-  'Skip anything that is not a product: delivery charges, fuel surcharges, fees, deposits, subtotal, tax and total rows. ' +
-  'If a line is unreadable, leave it out rather than guessing at it. Return an empty list if the table cannot be read.\n' +
   'If several pages are provided they are one invoice — merge them.';
 
-/**
- * @param {Array<{buffer:Buffer, mimetype:string}>} files  images and/or PDFs
- */
-async function readInvoice(files) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    const e = new Error('No ANTHROPIC_API_KEY set — add one to .env to enable invoice reading.');
-    e.code = 'NO_KEY';
-    throw e;
-  }
-  const client = new Anthropic();
-  const content = files.map((f) => {
-    // PDFs go as documents, not images — the API reads them natively, which is
-    // far better than rasterising a page and hoping the small print survives.
+const LINES_PROMPT =
+  'This is a supplier invoice for a restaurant. List every product line from its item table, using the description exactly as printed — abbreviations and all.\n' +
+  'Capture the vendor item code / SKU column if the invoice has one, and the pack size and brand when they are printed separately.\n' +
+  'Skip anything that is not a product: delivery charges, fuel surcharges, fees, deposits, credits, and the subtotal, tax and total rows.\n' +
+  'Return money as plain numbers (12.75), no currency symbols or commas. Use 0 for anything not shown, and "" for missing text.\n' +
+  'If a line is unreadable, leave it out rather than guessing at it. Return an empty list if the item table cannot be read.\n' +
+  'If several pages are provided they are one invoice — merge them.';
+
+/** Turn uploads into content blocks. PDFs go as documents — the API reads
+ *  them natively, which beats rasterising a page and hoping the small print
+ *  survives. */
+function invoiceContent(files) {
+  return files.map((f) => {
     if (/pdf/i.test(f.mimetype)) {
       return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: f.buffer.toString('base64') } };
     }
@@ -190,32 +197,79 @@ async function readInvoice(files) {
       },
     };
   });
+}
 
-  let resp;
-  try {
-    resp = await client.messages.create({
-      model: MODEL,
-      max_tokens: 2048,
-      output_config: { format: { type: 'json_schema', schema: INVOICE_SCHEMA } },
-      messages: [{ role: 'user', content: [...content, { type: 'text', text: INVOICE_PROMPT }] }],
-    });
-  } catch (apiErr) {
-    const status = apiErr.status;
-    const detail = apiErr.error?.error?.message || apiErr.message || 'unknown error';
-    if (status === 401) throw new Error('the API key was rejected. Check ANTHROPIC_API_KEY.');
-    if (status === 400 && /model/i.test(detail)) throw new Error(`the model "${MODEL}" rejected the request (${detail}).`);
-    if (status === 429) throw new Error('rate limited — wait a moment and try again.');
-    if (status === 413 || /too large/i.test(detail)) throw new Error('that file is too large. Try a photo instead of a scan, or one page at a time.');
-    throw new Error(detail);
+/** Manager-readable version of whatever the API said. */
+function invoiceError(apiErr) {
+  const status = apiErr.status;
+  const detail = apiErr.error?.error?.message || apiErr.message || 'unknown error';
+  if (status === 401) return new Error('the API key was rejected. Check ANTHROPIC_API_KEY.');
+  if (status === 400 && /schema|grammar/i.test(detail)) {
+    // Ours to fix, not the manager's — say so rather than blaming their photo.
+    return new Error('the reader could not prepare that request (schema issue). This is a bug, not your file.');
   }
+  if (status === 400 && /model/i.test(detail)) return new Error(`the model "${MODEL}" rejected the request (${detail}).`);
+  if (status === 429) return new Error('rate limited — wait a moment and try again.');
+  if (status === 413 || /too large/i.test(detail)) return new Error('that file is too large. Try a photo instead of a scan, or one page at a time.');
+  if (/timeout|timed out|aborted/i.test(detail)) return new Error('the reader took too long. Try again, or enter it by hand.');
+  return new Error(detail);
+}
 
+// A ceiling on any single read. Without one the client sat on a request for
+// three minutes before the API gave up, and the person uploading had no idea
+// whether it was working.
+const READ_TIMEOUT_MS = Number(process.env.READER_TIMEOUT_MS || 90_000);
+
+async function askJSON(client, content, prompt, schema, maxTokens) {
+  const resp = await client.messages.create({
+    model: MODEL,
+    max_tokens: maxTokens,
+    output_config: { format: { type: 'json_schema', schema } },
+    messages: [{ role: 'user', content: [...content, { type: 'text', text: prompt }] }],
+  }, { timeout: READ_TIMEOUT_MS });
   const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  return JSON.parse(text);
+}
+
+/**
+ * Read an invoice: the accounting header, and the product lines behind it.
+ *
+ * Two calls, because one schema covering both is too complex to compile (see
+ * the note above the schemas). They are sequenced header-first so that the
+ * part the books need is never held up by the part Products wants — if the
+ * line-item read fails, the invoice still comes back fully filled in and the
+ * only thing lost is the automatic product import.
+ *
+ * @param {Array<{buffer:Buffer, mimetype:string}>} files  images and/or PDFs
+ */
+async function readInvoice(files) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    const e = new Error('No ANTHROPIC_API_KEY set — add one to .env to enable invoice reading.');
+    e.code = 'NO_KEY';
+    throw e;
+  }
+  const client = new Anthropic();
+  const content = invoiceContent(files);
+
+  // --- the header: essential. A failure here means hand entry.
   let data;
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error('Could not read that invoice — try a clearer photo, or enter it by hand.');
+    data = await askJSON(client, content, INVOICE_PROMPT, HEADER_SCHEMA, 1024);
+  } catch (apiErr) {
+    if (apiErr instanceof SyntaxError) throw new Error('Could not read that invoice — try a clearer photo, or enter it by hand.');
+    throw invoiceError(apiErr);
   }
+
+  // --- the lines: best effort. Never allowed to sink the invoice.
+  data.line_items = [];
+  try {
+    const lines = await askJSON(client, content, LINES_PROMPT, LINES_SCHEMA, 8192);
+    if (Array.isArray(lines.line_items)) data.line_items = lines.line_items;
+  } catch (e) {
+    data.lines_error = invoiceError(e).message;
+    console.error('[reader] line items unavailable:', data.lines_error);
+  }
+
   // A credit memo reduces what you owe, so it belongs in the ledger as negative.
   if (data.is_credit) {
     for (const k of ['subtotal', 'tax', 'total']) if (data[k] > 0) data[k] = -data[k];
@@ -229,3 +283,6 @@ async function readInvoice(files) {
 }
 
 module.exports.readInvoice = readInvoice;
+// Exported for the regression test that keeps them apart.
+module.exports.HEADER_SCHEMA = HEADER_SCHEMA;
+module.exports.LINES_SCHEMA = LINES_SCHEMA;

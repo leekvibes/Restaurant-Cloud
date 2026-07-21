@@ -3961,10 +3961,15 @@ function invoiceDrawerScript() {
       if (t.fresh) bits.push(t.fresh + ' new product' + (t.fresh === 1 ? '' : 's'));
       if (t.fees) bits.push(t.fees + ' charge' + (t.fees === 1 ? '' : 's') + ' ignored');
       bits.push(t.asks || t.fresh ? 'Products import after saving' : 'Products import automatically on save');
+    } else if (d.lines_error) {
+      // The header read fine and the line read didn't. Say so plainly: the
+      // invoice is complete, it just won't fill Products by itself.
+      bits.push('Product lines could not be read — the invoice still saves');
+      bits.push('Add its products from the Products page if you need them');
     } else {
-      bits.push('No product lines readable — the invoice still saves');
+      bits.push('No product lines on this invoice — it still saves');
     }
-    var lowRead = (d.confidence || '') === 'low';
+    var lowRead = (d.confidence || '') === 'low' || !!d.lines_error;
     sum.className = 'aisum' + (lowRead ? ' aisum-warn' : '');
     sum.innerHTML = '<div class="aisum-h">' + (lowRead ? 'Read, but check it' : 'Read successfully') + '</div>' +
       '<ul>' + bits.map(function (b) { return '<li>' + b + '</li>'; }).join('') + '</ul>';
