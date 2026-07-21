@@ -2859,18 +2859,31 @@ app.get('/cash', (req, res) => {
 // you see while entering is what gets stored.
 
 function cashForm(row, movements, denoms, req) {
+  // -------------------------------------------------------------------------
+  // Closing at 10:30pm, standing at the register, phone in one hand.
+  //
+  // A reconciliation needs exactly two numbers that only a human can know:
+  // what the POS says was taken in cash, and what is physically in the drawer.
+  // Everything else is either already known (the date, the service, the $200
+  // till) or derived from those two (expected, variance, deposit).
+  //
+  // So those two are the page. The other seventeen fields still exist —
+  // nothing was removed — but they sit behind Change and Advanced, where the
+  // one close in twenty that needs them can find them. The rest of the time
+  // they are noise between a tired manager and going home.
+  // -------------------------------------------------------------------------
   const isNew = !row.id;
   const drawers = CASH.q.drawers.all();
   const staff = q.allEmployees.all();
-  const c = CASH.compute(row);
   const dflt = CASH.defaultFloat();
   const m = (v) => (v == null ? '' : (v / 100).toFixed(2));
+  const me = (req.user && req.user.name) || '';
 
   const paid = movements.filter((x) => x.movement_type !== 'cash_added');
   const added = movements.filter((x) => x.movement_type === 'cash_added');
   const mvRow = (x, i, kind) => `
     <div class="mv" data-mv>
-      <input class="mv-amt" name="${kind}_amt_${i}" type="number" step="0.01" min="0" value="${x ? m(x.amount_cents) : ''}" placeholder="0.00">
+      <input class="mv-amt" name="${kind}_amt_${i}" type="number" step="0.01" min="0" inputmode="decimal" value="${x ? m(x.amount_cents) : ''}" placeholder="0.00">
       <select name="${kind}_reason_${i}" class="minisel">
         ${(kind === 'paid' ? CASH.PAID_REASONS : CASH.ADDED_REASONS).map((rr) => `<option${x && x.reason === rr ? ' selected' : ''}>${rr}</option>`).join('')}
       </select>
@@ -2878,123 +2891,151 @@ function cashForm(row, movements, denoms, req) {
       <button type="button" class="rl-del" onclick="cashDrop(this)" title="Remove">✕</button>
     </div>`;
 
-  return layout(isNew ? 'New reconciliation' : `Reconciliation · ${row.date}`, `
+  const theDate = row.date || isoDate(startOfToday());
+  const pretty = new Date(theDate + 'T00:00:00')
+    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  // Open the drawers to whatever needs attention, so nothing hides from
+  // somebody who is mid-correction.
+  const openMoney = paid.length > 0 || added.length > 0;
+  const openAdv = !!(row.deposit_destination || row.deposit_bag || row.deposit_reference
+    || row.verified_by || row.note || row.override_reason || denoms.length
+    || (row.ending_float_cents != null && row.ending_float_cents !== dflt)
+    || (row.actual_deposit_cents != null));
+  const openCtx = !isNew && (row.float_cents !== dflt || drawers.length > 1);
+
+  return layout(isNew ? 'Close the drawer' : `Reconciliation · ${row.date}`, `
     ${flash(req)}
     <form method="post" action="${isNew ? '/cash' : `/cash/${row.id}`}" id="cashform">
-    <div class="phead">
-      <div class="phead-t">
-        <a class="link back" href="${isNew ? '/cash' : `/cash/${row.id}`}">← Cash reconciliation</a>
-        <h1>${isNew ? 'New reconciliation' : 'Edit reconciliation'}</h1>
-      </div>
-    </div>
-
-    <div class="mnwrap">
-      <div class="mnmain">
-        <section class="panel">
-          <div class="panel-h"><b>1 · The shift</b></div>
-          <div class="fld-row3">
-            <label class="fld">Date<input name="date" type="date" required value="${esc(row.date || isoDate(startOfToday()))}"></label>
-            <label class="fld">Service<select name="daypart">
-              ${DAYPARTS.map((d) => `<option value="${d}"${row.daypart === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
-            </select></label>
-            <label class="fld">Drawer<select name="drawer_id">
-              ${drawers.map((d) => `<option value="${d.id}"${Number(row.drawer_id) === d.id ? ' selected' : ''}>${esc(d.name)}</option>`).join('')}
-            </select></label>
-          </div>
-          <div class="fld-row3">
-            <label class="fld">Opening till<input name="float" id="c-float" type="number" step="0.01" min="0"
-              value="${row.float_cents == null ? m(dflt) : m(row.float_cents)}"></label>
-            <label class="fld">Counted by<input name="counted_by" list="c-staff" value="${esc(row.counted_by || row.closed_by || '')}" placeholder="Who counted it"></label>
-            <label class="fld">Closing manager<input name="closed_by" list="c-staff" value="${esc(row.closed_by || '')}" placeholder="Optional"></label>
-          </div>
-          <datalist id="c-staff">${staff.map((e) => `<option value="${esc(e.name)}">`).join('')}</datalist>
-          <div class="fld-hint" id="c-floathint">The usual opening till is ${CASH.money(dflt)}.</div>
-          <label class="fld inv-hide" id="c-floatwhy">Why is the till different?
-            <select name="float_override_reason">
-              <option value="">Choose a reason…</option>
-              ${['Different opening float', 'Temporary change fund', 'Register transfer', 'Correction', 'Other']
-                .map((x) => `<option${row.float_override_reason === x ? ' selected' : ''}>${x}</option>`).join('')}
-            </select></label>
-        </section>
-
-        <section class="panel">
-          <div class="panel-h"><b>2 · Cash activity</b></div>
-          <label class="fld">Cash sales<input name="cash_sales" id="c-sales" type="number" step="0.01" min="0" value="${m(row.cash_sales_cents)}" placeholder="0.00"></label>
-          <div class="mvblock">
-            <div class="mv-h"><b>Paid outs / cash removed</b>
-              <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('paid')">＋ Add</button></div>
-            <div class="fld-hint">Cash taken out of the drawer before close — reimbursements, petty cash, approved purchases.</div>
-            <div id="paid-list">${paid.length ? paid.map((x, i) => mvRow(x, i, 'paid')).join('') : mvRow(null, 0, 'paid')}</div>
-          </div>
-          <div class="mvblock">
-            <div class="mv-h"><b>Cash added</b>
-              <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('added')">＋ Add</button></div>
-            <div class="fld-hint">Money put into the drawer outside sales — change funds, corrections.</div>
-            <div id="added-list">${added.map((x, i) => mvRow(x, i, 'added')).join('')}</div>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-h"><b>3 · Count the drawer</b><span class="muted">before removing the deposit</span></div>
-          <label class="fld">Actual cash counted<input name="counted" id="c-counted" type="number" step="0.01" min="0"
-            value="${m(row.counted_cents)}" placeholder="0.00"></label>
-          <details class="rl-adv" id="c-denoms"${denoms.length ? ' open' : ''}>
-            <summary>Count by denomination</summary>
-            <div class="denoms">
-              ${CASH.DENOMS.map((d) => {
-                const found = denoms.find((x) => x.denom_cents === d);
-                return `<label class="denom"><span>${CASH.DENOM_LABEL[d]}</span>
-                  <input name="denom_${d}" type="number" min="0" step="1" value="${found && found.qty ? found.qty : ''}" placeholder="0" data-denom="${d}"></label>`;
-              }).join('')}
-            </div>
-            <div class="denom-total">Denominations add to <b id="c-denomtotal">$0.00</b>
-              <button type="button" class="btn btn-sm" onclick="cashUseDenoms()">Use this as the counted amount</button></div>
-          </details>
-          <label class="fld">Variance note<textarea name="variance_note" rows="2" placeholder="Needed when the drawer is out by more than ${CASH.money(CASH.tolerance().minor)}">${esc(row.variance_note || '')}</textarea></label>
-        </section>
-
-        <section class="panel">
-          <div class="panel-h"><b>4 · Close the drawer</b></div>
-          <div class="fld-row3">
-            <label class="fld">Leave in register<input name="ending" id="c-ending" type="number" step="0.01" min="0"
-              value="${row.ending_float_cents == null ? m(dflt) : m(row.ending_float_cents)}"></label>
-            <label class="fld">Deposit<input name="deposit" id="c-deposit" type="number" step="0.01" min="0" value="${m(row.actual_deposit_cents)}" placeholder="calculated"></label>
-            <label class="fld">Destination<select name="deposit_destination">
-              <option value="">—</option>
-              ${CASH.DESTINATIONS.map((d) => `<option${row.deposit_destination === d ? ' selected' : ''}>${d}</option>`).join('')}
-            </select></label>
-          </div>
-          <div class="fld-row3">
-            <label class="fld">Bag number<input name="deposit_bag" value="${esc(row.deposit_bag || '')}" placeholder="Optional"></label>
-            <label class="fld">Reference<input name="deposit_reference" value="${esc(row.deposit_reference || '')}" placeholder="Optional"></label>
-            <label class="fld">Verified by<input name="verified_by" list="c-staff" value="${esc(row.verified_by || '')}" placeholder="Optional"></label>
-          </div>
-          <label class="fld inv-hide" id="c-overwhy">Why does the deposit differ?
-            <textarea name="override_reason" rows="2">${esc(row.override_reason || '')}</textarea></label>
-          <label class="fld">Closing notes<textarea name="note" rows="2">${esc(row.note || '')}</textarea></label>
-        </section>
-      </div>
-
-      <aside class="mnside">
-        <div class="mncost">
-          <div class="mnc-h">Reconciliation</div>
-          <div class="mnc-row"><span>Opening till</span><b id="s-open">—</b></div>
-          <div class="mnc-row"><span>Cash sales</span><b id="s-sales">—</b></div>
-          <div class="mnc-row"><span>Paid outs</span><b id="s-paid">—</b></div>
-          <div class="mnc-row"><span>Cash added</span><b id="s-added">—</b></div>
-          <div class="mnc-row mnc-total"><span>Expected in drawer</span><b id="s-exp">—</b></div>
-          <div class="mnc-row"><span>Actual counted</span><b id="s-count">—</b></div>
-          <div class="mnc-row"><span>Variance</span><b id="s-var">—</b></div>
-          <div class="mnc-row"><span>Leave in register</span><b id="s-end">—</b></div>
-          <div class="mnc-row mnc-total"><span>Deposit</span><b id="s-dep">—</b></div>
-          <div class="mnc-status" id="s-stat">Enter the count</div>
-          <div class="mnc-warn" id="s-warn" hidden></div>
-          <div class="mnc-act">
-            <button class="btn btn-primary" type="submit" name="status" value="final">${isNew ? 'Save reconciliation' : 'Save changes'}</button>
-            <button class="btn btn-ghost" type="submit" name="status" value="draft">Save as draft</button>
-          </div>
+    <div class="cq">
+      <div class="phead">
+        <div class="phead-t">
+          <a class="link back" href="${isNew ? '/cash' : `/cash/${row.id}`}">← Cash reconciliation</a>
+          <h1>${isNew ? 'Close the drawer' : 'Edit reconciliation'}</h1>
         </div>
-      </aside>
+      </div>
+
+      <!-- What we already know. One line, and a way in if any of it is wrong. -->
+      <div class="cq-ctx">
+        <span class="cq-ctx-t"><b id="cq-when">${esc(pretty)}</b>
+          <i><span id="cq-svc">${esc(dp(row.daypart || 'cafe'))}</span> · opening till <span id="cq-till">${CASH.money(row.float_cents == null ? dflt : row.float_cents)}</span></i></span>
+        <button type="button" class="cq-ctx-b" onclick="cashToggle('cq-ctxbox', this)"
+          aria-expanded="${openCtx ? 'true' : 'false'}">Change</button>
+      </div>
+      <div class="cq-box" id="cq-ctxbox"${openCtx ? '' : ' hidden'}>
+        <div class="fld-row3">
+          <label class="fld">Date<input name="date" type="date" required value="${esc(theDate)}"></label>
+          <label class="fld">Service<select name="daypart">
+            ${DAYPARTS.map((d) => `<option value="${d}"${(row.daypart || 'cafe') === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+          </select></label>
+          <label class="fld">Opening till<input name="float" id="c-float" type="number" step="0.01" min="0" inputmode="decimal"
+            value="${row.float_cents == null ? m(dflt) : m(row.float_cents)}"></label>
+        </div>
+        ${drawers.length > 1 ? `<label class="fld">Drawer<select name="drawer_id">
+          ${drawers.map((d) => `<option value="${d.id}"${Number(row.drawer_id) === d.id ? ' selected' : ''}>${esc(d.name)}</option>`).join('')}
+        </select></label>` : `<input type="hidden" name="drawer_id" value="${drawers[0] ? drawers[0].id : ''}">`}
+        <label class="fld inv-hide" id="c-floatwhy">Why is the till different?
+          <select name="float_override_reason">
+            <option value="">Choose a reason…</option>
+            ${['Different opening float', 'Temporary change fund', 'Register transfer', 'Correction', 'Other']
+              .map((x) => `<option${row.float_override_reason === x ? ' selected' : ''}>${x}</option>`).join('')}
+          </select></label>
+      </div>
+
+      <!-- The two numbers. Big, and first. -->
+      <div class="cq-two">
+        <label class="cq-n">
+          <span class="cq-n-l">Cash sales</span>
+          <span class="cq-n-h">what the POS rang in cash</span>
+          <span class="cq-n-f"><i>$</i><input name="cash_sales" id="c-sales" type="number" step="0.01" min="0"
+            inputmode="decimal" value="${m(row.cash_sales_cents)}" placeholder="0.00" autocomplete="off"></span>
+        </label>
+        <label class="cq-n">
+          <span class="cq-n-l">Counted in the drawer</span>
+          <span class="cq-n-h">everything, before you pull the deposit</span>
+          <span class="cq-n-f"><i>$</i><input name="counted" id="c-counted" type="number" step="0.01" min="0"
+            inputmode="decimal" value="${m(row.counted_cents)}" placeholder="0.00" autocomplete="off"></span>
+        </label>
+      </div>
+
+      <!-- The answer, in words, the moment both numbers exist. -->
+      <div class="cq-verdict" id="cq-v">
+        <div class="cq-v-head"><span class="cq-v-dot"></span><b id="cq-v-t">Enter the two numbers above</b></div>
+        <div class="cq-v-sub" id="cq-v-s">Everything else works itself out.</div>
+        <div class="cq-v-do" id="cq-v-do" hidden></div>
+      </div>
+
+      <div class="cq-box cq-warnbox" id="cq-varwrap" hidden>
+        <label class="fld"><b id="cq-varlabel">Why is the drawer out?</b>
+          <textarea name="variance_note" rows="2" id="c-varnote"
+            placeholder="What happened — a miscount, a missed paid-out, a till error">${esc(row.variance_note || '')}</textarea></label>
+      </div>
+
+      <label class="fld cq-who">Counted by
+        <input name="counted_by" list="c-staff" value="${esc(row.counted_by || row.closed_by || (isNew ? me : ''))}" placeholder="Who counted it" required>
+      </label>
+      <datalist id="c-staff">${staff.map((e) => `<option value="${esc(e.name)}">`).join('')}</datalist>
+
+      <div class="cq-act">
+        <button class="btn btn-primary cq-save" type="submit" name="status" value="final">${isNew ? 'Save the count' : 'Save changes'}</button>
+        <button class="btn btn-ghost btn-sm" type="submit" name="status" value="draft">Finish later</button>
+      </div>
+
+      <!-- Everything below here is the one close in twenty. -->
+      <div class="cq-more">
+        <button type="button" class="cq-more-b" onclick="cashToggle('cq-money', this)" aria-expanded="${openMoney ? 'true' : 'false'}">
+          ＋ Money in or out of the drawer</button>
+        <button type="button" class="cq-more-b" onclick="cashToggle('cq-adv', this)" aria-expanded="${openAdv ? 'true' : 'false'}">
+          Advanced</button>
+      </div>
+
+      <div class="cq-box" id="cq-money"${openMoney ? '' : ' hidden'}>
+        <div class="mvblock">
+          <div class="mv-h"><b>Paid out / taken from the drawer</b>
+            <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('paid')">＋ Add</button></div>
+          <div class="fld-hint">Reimbursements, petty cash, an approved purchase. This lowers what the drawer should hold.</div>
+          <div id="paid-list">${paid.length ? paid.map((x, i) => mvRow(x, i, 'paid')).join('') : mvRow(null, 0, 'paid')}</div>
+        </div>
+        <div class="mvblock">
+          <div class="mv-h"><b>Cash added</b>
+            <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('added')">＋ Add</button></div>
+          <div class="fld-hint">Change brought in, a correction, a transfer from another register.</div>
+          <div id="added-list">${added.map((x, i) => mvRow(x, i, 'added')).join('')}</div>
+        </div>
+      </div>
+
+      <div class="cq-box" id="cq-adv"${openAdv ? '' : ' hidden'}>
+        <div class="fld-row3">
+          <label class="fld">Leave in the register<input name="ending" id="c-ending" type="number" step="0.01" min="0" inputmode="decimal"
+            value="${row.ending_float_cents == null ? m(dflt) : m(row.ending_float_cents)}"></label>
+          <label class="fld">Deposit<input name="deposit" id="c-deposit" type="number" step="0.01" min="0" inputmode="decimal"
+            value="${m(row.actual_deposit_cents)}" placeholder="calculated"></label>
+          <label class="fld">Destination<select name="deposit_destination">
+            <option value="">—</option>
+            ${CASH.DESTINATIONS.map((d) => `<option${row.deposit_destination === d ? ' selected' : ''}>${d}</option>`).join('')}
+          </select></label>
+        </div>
+        <label class="fld inv-hide" id="c-overwhy">Why does the deposit differ?
+          <textarea name="override_reason" rows="2">${esc(row.override_reason || '')}</textarea></label>
+        <div class="fld-row3">
+          <label class="fld">Bag number<input name="deposit_bag" value="${esc(row.deposit_bag || '')}" placeholder="Optional"></label>
+          <label class="fld">Reference<input name="deposit_reference" value="${esc(row.deposit_reference || '')}" placeholder="Optional"></label>
+          <label class="fld">Verified by<input name="verified_by" list="c-staff" value="${esc(row.verified_by || '')}" placeholder="Optional"></label>
+        </div>
+        <label class="fld">Closing manager<input name="closed_by" list="c-staff" value="${esc(row.closed_by || '')}" placeholder="Optional"></label>
+        <details class="rl-adv" id="c-denoms"${denoms.length ? ' open' : ''}>
+          <summary>Count by denomination</summary>
+          <div class="denoms">
+            ${CASH.DENOMS.map((d) => {
+              const found = denoms.find((x) => x.denom_cents === d);
+              return `<label class="denom"><span>${CASH.DENOM_LABEL[d]}</span>
+                <input name="denom_${d}" type="number" min="0" step="1" inputmode="numeric" value="${found && found.qty ? found.qty : ''}" placeholder="0" data-denom="${d}"></label>`;
+            }).join('')}
+          </div>
+          <div class="denom-total">Denominations add to <b id="c-denomtotal">$0.00</b>
+            <button type="button" class="btn btn-sm" onclick="cashUseDenoms()">Use this as the counted amount</button></div>
+        </details>
+        <label class="fld">Closing notes<textarea name="note" rows="2">${esc(row.note || '')}</textarea></label>
+      </div>
     </div>
     <input type="hidden" name="paid_n" id="paid-n" value="${Math.max(1, paid.length)}">
     <input type="hidden" name="added_n" id="added-n" value="${added.length}">
@@ -3012,64 +3053,95 @@ function cashScript() {
   return `
   function cmoney(c){ var n=Math.abs(Math.round(c)); return (c<0?'-$':'$')+(n/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
   function cnum(id){ var e=document.getElementById(id); return e&&e.value!=='' ? Math.round(parseFloat(e.value)*100)||0 : null; }
+  function cashToggle(id, btn){
+    var el=document.getElementById(id);
+    el.hidden = !el.hidden;
+    btn.setAttribute('aria-expanded', el.hidden ? 'false' : 'true');
+    if(!el.hidden){ var f=el.querySelector('input,select,textarea'); if(f) f.focus(); }
+  }
   function cashDrop(b){ var w=b.closest('[data-mv]'); if(w.parentElement.children.length>1) w.remove(); else w.querySelectorAll('input').forEach(function(i){i.value='';}); cashCalc(); }
   function cashAdd(kind){
     var list=document.getElementById(kind+'-list');
     var i=list.children.length;
     var reasons = kind==='paid' ? CASH_PAID_REASONS : CASH_ADDED_REASONS;
     var d=document.createElement('div'); d.className='mv'; d.setAttribute('data-mv','');
-    d.innerHTML='<input class="mv-amt" name="'+kind+'_amt_'+i+'" type="number" step="0.01" min="0" placeholder="0.00">'
+    d.innerHTML='<input class="mv-amt" name="'+kind+'_amt_'+i+'" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00">'
       +'<select name="'+kind+'_reason_'+i+'" class="minisel">'+reasons.map(function(r){return '<option>'+r+'</option>';}).join('')+'</select>'
       +'<input name="'+kind+'_who_'+i+'" placeholder="'+(kind==='paid'?'Paid to':'Added by')+'">'
       +'<button type="button" class="rl-del" onclick="cashDrop(this)" title="Remove">✕</button>';
-    list.appendChild(d); cashCalc();
+    list.appendChild(d); d.querySelector('input').focus(); cashCalc();
   }
   function cashUseDenoms(){
     var t=0; document.querySelectorAll('[data-denom]').forEach(function(i){ t += (parseInt(i.value,10)||0) * parseInt(i.dataset.denom,10); });
     document.getElementById('c-counted').value=(t/100).toFixed(2); cashCalc();
   }
+
   function cashCalc(){
     var sum=function(kind){ var t=0; document.querySelectorAll('#'+kind+'-list .mv-amt').forEach(function(i){ t+=Math.round((parseFloat(i.value)||0)*100); }); return t; };
-    var open=cnum('c-float')||0, sales=cnum('c-sales')||0, paid=sum('paid'), added=sum('added');
-    var exp=open+sales+added-paid;
+    var open=cnum('c-float'); if(open==null) open=CASH_DEFAULT;
+    var sales=cnum('c-sales'), paid=sum('paid'), added=sum('added');
     var counted=cnum('c-counted');
-    var end=cnum('c-ending');
-    var set=function(id,v){ document.getElementById(id).textContent=v; };
-    set('s-open',cmoney(open)); set('s-sales',cmoney(sales));
-    set('s-paid',paid?'-'+cmoney(paid):cmoney(0)); set('s-added',cmoney(added));
-    set('s-exp',cmoney(exp));
-    set('s-count',counted==null?'—':cmoney(counted));
-    set('s-end',end==null?'—':cmoney(end));
+    var end=cnum('c-ending'); if(end==null) end=CASH_DEFAULT;
+    var exp=open+(sales||0)+added-paid;
 
-    var dt=0; document.querySelectorAll('[data-denom]').forEach(function(i){ dt += (parseInt(i.value,10)||0)*parseInt(i.dataset.denom,10); });
-    var dte=document.getElementById('c-denomtotal'); if(dte) dte.textContent=cmoney(dt);
-
-    // Anything off the usual till has to say why — asked for at the moment it
-    // happens rather than refused at the end.
+    // The context line restates what the page is assuming, so a wrong date or
+    // a wrong till is visible without opening anything.
+    var t=document.getElementById('cq-till'); if(t) t.textContent=cmoney(open);
+    var dsel=document.querySelector('[name=daypart]'), svc=document.getElementById('cq-svc');
+    if(dsel && svc) svc.textContent=dsel.options[dsel.selectedIndex].text;
+    var dt2=document.querySelector('[name=date]'), whn=document.getElementById('cq-when');
+    if(dt2 && whn && dt2.value){
+      whn.textContent=new Date(dt2.value+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'});
+    }
     document.getElementById('c-floatwhy').classList.toggle('inv-hide', open===CASH_DEFAULT);
 
-    var st=document.getElementById('s-stat'), warn=document.getElementById('s-warn');
-    if(counted==null){ set('s-var','—'); set('s-dep','—'); st.textContent='Enter the count'; st.className='mnc-status'; warn.hidden=true; return; }
-    var v=counted-exp;
-    set('s-var',v===0?'Exact':cmoney(v));
-    var calcDep = end==null?null:counted-end;
-    var typedDep = cnum('c-deposit');
-    set('s-dep', calcDep==null?'—':cmoney(typedDep==null?calcDep:typedDep));
+    var dtot=0; document.querySelectorAll('[data-denom]').forEach(function(i){ dtot += (parseInt(i.value,10)||0)*parseInt(i.dataset.denom,10); });
+    var dte=document.getElementById('c-denomtotal'); if(dte) dte.textContent=cmoney(dtot);
 
-    var mag=Math.abs(v);
-    st.className='mnc-status '+(v===0?'st-on':mag<=CASH_TOL.minor?'st-near':mag<=CASH_TOL.critical?'st-over':'st-missing');
-    st.textContent = v===0 ? 'Exact' : cmoney(mag)+(v>0?' over':' short')+(mag<=CASH_TOL.minor?' — within tolerance':mag<=CASH_TOL.critical?' — needs review':' — critical');
+    var box=document.getElementById('cq-v'), ttl=document.getElementById('cq-v-t'),
+        sub=document.getElementById('cq-v-s'), doo=document.getElementById('cq-v-do'),
+        vw=document.getElementById('cq-varwrap'), vl=document.getElementById('cq-varlabel');
 
-    var msgs=[];
-    if(mag>CASH_TOL.minor) msgs.push('A variance this size needs a note before it can be finalised.');
-    if(end!=null && end>counted) msgs.push('You cannot leave more in the register than was counted.');
-    if(typedDep!=null && calcDep!=null && typedDep!==calcDep){
-      var un=calcDep-typedDep;
-      msgs.push(cmoney(Math.abs(un))+' would be unaccounted for. Say why below, or clear the deposit to use '+cmoney(calcDep)+'.');
+    // Nothing yet, or only half of it. Say what is still needed rather than
+    // showing a variance against a number nobody has entered.
+    if(sales==null || counted==null){
+      box.className='cq-verdict';
+      if(sales==null && counted==null){ ttl.textContent='Enter the two numbers above'; sub.textContent='Everything else works itself out.'; }
+      else if(counted==null){ ttl.textContent='The drawer should hold '+cmoney(exp); sub.textContent='Count it and put the total in.'; }
+      else { ttl.textContent='Now add the cash sales'; sub.textContent='From the POS report, so the count has something to check against.'; }
+      doo.hidden=true; vw.hidden=true;
+      return;
     }
-    document.getElementById('c-overwhy').classList.toggle('inv-hide', !(typedDep!=null && calcDep!=null && typedDep!==calcDep));
-    warn.hidden = !msgs.length;
-    warn.innerHTML = msgs.join('<br>');
+
+    var v=counted-exp, mag=Math.abs(v);
+    var tier = v===0 ? 'exact' : mag<=CASH_TOL.minor ? 'near' : mag<=CASH_TOL.critical ? 'review' : 'bad';
+    box.className='cq-verdict cq-v-'+tier;
+    ttl.textContent = v===0 ? 'The drawer is exact'
+      : cmoney(mag)+(v>0?' over':' short');
+    sub.textContent = 'Should hold '+cmoney(exp)+' · counted '+cmoney(counted)
+      + (tier==='near' ? ' · within tolerance' : '');
+
+    // What to physically do next, which is the part they came for.
+    var dep=counted-end, typed=cnum('c-deposit');
+    var dest=document.querySelector('[name=deposit_destination]');
+    var where=(dest && dest.value) ? dest.value.toLowerCase() : 'the safe';
+    var lines=[];
+    if(dep>0) lines.push('<b>Take '+cmoney(dep)+'</b> to '+where+', leave '+cmoney(end)+' in the register.');
+    else if(dep===0) lines.push('Nothing to deposit — the '+cmoney(end)+' stays in the register.');
+    else lines.push('<b>Short '+cmoney(-dep)+'</b> of the '+cmoney(end)+' the register should keep.');
+    if(typed!=null && typed!==dep){
+      var un=dep-typed;
+      lines.push(cmoney(Math.abs(un))+' would be unaccounted for. Say why under Advanced, or clear the deposit to use '+cmoney(dep)+'.');
+    }
+    doo.innerHTML=lines.join('<br>'); doo.hidden=false;
+    document.getElementById('c-overwhy').classList.toggle('inv-hide', !(typed!=null && typed!==dep));
+
+    // The note is asked for the moment it is owed, not refused at the end.
+    var needNote = mag>CASH_TOL.minor;
+    vw.hidden = !needNote;
+    if(needNote) vl.textContent = tier==='bad'
+      ? 'This one needs explaining before it can be saved'
+      : 'Why is the drawer out?';
   }
   document.addEventListener('input', function(e){ if(e.target.closest('#cashform')) cashCalc(); });
   document.addEventListener('change', function(e){ if(e.target.closest('#cashform')) cashCalc(); });
@@ -3079,8 +3151,12 @@ function cashScript() {
 app.get('/cash/new', (req, res) => {
   if (!canWrite()) return res.redirect('/cash');
   const drawer = CASH.q.drawers.all()[0];
+  const today = isoDate(startOfToday());
+  // Whatever service actually ran today, rather than a guess. A café that
+  // never serves dinner should not have to correct the field every night.
+  const ran = db.prepare('SELECT daypart FROM shifts WHERE date = ? ORDER BY id DESC LIMIT 1').get(today);
   res.send(cashForm({
-    date: isoDate(startOfToday()), daypart: 'dinner', drawer_id: drawer ? drawer.id : null,
+    date: today, daypart: ran ? ran.daypart : 'cafe', drawer_id: drawer ? drawer.id : null,
     float_cents: CASH.defaultFloat(), ending_float_cents: CASH.defaultFloat(),
   }, [], [], req));
 });
@@ -3127,9 +3203,13 @@ function cashBody(body) {
     paid_out_cents: paidTotal,
     cash_added_cents: addedTotal,
     counted_cents: counted,
-    ending_float_cents: ending,
+    // Assumed, like the opening till. Both live behind Advanced now, so the
+    // parser has to know the default rather than trusting a hidden field to
+    // always be posted — otherwise a close that never opens Advanced has no
+    // ending float, and the deposit silently comes out null.
+    ending_float_cents: ending ?? CASH.defaultFloat(),
     // Left blank means "whatever the drawer says", which is the normal case.
-    actual_deposit_cents: typedDeposit ?? (counted != null && ending != null ? counted - ending : null),
+    actual_deposit_cents: typedDeposit ?? (counted != null ? counted - (ending ?? CASH.defaultFloat()) : null),
     deposit_destination: String(body.deposit_destination || '').trim() || null,
     deposit_reference: String(body.deposit_reference || '').trim() || null,
     deposit_bag: String(body.deposit_bag || '').trim() || null,

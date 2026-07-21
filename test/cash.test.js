@@ -272,3 +272,81 @@ test('the list groups by month and the detail page opens', async () => {
   assert.ok(detail.includes('Expected in drawer') && detail.includes('Actual counted'));
   assert.ok(detail.includes('History'), 'with its audit trail');
 });
+
+// --- closing at 10:30pm ---------------------------------------------------------
+//
+// A reconciliation needs two numbers a human has to supply: what the POS rang
+// in cash, and what is in the drawer. Everything else is known or derived. The
+// form had nineteen fields on it, which is nineteen chances to stall somebody
+// who wants to go home.
+
+test('the close asks for two numbers and nothing else', async () => {
+  const html = await (await fetch(`${BASE}/cash/new`)).text();
+  // The three panels holding the other seventeen fields all start closed.
+  for (const id of ['cq-ctxbox', 'cq-money', 'cq-adv']) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*\\bhidden\\b`), `${id} starts closed`);
+  }
+  assert.match(html, /id="cq-varwrap"[^>]*\bhidden\b/, 'and the variance note only appears when owed');
+  // What is left standing is the two numbers, and who counted them.
+  const two = html.slice(html.indexOf('class="cq-two"'), html.indexOf('id="cq-v"'));
+  const fields = two.match(/<(input|select|textarea)\b(?![^>]*type="hidden")/g) || [];
+  assert.strictEqual(fields.length, 2, `two numbers, got ${fields.length}`);
+  assert.ok(two.includes('name="cash_sales"') && two.includes('name="counted"'));
+  assert.match(html, /class="fld cq-who">Counted by\s*\n\s*<input name="counted_by"/,
+    'and one field for who counted, outside any panel');
+  // Both take a numeric keypad. A manager standing at a register should not
+  // get a full qwerty for a dollar amount.
+  assert.strictEqual((two.match(/inputmode="decimal"/g) || []).length, 2);
+});
+
+test('everything hidden still posts, so a full close is one round trip', async () => {
+  // The advanced fields are collapsed, not removed. A reconciliation that uses
+  // them must save in the same submit as one that doesn't.
+  const res = await post('/cash', base({
+    date: '2026-07-09', counted: '433',
+    paid_amt_0: '80', paid_reason_0: 'Store purchase', paid_who_0: 'Kevin',
+    paid_amt_1: '40', paid_reason_1: 'Petty cash', paid_who_1: 'Sandra',
+    variance_note: 'Found a twenty under the tray',
+    deposit_destination: 'Bank', deposit_bag: 'B-114', deposit_reference: 'R-9',
+    verified_by: 'Houston', note: 'POS was down for ten minutes',
+    denom_10000: '4', denom_500: '6', denom_100: '3',
+  }));
+  const id = idOf(res);
+  assert.ok(id, `saved, got ${res.headers.get('location')}`);
+  const db2 = new Database(DB, { readonly: true });
+  const row = db2.prepare('SELECT * FROM cash_recon WHERE id = ?').get(id);
+  const dn = db2.prepare('SELECT COUNT(*) n FROM cash_denoms WHERE recon_id = ?').get(id).n;
+  db2.close();
+  assert.strictEqual(row.paid_out_cents, 12000);
+  assert.strictEqual(row.deposit_destination, 'Bank');
+  assert.strictEqual(row.deposit_bag, 'B-114');
+  assert.strictEqual(row.verified_by, 'Houston');
+  assert.strictEqual(dn, 3, 'denominations survive being behind a disclosure');
+});
+
+test('the opening till and the ending float are assumed, not asked for', async () => {
+  // Neither appears on the open form. A close that touches neither must still
+  // land on $200 in and $200 left, or the deposit is wrong every night.
+  const id = idOf(await post('/cash', {
+    date: '2026-07-10', daypart: 'cafe', cash_sales: '333', counted: '533',
+    counted_by: 'Malek', status: 'final',
+  }));
+  assert.ok(id, 'saves with neither float supplied');
+  const db2 = new Database(DB, { readonly: true });
+  const row = db2.prepare('SELECT * FROM cash_recon WHERE id = ?').get(id);
+  db2.close();
+  assert.strictEqual(row.float_cents, 20000, 'opened on the usual till');
+  assert.strictEqual(row.ending_float_cents, 20000, 'and leaves the usual till behind');
+  assert.strictEqual(row.actual_deposit_cents, 33300, 'and banked the count less the till');
+  assert.strictEqual(C.compute(row).variance, 0, 'which reconciles exactly');
+});
+
+test('a new close defaults to the service that actually ran', async () => {
+  const w = new Database(DB);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(today);
+  w.close();
+  const html = await (await fetch(`${BASE}/cash/new`)).text();
+  // A café that never serves dinner should not correct this field every night.
+  assert.match(html, /<option value="cafe" selected>/, 'picks up today\'s service');
+});

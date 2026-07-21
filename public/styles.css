@@ -2057,3 +2057,84 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .todobar { flex-wrap: wrap; }
   .todobar .btn { width: 100%; text-align: center; }
 }
+
+/* ===========================================================================
+   CLOSE THE DRAWER — the two-number cash count
+   ---------------------------------------------------------------------------
+   Sized for a phone held at a register at 10:30pm. The two inputs are the
+   biggest thing on the page; the verdict sits directly under them and reads
+   as a sentence, not a table. Everything else is behind a disclosure.
+   ======================================================================== */
+.cq { max-width: 620px; margin: 0 auto; }
+
+.cq-ctx { display: flex; align-items: center; gap: 12px; padding: 12px 15px; margin-bottom: 14px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.cq-ctx-t { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.cq-ctx-t b { font-size: 14px; font-weight: 650; color: var(--ink); }
+.cq-ctx-t i { font-style: normal; font-size: 12.5px; color: var(--muted); }
+.cq-ctx-b { flex-shrink: 0; background: none; border: 0; padding: 6px 4px; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600; color: var(--primary); }
+
+.cq-box { padding: 15px; margin-bottom: 14px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.cq-box[hidden] { display: none; }
+.cq-warnbox { border-color: var(--warn-200, #fed7aa); background: var(--warn-50, #fffbeb); }
+
+/* The two numbers. Deliberately oversized — this is the whole task. */
+.cq-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+/* min-width:0 on both: a grid item and a flex item both default to `auto`,
+   which lets the 27px number input's intrinsic width blow the track out and
+   scroll the whole page sideways. */
+.cq-n { display: grid; gap: 2px; padding: 14px 15px 13px; cursor: text; min-width: 0;
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--radius-lg); }
+.cq-n:focus-within { border-color: var(--primary); box-shadow: var(--ring); }
+.cq-n-l { font-size: 13px; font-weight: 650; color: var(--ink); }
+.cq-n-h { font-size: 11.5px; color: var(--faint); line-height: 1.35; margin-bottom: 6px; }
+.cq-n-f { display: flex; align-items: baseline; gap: 3px; min-width: 0; }
+.cq-n-f i { font-style: normal; font-size: 19px; font-weight: 600; color: var(--faint); }
+.cq-n-f input { flex: 1; min-width: 0; border: 0; outline: none; background: none; padding: 0;
+  font: inherit; font-size: 27px; font-weight: 700; letter-spacing: -.02em; color: var(--ink); }
+.cq-n-f input::-webkit-outer-spin-button, .cq-n-f input::-webkit-inner-spin-button {
+  -webkit-appearance: none; margin: 0; }
+.cq-n-f input[type=number] { -moz-appearance: textfield; }
+
+/* The answer, in a sentence. Colour carries the same thing the words do, so
+   it still reads correctly to anyone who cannot tell them apart. */
+.cq-verdict { padding: 15px 16px; margin-bottom: 14px; border-radius: var(--radius-lg);
+  background: var(--surface-2); border: 1px solid var(--line); }
+.cq-v-head { display: flex; align-items: center; gap: 9px; }
+.cq-v-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
+.cq-v-head b { font-size: 17px; font-weight: 700; letter-spacing: -.01em; color: var(--ink); }
+.cq-v-sub { margin-top: 3px; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
+.cq-v-do { margin-top: 11px; padding: 11px 13px; border-radius: 9px; background: var(--surface);
+  border: 1px solid var(--line); font-size: 13.5px; line-height: 1.6; color: var(--ink-2); }
+.cq-v-do b { font-weight: 700; color: var(--ink); }
+.cq-verdict.cq-v-exact { background: #f0fdf4; border-color: #bbf7d0; }
+.cq-verdict.cq-v-exact .cq-v-dot { background: #16a34a; }
+.cq-verdict.cq-v-near  { background: #f0fdf4; border-color: #bbf7d0; }
+.cq-verdict.cq-v-near .cq-v-dot { background: #65a30d; }
+.cq-verdict.cq-v-review { background: #fffbeb; border-color: #fde68a; }
+.cq-verdict.cq-v-review .cq-v-dot { background: #d97706; }
+.cq-verdict.cq-v-bad { background: #fef2f2; border-color: #fecaca; }
+.cq-verdict.cq-v-bad .cq-v-dot { background: #dc2626; }
+
+.cq-who { margin-bottom: 14px; }
+.cq-act { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.cq-save { flex: 1; padding: 13px; font-size: 15px; font-weight: 650; }
+
+.cq-more { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+  padding-top: 16px; border-top: 1px solid var(--line); }
+.cq-more-b { background: none; border: 1px solid var(--line-2); border-radius: 9px;
+  padding: 8px 13px; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600;
+  color: var(--ink-2); }
+.cq-more-b:hover { border-color: var(--primary); color: var(--primary); }
+.cq-more-b[aria-expanded="true"] { background: var(--primary-50); border-color: var(--primary-200);
+  color: var(--primary-700); }
+
+@media (max-width: 560px) {
+  /* Stacked, because two 27px figures side by side on a phone leaves neither
+     of them readable — and this is the one page guaranteed to be used on one. */
+  .cq-two { grid-template-columns: 1fr; }
+  .cq-act { flex-direction: column-reverse; align-items: stretch; }
+  .cq-save { width: 100%; }
+}

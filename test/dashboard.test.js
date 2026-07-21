@@ -280,3 +280,14 @@ test('sales entered through the form are stored and read back', async () => {
     w2.close();
   }
 });
+
+test('the closing manager does not type their own name', async () => {
+  // Who counted the drawer is required, and the app already knows who is
+  // signed in. Asking is one more field between a tired manager and going
+  // home — and a typed name is a name that gets typed differently each night.
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/cash/new')).text();
+  const field = html.match(/<input name="counted_by"[^>]*>/);
+  assert.ok(field, 'the field is on the form');
+  assert.match(field[0], /value="[^"]+"/, `prefilled from the session, got: ${field[0]}`);
+});
