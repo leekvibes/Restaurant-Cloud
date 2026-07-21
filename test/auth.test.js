@@ -108,6 +108,52 @@ test('a view-only account can open its areas and is refused every write', async 
   assert.strictEqual(write.status, 403, 'writes refused');
 });
 
+// The dashboard pulls from every module at once, so it is the one page where
+// a permissions mistake shows up as content rather than as a 403 — a viewer
+// would just see payroll and cost figures on their home page and never know
+// they weren't supposed to.
+test('the dashboard shows nothing from areas the account cannot open', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const existing = users.byEmail.get('dash@test.local');
+  if (existing) users.del.run(existing.id);
+  await as(owner, '/users', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams([['name', 'Dash Viewer'], ['email', 'dash@test.local'],
+      ['password', 'dash-password-1'], ['role', 'viewer'],
+      ['features', 'dashboard'], ['features', 'shifts']]).toString(),
+  });
+  const v = await login({ email: 'dash@test.local', password: 'dash-password-1' });
+  // finally, not a trailing line: a failed assertion would otherwise leave the
+  // account sitting in the real database until someone noticed it.
+  try {
+    const res = await as(v, '/');
+    assert.strictEqual(res.status, 200, 'dashboard itself is allowed');
+    const html = await res.text();
+
+    assert.ok(html.includes('Needs attention'), 'still gets the sections it may see');
+    for (const withheld of ['Business health', 'Quick actions']) {
+      assert.ok(!html.includes(withheld), `${withheld} must not render`);
+    }
+    // Quick actions are writes; a view-only account gets none of them at all.
+    assert.ok(!html.includes('class="qact"'), 'no write shortcuts for a viewer');
+    // And nothing from the trackers/payroll/cash areas leaks into the lists.
+    for (const leak of ['/c/invoices', '/c/recurring', '/c/par', '/payroll', '/cash']) {
+      assert.ok(!html.includes(`href="${leak}"`), `must not link to ${leak}`);
+    }
+  } finally {
+    const owned = users.byEmail.get('dash@test.local');
+    if (owned) users.del.run(owned.id);
+  }
+});
+
+test('an owner does see the full dashboard', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const html = await (await as(owner, '/')).text();
+  for (const section of ['Today', 'Needs attention', 'Quick actions', 'Business health', 'Recent activity']) {
+    assert.ok(html.includes(section), `${section} renders for the owner`);
+  }
+});
+
 test('disabling an account revokes it immediately, not at cookie expiry', async () => {
   const v = await login({ email: 'viewer@test.local', password: 'viewer-password-1' });
   assert.strictEqual((await as(v, '/sales')).status, 200);

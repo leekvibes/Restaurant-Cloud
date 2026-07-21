@@ -10,7 +10,7 @@ const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext } = require('./views');
-const { mountModules, MODULES, expiringSoon } = require('./modules');
+const { mountModules, MODULES } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
@@ -234,127 +234,13 @@ app.get('/logout', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Dashboard
+// Everything about a shift that the dashboard and the shifts list both need,
+// as correlated subqueries rather than a per-shift engine run. The engine
+// costs ~1ms a shift; these pages read many shifts at once, so at a few
+// hundred that difference is the page feeling instant or visibly stalling.
+// One definition, so the two pages can never disagree about what a shift did.
 // ---------------------------------------------------------------------------
-function salesChart(dailySales, today) {
-  const days = [];
-  for (let i = 13; i >= 0; i--) {
-    const d = new Date(today.getTime() - i * 86400000);
-    const ds = isoDate(d);
-    days.push({ ds, c: dailySales[ds] || 0 });
-  }
-  const max = Math.max(1, ...days.map((d) => d.c));
-  const W = 600, H = 150, pad = 10, bw = (W - pad * 2) / days.length;
-  const bars = days.map((d, i) => {
-    const h = Math.max(2, Math.round((d.c / max) * (H - 34)));
-    const x = pad + i * bw + bw * 0.16, y = H - 20 - h, w = bw * 0.68;
-    const lbl = i % 3 === 0 ? `<text class="bar-lbl" x="${x + w / 2}" y="${H - 5}" text-anchor="middle">${d.ds.slice(5)}</text>` : '';
-    return `<rect class="bar" x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="${h}" rx="3"><title>${d.ds}: ${money(d.c)}</title></rect>${lbl}`;
-  }).join('');
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}">${bars}</svg></div>`;
-}
-
-app.get('/', (req, res) => {
-  const today = startOfToday();
-  const toStr = isoDate(today);
-  const from7 = addDays(toStr, -6);
-  const from14 = addDays(toStr, -13);
-
-  const costs = aggregateCosts(from7, toStr); // sales, laborPct, primePct, wow (sales vs prior 7d)
-
-  // One pass over the last 14 days: daily sales for the chart + this/prior week tips.
-  const dailySales = {};
-  let tips7 = 0, tipsPrev = 0;
-  for (const sh of s.shiftsInRange.all(from14, toStr)) {
-    const inp = shiftInputs(sh.id);
-    const r = runShift(inp, policyForShift(sh));
-    const sales = shiftTotalSales(sh) || r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
-    dailySales[sh.date] = (dailySales[sh.date] || 0) + sales;
-    if (sh.date >= from7) tips7 += r.reconciliation.totalTipsCollected;
-    else tipsPrev += r.reconciliation.totalTipsCollected;
-  }
-  const tipsDelta = tipsPrev ? Math.round(((tips7 - tipsPrev) / tipsPrev) * 100) : null;
-  const openCount = db.prepare("SELECT COUNT(*) n FROM shifts WHERE status != 'emailed'").get().n;
-  const deltaTag = (v) => (v === null ? '' : `<span class="delta ${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '▲' : '▼'} ${Math.abs(v)}%</span> vs prev week`);
-
-  const stats = `
-    <div class="stats">
-      <div class="stat"><div class="stat-label">Sales · this week</div><div class="stat-value">${money(costs.sales)}</div><div class="stat-sub">${deltaTag(costs.wow)}</div></div>
-      <div class="stat"><div class="stat-label">Tips · this week</div><div class="stat-value">${money(tips7)}</div><div class="stat-sub">${deltaTag(tipsDelta)}</div></div>
-      <div class="stat"><div class="stat-label">Labor %</div><div class="stat-value">${costs.laborPct === null ? '—' : costs.laborPct + '%'}</div><div class="stat-sub">wages ÷ sales</div></div>
-      <div class="stat"><div class="stat-label">Prime cost %</div><div class="stat-value">${costs.primePct === null ? '—' : costs.primePct + '%'}</div><div class="stat-sub">labor + goods</div></div>
-    </div>`;
-
-  // Needs attention
-  const attn = [];
-  const exp = expiringSoon().filter((e) => e.days <= 30);
-  if (exp.length) attn.push({ cls: 'red', ico: '⏰', title: `${exp.length} expiring within 30 days`, sub: exp.slice(0, 3).map((e) => `${e.name} (${e.days < 0 ? 'expired' : e.days + 'd'})`).join(' · '), href: '/c/expirations' });
-  const lowPar = db.prepare('SELECT item FROM m_par WHERE on_hand IS NOT NULL AND reorder_point IS NOT NULL AND on_hand <= reorder_point').all();
-  if (lowPar.length) attn.push({ cls: 'amber', ico: '📦', title: `${lowPar.length} item${lowPar.length > 1 ? 's' : ''} at reorder point`, sub: lowPar.slice(0, 4).map((x) => x.item).join(' · '), href: '/c/par' });
-  const shorts = cashQ.list.all().filter((r) => r.date >= from14 && r.counted_cents < r.float_cents + r.cash_sales_cents - r.paid_out_cents).length;
-  if (shorts) attn.push({ cls: 'red', ico: '💵', title: `${shorts} cash short${shorts > 1 ? 's' : ''} in the last 2 weeks`, sub: 'Review who closed the drawer', href: '/cash' });
-  if (openCount) attn.push({ cls: 'blue', ico: '📋', title: `${openCount} shift${openCount > 1 ? 's' : ''} not sent yet`, sub: 'Finish the close and email staff', href: '/shifts' });
-  const attnHtml = attn.length
-    ? `<div class="attn">${attn.map((a) => `<a class="attn-item" href="${a.href}"><span class="attn-ico ${a.cls}">${a.ico}</span><span class="attn-main"><span class="attn-title">${a.title}</span><br><span class="attn-sub">${esc(a.sub)}</span></span><span class="attn-go">›</span></a>`).join('')}</div>`
-    : '<div class="all-clear">✓ Nothing needs your attention right now.</div>';
-
-  const recent = s.recentShifts.all(6).map((sh) => {
-    const inp = shiftInputs(sh.id);
-    const r = runShift(inp, policyForShift(sh));
-    const sales = shiftTotalSales(sh) || r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
-    return `<tr>
-      <td><a href="/shifts/${sh.id}">${sh.date}</a></td><td>${dp(sh.daypart)}</td>
-      <td class="num">${money(sales)}</td><td class="num">${money(r.reconciliation.totalTipsCollected)}</td>
-      <td>${sh.status === 'emailed' ? '<span class="pill pill-ok">emailed</span>' : '<span class="pill pill-blue">open</span>'}</td>
-    </tr>`;
-  }).join('');
-
-  const tiles = [...MODULES.map((m) => ({ href: `/c/${m.slug}`, ico: m.icon, name: m.title, desc: m.blurb })),
-    { href: '/costs', ico: '📈', name: 'Cost %', desc: 'Labor, food, prime cost' },
-    { href: '/cash', ico: '💵', name: 'Cash count', desc: 'Drawer over / short' },
-    { href: '/payroll', ico: '💰', name: 'Payroll', desc: 'Roll-up for Gusto' },
-    { href: '/policy', ico: '⚖️', name: 'Tip-out policy', desc: 'Edit rates, versioned' },
-    { href: '/employees', ico: '🧑‍🍳', name: 'Staff', desc: 'People, roles, wages' },
-  ].map((t) => `<a class="tile" href="${t.href}"><span class="tile-ico">${t.ico}</span><span class="tile-name">${t.name}</span><span class="tile-desc">${t.desc}</span></a>`).join('');
-
-  const body = `
-    ${flash(req)}
-    <div class="page-head">
-      <div><h1>Dashboard</h1><p class="sub">Here's how your restaurant is doing.</p></div>
-      <a class="btn btn-primary" href="/shifts/new">➕ Log a shift</a>
-    </div>
-    ${stats}
-    <div class="chart-card">
-      <div class="chart-head"><span class="t">Sales · last 14 days</span><span class="sub">${money(costs.sales)} this week</span></div>
-      ${salesChart(dailySales, today)}
-    </div>
-    <h2>Needs attention</h2>
-    ${attnHtml}
-    <div class="head-row"><h2>Recent shifts</h2><a class="link" href="/shifts">See all →</a></div>
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Date</th><th>Service</th><th class="num">Sales</th><th class="num">Tips</th><th>Status</th></tr></thead>
-      <tbody>${recent || '<tr><td colspan="5" class="muted">No shifts yet — tap “Log a shift”.</td></tr>'}</tbody>
-    </table></div>
-    <h2>Everything else</h2>
-    <div class="tiles">${tiles}</div>`;
-  res.send(layout('Dashboard', body));
-});
-
-// ---------------------------------------------------------------------------
-// Shifts — list of all shifts + "log a shift"
-// ---------------------------------------------------------------------------
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-// ---------------------------------------------------------------------------
-// SHIFTS — the command centre. Today first, then anything needing attention,
-// then history by month.
-//
-// Row figures come from one SQL pass rather than running the tip engine per
-// shift: the engine costs ~1ms each, which is five seconds at five thousand
-// shifts. It's still run — but only for the handful that aren't closed out,
-// because that's the only place its answers are needed.
-// ---------------------------------------------------------------------------
-const shiftRollup = db.prepare(`
-  SELECT sh.*,
+const SHIFT_ROLLUP_COLS = `
     (SELECT COALESCE(SUM(w.hours), 0) FROM work w WHERE w.shift_id = sh.id) AS hours,
     (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id) AS people,
     (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id AND (w.hours IS NULL OR w.hours = 0)) AS no_hours,
@@ -365,6 +251,9 @@ const shiftRollup = db.prepare(`
     (SELECT COUNT(*) FROM server_sales ss WHERE ss.shift_id = sh.id
        AND ss.note IS NOT NULL AND TRIM(ss.note) <> '') AS notes,
     (SELECT COUNT(*) FROM tip_submissions ts WHERE ts.shift_id = sh.id) AS subs,
+    -- People, not submissions: someone correcting a mistake submits twice, and
+    -- "6 of 5 submitted" would be nonsense on the progress bar.
+    (SELECT COUNT(DISTINCT ts.employee_id) FROM tip_submissions ts WHERE ts.shift_id = sh.id) AS submitters,
     -- Wage cost: hours x rate, summed. This has to resolve the wage exactly
     -- the way shiftInputs() does — per-shift override, then the wage set for
     -- THAT role, then the employee's default — because someone covering a
@@ -382,7 +271,383 @@ const shiftRollup = db.prepare(`
        LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
       WHERE w.shift_id = sh.id AND w.hours > 0
         AND COALESCE(e.pay_type, 'hourly') <> 'salary'
-        AND ${WAGE_RATE_SQL} = 0) AS no_wage
+        AND ${WAGE_RATE_SQL} = 0) AS no_wage`;
+
+// ---------------------------------------------------------------------------
+// DASHBOARD — the command centre. It answers one question: what do I need to
+// know before I start running the restaurant today?
+//
+// Deliberately NOT a copy of every other page. Anything here is either about
+// today, waiting on a decision, or one tap from the next action. Trend
+// analysis lives on Cost % and Shifts, which is why the 14-day sales chart
+// that used to sit at the top is gone — it was the thing people looked at
+// least and it pushed the open shift below the fold.
+// ---------------------------------------------------------------------------
+
+/** "Good morning" / "Good afternoon" / "Good evening", by local clock. */
+function greeting(now) {
+  const h = now.getHours();
+  return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+}
+
+const DASH_DATE = { weekday: 'long', month: 'long', day: 'numeric' };
+/** "18m ago", "3h ago", "Tuesday" — activity feeds read worse with timestamps. */
+function ago(iso, now) {
+  if (!iso) return '';
+  // SQLite datetime('now') is UTC without a zone marker; Date would read it as
+  // local and every entry would look hours off.
+  const t = new Date(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
+  if (isNaN(t)) return '';
+  const mins = Math.round((now - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  const days = Math.round(mins / 1440);
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days} days ago`;
+  return t.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+const dashQ = {
+  onDate: db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS} FROM shifts sh WHERE sh.date = ? ORDER BY sh.daypart`),
+  recent: db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS} FROM shifts sh ORDER BY sh.date DESC, sh.daypart DESC LIMIT ?`),
+  staffToday: db.prepare(`SELECT COUNT(DISTINCT w.employee_id) n FROM work w
+    JOIN shifts sh ON sh.id = w.shift_id WHERE sh.date = ?`),
+  lowPar: db.prepare(`SELECT id, item FROM m_par
+    WHERE on_hand IS NOT NULL AND reorder_point IS NOT NULL AND on_hand <= reorder_point`),
+  // Only an unpaid invoice can be overdue, and the unpaid pile stays small
+  // however many years of paid ones pile up behind it.
+  openInvoices: db.prepare("SELECT * FROM m_invoices WHERE status <> 'Paid' ORDER BY due_date"),
+  // Dated trackers are asked for one table at a time rather than through
+  // expiringSoon(), which folds three modules into one list and returns no id
+  // — so its rows can't be linked to the thing they're about.
+  expiring: db.prepare(`SELECT id, name, expires_on AS due FROM m_expirations
+    WHERE expires_on IS NOT NULL ORDER BY expires_on LIMIT 40`),
+  warranties: db.prepare(`SELECT id, name, warranty_expires AS due FROM m_equipment
+    WHERE warranty_expires IS NOT NULL ORDER BY warranty_expires LIMIT 40`),
+};
+
+/** The whole activity feed in one query, newest first. */
+const ACTIVITY_SQL = `
+  SELECT * FROM (
+    SELECT 'shift'   AS kind, ts.created_at AS at, e.name AS who,
+           sh.daypart AS what, ts.shift_id AS ref
+      FROM tip_submissions ts
+      LEFT JOIN employees e ON e.id = ts.employee_id
+      LEFT JOIN shifts sh ON sh.id = ts.shift_id
+    UNION ALL
+    -- Compared as numbers: vendor_id is a TEXT column that has held values
+    -- like "1.0", so a string comparison against m_vendors.id silently
+    -- matches nothing and every invoice reads as "A vendor".
+    SELECT 'invoice', i.created_at, COALESCE(v.name, 'A vendor'), i.invoice_number, i.id
+      FROM m_invoices i LEFT JOIN m_vendors v ON CAST(v.id AS REAL) = CAST(i.vendor_id AS REAL)
+    UNION ALL SELECT 'vendor',    created_at, name, category,    id FROM m_vendors
+    UNION ALL SELECT 'incident',  created_at, logged_by, type,   id FROM m_incidents
+    UNION ALL SELECT 'note',      created_at, NULL, title,       id FROM m_notes
+    UNION ALL SELECT 'cash',      created_at, closed_by, daypart, id FROM cash_recon
+    UNION ALL SELECT 'payroll',   sent_at,    NULL, period_start, NULL FROM period_sends
+  ) WHERE at IS NOT NULL ORDER BY at DESC LIMIT ?`;
+const activityFeed = db.prepare(ACTIVITY_SQL);
+
+app.get('/', (req, res) => {
+  const now = new Date();
+  const today = startOfToday();
+  const toStr = isoDate(today);
+  const from7 = addDays(toStr, -6);
+
+  // What this account is allowed to see, so the dashboard never offers a
+  // shortcut to a page that answers with 403.
+  const me = currentUser(req);
+  const may = (key) => !me || me.master || !me.features || !me.features.length || me.features.includes(key);
+  const canWrite = !me || me.role !== 'viewer';
+
+  // --- today ---------------------------------------------------------------
+  const todays = dashQ.onDate.all(toStr);
+  const openToday = todays.filter((x) => x.status !== 'emailed');
+  const todaySales = todays.reduce((a, x) => a + shiftSales(x), 0);
+  const todayTips = todays.reduce((a, x) => a + x.tips, 0);
+  const todayHours = todays.reduce((a, x) => a + x.hours, 0);
+  const staffToday = dashQ.staffToday.get(toStr).n;
+
+  // --- needs attention -----------------------------------------------------
+  // Every entry names the specific thing and links to it. A count with no
+  // route attached is a nag, not a to-do.
+  const attn = [];
+  const push = (tone, ico, title, sub, href) => attn.push({ tone, ico, title, sub, href });
+
+  /** "Jul 19 Dinner" — an ISO date in a to-do list reads like a serial number. */
+  const whenOf = (date, daypart) =>
+    `${MONTHS[Number(date.slice(5, 7)) - 1].slice(0, 3)} ${Number(date.slice(8, 10))}${daypart ? ' ' + dp(daypart) : ''}`;
+
+  if (may('shifts')) {
+    for (const x of dashQ.recent.all(30)) {
+      if (x.status === 'emailed' || x.date === toStr) continue;
+      const when = whenOf(x.date, x.daypart);
+      if (x.no_hours) push('red', 'shifts', `${when} — hours missing`,
+        `${x.no_hours} ${x.no_hours === 1 ? 'person has' : 'people have'} no hours entered`, `/shifts/${x.id}`);
+      else if (x.people) push('blue', 'shifts', `${when} — ready to send`, 'Everything is in; staff are waiting on it', `/shifts/${x.id}`);
+      if (x.notes) push('blue', 'notes', `${when} — ${x.notes === 1 ? 'a note' : x.notes + ' notes'} from staff`, 'Read it before you close the shift', `/shifts/${x.id}`);
+    }
+  }
+
+  if (may('trackers')) {
+    for (const r of recurQ.all.all()) {
+      const st = statusOf(r);
+      if (st.key === 'over') push('red', 'recurring', `${r.name} — ${st.label.toLowerCase()}`, r.responsible || 'Recurring task', `/c/recurring`);
+      else if (st.key === 'soon' && daysTo(r.next_due) <= 0) push('amber', 'recurring', `${r.name} — due today`, r.responsible || 'Recurring task', `/c/recurring`);
+    }
+    for (const i of dashQ.openInvoices.all()) {
+      const st = invStatus(i);
+      if (st.key === 'overdue') push('red', 'invoices', `Invoice ${i.invoice_number || '#' + i.id} — ${st.label}`, money(i.amount_cents), `/c/invoices`);
+    }
+    for (const [rows, slug, what] of [[dashQ.expiring.all(), 'expirations', 'Expires'], [dashQ.warranties.all(), 'equipment', 'Warranty ends']]) {
+      for (const r of rows) {
+        const d = daysTo(r.due);
+        if (d === null || d > 30) continue;
+        push(d < 0 ? 'red' : 'amber', slug === 'equipment' ? 'equipment' : 'expirations',
+          `${r.name} — ${d < 0 ? 'expired' : d === 0 ? 'expires today' : `${d} day${d === 1 ? '' : 's'} left`}`,
+          `${what} ${whenOf(r.due)}`, `/c/${slug}/${r.id}`);
+      }
+    }
+    const low = dashQ.lowPar.all();
+    if (low.length) push('amber', 'par', `${low.length} item${low.length === 1 ? '' : 's'} at reorder point`,
+      low.slice(0, 4).map((x) => x.item).join(' · '), '/c/par');
+  }
+
+  if (may('cash')) {
+    for (const r of cashQ.list.all()) {
+      if (r.date < addDays(toStr, -13)) break;                  // list is newest-first
+      const over = r.counted_cents - (r.float_cents + r.cash_sales_cents - r.paid_out_cents);
+      if (over < 0) push('red', 'cash', `${whenOf(r.date, r.daypart)} — drawer short ${money(-over)}`,
+        r.closed_by ? `Closed by ${r.closed_by}` : 'Check who closed', '/cash');
+    }
+  }
+
+  if (may('payroll')) {
+    const justEnded = recentPeriods(2)[1];
+    if (justEnded && !sendRecord(justEnded.start)) {
+      push('blue', 'payroll', `Payroll ready — ${labelFor(justEnded)}`, 'The period has ended and nothing has gone out', '/payroll');
+    }
+  }
+
+  // --- business health -----------------------------------------------------
+  const costs = may('costs') ? aggregateCosts(from7, toStr) : null;
+
+  // --- rendering -----------------------------------------------------------
+  const svc = (x) => dp(x.daypart);
+  const stateOf = (x) => shiftState(x, toStr);
+
+  const heroCard = (x) => {
+    const st = stateOf(x);
+    const pct = x.people ? Math.round((Math.min(x.submitters, x.people) / x.people) * 100) : 0;
+    const bits = [`${x.people} on shift`];
+    if (x.hours) bits.push(`${Math.round(x.hours * 10) / 10} hrs in`);
+    if (x.tips) bits.push(`${money(x.tips)} tips`);
+    return `
+      <div class="hero">
+        <div class="hero-top">
+          <div class="hero-id">
+            <span class="hero-ico">${icon('shifts')}</span>
+            <div><div class="hero-t">Today · ${svc(x)}</div><div class="hero-s">${bits.join(' · ')}</div></div>
+          </div>
+          <span class="pill ${st.cls}">${st.label}</span>
+        </div>
+        <div class="hero-prog">
+          <div class="hero-prog-h"><span>Staff submissions</span><b>${Math.min(x.submitters, x.people)} of ${x.people}</b></div>
+          <div class="bar"><span style="width:${pct}%"></span></div>
+          ${x.no_hours ? `<div class="hero-warn">${x.no_hours} still ${x.no_hours === 1 ? 'has' : 'have'} no hours entered</div>` : ''}
+          ${x.notes ? `<div class="hero-warn note">${x.notes === 1 ? 'A note' : x.notes + ' notes'} from staff to read</div>` : ''}
+        </div>
+        <div class="hero-act">
+          <a class="btn btn-primary" href="/shifts/${x.id}">Continue shift →</a>
+          <a class="link" href="/shifts">All shifts</a>
+        </div>
+      </div>`;
+  };
+
+  const todayBlock = openToday.length
+    ? openToday.map(heroCard).join('')
+    : todays.length
+      ? `<div class="hero hero-done">
+           <div class="hero-top"><div class="hero-id">
+             <span class="hero-ico ok">${icon('policy')}</span>
+             <div><div class="hero-t">Today is closed out</div>
+               <div class="hero-s">${todays.length} service${todays.length === 1 ? '' : 's'} sent · ${money(todaySales)} in sales</div></div>
+           </div></div>
+           <div class="hero-act">${canWrite ? '<a class="btn" href="/shifts/new">Log another shift</a>' : ''}<a class="link" href="/shifts">All shifts</a></div>
+         </div>`
+      : `<div class="hero hero-empty">
+           <div class="hero-top"><div class="hero-id">
+             <span class="hero-ico soft">${icon('shifts')}</span>
+             <div><div class="hero-t">No shift started today</div>
+               <div class="hero-s">Start one and staff can submit their tips from their phones.</div></div>
+           </div></div>
+           <div class="hero-act">${canWrite ? '<a class="btn btn-primary" href="/shifts/new">Log today\'s shift →</a>' : '<span class="muted">View-only account</span>'}</div>
+         </div>`;
+
+  const snap = (label, value, sub) =>
+    `<div class="snap"><div class="snap-l">${label}</div><div class="snap-v">${value}</div><div class="snap-s">${sub}</div></div>`;
+  const snapshot = `<div class="snaps">
+    ${snap('Sales', money(todaySales), todays.length ? `${todays.length} service${todays.length === 1 ? '' : 's'}` : 'nothing yet')}
+    ${snap('Tips', money(todayTips), todayTips ? 'collected today' : 'none reported')}
+    ${snap('Labor hours', todayHours ? String(Math.round(todayHours * 10) / 10) : '—', todayHours ? 'entered so far' : 'none entered')}
+    ${snap('Staff on', staffToday ? String(staffToday) : '—', staffToday ? 'people today' : 'nobody yet')}
+  </div>`;
+
+  // Worst first, so a drawer that came up short is never buried under six
+  // reorder reminders.
+  const TONE_RANK = { red: 0, amber: 1, blue: 2 };
+  attn.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone]);
+  const nitem = (a) => `
+    <a class="nitem" href="${a.href}">
+      <span class="nitem-ico ${a.tone}">${icon(a.ico)}</span>
+      <span class="nitem-main"><span class="nitem-t">${esc(a.title)}</span><span class="nitem-s">${esc(a.sub)}</span></span>
+      <span class="nitem-go">›</span>
+    </a>`;
+  const rest = attn.slice(8);
+  const attnBlock = attn.length
+    ? `<div class="nlist">${attn.slice(0, 8).map(nitem).join('')}
+        ${rest.length ? `<details class="nrest"><summary>${rest.length} more</summary>
+          <div class="nlist">${rest.map(nitem).join('')}</div></details>` : ''}
+      </div>`
+    : `<div class="all-clear">✓ Nothing needs your attention right now.</div>`;
+
+  const ACTIONS = [
+    { href: '/shifts/new', ico: 'shifts', label: 'Log shift', feat: 'shifts' },
+    { href: '/c/invoices', ico: 'invoices', label: 'Upload invoice', feat: 'trackers' },
+    { href: '/c/vendors', ico: 'vendors', label: 'Add vendor', feat: 'trackers' },
+    { href: '/c/incidents', ico: 'incidents', label: 'Log incident', feat: 'trackers' },
+    { href: '/c/recurring', ico: 'recurring', label: 'Recurring task', feat: 'trackers' },
+    { href: '/cash', ico: 'cash', label: 'Cash count', feat: 'cash' },
+  ].filter((a) => may(a.feat));
+  const actions = canWrite && ACTIONS.length
+    ? `<div class="qacts">${ACTIONS.map((a) => `<a class="qact" href="${a.href}"><span class="qact-ico">${icon(a.ico)}</span>${a.label}</a>`).join('')}</div>`
+    : '';
+
+  const pctOf = (v) => (v === null || v === undefined ? '—' : v + '%');
+  const trend = (v) => (v === null ? '<span class="muted">no prior week</span>'
+    : `<span class="delta ${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '▲' : '▼'} ${Math.abs(v)}%</span> vs last week`);
+  // With no invoices in the range, cost of goods is 0 — but 0 means "nothing
+  // logged", not "the food was free". Printing "0%" food cost and a prime cost
+  // that is really just labor would read as good news. Both are withheld until
+  // there's something to divide.
+  const hasCogs = costs && costs.cogs > 0;
+  const health = costs ? `<div class="bhealth">
+      <div class="bh bh-wide"><div class="bh-l">Sales this week</div><div class="bh-v">${money(costs.sales)}</div><div class="bh-s">${trend(costs.wow)}</div></div>
+      <div class="bh"><div class="bh-l">Labor</div><div class="bh-v">${pctOf(costs.laborPct)}</div><div class="bh-s">wages ÷ sales</div></div>
+      <div class="bh"><div class="bh-l">Food cost</div><div class="bh-v">${hasCogs ? pctOf(costs.foodPct) : '—'}</div><div class="bh-s">${hasCogs ? 'invoices ÷ sales' : 'no invoices logged'}</div></div>
+      <div class="bh"><div class="bh-l">Prime cost</div><div class="bh-v">${hasCogs ? pctOf(costs.primePct) : '—'}</div><div class="bh-s">${hasCogs ? 'labor + goods' : 'needs invoices'}</div></div>
+    </div>` : '';
+
+  const FEED = {
+    shift: (r) => {
+      const who = r.names && r.names.length > 1
+        ? (r.names.length === 2 ? `<b>${esc(r.names[0])}</b> and <b>${esc(r.names[1])}</b>`
+          : `<b>${esc(r.names[0])}</b> and ${r.names.length - 1} others`)
+        : `<b>${esc(r.who || 'Someone')}</b>`;
+      return { ico: 'tips', text: `${who} submitted for ${esc(dp(r.what || 'shift'))}`, href: r.ref ? `/shifts/${r.ref}` : null };
+    },
+    invoice: (r) => ({ ico: 'invoices', text: `Invoice added${r.who ? ` from <b>${esc(r.who)}</b>` : ''}${r.what ? ` · ${esc(r.what)}` : ''}`, href: '/c/invoices' }),
+    vendor: (r) => ({ ico: 'vendors', text: `<b>${esc(r.who || 'A vendor')}</b> added to vendors`, href: '/c/vendors' }),
+    incident: (r) => ({ ico: 'incidents', text: `Incident logged${r.what ? ` · ${esc(r.what)}` : ''}`, href: '/c/incidents' }),
+    note: (r) => ({ ico: 'notes', text: `Decision logged${r.what ? ` · ${esc(r.what)}` : ''}`, href: '/c/notes' }),
+    cash: (r) => ({ ico: 'cash', text: `Cash counted${r.what ? ` · ${esc(dp(r.what))}` : ''}${r.who ? ` by <b>${esc(r.who)}</b>` : ''}`, href: '/cash' }),
+    payroll: (r) => ({ ico: 'payroll', text: `Payroll sent${r.what ? ` · period from ${esc(r.what)}` : ''}`, href: '/payroll' }),
+  };
+  const FEED_FEAT = { shift: 'shifts', invoice: 'trackers', vendor: 'trackers', incident: 'trackers', note: 'trackers', cash: 'cash', payroll: 'payroll' };
+  // A busy close puts one line per person per submission into the log, which
+  // is right for the audit trail and useless as a feed — seven of eight rows
+  // become "someone submitted" and everything else falls off the bottom. All
+  // the submissions for a shift collapse into one entry naming who.
+  const byShift = new Map();
+  const events = [];
+  for (const r of activityFeed.all(80)) {
+    if (!may(FEED_FEAT[r.kind] || 'dashboard')) continue;
+    if (r.kind === 'shift') {
+      const g = byShift.get(r.ref);
+      if (g) { if (r.who && !g.names.includes(r.who)) g.names.push(r.who); continue; }
+      const ev = { ...r, names: r.who ? [r.who] : [] };
+      byShift.set(r.ref, ev);
+      events.push(ev);
+    } else {
+      events.push(r);
+    }
+    if (events.length >= 20) break;   // room to group before trimming to 8
+  }
+  const feedRows = events.slice(0, 8).map((r) => {
+    const f = FEED[r.kind](r);
+    const inner = `<span class="fd-ico">${icon(f.ico)}</span><span class="fd-t">${f.text}</span><span class="fd-w">${ago(r.at, now)}</span>`;
+    return f.href ? `<a class="fd" href="${f.href}">${inner}</a>` : `<div class="fd">${inner}</div>`;
+  }).join('');
+  const feed = feedRows || '<div class="all-clear">Nothing has happened yet.</div>';
+
+  const recentRows = may('shifts') ? dashQ.recent.all(5).map((x) => {
+    const st = stateOf(x);
+    return `<a class="drow" href="/shifts/${x.id}">
+      <span class="drow-d"><b>${Number(x.date.slice(8, 10))}</b><i>${MONTHS[Number(x.date.slice(5, 7)) - 1].slice(0, 3)}</i></span>
+      <span class="drow-m"><span class="drow-t">${svc(x)}</span><span class="pill ${st.cls}">${st.label}</span></span>
+      <span class="drow-n">${money(shiftSales(x))}</span>
+      <span class="drow-go">›</span>
+    </a>`;
+  }).join('') : '';
+
+  // --- the one-line status under the greeting ------------------------------
+  const bad = attn.filter((a) => a.tone === 'red').length;
+  const status = openToday.length
+    ? `Your ${openToday.map(svc).join(' and ')} shift${openToday.length === 1 ? ' is' : 's are'} open.${attn.length ? ` ${attn.length} thing${attn.length === 1 ? '' : 's'} need${attn.length === 1 ? 's' : ''} your attention.` : ''}`
+    : bad
+      ? `${bad} thing${bad === 1 ? '' : 's'} need${bad === 1 ? 's' : ''} sorting out${attn.length > bad ? `, ${attn.length - bad} more can wait` : ''}.`
+      : attn.length
+        ? `${attn.length} thing${attn.length === 1 ? '' : 's'} to look at, nothing urgent.`
+        : 'Everything is running smoothly today.';
+
+  const sec = (title, body, link) => !body ? '' : `
+    <section class="dsec">
+      <div class="dsec-h"><h2>${title}</h2>${link || ''}</div>
+      ${body}
+    </section>`;
+
+  const bodyHtml = `
+    ${flash(req)}
+    <header class="dhead">
+      <div>
+        <div class="dhead-hi">${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</div>
+        <h1>${esc(RESTAURANT)}</h1>
+        <p class="dhead-d">${now.toLocaleDateString('en-US', DASH_DATE)}</p>
+      </div>
+      <div class="dhead-st ${openToday.length ? 'live' : bad ? 'warn' : 'calm'}">
+        <span class="dot"></span>${esc(status)}
+      </div>
+    </header>
+    <div class="dash">
+      <div class="dash-main">
+        ${sec('Today', todayBlock + snapshot)}
+        ${sec(`Needs attention${attn.length ? ` <span class="cnt">${attn.length}</span>` : ''}`, attnBlock)}
+        ${sec('Recent shifts', recentRows && `<div class="drows">${recentRows}</div>`, '<a class="link" href="/shifts">View all →</a>')}
+      </div>
+      <aside class="dash-side">
+        ${sec('Quick actions', actions)}
+        ${sec('Business health', health, may('costs') ? '<a class="link" href="/costs">Details →</a>' : '')}
+        ${sec('Recent activity', feed)}
+      </aside>
+    </div>`;
+  res.send(layout('Dashboard', bodyHtml));
+});
+
+// ---------------------------------------------------------------------------
+// Shifts — list of all shifts + "log a shift"
+// ---------------------------------------------------------------------------
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// ---------------------------------------------------------------------------
+// SHIFTS — the command centre. Today first, then anything needing attention,
+// then history by month.
+//
+// Row figures come from one SQL pass rather than running the tip engine per
+// shift: the engine costs ~1ms each, which is five seconds at five thousand
+// shifts. It's still run — but only for the handful that aren't closed out,
+// because that's the only place its answers are needed.
+// ---------------------------------------------------------------------------
+const shiftRollup = db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS}
   FROM shifts sh ORDER BY sh.date DESC, sh.daypart DESC`);
 
 /** Total sales for a shift: what was rung overall, or server sales if not entered. */
