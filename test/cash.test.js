@@ -420,3 +420,88 @@ test('a new close defaults to the service that actually ran', async () => {
   // A café that never serves dinner should not correct this field every night.
   assert.match(html, /<option value="cafe" selected>/, 'picks up today\'s service');
 });
+
+// --- money in and out of the drawer ---------------------------------------------
+//
+// Typing $75 into a row and pressing Add produced a second empty row and no
+// sign that anything had registered, so the entry read as lost. It was in fact
+// saving correctly the whole time — which is worse, because the manager's only
+// options were to retype it or to distrust the page.
+
+test('an entry is committed to a line you can read, and posts what it shows', async () => {
+  const html = await (await fetch(`${BASE}/cash/new`)).text();
+  // The line you type into carries no name, so a half-finished entry cannot
+  // post on its own.
+  const draft = html.slice(html.indexOf('data-draft="paid"'), html.indexOf('data-draft="added"'));
+  assert.ok(!/name="/.test(draft), `the draft line posts nothing: ${draft.slice(0, 200)}`);
+  assert.match(draft, /onclick="cashCommit\('paid'\)"/, 'and has an Add that commits it');
+  assert.match(html, /id="paid-total"/, 'with a running total');
+});
+
+test('an existing record renders its movements as committed lines', async () => {
+  const id = idOf(await post('/cash', base({
+    date: '2026-06-05', counted: '433',
+    paid_amt_0: '80', paid_reason_0: 'Store purchase', paid_who_0: 'Kevin',
+    paid_amt_1: '40', paid_reason_1: 'Petty cash', paid_who_1: 'Sandra',
+    variance_note: 'Found a twenty under the tray',
+  })));
+  const html = await (await fetch(`${BASE}/cash/${id}/edit`)).text();
+  assert.strictEqual((html.match(/class="mvi"/g) || []).length, 2, 'two lines');
+  // Each carries the fields that post it, numbered from zero without gaps.
+  for (const n of ['paid_amt_0', 'paid_reason_0', 'paid_who_0', 'paid_amt_1', 'paid_reason_1', 'paid_who_1']) {
+    assert.match(html, new RegExp(`name="${n}"`), `${n} is posted`);
+  }
+  assert.match(html, /value="80\.00"/);
+  assert.match(html, /to Kevin/, 'and reads as a sentence');
+});
+
+test('a recipient name is inserted as text, never as markup', async () => {
+  // Movement recipients are typed by whoever is closing. The committed line is
+  // built in the browser, and building it with innerHTML would run whatever
+  // they typed.
+  const id = idOf(await post('/cash', base({
+    date: '2026-06-06', counted: '433',
+    paid_amt_0: '120', paid_reason_0: 'Store purchase',
+    paid_who_0: '<img src=x onerror=alert(1)>',
+    variance_note: 'Found a twenty under the tray',
+  })));
+  const html = await (await fetch(`${BASE}/cash/${id}/edit`)).text();
+  assert.ok(!html.includes('<img src=x'), 'not rendered as a tag');
+  assert.match(html, /&lt;img src=x/, 'escaped instead');
+
+  // The committed line is built in the browser. Neither the reason nor the
+  // recipient may be written with innerHTML — both are typed by whoever closed.
+  const script = html.slice(html.indexOf('function cashCommit'), html.indexOf('function cashCalc'));
+  assert.match(script, /\.mvi-t b'\)\.textContent =/, 'the reason goes in as text');
+  assert.match(script, /\.mvi-t i'\)\.textContent =/, 'and so does the recipient');
+  assert.ok(!/mvi-t [bi]'\)\.innerHTML/.test(script), 'never innerHTML for a typed value');
+});
+
+test('the emitted client scripts survive being written inside a template literal', async () => {
+  // cashScript, searchScript and salesScript return their JavaScript from a
+  // template literal, so a backslash has to be doubled in the source to reach
+  // the browser. `/_amt_\\d+$/` written with one arrived as `/_amt_d+$/`, which
+  // matched nothing — every paid-out silently stopped counting towards the
+  // expected total, and the variance was wrong on any count that had one.
+  //
+  // This reads what the browser is actually served. Scanning the source proves
+  // nothing: there the escape is still there, whether or not it survives.
+  const pages = ['/cash/new', '/sales?r=30', '/'];
+  let scanned = 0;
+
+  for (const url of pages) {
+    const html = await (await fetch(BASE + url)).text();
+    for (const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      const body = m[1];
+      if (!/function |addEventListener/.test(body)) continue;   // skip config blobs
+      scanned++;
+      assert.doesNotThrow(() => new (require('node:vm').Script)(body),
+        `${url}: a script block does not parse`);
+      for (const lit of body.matchAll(/\/[^/\n ]+\//g)) {
+        assert.ok(!/[^\\](d\+|w\+|s\+|d\{)/.test(lit[0]),
+          `${url}: ${lit[0]} looks like a \\d, \\w or \\s that lost its backslash`);
+      }
+    }
+  }
+  assert.ok(scanned >= 2, `scanned ${scanned} script blocks`);
+});

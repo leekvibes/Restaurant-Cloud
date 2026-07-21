@@ -2818,14 +2818,38 @@ function cashForm(row, movements, denoms, req) {
 
   const paid = movements.filter((x) => x.movement_type !== 'cash_added');
   const added = movements.filter((x) => x.movement_type === 'cash_added');
-  const mvRow = (x, i, kind) => `
-    <div class="mv" data-mv>
-      <input class="mv-amt" name="${kind}_amt_${i}" type="number" step="0.01" min="0" inputmode="decimal" value="${x ? m(x.amount_cents) : ''}" placeholder="0.00">
-      <select name="${kind}_reason_${i}" class="minisel">
-        ${(kind === 'paid' ? CASH.PAID_REASONS : CASH.ADDED_REASONS).map((rr) => `<option${x && x.reason === rr ? ' selected' : ''}>${rr}</option>`).join('')}
+
+  // A committed entry: a line you can read, with the fields that post it
+  // hidden behind. The old form left every entry as three live inputs, which
+  // gave no signal that anything had been recorded — you typed $75 into a box
+  // and the box just sat there looking like a box.
+  const mvItem = (x, i, kind) => {
+    const out = kind === 'paid';
+    return `<div class="mvi" data-kind="${kind}">
+      <span class="mvi-i ${out ? 'out' : 'in'}">${out ? '↓' : '↑'}</span>
+      <span class="mvi-t"><b>${esc(x.reason || (out ? 'Paid out' : 'Cash added'))}</b>
+        ${x.recipient ? `<i>${out ? 'to' : 'by'} ${esc(x.recipient)}</i>` : ''}</span>
+      <b class="mvi-a ${out ? 'out' : 'in'}">${out ? '−' : '+'}${CASH.money(x.amount_cents)}</b>
+      <button type="button" class="mvi-x" onclick="cashRemove(this)" aria-label="Remove">✕</button>
+      <input type="hidden" name="${kind}_amt_${i}" value="${m(x.amount_cents)}">
+      <input type="hidden" name="${kind}_reason_${i}" value="${esc(x.reason || '')}">
+      <input type="hidden" name="${kind}_who_${i}" value="${esc(x.recipient || '')}">
+    </div>`;
+  };
+
+  // The line you type into. Nothing here is named, so a half-finished entry
+  // cannot post — it is committed by Add, or swept up on submit.
+  const mvDraft = (kind) => `
+    <div class="mvd" data-draft="${kind}">
+      <span class="mvd-cur">$</span>
+      <input class="mvd-amt" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"
+        aria-label="${kind === 'paid' ? 'Amount paid out' : 'Amount added'}">
+      <select class="mvd-reason minisel" aria-label="Reason">
+        ${(kind === 'paid' ? CASH.PAID_REASONS : CASH.ADDED_REASONS).map((rr) => `<option>${rr}</option>`).join('')}
       </select>
-      <input name="${kind}_who_${i}" value="${esc(x ? x.recipient || '' : '')}" placeholder="${kind === 'paid' ? 'Paid to' : 'Added by'}">
-      <button type="button" class="rl-del" onclick="cashDrop(this)" title="Remove">✕</button>
+      <input class="mvd-who" placeholder="${kind === 'paid' ? 'Paid to' : 'Added by'}"
+        aria-label="${kind === 'paid' ? 'Paid to' : 'Added by'}">
+      <button type="button" class="btn btn-sm btn-primary mvd-go" onclick="cashCommit('${kind}')">Add</button>
     </div>`;
 
   const theDate = row.date || isoDate(startOfToday());
@@ -2928,15 +2952,17 @@ function cashForm(row, movements, denoms, req) {
       <div class="cq-box" id="cq-money"${openMoney ? '' : ' hidden'}>
         <div class="mvblock">
           <div class="mv-h"><b>Paid out / taken from the drawer</b>
-            <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('paid')">＋ Add</button></div>
+            <span class="mv-tot" id="paid-total"></span></div>
           <div class="fld-hint">Reimbursements, petty cash, an approved purchase. This lowers what the drawer should hold.</div>
-          <div id="paid-list">${paid.length ? paid.map((x, i) => mvRow(x, i, 'paid')).join('') : mvRow(null, 0, 'paid')}</div>
+          <div id="paid-list" class="mvlist">${paid.map((x, i) => mvItem(x, i, 'paid')).join('')}</div>
+          ${mvDraft('paid')}
         </div>
         <div class="mvblock">
           <div class="mv-h"><b>Cash added</b>
-            <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('added')">＋ Add</button></div>
+            <span class="mv-tot" id="added-total"></span></div>
           <div class="fld-hint">Change brought in, a correction, a transfer from another register.</div>
-          <div id="added-list">${added.map((x, i) => mvRow(x, i, 'added')).join('')}</div>
+          <div id="added-list" class="mvlist">${added.map((x, i) => mvItem(x, i, 'added')).join('')}</div>
+          ${mvDraft('added')}
         </div>
       </div>
 
@@ -2996,17 +3022,78 @@ function cashScript() {
     btn.setAttribute('aria-expanded', el.hidden ? 'false' : 'true');
     if(!el.hidden){ var f=el.querySelector('input,select,textarea'); if(f) f.focus(); }
   }
-  function cashDrop(b){ var w=b.closest('[data-mv]'); if(w.parentElement.children.length>1) w.remove(); else w.querySelectorAll('input').forEach(function(i){i.value='';}); cashCalc(); }
-  function cashAdd(kind){
-    var list=document.getElementById(kind+'-list');
-    var i=list.children.length;
-    var reasons = kind==='paid' ? CASH_PAID_REASONS : CASH_ADDED_REASONS;
-    var d=document.createElement('div'); d.className='mv'; d.setAttribute('data-mv','');
-    d.innerHTML='<input class="mv-amt" name="'+kind+'_amt_'+i+'" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00">'
-      +'<select name="'+kind+'_reason_'+i+'" class="minisel">'+reasons.map(function(r){return '<option>'+r+'</option>';}).join('')+'</select>'
-      +'<input name="'+kind+'_who_'+i+'" placeholder="'+(kind==='paid'?'Paid to':'Added by')+'">'
-      +'<button type="button" class="rl-del" onclick="cashDrop(this)" title="Remove">✕</button>';
-    list.appendChild(d); d.querySelector('input').focus(); cashCalc();
+  // --- money in and out ------------------------------------------------------
+  // Typing into a row gave no sign that anything had been recorded, and "Add"
+  // produced a second empty row — so a manager who typed $75 and pressed Add
+  // saw their entry apparently vanish. An entry is committed now: it becomes a
+  // line you can read, with the fields that post it hidden behind.
+
+  function cashRemove(btn){
+    var item = btn.closest('.mvi');
+    var kind = item.getAttribute('data-kind');
+    item.remove();
+    cashRenumber(kind);
+    cashCalc();
+  }
+
+  // Indices have to stay contiguous from zero. The server walks paid_amt_0
+  // upwards and a gap would silently drop everything after it.
+  function cashRenumber(kind){
+    var items = document.querySelectorAll('#'+kind+'-list .mvi');
+    items.forEach(function(el, i){
+      el.querySelectorAll('input[type=hidden]').forEach(function(h){
+        h.name = h.name.replace(/_(amt|reason|who)_\\d+$/, function(_, f){ return '_'+f+'_'+i; });
+      });
+    });
+  }
+
+  function cmoneyLine(kind, cents){
+    return (kind==='paid' ? '−' : '+') + cmoney(cents);
+  }
+
+  /** Move whatever is in the draft line into the list. Returns true if it did. */
+  function cashCommit(kind, quiet){
+    var draft = document.querySelector('[data-draft="'+kind+'"]');
+    if(!draft) return false;
+    var amtEl = draft.querySelector('.mvd-amt');
+    var cents = amtEl.value==='' ? null : Math.round(parseFloat(amtEl.value)*100);
+    if(!cents){
+      // Nothing to add. Say so rather than doing nothing, which is what made
+      // the old version feel broken.
+      if(!quiet){ amtEl.focus(); amtEl.classList.add('mvd-nudge');
+        setTimeout(function(){ amtEl.classList.remove('mvd-nudge'); }, 600); }
+      return false;
+    }
+    var reason = draft.querySelector('.mvd-reason').value;
+    var who = draft.querySelector('.mvd-who').value.trim();
+    var list = document.getElementById(kind+'-list');
+    var i = list.querySelectorAll('.mvi').length;
+    var out = kind === 'paid';
+
+    var el = document.createElement('div');
+    el.className = 'mvi'; el.setAttribute('data-kind', kind);
+    el.innerHTML =
+      '<span class="mvi-i '+(out?'out':'in')+'">'+(out?'↓':'↑')+'</span>'
+      + '<span class="mvi-t"><b></b>'+(who?'<i></i>':'')+'</span>'
+      + '<b class="mvi-a '+(out?'out':'in')+'">'+cmoneyLine(kind, cents)+'</b>'
+      + '<button type="button" class="mvi-x" onclick="cashRemove(this)" aria-label="Remove">✕</button>'
+      + '<input type="hidden" name="'+kind+'_amt_'+i+'">'
+      + '<input type="hidden" name="'+kind+'_reason_'+i+'">'
+      + '<input type="hidden" name="'+kind+'_who_'+i+'">';
+    // textContent, not innerHTML — a recipient is somebody's name and goes in
+    // as text, never as markup.
+    el.querySelector('.mvi-t b').textContent = reason || (out ? 'Paid out' : 'Cash added');
+    if(who) el.querySelector('.mvi-t i').textContent = (out ? 'to ' : 'by ') + who;
+    var hid = el.querySelectorAll('input[type=hidden]');
+    hid[0].value = (cents/100).toFixed(2);
+    hid[1].value = reason;
+    hid[2].value = who;
+    list.appendChild(el);
+
+    amtEl.value = ''; draft.querySelector('.mvd-who').value = '';
+    if(!quiet) amtEl.focus();
+    cashCalc();
+    return true;
   }
   function cashUseDenoms(){
     var t=0; document.querySelectorAll('[data-denom]').forEach(function(i){ t += (parseInt(i.value,10)||0) * parseInt(i.dataset.denom,10); });
@@ -3014,7 +3101,16 @@ function cashScript() {
   }
 
   function cashCalc(){
-    var sum=function(kind){ var t=0; document.querySelectorAll('#'+kind+'-list .mv-amt').forEach(function(i){ t+=Math.round((parseFloat(i.value)||0)*100); }); return t; };
+    var sum=function(kind){
+      var t=0;
+      document.querySelectorAll('#'+kind+'-list input[name$="_amt_0"],#'+kind+'-list input[type=hidden]')
+        .forEach(function(i){ if(/_amt_\\d+$/.test(i.name)) t+=Math.round((parseFloat(i.value)||0)*100); });
+      // A draft line the manager has typed but not pressed Add on still counts
+      // towards the arithmetic, so the verdict never lags behind the screen.
+      var draft=document.querySelector('[data-draft="'+kind+'"] .mvd-amt');
+      if(draft && draft.value!=='') t+=Math.round(parseFloat(draft.value)*100)||0;
+      return t;
+    };
     var open=cnum('c-float'); if(open==null) open=CASH_DEFAULT;
     var sales=cnum('c-sales'), paid=sum('paid'), added=sum('added');
     var counted=cnum('c-counted');
@@ -3031,6 +3127,15 @@ function cashScript() {
       whn.textContent=new Date(dt2.value+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'});
     }
     document.getElementById('c-floatwhy').classList.toggle('inv-hide', open===CASH_DEFAULT);
+
+    ['paid','added'].forEach(function(k){
+      var el=document.getElementById(k+'-total');
+      if(!el) return;
+      var n=document.querySelectorAll('#'+k+'-list .mvi').length;
+      var t=k==='paid'?paid:added;
+      el.textContent = t ? cmoneyLine(k, t) + (n>1 ? ' · '+n+' entries' : '') : '';
+      el.className = 'mv-tot' + (t ? ' on '+k : '');
+    });
 
     var dtot=0; document.querySelectorAll('[data-denom]').forEach(function(i){ dtot += (parseInt(i.value,10)||0)*parseInt(i.dataset.denom,10); });
     var dte=document.getElementById('c-denomtotal'); if(dte) dte.textContent=cmoney(dtot);
@@ -3082,6 +3187,20 @@ function cashScript() {
   }
   document.addEventListener('input', function(e){ if(e.target.closest('#cashform')) cashCalc(); });
   document.addEventListener('change', function(e){ if(e.target.closest('#cashform')) cashCalc(); });
+
+  // Enter adds the line rather than submitting the whole count.
+  document.addEventListener('keydown', function(e){
+    var d = e.target.closest && e.target.closest('[data-draft]');
+    if(d && e.key === 'Enter'){ e.preventDefault(); cashCommit(d.getAttribute('data-draft')); }
+  });
+
+  // A typed-but-not-added line is swept up on submit. Requiring Add would be a
+  // new way to lose an entry, which is the bug this replaced.
+  var form = document.getElementById('cashform');
+  if(form) form.addEventListener('submit', function(){
+    cashCommit('paid', true); cashCommit('added', true);
+  });
+
   cashCalc();`;
 }
 
