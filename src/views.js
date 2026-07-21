@@ -55,7 +55,7 @@ const NAV_GROUPS = [
   ] },
   { title: 'Track', links: [
     ['/c/expirations', 'expirations', 'Expirations', '#dc2626'], ['/c/invoices', 'invoices', 'Invoices', '#0891b2'],
-    ['/c/vendors', 'vendors', 'Vendors', '#ea580c'], ['/c/products', 'par', 'Products', '#ca8a04'],
+    ['/c/vendors', 'vendors', 'Vendors', '#ea580c'], ['/c/products', 'par', 'Products', '#ca8a04'], ['/menu', 'costs', 'Menu costing', '#7c3aed', 'BETA'],
     ['/c/contacts', 'contacts', 'Contacts', '#0d9488'], ['/c/equipment', 'equipment', 'Equipment', '#64748b'],
     ['/c/documents', 'documents', 'Documents', '#6366f1'],
   ] },
@@ -123,7 +123,7 @@ function sidebar() {
     if (!links.length) return '';           // a group with nothing left just goes
     return `
     ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
-    ${links.map(([href, ico, label, accent]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}</span></a>`).join('')}
+    ${links.map(([href, ico, label, accent, tag]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}${tag ? `<span class="side-tag">${esc(tag)}</span>` : ''}</span></a>`).join('')}
   `;
   }).join('');
   const who = currentViewUser();

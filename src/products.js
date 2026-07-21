@@ -17,6 +17,12 @@
 // ---------------------------------------------------------------------------
 
 const { db } = require('./db');
+// products joins m_vendors and alters m_invoices, and both are created by
+// modules.js at require time. Declaring the dependency here means this file
+// can be loaded on its own — by a test, a script, or a future entry point —
+// instead of only working because server.js happens to require them first.
+// modules.js does not require this file, so there is no cycle.
+require('./modules');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS products (

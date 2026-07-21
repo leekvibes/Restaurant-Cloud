@@ -4707,6 +4707,15 @@ function productDrawer(vendors, p) {
           <label class="fld">Item code / SKU<input name="sku" value="${esc(v.sku || '')}"></label>
         </div>
         <label class="fld">Brand<input name="brand" value="${esc(v.brand || '')}" placeholder="optional — helps match invoice lines"></label>
+        <div class="fld-row3">
+          <label class="fld">Price paid<input name="price" type="number" step="0.01" min="0" placeholder="14.99"></label>
+          <label class="fld">One purchase unit holds<input name="pack_qty" type="number" step="0.01" min="0" placeholder="12"></label>
+          <label class="fld">of<select name="pack_unit">
+            <option value="">—</option>
+            ${UNITS.UNIT_GROUPS.map((g) => `<optgroup label="${g.label}">${g.units.map((u) => `<option value="${u}">${UNITS.unitLabel(u)}</option>`).join('')}</optgroup>`).join('')}
+          </select></label>
+        </div>
+        <div class="fld-hint">Menu costing needs to know what one purchase unit contains — 12 in a package, 25 lb in a case. Leave the price blank for anything you buy on invoice.</div>
         <label class="fld">Notes<textarea name="notes" rows="2">${esc(v.notes || '')}</textarea></label>
       </div>
       <div class="drawer-f">
@@ -4761,10 +4770,15 @@ function productListScript() {
 }
 
 app.post('/c/products', (req, res) => {
+  // ?json=1 is the menu workspace adding an ingredient mid-recipe. A redirect
+  // would navigate away and take the unsaved recipe with it.
+  const wantsJson = req.query.json === '1';
+  const bail = (msg) => (wantsJson ? res.json({ error: msg })
+    : res.redirect('/c/products?err=1&msg=' + encodeURIComponent(msg)));
   const name = (req.body.name || '').trim();
-  if (!name) return res.redirect('/c/products?err=1&msg=' + encodeURIComponent('A product needs a name.'));
-  if (prodQ.byName.get(name)) return res.redirect('/c/products?err=1&msg=' + encodeURIComponent(`You already track "${name}".`));
-  prodQ.add.run({
+  if (!name) return bail('A product needs a name.');
+  if (prodQ.byName.get(name)) return bail(`You already track "${name}".`);
+  const id = prodQ.add.run({
     name, category: (req.body.category || '').trim() || null,
     vendor_id: req.body.vendor_id ? Number(req.body.vendor_id) : null,
     unit: (req.body.unit || '').trim() || null,
@@ -4772,7 +4786,29 @@ app.post('/c/products', (req, res) => {
     sku: (req.body.sku || '').trim() || null,
     brand: (req.body.brand || '').trim() || null,
     notes: (req.body.notes || '').trim() || null,
-  });
+  }).lastInsertRowid;
+
+  // A manual price and what one purchase unit holds, so a product created from
+  // the recipe screen can be costed straight away instead of arriving broken.
+  const price = toCents(req.body.price);
+  const packQty = Number(req.body.pack_qty);
+  const packUnit = UNITS.normalizeUnit(req.body.pack_unit);
+  const parsed = UNITS.parsePack(req.body.pack_size);
+  db.prepare(`UPDATE products SET manual_price_cents=?, manual_price_on=?,
+      pack_qty=?, pack_unit=?, pack_source=?, yield_pct=? WHERE id=?`)
+    .run(price || null, price ? isoDate(startOfToday()) : null,
+      packQty > 0 ? packQty : (parsed ? parsed.qty : null),
+      packUnit || (parsed ? parsed.unit : null),
+      packQty > 0 && packUnit ? 'manual' : (parsed ? 'parsed' : null),
+      Number(req.body.yield_pct) > 0 ? Number(req.body.yield_pct) : null, id);
+
+  if (wantsJson) {
+    const p = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
+    const pr = MENU_priceLabel(p);
+    return res.json({ id, name: p.name, price: pr.text, source: pr.source,
+      meta: [p.brand, p.pack_size || p.unit].filter(Boolean).join(' · '),
+      units: PRODUCTS.costableUnits(p) });
+  }
   res.redirect('/c/products?msg=' + encodeURIComponent('Product added.'));
 });
 
@@ -4946,7 +4982,17 @@ app.post('/c/products/:id', (req, res) => {
 });
 
 app.post('/c/products/:id/delete', (req, res) => {
-  prodQ.del.run(Number(req.params.id));
+  const id = Number(req.params.id);
+  // A recipe line pointing at a product that no longer exists is a dish with a
+  // hole in it, so the database refuses the delete. Say which dishes rather
+  // than letting the constraint surface as a 500.
+  const used = menuUsedBy(id);
+  if (used.length) {
+    const names = used.slice(0, 3).map((m) => m.name).join(', ');
+    return res.redirect(`/c/products/${id}?err=1&msg=` + encodeURIComponent(
+      `Used by ${used.length} menu item${used.length === 1 ? '' : 's'} (${names}${used.length > 3 ? '…' : ''}). Remove it from ${used.length === 1 ? 'that recipe' : 'those recipes'} first.`));
+  }
+  prodQ.del.run(id);
   res.redirect('/c/products?msg=' + encodeURIComponent('Product deleted.'));
 });
 
@@ -5046,6 +5092,14 @@ function autoImport(invoiceId) {
     return added;
   });
   const added = run();
+  // One recalculation for the whole delivery, not one per line: fifty products
+  // moving should leave one record per affected dish, not fifty.
+  if (added) {
+    try {
+      const touched = rows.filter((r) => r.confidence === 'high' && r.match).map((r) => r.match.id);
+      MENU.recalcForProducts(touched, 'invoice');
+    } catch (e) { console.error('[menu] recalc after import failed:', e.message); }
+  }
   // Everything that still wants a person: uncertain matches and genuinely new
   // products. Charges are not pending — they are deliberately never products.
   const pending = rows.filter((r) => !already.has(r.i)
@@ -5168,6 +5222,7 @@ app.post('/c/invoices/:id/import', (req, res) => {
   const vendorId = inv.vendor_id ? Number(inv.vendor_id) : null;
   const on = inv.invoice_date || isoDate(startOfToday());
 
+  const touchedProducts = new Set();
   const run = db.transaction(() => {
     let added = 0, created = 0;
     for (let i = 0; i < n; i++) {
@@ -5204,6 +5259,7 @@ app.post('/c/invoices/:id/import', (req, res) => {
         purchased_on: on, qty, unit: (req.body[`unit_${i}`] || '').trim() || null,
         unit_price_cents: price, total_cents: total, raw_text: desc,
       });
+      touchedProducts.add(productId);
       // Record what this vendor called it. Confirming a match once is what
       // makes the next invoice from them recognise the line outright instead
       // of asking the same question again.
@@ -5213,9 +5269,11 @@ app.post('/c/invoices/:id/import', (req, res) => {
     }
     saveIdx(inv.id, seen);
     db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(inv.id);
-    return { added, created };
+    return { added, created, products: [...touchedProducts] };
   });
-  const { added, created } = run();
+  const { added, created, products } = run();
+  try { MENU.recalcForProducts(products, 'invoice'); }
+  catch (e) { console.error('[menu] recalc after import failed:', e.message); }
   res.redirect('/c/products?msg=' + encodeURIComponent(
     `Imported ${added} line${added === 1 ? '' : 's'}${created ? `, ${created} new product${created === 1 ? '' : 's'}` : ''}.`));
 });
@@ -5229,6 +5287,861 @@ app.post('/c/invoices/:id/import/undo', (req, res) => {
   // mistake — the "Never bought" filter on Products finds any strays.
   res.redirect(`/c/invoices/${id}/import?msg=` + encodeURIComponent(
     'Import undone. Any products it created are still listed, now with no purchases.'));
+});
+
+
+// ---------------------------------------------------------------------------
+// MENU COSTING — routes.
+//
+// Marked BETA in the nav on purpose. The arithmetic is well covered, but this
+// is the first module where a wrong answer is a pricing decision rather than a
+// display bug, and it wants real use before it is trusted quietly.
+// ---------------------------------------------------------------------------
+const MENU = require('./menu');
+const menuUsedBy = MENU.usedBy;
+const UNITS = require('./units');
+
+const MENU_CAT_COLORS = {
+  Breakfast: { color: '#d97706', tint: '#fffbeb' }, Sandwiches: { color: '#a16207', tint: '#fefce8' },
+  Bowls: { color: '#16a34a', tint: '#f0fdf4' }, Salads: { color: '#059669', tint: '#ecfdf5' },
+  Sides: { color: '#0891b2', tint: '#ecfeff' }, Desserts: { color: '#db2777', tint: '#fdf2f8' },
+  Beverages: { color: '#0ea5e9', tint: '#f0f9ff' }, Cocktails: { color: '#7c3aed', tint: '#f5f3ff' },
+  Other: { color: '#6b7280', tint: '#f9fafb' },
+};
+const menuCat = (c) => MENU_CAT_COLORS[c] || MENU_CAT_COLORS.Other;
+const pct1 = (v) => (v == null ? '—' : (Math.round(v * 10) / 10).toFixed(1) + '%');
+
+/** Cost every menu item once. Small n, and the pages all want the same thing. */
+function costAll() {
+  return MENU.q.all.all().map((m) => MENU.costItem(m.id));
+}
+
+// --- list ------------------------------------------------------------------
+app.get('/menu', (req, res) => {
+  const all = costAll();
+  const live = all.filter((c) => c.item.status !== 'archived');
+  const priced = live.filter((c) => c.foodCostPct != null && !c.unresolved);
+  const avgFc = priced.length ? priced.reduce((a, c) => a + c.foodCostPct, 0) / priced.length : null;
+  const over = priced.filter((c) => c.foodCostPct > c.target);
+  const incomplete = live.filter((c) => c.unresolved);
+  const best = [...priced].filter((c) => c.grossProfit != null).sort((a, b) => b.grossProfit - a.grossProfit)[0];
+
+  const card = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+
+  const cards = `<div class="mcards mcards-4">
+    ${card('blue', 'costs', 'Average food cost', avgFc == null ? '—' : pct1(avgFc),
+      priced.length ? `across ${priced.length} costed item${priced.length === 1 ? '' : 's'}` : 'nothing costed yet')}
+    ${card(over.length ? 'amber' : 'green', 'sales', 'Above target', String(over.length),
+      priced.length ? `of ${priced.length} with a target` : 'none to compare')}
+    ${card('green', 'payroll', 'Best gross profit', best ? money(best.grossProfit) : '—',
+      best ? esc(best.item.name) : 'needs a price and a recipe')}
+    ${card(incomplete.length ? 'red' : 'green', incomplete.length ? 'incidents' : 'policy', 'Cost incomplete',
+      String(incomplete.length), incomplete.length ? 'components without a price' : 'every recipe costs')}
+  </div>`;
+
+  const usedCats = [...new Set(all.map((c) => c.item.category).filter(Boolean))].sort();
+  const rows = all.map((c) => {
+    const m = c.item, cc = menuCat(m.category);
+    const search = [m.name, m.category, m.status, m.is_prep ? 'prep' : ''].filter(Boolean).join(' ').toLowerCase();
+    return `<a class="pitem" href="/menu/${m.id}"
+        data-menu data-search="${esc(search)}" data-cat="${esc(m.category || '')}"
+        data-status="${esc(m.status)}" data-cost="${c.status.key}"
+        data-fc="${c.foodCostPct == null ? -1 : c.foodCostPct.toFixed(2)}"
+        data-gp="${c.grossProfit == null ? -1 : c.grossProfit}" data-name="${esc(m.name.toLowerCase())}">
+      <span class="pitem-main">
+        <span class="pitem-n">${esc(m.name)}${m.is_prep ? ' <span class="prep-tag">prep</span>' : ''}</span>
+        <span class="pitem-meta">
+          ${m.category ? `<span class="pchip" style="--c:${cc.color};--ct:${cc.tint}">${esc(m.category)}</span>` : ''}
+          <span class="pill ${c.status.cls}">${c.status.label}</span>
+          ${m.status === 'draft' ? '<span class="pill">Draft</span>' : ''}
+          ${m.status === 'archived' ? '<span class="pill">Archived</span>' : ''}
+          <span class="pitem-u">${c.lines.length} component${c.lines.length === 1 ? '' : 's'}</span>
+        </span>
+      </span>
+      <span class="pitem-f">
+        <span class="pf"><i>Price</i><b>${m.selling_price_cents ? money(m.selling_price_cents) : '—'}</b></span>
+        <span class="pf"><i>Cost</i><b>${c.lines.length ? money(c.totalCents) + (c.unresolved ? '+' : '') : '—'}</b></span>
+        <span class="pf"><i>Food cost</i><b>${c.unresolved ? '<span class="tr tr-none">—</span>' : pct1(c.foodCostPct)}</b></span>
+        <span class="pf"><i>Gross profit</i><b>${c.grossProfit == null ? '—' : money(c.grossProfit)}</b></span>
+        <span class="pf pf-w"><i>Target</i><b>${pct1(c.target)}</b></span>
+      </span>
+      <span class="pitem-go">›</span>
+    </a>`;
+  }).join('');
+
+  const toolbar = `
+    <div class="toolbar2">
+      <div class="searchbox">${icon('search')}<input id="msearch" type="search" placeholder="Search a menu item..." autocomplete="off"></div>
+      <select id="msort" class="minisel">
+        <option value="name">Sort: name</option>
+        <option value="fc">Sort: highest food cost</option>
+        <option value="gp">Sort: best gross profit</option>
+      </select>
+    </div>
+    <div class="fchips">
+      <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${all.length}</span></button>
+      <button class="fchip" data-f="status" data-v="active" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Active</button>
+      <button class="fchip" data-f="status" data-v="draft" style="--c:#64748b;--ct:#f8fafc"><i class="fdot"></i>Draft</button>
+      <button class="fchip" data-f="status" data-v="archived" style="--c:#6b7280;--ct:#f9fafb"><i class="fdot"></i>Archived</button>
+      <button class="fchip" data-f="cost" data-v="on" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>On target</button>
+      <button class="fchip" data-f="cost" data-v="over" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Above target</button>
+      <button class="fchip" data-f="cost" data-v="missing" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Missing cost</button>
+      ${usedCats.map((x) => { const k = menuCat(x); return `<button class="fchip" data-f="cat" data-v="${esc(x)}" style="--c:${k.color};--ct:${k.tint}"><i class="fdot"></i>${esc(x)}</button>`; }).join('')}
+    </div>`;
+
+  const body = all.length
+    ? `${cards}${toolbar}<div class="pitems" id="mlist">${rows}</div>
+       <div class="empty2" id="mnone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>`
+    : `<div class="upload-hero">
+        <div class="uh-ico">${icon('costs')}</div>
+        <div class="uh-t">No menu items yet</div>
+        <div class="uh-s">${canWrite()
+          ? 'Build a recipe from the products you already buy and it will tell you what the dish costs — and keep telling you as prices move.'
+          : 'Once menu items are added, what each dish costs shows up here.'}</div>
+        ${canWrite() ? `<a class="btn btn-primary btn-lg" href="/menu/new">＋ Create your first menu item</a>` : ''}
+      </div>`;
+
+  res.send(layout('Menu costing', `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t"><h1>Menu costing <span class="beta">BETA</span></h1>
+        <p class="phead-s">What each dish costs to make, from the prices you actually paid.</p></div>
+      ${canWrite() ? `<a class="btn btn-primary" href="/menu/new">＋ Create menu item</a>` : ''}
+    </div>
+    ${body}
+    <script>${menuListScript()}</script>`));
+});
+
+function menuListScript() {
+  return `(function(){
+    var q='', mode='all', val='';
+    var list=document.getElementById('mlist'); if(!list) return;
+    var rows=[].slice.call(list.querySelectorAll('[data-menu]'));
+    var none=document.getElementById('mnone');
+    function pass(el){
+      if(q && el.dataset.search.indexOf(q)<0) return false;
+      if(mode==='status' && el.dataset.status!==val) return false;
+      if(mode==='cat' && el.dataset.cat!==val) return false;
+      if(mode==='cost' && el.dataset.cost!==val) return false;
+      return true;
+    }
+    function apply(){ var n=0; rows.forEach(function(el){ var ok=pass(el); el.style.display=ok?'':'none'; if(ok)n++; });
+      if(none) none.style.display=n?'none':''; }
+    var s=document.getElementById('msearch');
+    if(s) s.addEventListener('input', function(){ q=this.value.trim().toLowerCase(); apply(); });
+    document.querySelectorAll('.fchip').forEach(function(c){ c.addEventListener('click', function(){
+      document.querySelectorAll('.fchip').forEach(function(x){ x.classList.remove('on'); });
+      c.classList.add('on'); mode=c.dataset.f; val=c.dataset.v; apply(); }); });
+    var so=document.getElementById('msort');
+    if(so) so.addEventListener('change', function(){
+      var k=this.value, num=function(el,a){ return parseFloat(el.dataset[a]||'-1'); };
+      rows.slice().sort(function(a,b){
+        if(k==='name') return (a.dataset.name||'').localeCompare(b.dataset.name||'');
+        return num(b,k)-num(a,k);
+      }).forEach(function(el){ list.appendChild(el); });
+    });
+  })();`;
+}
+
+// --- create / edit workspace ------------------------------------------------
+// A full page, not a modal: building a recipe means looking at a growing cost
+// while you add to it, and a dialog can't hold that.
+
+/** Everything the ingredient picker can offer, products and preps together. */
+function pickerOptions(excludeItemId) {
+  const out = [];
+  for (const p of prodQ.plain.all()) {
+    const price = MENU_priceLabel(p);
+    out.push({
+      kind: 'product', id: p.id, name: p.name,
+      meta: [p.brand, p.vendor_name, p.pack_size || p.unit].filter(Boolean).join(' · '),
+      price: price.text, source: price.source, units: PRODUCTS.costableUnits(p),
+      search: [p.name, p.brand, p.sku, p.pack_size, p.unit, p.category].filter(Boolean).join(' ').toLowerCase(),
+    });
+  }
+  for (const m of MENU.q.preps.all()) {
+    if (m.id === excludeItemId) continue;            // a prep can't contain itself
+    const c = MENU.costItem(m.id);
+    const per = m.prep_yield_qty > 0 ? c.totalMicros / m.prep_yield_qty : null;
+    out.push({
+      kind: 'prep', id: m.id, name: m.name,
+      meta: m.prep_yield_qty ? `house prep · makes ${UNITS.fmtQty(m.prep_yield_qty)} ${UNITS.unitLabel(m.prep_yield_unit)}` : 'house prep',
+      price: per && !c.unresolved ? money(UNITS.microsToCents(per)) + ' / ' + UNITS.unitLabel(m.prep_yield_unit) : 'cost incomplete',
+      source: 'prep', units: m.prep_yield_unit ? [m.prep_yield_unit] : [],
+      search: (m.name + ' prep').toLowerCase(),
+    });
+  }
+  return out;
+}
+const PRODUCTS = require('./products');
+function MENU_priceLabel(p) {
+  const pr = PRODUCTS.priceOf(p);
+  if (!pr) return { text: 'no price yet', source: 'none' };
+  return { text: money(UNITS.microsToCents(pr.micros)) + ' / ' + UNITS.unitLabel(pr.unit || p.unit || 'unit'), source: pr.source };
+}
+
+const UNIT_OPTIONS = UNITS.UNIT_GROUPS.map((g) =>
+  `<optgroup label="${g.label}">${g.units.map((u) => `<option value="${u}">${UNITS.unitLabel(u)}</option>`).join('')}</optgroup>`).join('');
+
+function menuForm(m, comps, req) {
+  const isNew = !m.id;
+  const opts = pickerOptions(m.id || 0);
+  const vendors = invQ.vendors.all();
+  const cost = m.id ? MENU.costItem(m.id) : null;
+
+  const lineRow = (c, i) => {
+    const label = c.label || '';
+    return `<div class="rline" data-line data-i="${i}">
+      <span class="rl-drag" title="Drag to reorder">⋮⋮</span>
+      <div class="rl-name">
+        <b>${esc(label)}</b>
+        <input type="hidden" name="ref_${i}" value="${c.refItemId ? 'i' + c.refItemId : 'p' + c.productId}">
+        <span class="rl-meta">${esc(c.meta || '')}</span>
+      </div>
+      <select name="group_${i}" class="minisel rl-group">
+        ${['', ...MENU.GROUPS].map((g) => `<option value="${esc(g)}"${(c.group || '') === g ? ' selected' : ''}>${g || 'No section'}</option>`).join('')}
+      </select>
+      <select name="type_${i}" class="minisel rl-type">
+        ${MENU.TYPES.map((t) => `<option value="${t}"${c.type === t ? ' selected' : ''}>${MENU.TYPE_LABEL[t]}</option>`).join('')}
+      </select>
+      <input class="rl-qty" name="qty_${i}" type="number" step="0.001" min="0" value="${c.qty ?? ''}" placeholder="0">
+      <select name="unit_${i}" class="minisel rl-unit">${UNIT_OPTIONS}</select>
+      <span class="rl-cost" data-cost>—</span>
+      <button type="button" class="rl-del" title="Remove" onclick="mnRemove(this)">✕</button>
+      <details class="rl-adv">
+        <summary>advanced</summary>
+        <div class="rl-adv-b">
+          <label>Waste %<input name="waste_${i}" type="number" step="0.1" min="0" max="99" value="${c.wastePct ?? ''}" placeholder="0"></label>
+          <label>Prep note<input name="note_${i}" value="${esc(c.note || '')}" placeholder="optional"></label>
+        </div>
+      </details>
+    </div>`;
+  };
+
+  return layout(isNew ? 'Create menu item' : `Edit ${m.name}`, `
+    ${flash(req)}
+    <form method="post" action="${isNew ? '/menu' : `/menu/${m.id}`}" id="mnform">
+    <div class="phead">
+      <div class="phead-t">
+        <a class="link back" href="${isNew ? '/menu' : `/menu/${m.id}`}">← ${isNew ? 'Menu costing' : esc(m.name)}</a>
+        <h1>${isNew ? 'Create menu item' : 'Edit menu item'} <span class="beta">BETA</span></h1>
+      </div>
+    </div>
+
+    <div class="mnwrap">
+      <div class="mnmain">
+        <section class="panel">
+          <div class="panel-h"><b>The item</b></div>
+          <div class="fld-row">
+            <label class="fld">Name<input name="name" required value="${esc(m.name || '')}" placeholder="e.g. PV Breakfast Sandwich"></label>
+            <label class="fld">Category
+              <input name="category" list="mn-cats" value="${esc(m.category || '')}" placeholder="Breakfast">
+              <datalist id="mn-cats">${MENU.CATEGORIES.map((c) => `<option value="${c}">`).join('')}</datalist>
+            </label>
+          </div>
+          <div class="fld-row3">
+            <label class="fld">Selling price<input name="price" id="mn-price" type="number" step="0.01" min="0"
+              value="${m.selling_price_cents ? (m.selling_price_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
+            <label class="fld">Target food cost %<input name="target" id="mn-target" type="number" step="0.1" min="1" max="100"
+              value="${m.target_food_cost_pct ?? MENU.DEFAULT_TARGET}"></label>
+            <label class="fld">Status<select name="status" id="mn-status">
+              ${MENU.STATUSES.map((s) => `<option value="${s}"${(m.status || 'draft') === s ? ' selected' : ''}>${s[0].toUpperCase() + s.slice(1)}</option>`).join('')}
+            </select></label>
+          </div>
+          <label class="fcheck"><input type="checkbox" name="is_prep" id="mn-isprep" value="1"${m.is_prep ? ' checked' : ''}>
+            This is a house prep other items use as an ingredient</label>
+          <div class="fld-row" id="mn-prepyield" style="${m.is_prep ? '' : 'display:none'}">
+            <label class="fld">One batch makes<input name="yield_qty" type="number" step="0.01" min="0" value="${m.prep_yield_qty ?? ''}" placeholder="32"></label>
+            <label class="fld">of<select name="yield_unit">${UNIT_OPTIONS}</select></label>
+          </div>
+          <label class="fld">Description<textarea name="description" rows="2">${esc(m.description || '')}</textarea></label>
+          <label class="fld">Internal notes<textarea name="notes" rows="2">${esc(m.notes || '')}</textarea></label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h"><b>Recipe components</b><span class="panel-link muted" id="mn-count"></span></div>
+          <div class="combo" id="mn-combo">
+            ${icon('search')}
+            <input id="mn-pick" type="search" autocomplete="off" placeholder="Search products or add an ingredient...">
+            <div class="combo-menu" id="mn-menu" hidden></div>
+          </div>
+          <div class="rlines" id="mn-lines">${comps.map(lineRow).join('')}</div>
+          <div class="rl-empty" id="mn-empty"${comps.length ? ' hidden' : ''}>Nothing added yet. Search above to build the recipe.</div>
+        </section>
+      </div>
+
+      <aside class="mnside">
+        <div class="mncost" id="mn-summary">
+          <div class="mnc-h">Cost summary</div>
+          <div class="mnc-row"><span>Selling price</span><b id="s-sell">—</b></div>
+          <div class="mnc-row"><span>Ingredients</span><b id="s-ing">—</b></div>
+          <div class="mnc-row"><span>Packaging</span><b id="s-pack">—</b></div>
+          <div class="mnc-row"><span>Garnish &amp; condiments</span><b id="s-other">—</b></div>
+          <div class="mnc-row mnc-total"><span>Total cost</span><b id="s-total">—</b></div>
+          <div class="mnc-row"><span>Food cost</span><b id="s-fc">—</b></div>
+          <div class="mnc-row"><span>Gross profit</span><b id="s-gp">—</b></div>
+          <div class="mnc-row"><span>Gross margin</span><b id="s-gm">—</b></div>
+          <div class="mnc-row"><span>Target</span><b id="s-target">—</b></div>
+          <div class="mnc-row"><span>Suggested price</span><b id="s-sugg">—</b></div>
+          <div class="mnc-status" id="s-status">Add components to see the cost</div>
+          <div class="mnc-warn" id="s-warn" hidden></div>
+          <div class="mnc-act">
+            <button class="btn btn-primary" type="submit">${isNew ? 'Create menu item' : 'Save changes'}</button>
+            <a class="btn btn-ghost" href="${isNew ? '/menu' : `/menu/${m.id}`}">Cancel</a>
+          </div>
+        </div>
+      </aside>
+    </div>
+    <input type="hidden" name="count" id="mn-n" value="${comps.length}">
+    </form>
+
+    ${productDrawer(vendors)}
+    <script>
+      window.MN_OPTS = ${JSON.stringify(opts)};
+      window.MN_UNIT_HTML = ${JSON.stringify(UNIT_OPTIONS)};
+      window.MN_TYPES = ${JSON.stringify(MENU.TYPES.map((t) => [t, MENU.TYPE_LABEL[t]]))};
+      window.MN_GROUPS = ${JSON.stringify(['', ...MENU.GROUPS])};
+      window.MN_START = ${JSON.stringify(comps.map((c) => ({ unit: c.unit, ref: c.refItemId ? 'i' + c.refItemId : 'p' + c.productId })))};
+    </script>
+    <script>${menuEditScript()}</script>
+    <script>${productListScript()}</script>`);
+}
+
+app.get('/menu/new', (req, res) => {
+  if (!canWrite()) return res.redirect('/menu');
+  res.send(menuForm({ status: 'draft', target_food_cost_pct: MENU.DEFAULT_TARGET }, [], req));
+});
+
+app.get('/menu/:id/edit', (req, res) => {
+  const m = MENU.q.one.get(Number(req.params.id));
+  if (!m) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such menu item</div></div>'));
+  if (!canWrite()) return res.redirect(`/menu/${m.id}`);
+  const c = MENU.costItem(m.id);
+  res.send(menuForm(m, c.lines.map((l) => ({ ...l, meta: [l.brand, l.vendor, l.packSize].filter(Boolean).join(' · ') })), req));
+});
+
+function menuEditScript() {
+  return `
+  var MN = { n: 0, seq: 0 };
+  function mnMoney(c){ return '$' + (Math.round(c)/100).toFixed(2); }
+
+  // --- the ingredient picker ------------------------------------------------
+  // A combobox, because a select with four hundred products in it is a list you
+  // scroll, not one you search. Recently used first, so the things you reach
+  // for most are one keystroke away.
+  function mnRecent(){ try { return JSON.parse(localStorage.getItem('mn_recent')||'[]'); } catch(e){ return []; } }
+  function mnRemember(ref){
+    var r = mnRecent().filter(function(x){ return x!==ref; });
+    r.unshift(ref); try { localStorage.setItem('mn_recent', JSON.stringify(r.slice(0,8))); } catch(e){}
+  }
+  function mnRender(q){
+    var menu = document.getElementById('mn-menu');
+    var used = {}; document.querySelectorAll('#mn-lines [name^=ref_]').forEach(function(i){ used[i.value]=1; });
+    var list = MN_OPTS.filter(function(o){ return !q || o.search.indexOf(q)>=0; });
+    if(!q){
+      var rec = mnRecent();
+      list = list.slice().sort(function(a,b){
+        var ai=rec.indexOf(a.kind[0]+a.id), bi=rec.indexOf(b.kind[0]+b.id);
+        if(ai<0&&bi<0) return a.name.localeCompare(b.name);
+        if(ai<0) return 1; if(bi<0) return -1; return ai-bi;
+      });
+    }
+    var html = list.slice(0,40).map(function(o){
+      var ref=o.kind[0]+o.id, isUsed=used[ref];
+      var badge = o.source==='invoice' ? '<span class="cb-src cb-inv">invoice</span>'
+        : o.source==='prep' ? '<span class="cb-src cb-prep">prep</span>'
+        : o.source==='manual' ? '<span class="cb-src cb-man">manual</span>'
+        : '<span class="cb-src cb-none">no price</span>';
+      return '<button type="button" class="cb-opt'+(isUsed?' cb-used':'')+'" data-ref="'+ref+'"'+(isUsed?' disabled':'')+'>'
+        + '<span class="cb-l"><b>'+o.name.replace(/[<>&]/g,'')+'</b><i>'+(o.meta||'').replace(/[<>&]/g,'')+'</i></span>'
+        + '<span class="cb-r">'+badge+'<span class="cb-p">'+o.price+'</span>'+(isUsed?'<span class="cb-in">already in</span>':'')+'</span></button>';
+    }).join('');
+    // Creating a missing ingredient without leaving a half-built recipe is the
+    // whole reason this is inline.
+    html += '<button type="button" class="cb-opt cb-new" id="cb-create">＋ Create a product that isn\\'t on file</button>';
+    menu.innerHTML = html || '<div class="cb-none">Nothing matches</div>' + html;
+    menu.hidden = false;
+  }
+  function mnAdd(ref, unit){
+    var o = MN_OPTS.filter(function(x){ return x.kind[0]+x.id===ref; })[0];
+    if(!o) return;
+    var i = MN.n++;
+    var wrap = document.createElement('div');
+    wrap.className='rline'; wrap.setAttribute('data-line',''); wrap.dataset.i=i;
+    wrap.innerHTML = '<span class="rl-drag" title="Drag to reorder">⋮⋮</span>'
+      + '<div class="rl-name"><b>'+o.name.replace(/[<>&]/g,'')+'</b>'
+      + '<input type="hidden" name="ref_'+i+'" value="'+ref+'">'
+      + '<span class="rl-meta">'+(o.meta||'').replace(/[<>&]/g,'')+'</span></div>'
+      + '<select name="group_'+i+'" class="minisel rl-group">'+MN_GROUPS.map(function(g){return '<option value="'+g+'">'+(g||'No section')+'</option>';}).join('')+'</select>'
+      + '<select name="type_'+i+'" class="minisel rl-type">'+MN_TYPES.map(function(t){return '<option value="'+t[0]+'">'+t[1]+'</option>';}).join('')+'</select>'
+      + '<input class="rl-qty" name="qty_'+i+'" type="number" step="0.001" min="0" value="1">'
+      + '<select name="unit_'+i+'" class="minisel rl-unit">'+MN_UNIT_HTML+'</select>'
+      + '<span class="rl-cost" data-cost>—</span>'
+      + '<button type="button" class="rl-del" title="Remove" onclick="mnRemove(this)">✕</button>'
+      + '<details class="rl-adv"><summary>advanced</summary><div class="rl-adv-b">'
+      + '<label>Waste %<input name="waste_'+i+'" type="number" step="0.1" min="0" max="99" placeholder="0"></label>'
+      + '<label>Prep note<input name="note_'+i+'" placeholder="optional"></label></div></details>';
+    document.getElementById('mn-lines').appendChild(wrap);
+    // Default the unit to something this product can actually be costed in,
+    // so a fresh line starts resolvable instead of starting broken.
+    var us = wrap.querySelector('.rl-unit');
+    var want = unit || (o.units && o.units[0]);
+    if(want) us.value = want;
+    if(/pack|wrap|cup|box|bag|container|lid|napkin/i.test(o.name)) wrap.querySelector('.rl-type').value='packaging';
+    mnRemember(ref);
+    document.getElementById('mn-empty').hidden = true;
+    mnCost();
+  }
+  function mnRemove(btn){ btn.closest('[data-line]').remove(); mnCost(); }
+
+  // --- live costing ---------------------------------------------------------
+  // Asks the server, because the conversion rules and the price lookups live
+  // there and a second copy in the browser is a second set of answers.
+  var mnTimer;
+  function mnCost(){
+    clearTimeout(mnTimer);
+    mnTimer = setTimeout(function(){
+      var lines=[];
+      document.querySelectorAll('#mn-lines [data-line]').forEach(function(el){
+        lines.push({
+          ref: el.querySelector('[name^=ref_]').value,
+          type: el.querySelector('.rl-type').value,
+          qty: parseFloat(el.querySelector('.rl-qty').value)||0,
+          unit: el.querySelector('.rl-unit').value,
+          waste: parseFloat((el.querySelector('[name^=waste_]')||{}).value)||0,
+        });
+      });
+      document.getElementById('mn-count').textContent = lines.length ? lines.length+' component'+(lines.length===1?'':'s') : '';
+      // Typing fast puts several of these in flight at once. Without a
+      // sequence check a slow earlier reply can land last and paint a total
+      // that does not match the recipe on screen — which is the one thing a
+      // live cost panel must never do.
+      var seq = ++MN.seq;
+      fetch('/menu/cost', { method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({ lines: lines,
+          price: parseFloat(document.getElementById('mn-price').value)||0,
+          target: parseFloat(document.getElementById('mn-target').value)||0 }) })
+        .then(function(r){ return r.json(); })
+        .then(function(d){ if(seq === MN.seq) mnPaint(d); })
+        .catch(function(){ if(seq === MN.seq) document.getElementById('s-status').textContent='Could not work out the cost just now.'; });
+    }, 220);
+  }
+  function mnPaint(d){
+    var els = document.querySelectorAll('#mn-lines [data-line]');
+    d.lines.forEach(function(l, i){
+      var cell = els[i] && els[i].querySelector('[data-cost]');
+      if(!cell) return;
+      if(l.ok){ cell.textContent = mnMoney(l.cents); cell.className='rl-cost'; cell.removeAttribute('title'); }
+      else { cell.textContent='needs setup'; cell.className='rl-cost rl-bad'; cell.title=l.reason||''; }
+      if(els[i]) els[i].classList.toggle('rline-bad', !l.ok);
+    });
+    var set=function(id,v){ document.getElementById(id).textContent=v; };
+    set('s-sell', d.sellCents?mnMoney(d.sellCents):'—');
+    set('s-ing', mnMoney(d.ingredient)); set('s-pack', mnMoney(d.packaging)); set('s-other', mnMoney(d.other));
+    set('s-total', mnMoney(d.totalCents) + (d.unresolved?'+':''));
+    set('s-fc', d.foodCostPct==null?'—':d.foodCostPct.toFixed(1)+'%');
+    set('s-gp', d.grossProfit==null?'—':mnMoney(d.grossProfit));
+    set('s-gm', d.grossMarginPct==null?'—':d.grossMarginPct.toFixed(1)+'%');
+    set('s-target', d.target?d.target.toFixed(1)+'%':'—');
+    set('s-sugg', d.suggestedCents?mnMoney(d.suggestedCents):'—');
+    var st=document.getElementById('s-status');
+    st.textContent=d.status.label; st.className='mnc-status st-'+d.status.key;
+    var w=document.getElementById('s-warn');
+    if(d.unresolved){
+      w.hidden=false;
+      w.innerHTML = d.unresolved+' component'+(d.unresolved===1?'':'s')+' can\\'t be costed yet, so this total is a floor, not the price.'
+        + ' <a href="/c/products" target="_blank">Fix in Products →</a>';
+    } else w.hidden=true;
+  }
+
+  // --- wiring ---------------------------------------------------------------
+  (function(){
+    var pick=document.getElementById('mn-pick'), menu=document.getElementById('mn-menu');
+    if(!pick) return;
+    MN.n = parseInt(document.getElementById('mn-n').value,10)||0;
+    (window.MN_START||[]).forEach(function(s,i){
+      var el=document.querySelectorAll('#mn-lines [data-line]')[i];
+      if(el && s.unit) el.querySelector('.rl-unit').value=s.unit;
+    });
+    pick.addEventListener('focus', function(){ mnRender(''); });
+    pick.addEventListener('input', function(){ mnRender(this.value.trim().toLowerCase()); });
+    document.addEventListener('click', function(e){
+      if(!e.target.closest('#mn-combo')) menu.hidden=true;
+    });
+    menu.addEventListener('click', function(e){
+      var b=e.target.closest('.cb-opt'); if(!b) return;
+      if(b.id==='cb-create'){ menu.hidden=true; mnNewProduct(pick.value.trim()); return; }
+      if(b.disabled) return;
+      mnAdd(b.dataset.ref); pick.value=''; menu.hidden=true;
+    });
+    ['mn-price','mn-target'].forEach(function(id){ document.getElementById(id).addEventListener('input', mnCost); });
+    document.getElementById('mn-lines').addEventListener('input', mnCost);
+    document.getElementById('mn-lines').addEventListener('change', mnCost);
+    var ip=document.getElementById('mn-isprep');
+    if(ip) ip.addEventListener('change', function(){ document.getElementById('mn-prepyield').style.display=this.checked?'':'none'; });
+
+    // Renumber on submit so removed lines don't leave gaps the server has to
+    // guess about.
+    document.getElementById('mnform').addEventListener('submit', function(){
+      var i=0;
+      document.querySelectorAll('#mn-lines [data-line]').forEach(function(el){
+        el.querySelectorAll('[name]').forEach(function(f){ f.name=f.name.replace(/_\\d+$/,'_'+i); });
+        i++;
+      });
+      document.getElementById('mn-n').value=i;
+    });
+
+    // Drag to reorder.
+    var dragging=null;
+    document.getElementById('mn-lines').addEventListener('mousedown', function(e){
+      if(!e.target.closest('.rl-drag')) return;
+      dragging=e.target.closest('[data-line]'); dragging.classList.add('rl-dragging');
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e){
+      if(!dragging) return;
+      var over=document.elementFromPoint(e.clientX,e.clientY);
+      var row=over&&over.closest('[data-line]');
+      if(row&&row!==dragging){
+        var r=row.getBoundingClientRect();
+        row.parentNode.insertBefore(dragging, (e.clientY-r.top)/r.height>0.5?row.nextSibling:row);
+      }
+    });
+    document.addEventListener('mouseup', function(){
+      if(dragging){ dragging.classList.remove('rl-dragging'); dragging=null; }
+    });
+
+    mnCost();
+  })();
+
+  // --- creating a product without losing the recipe -------------------------
+  function mnNewProduct(name){
+    prodDrawer(true);
+    var f=document.querySelector('#prod-drawer input[name=name]');
+    if(f && name) f.value=name;
+    var form=document.querySelector('#prod-drawer form');
+    if(form.dataset.wired) return;
+    form.dataset.wired='1';
+    form.addEventListener('submit', function(e){
+      // Posting normally would navigate away and take the unsaved recipe with
+      // it. Send it in the background, then add the new product to the line
+      // list where the person was already working.
+      e.preventDefault();
+      var btn=form.querySelector('button[type=submit]'); btn.disabled=true; btn.textContent='Adding…';
+      fetch('/c/products?json=1', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'},
+        body: new URLSearchParams(new FormData(form)).toString() })
+        .then(function(r){ return r.json(); })
+        .then(function(out){
+          btn.disabled=false; btn.textContent='Add product';
+          if(out.error){ alert(out.error); return; }
+          MN_OPTS.unshift({ kind:'product', id:out.id, name:out.name, meta:out.meta||'',
+            price:out.price||'no price yet', source:out.source||'manual', units:out.units||[],
+            search:(out.name+' '+(out.meta||'')).toLowerCase() });
+          prodDrawer(false); form.reset();
+          mnAdd('p'+out.id, (out.units||[])[0]);
+        })
+        .catch(function(){ btn.disabled=false; btn.textContent='Add product'; alert('Could not add that product.'); });
+    });
+  }
+  `;
+}
+
+/** Turn posted line fields into component rows. Shared by save and preview. */
+function menuLinesFrom(body) {
+  const n = Number(body.count) || 0;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const ref = String(body[`ref_${i}`] || '');
+    if (!ref) continue;
+    const isPrep = ref[0] === 'i';
+    const id = Number(ref.slice(1));
+    if (!id) continue;
+    out.push({
+      product_id: isPrep ? null : id,
+      ref_item_id: isPrep ? id : null,
+      component_type: MENU.TYPES.includes(body[`type_${i}`]) ? body[`type_${i}`] : 'ingredient',
+      qty: Number(body[`qty_${i}`]) || 0,
+      usage_unit: UNITS.normalizeUnit(body[`unit_${i}`]) || null,
+      prep_note: String(body[`note_${i}`] || '').trim() || null,
+      waste_pct: body[`waste_${i}`] === '' || body[`waste_${i}`] == null ? null : Number(body[`waste_${i}`]),
+      group_name: String(body[`group_${i}`] || '').trim() || null,
+      sort_order: out.length,
+    });
+  }
+  return out;
+}
+
+function menuFieldsFrom(body) {
+  return {
+    name: String(body.name || '').trim(),
+    category: String(body.category || '').trim() || null,
+    description: String(body.description || '').trim() || null,
+    notes: String(body.notes || '').trim() || null,
+    selling_price_cents: body.price === '' || body.price == null ? null : toCents(body.price),
+    target_food_cost_pct: body.target === '' || body.target == null ? MENU.DEFAULT_TARGET : Number(body.target),
+    status: MENU.STATUSES.includes(body.status) ? body.status : 'draft',
+    is_prep: body.is_prep ? 1 : 0,
+    prep_yield_qty: body.yield_qty === '' || body.yield_qty == null ? null : Number(body.yield_qty),
+    prep_yield_unit: UNITS.normalizeUnit(body.yield_unit) || null,
+  };
+}
+
+/**
+ * Live cost for a recipe that hasn't been saved. Costs against a temporary row
+ * inside a transaction that is always rolled back, so the preview uses exactly
+ * the same code as the real thing rather than a second implementation that can
+ * disagree with it.
+ */
+app.post('/menu/cost', (req, res) => {
+  const body = req.body || {};
+  const lines = Array.isArray(body.lines) ? body.lines : [];
+  const priceCents = toCents(body.price);
+  const target = Number(body.target) || MENU.DEFAULT_TARGET;
+
+  let out = null;
+  db.exec('BEGIN');
+  try {
+    const id = MENU.q.add.run({
+      name: '__preview__', category: null, description: null, notes: null,
+      selling_price_cents: priceCents || null, target_food_cost_pct: target,
+      status: 'draft', is_prep: 0, prep_yield_qty: null, prep_yield_unit: null,
+    }).lastInsertRowid;
+    lines.forEach((l, i) => {
+      const ref = String(l.ref || '');
+      const rid = Number(ref.slice(1));
+      if (!rid) return;
+      MENU.q.addComponent.run({
+        menu_item_id: id,
+        product_id: ref[0] === 'i' ? null : rid,
+        ref_item_id: ref[0] === 'i' ? rid : null,
+        component_type: MENU.TYPES.includes(l.type) ? l.type : 'ingredient',
+        qty: Number(l.qty) || 0, usage_unit: UNITS.normalizeUnit(l.unit) || null,
+        prep_note: null, waste_pct: Number(l.waste) || null, group_name: null, sort_order: i,
+      });
+    });
+    const c = MENU.costItem(id);
+    out = {
+      lines: c.lines.map((l) => ({ ok: l.ok, cents: l.lineMicros == null ? 0 : UNITS.microsToCents(l.lineMicros), reason: l.reason })),
+      ingredient: UNITS.microsToCents(c.byType.ingredient || 0),
+      packaging: UNITS.microsToCents(c.byType.packaging || 0),
+      other: UNITS.microsToCents((c.byType.garnish || 0) + (c.byType.condiment || 0) + (c.byType.other || 0)),
+      totalCents: c.totalCents, sellCents: c.sellCents, unresolved: c.unresolved,
+      foodCostPct: c.foodCostPct, grossProfit: c.grossProfit, grossMarginPct: c.grossMarginPct,
+      target: c.target, suggestedCents: c.suggestedCents, status: c.status,
+    };
+  } finally {
+    db.exec('ROLLBACK');
+  }
+  res.json(out);
+});
+
+const saveMenu = db.transaction((id, fields, lines) => {
+  let itemId = id;
+  if (itemId) MENU.q.update.run({ ...fields, id: itemId });
+  else itemId = MENU.q.add.run(fields).lastInsertRowid;
+  MENU.q.clearComponents.run(itemId);
+  for (const l of lines) MENU.q.addComponent.run({ ...l, menu_item_id: itemId });
+  return itemId;
+});
+
+function saveMenuItem(req, res, existingId) {
+  const fields = menuFieldsFrom(req.body);
+  const lines = menuLinesFrom(req.body);
+  const check = MENU.validate(fields, lines.map((l) => ({ label: '', qty: l.qty, wastePct: l.waste_pct })));
+  if (!check.ok) {
+    return res.redirect(`${existingId ? `/menu/${existingId}/edit` : '/menu/new'}?err=1&msg=` + encodeURIComponent(check.errors[0]));
+  }
+  const id = saveMenu(existingId, fields, lines);
+  MENU.snapshot(id, existingId ? 'edit' : 'create');
+  const c = MENU.costItem(id);
+  const warn = c.unresolved
+    ? ` ${c.unresolved} component${c.unresolved === 1 ? '' : 's'} still need${c.unresolved === 1 ? 's' : ''} a cost.` : '';
+  res.redirect(`/menu/${id}?msg=` + encodeURIComponent(`Saved.${warn}`));
+}
+
+app.post('/menu', (req, res) => saveMenuItem(req, res, null));
+app.post('/menu/:id', (req, res) => {
+  const m = MENU.q.one.get(Number(req.params.id));
+  if (!m) return res.status(404).end();
+  saveMenuItem(req, res, m.id);
+});
+
+app.post('/menu/:id/status', (req, res) => {
+  const id = Number(req.params.id);
+  const to = MENU.STATUSES.includes(req.body.status) ? req.body.status : 'draft';
+  MENU.q.setStatus.run(to, to, id);
+  MENU.snapshot(id, 'status');
+  res.redirect(`/menu/${id}?msg=` + encodeURIComponent(to === 'archived' ? 'Archived.' : `Marked ${to}.`));
+});
+
+app.post('/menu/:id/duplicate', (req, res) => {
+  const m = MENU.q.one.get(Number(req.params.id));
+  if (!m) return res.status(404).end();
+  // The recipe carries over; the name, the history and the photo do not. A
+  // duplicate that inherits its parent's cost history would be claiming
+  // something that never happened to it.
+  const base = `${m.name} (copy)`;
+  let name = base, n = 2;
+  while (db.prepare('SELECT 1 FROM menu_items WHERE name = ?').get(name)) name = `${base} ${n++}`;
+  const copy = db.transaction(() => {
+    const id = MENU.q.add.run({
+      name, category: m.category, description: m.description, notes: m.notes,
+      selling_price_cents: m.selling_price_cents, target_food_cost_pct: m.target_food_cost_pct,
+      status: 'draft', is_prep: m.is_prep, prep_yield_qty: m.prep_yield_qty, prep_yield_unit: m.prep_yield_unit,
+    }).lastInsertRowid;
+    for (const c of MENU.q.components.all(m.id)) {
+      MENU.q.addComponent.run({
+        menu_item_id: id, product_id: c.product_id, ref_item_id: c.ref_item_id,
+        component_type: c.component_type, qty: c.qty, usage_unit: c.usage_unit,
+        prep_note: c.prep_note, waste_pct: c.waste_pct, group_name: c.group_name, sort_order: c.sort_order,
+      });
+    }
+    return id;
+  })();
+  MENU.snapshot(copy, 'duplicate');
+  res.redirect(`/menu/${copy}/edit?msg=` + encodeURIComponent('Copied — give it a name and adjust the recipe.'));
+});
+
+app.post('/menu/:id/delete', (req, res) => {
+  const id = Number(req.params.id);
+  const used = MENU.q.usingItem.all(id);
+  if (used.length) {
+    return res.redirect(`/menu/${id}?err=1&msg=` + encodeURIComponent(
+      `This prep is used by ${used.length} other menu item${used.length === 1 ? '' : 's'}. Remove it from ${used.length === 1 ? 'that recipe' : 'those recipes'} first.`));
+  }
+  MENU.q.del.run(id);
+  res.redirect('/menu?msg=' + encodeURIComponent('Menu item deleted.'));
+});
+
+// --- detail ----------------------------------------------------------------
+app.get('/menu/:id', (req, res) => {
+  const m = MENU.q.one.get(Number(req.params.id));
+  if (!m) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such menu item</div></div>'));
+  const c = MENU.costItem(m.id);
+  const snaps = MENU.q.snapshots.all(m.id);
+  const cc = menuCat(m.category);
+
+  // Group the recipe the way it was built.
+  const groups = new Map();
+  for (const l of c.lines) {
+    const g = l.group || 'Recipe';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(l);
+  }
+  const recipe = [...groups.entries()].map(([name, lines]) => `
+    <div class="rgroup"><div class="rgroup-h">${esc(name)}</div>
+      ${lines.map((l) => `
+        <div class="rrow${l.ok ? '' : ' rrow-bad'}">
+          <span class="rr-n">${esc(l.label)}${l.isPrep ? ' <span class="prep-tag">prep</span>' : ''}
+            ${l.type !== 'ingredient' ? `<span class="rr-t">${MENU.TYPE_LABEL[l.type]}</span>` : ''}
+            ${l.note ? `<i class="rr-note">${esc(l.note)}</i>` : ''}</span>
+          <span class="rr-q">${UNITS.fmtQty(l.qty)} ${esc(UNITS.unitLabel(l.unit))}${l.wastePct ? ` · ${l.wastePct}% waste` : ''}</span>
+          <span class="rr-u">${l.unitMicros == null ? '—' : money(UNITS.microsToCents(l.unitMicros)) + '/' + esc(UNITS.unitLabel(l.unit))}</span>
+          <span class="rr-c">${l.ok ? money(UNITS.microsToCents(l.lineMicros))
+            : `<a class="rr-fix" href="${l.productId ? `/c/products/${l.productId}` : `/menu/${l.refItemId}`}">${esc(l.reason || 'needs setup')} →</a>`}</span>
+        </div>`).join('')}
+    </div>`).join('');
+
+  // Cost over time. Only drawn with three points — two dots is not a trend.
+  let spark = '';
+  const pts = snaps.slice(0, 24).reverse().filter((s) => s.total_micros > 0);
+  if (pts.length >= 3) {
+    const vals = pts.map((s) => s.total_micros);
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+    const W = 520, H = 60;
+    const d = vals.map((v, i) => `${((i / (vals.length - 1)) * W).toFixed(1)},${(H - ((v - lo) / span) * (H - 10) - 5).toFixed(1)}`);
+    spark = `<div class="spark"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <polyline points="${d.join(' ')}" fill="none" stroke="${vals[vals.length - 1] > vals[0] ? '#dc2626' : '#059669'}" stroke-width="2" stroke-linejoin="round"/>
+    </svg><div class="spark-l"><span>${money(UNITS.microsToCents(lo))}</span><span>${pts.length} recalculations</span><span>${money(UNITS.microsToCents(hi))}</span></div></div>`;
+  }
+
+  const history = snaps.slice(0, 12).map((s, i) => {
+    const older = snaps[i + 1];
+    const d = older ? MENU.drivers(s, older) : [];
+    const delta = older ? s.total_micros - older.total_micros : 0;
+    return `<div class="hrow">
+      <span class="hr-d">${esc(String(s.calculated_at).slice(0, 16))}</span>
+      <span class="hr-c">${money(UNITS.microsToCents(s.total_micros))}${s.unresolved ? '+' : ''}</span>
+      <span class="hr-x">${older ? `<span class="${delta > 0 ? 'tr tr-up' : delta < 0 ? 'tr tr-down' : 'tr tr-flat'}">${delta > 0 ? '+' : ''}${money(UNITS.microsToCents(delta))}</span>` : '<span class="muted">first</span>'}</span>
+      <span class="hr-w">${esc(s.trigger || '')}${d.length ? ' · ' + d.slice(0, 2).map((x) => `${esc(x.label)} ${x.delta > 0 ? '+' : ''}${money(UNITS.microsToCents(x.delta))}`).join(', ') : ''}</span>
+    </div>`;
+  }).join('');
+
+  const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
+  res.send(layout(m.name, `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t">
+        <a class="link back" href="/menu">← Menu costing</a>
+        <h1>${esc(m.name)}${m.is_prep ? ' <span class="prep-tag">prep</span>' : ''}</h1>
+        <p class="phead-s">
+          ${m.category ? `<span class="pchip" style="--c:${cc.color};--ct:${cc.tint}">${esc(m.category)}</span>` : ''}
+          <span class="pill ${c.status.cls}">${c.status.label}</span>
+          ${m.status !== 'active' ? `<span class="pill">${m.status[0].toUpperCase() + m.status.slice(1)}</span>` : ''}
+        </p>
+      </div>
+      ${canWrite() ? `<div class="phead-acts">
+        <a class="btn btn-primary" href="/menu/${m.id}/edit">Edit recipe</a>
+        <form method="post" action="/menu/${m.id}/duplicate" style="margin:0"><button class="btn" type="submit">Duplicate</button></form>
+      </div>` : ''}
+    </div>
+
+    ${c.unresolved ? `<div class="attn"><div class="attn-h">${icon('incidents')} ${c.unresolved} component${c.unresolved === 1 ? '' : 's'} without a cost</div>
+      <p>The total below is what the rest adds up to — a floor, not the real cost. Fix the flagged lines to complete it.</p></div>` : ''}
+
+    <div class="mcards mcards-4">
+      <div class="mcard mcard-blue"><div class="mcard-ico">${icon('sales')}</div><div class="mcard-body">
+        <div class="mcard-label">Selling price</div><div class="mcard-value">${m.selling_price_cents ? money(m.selling_price_cents) : '—'}</div>
+        <div class="mcard-sub">${m.is_prep ? 'a prep, not sold directly' : 'on the menu'}</div></div></div>
+      <div class="mcard mcard-amber"><div class="mcard-ico">${icon('invoices')}</div><div class="mcard-body">
+        <div class="mcard-label">Total cost</div><div class="mcard-value">${money(c.totalCents)}${c.unresolved ? '+' : ''}</div>
+        <div class="mcard-sub">${c.lines.length} component${c.lines.length === 1 ? '' : 's'}</div></div></div>
+      <div class="mcard mcard-${c.status.key === 'on' ? 'green' : c.status.key === 'over' ? 'red' : 'violet'}"><div class="mcard-ico">${icon('costs')}</div><div class="mcard-body">
+        <div class="mcard-label">Food cost</div><div class="mcard-value">${c.unresolved ? '—' : pct1(c.foodCostPct)}</div>
+        <div class="mcard-sub">target ${pct1(c.target)}</div></div></div>
+      <div class="mcard mcard-green"><div class="mcard-ico">${icon('payroll')}</div><div class="mcard-body">
+        <div class="mcard-label">Gross profit</div><div class="mcard-value">${c.grossProfit == null ? '—' : money(c.grossProfit)}</div>
+        <div class="mcard-sub">${c.grossMarginPct == null ? 'needs a price' : pct1(c.grossMarginPct) + ' margin'}</div></div></div>
+    </div>
+
+    <div class="vpanels">
+      <section class="panel panel-wide">
+        <div class="panel-h"><b>Recipe</b><span class="panel-link muted">${c.lines.length} component${c.lines.length === 1 ? '' : 's'}</span></div>
+        ${c.lines.length ? recipe : '<div class="panel-empty">No components yet.</div>'}
+      </section>
+    </div>
+
+    <div class="vpanels">
+      <section class="panel">
+        <div class="panel-h"><b>Cost breakdown</b></div>
+        ${fact('Ingredients', money(UNITS.microsToCents(c.byType.ingredient || 0)))}
+        ${fact('Packaging', money(UNITS.microsToCents(c.byType.packaging || 0)))}
+        ${fact('Garnish', money(UNITS.microsToCents(c.byType.garnish || 0)))}
+        ${fact('Condiments', money(UNITS.microsToCents(c.byType.condiment || 0)))}
+        ${fact('Other', money(UNITS.microsToCents(c.byType.other || 0)))}
+        ${fact('Suggested price at target', c.suggestedCents ? money(c.suggestedCents) : '—')}
+        ${fact('Last recalculated', snaps[0] ? esc(String(snaps[0].calculated_at).slice(0, 16)) : 'never')}
+        ${m.is_prep ? fact('One batch makes', m.prep_yield_qty ? `${UNITS.fmtQty(m.prep_yield_qty)} ${esc(UNITS.unitLabel(m.prep_yield_unit))}` : '<i class="unset">not set</i>') : ''}
+        ${m.description ? `<div class="inv-notes">${esc(m.description)}</div>` : ''}
+        ${spark}
+      </section>
+      <section class="panel">
+        <div class="panel-h"><b>Cost history</b><span class="panel-link muted">${snaps.length} record${snaps.length === 1 ? '' : 's'}</span></div>
+        ${history || '<div class="panel-empty">Nothing recorded yet. A record is kept whenever the cost moves.</div>'}
+      </section>
+    </div>
+
+    ${canWrite() ? `<div class="danger-zone">
+      <div><b>${m.status === 'archived' ? 'Bring this back' : 'Archive this item'}</b>
+        <p class="muted">${m.status === 'archived' ? 'It will appear on the menu list again.' : 'It stays costed and keeps its history — it just drops off the working list.'}</p></div>
+      <form method="post" action="/menu/${m.id}/status" style="margin:0">
+        <input type="hidden" name="status" value="${m.status === 'archived' ? 'draft' : 'archived'}">
+        <button class="btn ${m.status === 'archived' ? '' : 'btn-danger'}" type="submit">${m.status === 'archived' ? 'Restore' : 'Archive'}</button>
+      </form>
+    </div>` : ''}`));
 });
 
 
