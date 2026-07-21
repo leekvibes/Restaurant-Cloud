@@ -50,10 +50,15 @@ h3 { font-size: 13px; font-weight: 700; margin: 16px 0 8px; }
    only thing that reflows content. State persists in localStorage.
    =========================================================================== */
 :root {
-  --rail: 62px;
-  --side: 234px;
+  --rail: 62px;           /* collapsed sidebar */
+  --side: 234px;          /* expanded sidebar */
+  --side-pad: 9px;        /* sidebar inner padding, both states */
+  --side-ease: .22s cubic-bezier(.4, 0, .2, 1);
   --shell-x: 24px;        /* horizontal page padding */
   --shell-y: 22px;
+  /* 6 / 10 / 16 / 22 / 32 — every gap in the shell comes from here rather than
+     being typed in at the call site, which is how the sidebar collected a
+     46px header for a 34px button. */
   --sp-1: 6px; --sp-2: 10px; --sp-3: 16px; --sp-4: 22px; --sp-5: 32px;
 }
 
@@ -63,8 +68,8 @@ h3 { font-size: 13px; font-weight: 700; margin: 16px 0 8px; }
   position: fixed; top: 0; left: 0; bottom: 0; width: var(--rail);
   display: flex; flex-direction: column;
   background: var(--surface); border-right: 1px solid var(--line);
-  padding: 10px 9px; overflow-x: hidden; overflow-y: auto;
-  transition: width .25s ease-out, box-shadow .25s ease-out;
+  padding: var(--sp-1) var(--side-pad) var(--sp-2); overflow-x: hidden; overflow-y: auto;
+  transition: width var(--side-ease), box-shadow var(--side-ease);
   z-index: 40; scrollbar-width: none;
 }
 .sidebar::-webkit-scrollbar { width: 0; }
@@ -73,16 +78,21 @@ html.side-pinned .sidebar { width: var(--side); box-shadow: none; }
 /* After unpinning, the cursor is still on the rail — hover would snap it right
    back open and the click would look like it did nothing. Suppress the peek
    until the pointer actually leaves. */
-html.no-peek .sidebar:hover { width: var(--rail); box-shadow: none; }
+/* :not(.side-pinned) matters. This rule is more specific than the pinned one,
+   so without the guard a sidebar pinned while the pointer was still on it
+   stayed at rail width — pinned but narrow. Unreachable by mouse, because
+   unpinning was the only way to set no-peek; ⌘B made it reachable. */
+html.no-peek:not(.side-pinned) .sidebar:hover { width: var(--rail); box-shadow: none; }
 
-.content { flex: 1; min-width: 0; margin-left: var(--rail); transition: margin-left .25s ease-out; }
+.content { flex: 1; min-width: 0; margin-left: var(--rail); transition: margin-left var(--side-ease); }
 html.side-pinned .content { margin-left: var(--side); }
 
 /* Full-bleed: content uses the whole viewport, no centred column. */
 .wrap { max-width: none; margin: 0; padding: var(--shell-y) var(--shell-x) 56px; }
 
-/* --- brand + pin toggle --- */
-.side-top { display: flex; align-items: center; gap: 10px; padding: 5px 6px 14px; min-height: 46px; }
+/* --- header row: Dashboard, with the collapse control beside it --- */
+.side-head { display: flex; align-items: center; gap: 4px; margin-bottom: var(--sp-1); }
+.side-head .side-link { flex: 1; min-width: 0; margin-bottom: 0; }
 .side-brand { display: flex; align-items: center; gap: 11px; color: var(--ink); font-weight: 750;
   font-size: 14.5px; letter-spacing: -.015em; text-decoration: none; flex: 1; min-width: 0; }
 .side-brand span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -98,14 +108,25 @@ html.side-pinned .content { margin-left: var(--side); }
 .side-pin:active { background: var(--line); }
 html.side-pinned .side-pin { transform: rotate(180deg); color: var(--ink-2); }
 .sidebar:hover .side-pin, html.side-pinned .side-pin { display: flex; }
+/* At 62px there is room for one icon, and it is the Dashboard's. Collapsed,
+   the top-bar hamburger and ⌘B are how the sidebar comes back. */
+html.no-peek:not(.side-pinned) .sidebar:hover .side-pin { display: none; }
 
 /* --- nav items --- */
+/* Collapsed, a heading is not just invisible — it takes no room. Hiding only
+   the text left a ladder of empty gaps down the rail. The height is explicit
+   because auto cannot be animated: 12px of line plus the padding below. */
 .side-group { color: var(--faint); font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: .1em; padding: 16px 12px 6px; white-space: nowrap; }
+  letter-spacing: .1em; line-height: 12px; padding: 0 12px; white-space: nowrap; overflow: hidden;
+  height: 0; opacity: 0; box-sizing: content-box;
+  transition: height var(--side-ease), padding var(--side-ease), opacity .14s ease-out; }
+.sidebar:hover .side-group, html.side-pinned .side-group {
+  height: 12px; padding: var(--sp-3) 12px var(--sp-1); opacity: 1; }
+html.no-peek:not(.side-pinned) .sidebar:hover .side-group { height: 0; padding: 0 12px; opacity: 0; }
 .side-link {
   position: relative; display: flex; align-items: center; gap: 12px;
-  color: var(--ink-2); padding: 7px 8px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
-  text-decoration: none; margin-bottom: 3px; white-space: nowrap;
+  color: var(--ink-2); padding: 6px 8px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
+  text-decoration: none; margin-bottom: 2px; white-space: nowrap;
   transition: background .12s, color .12s;
 }
 .side-link:hover { background: var(--surface-3); color: var(--ink); text-decoration: none; }
@@ -127,10 +148,9 @@ html.side-pinned .side-pin { transform: rotate(180deg); color: var(--ink-2); }
   width: 3px; border-radius: 0 3px 3px 0; background: var(--ac, var(--primary)); }
 
 /* Labels and group headings fade in with the rail. */
-.side-label, .side-group { opacity: 0; transition: opacity .16s ease-out; }
-.sidebar:hover .side-label, .sidebar:hover .side-group,
-html.side-pinned .side-label, html.side-pinned .side-group { opacity: 1; }
-html.no-peek .sidebar:hover .side-label, html.no-peek .sidebar:hover .side-group { opacity: 0; }
+.side-label { opacity: 0; transition: opacity .16s ease-out; }
+.sidebar:hover .side-label, html.side-pinned .side-label { opacity: 1; }
+html.no-peek:not(.side-pinned) .sidebar:hover .side-label { opacity: 0; }
 .side-brand span { opacity: 0; transition: opacity .16s ease-out; }
 .sidebar:hover .side-brand span, html.side-pinned .side-brand span { opacity: 1; }
 html.no-peek .sidebar:hover .side-brand span { opacity: 0; }

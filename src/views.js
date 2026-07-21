@@ -97,7 +97,7 @@ function topbar() {
   const initials = (n) => String(n || '').split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || '·';
   return `
     <header class="topbar">
-      <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="Menu">☰</button>
+      <button class="menu-btn" onclick="rcSide()" aria-label="Menu" title="Menu (⌘B)">☰</button>
       <a class="topbar-brand" href="/">
         <img class="brand-mark" src="/static/brand-mark.png" alt="" width="26" height="26">
         <img class="brand-word" src="/static/brand-word.png" alt="${esc(APP_NAME)}" width="70" height="15">
@@ -207,23 +207,31 @@ function searchScript() {
 }
 
 function sidebar() {
-  const groups = SECTIONS.map((g) => {
+  const who = currentViewUser();
+  // The first section is Dashboard alone. It gets rendered as the sidebar's
+  // header row with the collapse control beside it: the control used to own a
+  // row of its own, which was a whole empty line above the navigation for one
+  // 34px button.
+  const [head, ...rest] = SECTIONS;
+  const link = ([href, ico, label, accent, , tag]) =>
+    `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}${tag ? `<span class="side-tag">${esc(tag)}</span>` : ''}</span></a>`;
+
+  const headLinks = head.links.filter(([href]) => navAllowed(href));
+  const groups = rest.map((g) => {
     const links = g.links.filter(([href]) => navAllowed(href));
     if (!links.length) return '';           // a group with nothing left just goes
-    return `
-    ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
-    ${links.map(([href, ico, label, accent, , tag]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}${tag ? `<span class="side-tag">${esc(tag)}</span>` : ''}</span></a>`).join('')}
-  `;
+    return `${g.title ? `<div class="side-group">${g.title}</div>` : ''}${links.map(link).join('')}`;
   }).join('');
-  const who = currentViewUser();
+
   const signOut = process.env.APP_PASSWORD
     ? `<div class="side-group">${who && !who.master ? esc(who.name) : 'Account'}</div>
        <a class="side-link" href="/logout" style="--ac:#64748b;--ac-soft:#64748b14;--ac-soft2:#64748b24"><span class="side-ico">${icon('signout')}</span><span class="side-label">Sign out</span></a>`
     : '';
+
   return `<aside class="sidebar">
-    <div class="side-top">
-      <span class="side-spacer"></span>
-      <button class="side-pin" type="button" onclick="rcPin()" aria-label="Collapse or pin the menu" title="Collapse / pin the menu">${icon('pin')}</button>
+    <div class="side-head">
+      ${headLinks.map(link).join('')}
+      <button class="side-pin" type="button" onclick="rcSide()" aria-label="Collapse or pin the menu" title="Collapse / pin the menu (⌘B)">${icon('pin')}</button>
     </div>
     <nav class="side-nav">${groups}${signOut}</nav>
   </aside>`;
@@ -331,10 +339,25 @@ function layout(title, body, opts = {}) {
       <script>${searchScript()}</script>
       <script>
         // Pin / unpin the rail, remembered between sessions.
+        // One entry point for the arrow, the hamburger and the keyboard, so the
+        // three cannot drift into behaving differently. On a phone the sidebar
+        // is an overlay drawer; on a desktop it pins and reflows.
+        function rcSide() {
+          if (window.matchMedia('(max-width: 820px)').matches) {
+            document.body.classList.toggle('nav-open');
+            return;
+          }
+          rcPin();
+        }
+        document.addEventListener('keydown', function (e) {
+          if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); rcSide(); }
+        });
+
         function rcPin() {
           var root = document.documentElement;
           var on = root.classList.toggle('side-pinned');
           try { localStorage.setItem('rc_side', on ? 'pinned' : 'rail'); } catch (e) {}
+          if (on) root.classList.remove('no-peek');   // pinning ends the suppression
           if (!on) {
             // The pointer is still over the rail after the click, so hover
             // would immediately re-open it. Hold the peek off until the mouse
