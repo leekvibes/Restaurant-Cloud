@@ -1792,3 +1792,33 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
 .driver-b b { font-size: 13px; font-weight: 620; }
 .driver-b i { font-style: normal; font-size: 11.5px; color: var(--muted); }
 .driver-go { color: var(--faint); font-size: 16px; }
+
+/* --- Sales: day rows, highlights, future placeholders --- */
+.srows2 { display: grid; gap: 6px; }
+.srow2 { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 10px 14px; transition: border-color .16s, transform .16s; }
+.srow2:hover { text-decoration: none; border-color: var(--primary-200); transform: translateX(2px); }
+.s2-d { flex-shrink: 0; width: 36px; text-align: center; }
+.s2-d b { display: block; font-size: 16px; font-weight: 750; letter-spacing: -.03em; color: var(--ink); line-height: 1.1; }
+.s2-d i { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--faint); text-transform: uppercase; }
+.s2-s { flex: 0 0 76px; font-size: 13px; font-weight: 620; color: var(--ink); }
+.s2-n { display: grid; flex: 1 1 0; min-width: 0; }
+.s2-n i { font-style: normal; font-size: 10px; font-weight: 650; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
+.s2-n b { font-size: 13px; font-weight: 650; color: var(--ink); letter-spacing: -.015em; }
+.s2-go { color: var(--faint); font-size: 16px; flex-shrink: 0; }
+
+.hilite { margin: 0; padding: 0; list-style: none; display: grid; gap: 9px; }
+.hilite li { font-size: 13.5px; line-height: 1.5; color: var(--ink-2); }
+.hilite b { color: var(--ink); font-weight: 680; }
+
+.pcard-future { background: var(--surface-2); border-style: dashed; }
+.futuregrid { display: flex; flex-wrap: wrap; gap: 7px; }
+.future { font-size: 12px; font-weight: 600; color: var(--faint); background: var(--surface);
+  border: 1px dashed var(--line-2); border-radius: 999px; padding: 5px 11px; }
+
+@media (max-width: 900px) {
+  .srow2 { flex-wrap: wrap; gap: 8px 14px; }
+  .s2-s { flex: 0 0 auto; }
+  .s2-n { flex: 1 1 27%; }
+  .s2-go { display: none; }
+}

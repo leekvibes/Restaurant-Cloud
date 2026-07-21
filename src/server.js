@@ -2653,80 +2653,172 @@ app.post('/email/test', async (req, res) => {
 // Server sales stay per-person for tip-outs; these totals are what labor %,
 // food cost % and prime cost are measured against.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SALES — where the money came from.
+//
+// Revenue only. Labor %, food cost and prime cost moved to Performance: two
+// pages quoting the same percentage is two chances to disagree, and this one
+// is about the top line. If a number is about what things cost, it belongs
+// next door.
+// ---------------------------------------------------------------------------
 app.get('/sales', (req, res) => {
-  const def = defaultRange();
-  const from = req.query.from || def.from;
-  const to = req.query.to || def.to;
-  const shifts = s.shiftsInRange.all(from, to).slice().reverse();
-  const c = aggregateCosts(from, to);
+  const today = isoDate(startOfToday());
+  const key = MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '30';
+  const r = MX.range(key, today, { from: req.query.from, to: req.query.to });
+  const svc = ['cafe', 'dinner'].includes(req.query.svc) ? req.query.svc : '';
 
-  const cat = (k) => shifts.reduce((a, sh) => a + (sh[k] || 0), 0);
-  const food = cat('total_food_cents'); const coffee = cat('total_coffee_cents');
-  const alcohol = cat('total_alcohol_cents'); const other = cat('total_other_cents');
-  const entered = food + coffee + alcohol + other;
-  const missing = shifts.filter((sh) => !(sh.total_food_cents + sh.total_coffee_cents + sh.total_alcohol_cents + sh.total_other_cents));
-  const share = (v) => (entered ? Math.round((v / entered) * 100) : 0);
-  const days = new Set(shifts.map((sh) => sh.date)).size;
+  const all = MX.period(r.from, r.to);
+  const prev = MX.previous(r.from, r.to);
+  const rows = svc ? all.rows.filter((x) => x.daypart === svc) : all.rows;
+  const traded = rows.filter((x) => x.sales > 0);
+  const series = MX.days(r.from, r.to);
+  const dm = (d) => d.date.slice(5).replace('-', '/');
 
-  const rows = shifts.map((sh) => {
-    const total = sh.total_food_cents + sh.total_coffee_cents + sh.total_alcohol_cents + sh.total_other_cents;
-    const inp = shiftInputs(sh.id);
-    const rung = inp.servers.reduce((a, p) => a + toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol), 0);
-    // Servers can't ring more than the restaurant took — that's a data error.
-    const bad = total > 0 && rung > total;
-    return `<tr${total ? (bad ? ' class="row-warn"' : '') : ' class="row-warn"'}>
-      <td><a class="row-open" href="/sales/${sh.id}">${sh.date}</a></td>
-      <td>${dp(sh.daypart)}</td>
-      <td class="num">${total ? money(sh.total_food_cents) : '<span class="muted">—</span>'}</td>
-      <td class="num">${total ? money(sh.total_coffee_cents) : '<span class="muted">—</span>'}</td>
-      <td class="num">${total ? money(sh.total_alcohol_cents) : '<span class="muted">—</span>'}</td>
-      <td class="num">${total ? money(sh.total_other_cents) : '<span class="muted">—</span>'}</td>
-      <td class="num strong">${total ? money(total) : '<span class="muted">not entered</span>'}</td>
-      <td class="num ${bad ? 'neg' : 'muted'}">${money(rung)}</td>
-      <td class="row-actions"><a href="/sales/${sh.id}">enter</a></td>
-    </tr>`;
+  const sales = rows.reduce((a, x) => a + x.sales, 0);
+  const tips = rows.reduce((a, x) => a + x.tips, 0);
+  const byDay = new Map();
+  for (const x of traded) byDay.set(x.date, (byDay.get(x.date) || 0) + x.sales);
+  const dayList = [...byDay.entries()].sort((a, b) => b[1] - a[1]);
+  const best = dayList[0], worst = dayList[dayList.length - 1];
+  const avgDaily = byDay.size ? Math.round(sales / byDay.size) : null;
+  const weekday = (d) => new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long' });
+
+  const kpi = (tone, ico, label, value, sub, spark) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div>
+      ${spark ? `<div class="mcard-spark">${spark}</div>` : ''}</div>`;
+
+  const cards = `<div class="mcards mcards-3">
+    ${kpi('blue', 'sales', 'Total sales', money(sales),
+      `${CH.delta(sales, svc ? prev.rows.filter((x) => x.daypart === svc).reduce((a, x) => a + x.sales, 0) : prev.sales)} vs the period before`,
+      CH.spark(series.map((d) => d.sales)))}
+    ${kpi('green', 'cash', 'Average day', avgDaily === null ? '—' : money(avgDaily),
+      byDay.size ? `over ${byDay.size} day${byDay.size === 1 ? '' : 's'} traded` : 'nothing traded yet')}
+    ${kpi('violet', 'costs', 'Best day', best ? money(best[1]) : '—',
+      best ? `${weekday(best[0])} ${best[0].slice(5)}` : 'nothing yet')}
+    ${kpi('amber', 'expirations', 'Quietest day', worst && dayList.length > 1 ? money(worst[1]) : '—',
+      worst && dayList.length > 1 ? `${weekday(worst[0])} ${worst[0].slice(5)}` : 'need more days')}
+    ${kpi('green', 'tips', 'Tips collected', money(tips), tips ? 'across the same period' : 'none reported')}
+    ${kpi('blue', 'shifts', 'Average ticket', '—', 'comes with the POS')}
+  </div>`;
+
+  // --- revenue mix ----------------------------------------------------------
+  const m = svc
+    ? rows.reduce((a, x) => ({ food: a.food + x.food, coffee: a.coffee + x.coffee, alcohol: a.alcohol + x.alcohol,
+        other: a.other + x.other, unsplit: a.unsplit + (x.food + x.coffee + x.alcohol + x.other > 0 ? 0 : x.server_sales) }),
+      { food: 0, coffee: 0, alcohol: 0, other: 0, unsplit: 0 })
+    : all.mix;
+  const mixRows = [
+    { label: 'Food', value: m.food, color: '#16a34a' },
+    { label: 'Coffee', value: m.coffee, color: '#a16207' },
+    { label: 'Alcohol', value: m.alcohol, color: '#7c3aed' },
+    { label: 'Other', value: m.other, color: '#64748b' },
+  ].filter((x) => x.value > 0);
+
+  // --- service split --------------------------------------------------------
+  const services = [['cafe', 'Café'], ['dinner', 'Dinner']].map(([k, label]) => {
+    const list = all.rows.filter((x) => x.daypart === k && x.sales > 0);
+    return { k, label, sales: list.reduce((a, x) => a + x.sales, 0), shifts: list.length };
+  }).filter((x) => x.shifts);
+
+  // --- highlights: only things the data actually supports -------------------
+  const hi = [];
+  if (best) hi.push(`🏆 Best day was <b>${weekday(best[0])} ${best[0].slice(5)}</b> at <b>${money(best[1])}</b>.`);
+  const prevSales = svc ? prev.rows.filter((x) => x.daypart === svc).reduce((a, x) => a + x.sales, 0) : prev.sales;
+  if (prevSales > 0) {
+    const d = ((sales - prevSales) / prevSales) * 100;
+    hi.push(`${d >= 0 ? '📈' : '📉'} Sales are <b>${d >= 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}%</b> on the period before.`);
+  }
+  const mixTotal = mixRows.reduce((a, x) => a + x.value, 0);
+  if (mixTotal) {
+    const top = [...mixRows].sort((a, b) => b.value - a.value)[0];
+    hi.push(`${top.label === 'Coffee' ? '☕' : top.label === 'Alcohol' ? '🍸' : '🍳'} <b>${top.label}</b> was <b>${Math.round((top.value / mixTotal) * 100)}%</b> of revenue.`);
+  }
+  if (services.length > 1) {
+    const t = [...services].sort((a, b) => b.sales - a.sales)[0];
+    hi.push(`🔥 <b>${t.label}</b> brought in the most, at <b>${money(t.sales)}</b>.`);
+  }
+  if (byDay.size >= 7 && avgDaily) {
+    const quiet = dayList.filter(([, v]) => v < avgDaily * 0.82);
+    if (quiet.length) hi.push(`🗓️ ${quiet.length} day${quiet.length === 1 ? ' was' : 's were'} more than 18% below the average.`);
+  }
+
+  // --- daily rows -----------------------------------------------------------
+  const dayRows = [...traded].sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart)).slice(0, 60).map((x) => {
+    const split = x.food + x.coffee + x.alcohol + x.other > 0;
+    return `<a class="srow2" href="/shifts/${x.id}">
+      <span class="s2-d"><b>${Number(x.date.slice(8))}</b><i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}</i></span>
+      <span class="s2-s">${dp(x.daypart)}</span>
+      <span class="s2-n"><i>Sales</i><b>${money(x.sales)}</b></span>
+      <span class="s2-n"><i>Food</i><b>${split ? money(x.food) : '—'}</b></span>
+      <span class="s2-n"><i>Coffee</i><b>${split ? money(x.coffee) : '—'}</b></span>
+      <span class="s2-n"><i>Alcohol</i><b>${split ? money(x.alcohol) : '—'}</b></span>
+      <span class="s2-n"><i>Tips</i><b>${money(x.tips)}</b></span>
+      <span class="s2-go">›</span>
+    </a>`;
   }).join('');
 
-  const pill = (label, value, sub, cls) =>
-    `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls || ''}">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
-  const band = (v, warn, bad) => (v == null ? '' : v >= bad ? 'stat-bad' : v >= warn ? 'stat-warn' : 'stat-ok');
-  const arrow = c.wow == null ? '' : `<span class="delta ${c.wow >= 0 ? 'up' : 'down'}">${c.wow >= 0 ? '▲' : '▼'} ${Math.abs(c.wow)}%</span> vs previous`;
+  const svcChip = (k, label) => `<a class="rchip${svc === k ? ' on' : ''}" href="/sales?r=${key}&svc=${k}${key === 'custom' ? `&from=${r.from}&to=${r.to}` : ''}">${label}</a>`;
 
   res.send(layout('Sales', `
     ${flash(req)}
-    <div class="page-head"><div><h1>📈 Sales</h1>
-      <p class="sub">${shifts.length} shift${shifts.length === 1 ? '' : 's'} · ${from} → ${to}. Everything the restaurant rang — counter and to-go included.</p></div></div>
-
-    <div class="stats">
-      ${pill('Total sales', money(c.sales), arrow)}
-      ${pill('Labor %', c.laborPct == null ? '—' : c.laborPct + '%', 'wages ÷ sales', band(c.laborPct, 30, 35))}
-      ${pill('Food cost %', c.foodPct == null ? '—' : c.foodPct + '%', 'invoices ÷ sales', band(c.foodPct, 32, 38))}
-      ${pill('Prime cost %', c.primePct == null ? '—' : c.primePct + '%', 'labor + goods', band(c.primePct, 60, 68))}
+    <div class="phead">
+      <div class="phead-t"><h1>Sales</h1>
+        <p class="phead-s">Where the money came from. Costs and margins live on <a class="link" href="/costs">Performance</a>.</p></div>
     </div>
-    <div class="stats">
-      ${pill('Food', money(food), share(food) + '% of sales')}
-      ${pill('Coffee', money(coffee), share(coffee) + '% of sales')}
-      ${pill('Alcohol', money(alcohol), share(alcohol) + '% of sales')}
-      ${pill('Per day', days ? money(Math.round(entered / days)) : '—', days + ' day' + (days === 1 ? '' : 's') + ' with a shift')}
+    <div class="rangebar">
+      ${MX.RANGES.map(([k, label]) => `<a class="rchip${key === k ? ' on' : ''}" href="/sales?r=${k}${svc ? `&svc=${svc}` : ''}">${label}</a>`).join('')}
+      <form class="rcustom" method="get" action="/sales">
+        <input type="hidden" name="r" value="custom">${svc ? `<input type="hidden" name="svc" value="${svc}">` : ''}
+        <input type="date" name="from" value="${esc(r.from)}"><span>to</span>
+        <input type="date" name="to" value="${esc(r.to)}">
+        <button class="btn btn-sm" type="submit">Go</button>
+      </form>
+    </div>
+    ${services.length > 1 ? `<div class="rangebar">
+      <a class="rchip${svc ? '' : ' on'}" href="/sales?r=${key}">All services</a>
+      ${services.map((x) => svcChip(x.k, x.label)).join('')}
+    </div>` : ''}
+    <p class="rangenote">${esc(r.label)} · ${esc(r.from)} to ${esc(r.to)}${svc ? ` · ${esc(dp(svc))} only` : ''} · ${traded.length} shift${traded.length === 1 ? '' : 's'} with sales</p>
+
+    ${cards}
+
+    <section class="pcard">
+      <div class="pcard-h"><b>Sales trend</b><span class="muted">daily, whole restaurant</span></div>
+      ${CH.lineChart([{ label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.sales })), area: true }], { height: 230 })}
+    </section>
+
+    <div class="pgrid2">
+      <section class="pcard">
+        <div class="pcard-h"><b>Where it came from</b><span class="muted">${mixTotal ? money(mixTotal) + ' split' : 'not split'}</span></div>
+        ${CH.shareBars(mixRows, { empty: 'No category totals entered for this period.' })}
+        ${m.unsplit ? `<p class="rangenote" style="margin:12px 0 0">${money(m.unsplit)} came from shifts entered before category totals existed, so it can't be split.</p>` : ''}
+      </section>
+      <section class="pcard">
+        <div class="pcard-h"><b>Sales highlights</b></div>
+        ${hi.length ? `<ul class="hilite">${hi.map((h) => `<li>${h}</li>`).join('')}</ul>`
+          : '<div class="panel-empty">Trade for a few more days and the highlights fill in.</div>'}
+      </section>
     </div>
 
-    ${missing.length ? `<div class="flash flash-warn"><div><b>${missing.length} shift${missing.length === 1 ? '' : 's'} without totals.</b>
-      Until you enter them, those days fall back to server sales only, which makes labor % read higher than it is:
-      ${esc(missing.slice(0, 6).map((sh) => `${sh.date} ${dp(sh.daypart)}`).join(', '))}${missing.length > 6 ? '…' : ''}</div></div>` : ''}
+    ${services.length > 1 ? `<section class="pcard">
+      <div class="pcard-h"><b>By service</b></div>
+      ${CH.shareBars(services.map((x, i) => ({ label: x.label, value: x.sales, color: ['#0891b2', '#7c3aed'][i % 2] })))}
+    </section>` : ''}
 
-    <form method="get" action="/sales" class="card form inline-range">
-      <label>From <input type="date" name="from" value="${from}"></label>
-      <label>To <input type="date" name="to" value="${to}"></label>
-      <button class="btn" type="submit">Update</button>
-    </form>
+    <div class="head-row"><h2>Day by day</h2><span class="muted">${traded.length > 60 ? 'most recent 60' : `${traded.length} shift${traded.length === 1 ? '' : 's'}`}</span></div>
+    ${dayRows ? `<div class="srows2">${dayRows}</div>`
+      : '<div class="empty2"><div class="empty2-t">No sales in this range</div><div class="empty2-s">Pick a different period, or close a shift to record some.</div></div>'}
 
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Date</th><th>Service</th><th class="num">Food</th><th class="num">Coffee</th>
-        <th class="num">Alcohol</th><th class="num">Other</th><th class="num">Total</th><th class="num">Servers rang</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="9" class="muted">No shifts in this range.</td></tr>'}</tbody>
-    </table></div>
-    <p class="sub"><b>Servers rang</b> is the part that went through a named server — it drives tip-outs. The difference is counter,
-      to-go and anything rung without a server. If it ever exceeds the total, one of the two numbers is wrong.</p>`));
+    <section class="pcard pcard-future">
+      <div class="pcard-h"><b>With a POS connected</b><span class="muted">not available yet</span></div>
+      <div class="futuregrid">
+        ${['Average check', 'Transactions', 'Items sold', 'Peak hours', 'Hourly sales', 'Payment methods', 'Discounts', 'Voids']
+          .map((f) => `<span class="future">${esc(f)}</span>`).join('')}
+      </div>
+      <p class="rangenote" style="margin:10px 0 0">These need per-transaction data. Nothing here is estimated in the meantime.</p>
+    </section>`));
 });
 
 app.get('/sales/:id', (req, res) => {
