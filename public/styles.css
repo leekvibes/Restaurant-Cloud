@@ -742,6 +742,9 @@ body.drawer-open .drawer { transform: translateX(0); visibility: visible; }
   .mcard-ico { width: 28px; height: 28px; border-radius: 8px; }
   .mcard-ico svg { width: 15px; height: 15px; }
   .mcard-value { font-size: clamp(17px, 5.6vw, 23px); letter-spacing: -.035em; }
+  /* Two cards to a row leaves no width to ellipsize into, and these captions
+     are the part that says what the number means. Let them wrap instead. */
+  .mcard-sub { white-space: normal; overflow: visible; line-height: 1.35; }
   .toolbar2 { gap: 10px; }
   .searchbox { max-width: none; flex: 1 1 100%; }
   .seg-view { margin-left: 0; width: 100%; }
@@ -1821,4 +1824,46 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .s2-s { flex: 0 0 auto; }
   .s2-n { flex: 1 1 27%; }
   .s2-go { display: none; }
+}
+
+/* --- Cash reconciliation --- */
+.crows { border-top: 1px solid var(--line); }
+.crow { display: flex; align-items: center; gap: 14px; padding: 11px 16px; border-bottom: 1px solid var(--line); color: var(--ink); }
+.crow:last-child { border-bottom: 0; }
+.crow:hover { background: var(--surface-2); text-decoration: none; }
+.crow-void { opacity: .5; }
+.crow-d { flex-shrink: 0; width: 38px; text-align: center; }
+.crow-d b { display: block; font-size: 16px; font-weight: 750; letter-spacing: -.03em; line-height: 1.1; }
+.crow-d i { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--faint); text-transform: uppercase; }
+.crow-m { flex: 1 1 190px; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.crow-t { font-size: 13.5px; font-weight: 620; }
+.crow-n { display: grid; flex: 1 1 0; min-width: 0; }
+.crow-n i { font-style: normal; font-size: 10px; font-weight: 650; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
+.crow-n b { font-size: 13px; font-weight: 650; letter-spacing: -.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crow-go { color: var(--faint); font-size: 16px; flex-shrink: 0; }
+
+.mvblock { margin-top: 12px; }
+.mv-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 3px; }
+.mv-h b { font-size: 13px; font-weight: 650; }
+.mv { display: grid; grid-template-columns: 110px 1fr 1fr 28px; gap: 7px; align-items: center; margin-top: 6px; }
+.mv input { padding: 7px 9px; border: 1px solid var(--line-2); border-radius: 8px; font: inherit; font-size: 13px; min-width: 0; }
+
+.denoms { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 7px; padding: 8px 0; }
+.denom { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.denom span { flex: 0 0 34px; font-weight: 650; color: var(--ink-2); }
+.denom input { width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--line-2); border-radius: 7px; font: inherit; font-size: 12.5px; }
+.denom-total { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--muted); padding-top: 6px; border-top: 1px solid var(--line); }
+.denom-total b { color: var(--ink); font-weight: 700; }
+
+.hrows { display: grid; }
+.voidform { display: flex; gap: 8px; align-items: center; margin: 0; }
+.voidform input { padding: 7px 10px; border: 1px solid var(--line-2); border-radius: 8px; font: inherit; font-size: 13px; min-width: 200px; }
+
+@media (max-width: 900px) {
+  .crow { flex-wrap: wrap; gap: 8px 14px; }
+  .crow-n { flex: 1 1 28%; }
+  .crow-go { display: none; }
+  .mv { grid-template-columns: 1fr 1fr; }
+  .mv .rl-del { grid-column: 2; justify-self: end; }
 }

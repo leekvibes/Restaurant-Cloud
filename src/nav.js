@@ -25,7 +25,7 @@ const AREAS = [
   // Renamed from "Cost %" in the UI. The key stays put: it is written into
   // every account's feature list.
   { key: 'costs',     label: 'Performance',     paths: ['/costs', '/performance'] },
-  { key: 'cash',      label: 'Cash count',      paths: ['/cash'] },
+  { key: 'cash',      label: 'Cash',            paths: ['/cash'] },
   { key: 'payroll',   label: 'Payroll',         paths: ['/payroll'] },
   { key: 'trackers',  label: 'Trackers & logs', paths: ['/c/'] },
   { key: 'menu',      label: 'Menu costing',    paths: ['/menu'] },
@@ -62,7 +62,7 @@ const SECTIONS = [
     ['/shifts', 'shifts', 'Shifts', '#4f46e5', 'shifts'],
     ['/sales', 'sales', 'Sales', '#059669', 'sales'],
     ['/costs', 'costs', 'Performance', '#0891b2', 'costs'],
-    ['/cash', 'cash', 'Cash count', '#d97706', 'cash'],
+    ['/cash', 'cash', 'Cash', '#d97706', 'cash'],
     ['/payroll', 'payroll', 'Payroll', '#7c3aed', 'payroll'],
   ] },
   { title: 'Purchasing', links: [
@@ -110,7 +110,7 @@ const CREATE_ACTIONS = [
   { href: '/c/products', icon: 'par', label: 'Product', area: 'trackers' },
   { href: '/menu/new', icon: 'costs', label: 'Menu item', area: 'menu' },
   { href: '/c/incidents', icon: 'incidents', label: 'Incident', area: 'trackers' },
-  { href: '/cash', icon: 'cash', label: 'Cash count', area: 'cash' },
+  { href: '/cash/new', icon: 'cash', label: 'Cash count', area: 'cash' },
   { href: '/employees', icon: 'staff', label: 'Employee', area: 'staff' },
 ];
 

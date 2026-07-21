@@ -26,6 +26,9 @@ const CH = require('./charts');
 // deploy. test/boot.test.js now covers exactly this.
 const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
   learnAlias, mergeProducts, likelyDuplicates } = require('./products');
+// Same reason as products above: cash.js creates cash_recon and adds its
+// columns, and the dashboard alert below reads them.
+const CASH = require('./cash');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -50,22 +53,6 @@ const shiftRoles = () => positions.active.all().filter((p) => p.kind !== 'server
 /** Every job, for the staff "main role" picker. */
 const allRoles = () => positions.active.all().map((p) => p.slug);
 const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
-
-// Cash reconciliation — daily drawer over/short by shift.
-db.exec(`CREATE TABLE IF NOT EXISTS cash_recon (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  date TEXT NOT NULL, daypart TEXT NOT NULL,
-  float_cents INTEGER DEFAULT 0, cash_sales_cents INTEGER DEFAULT 0,
-  paid_out_cents INTEGER DEFAULT 0, counted_cents INTEGER DEFAULT 0,
-  closed_by TEXT, note TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);`);
-const cashQ = {
-  list: db.prepare('SELECT * FROM cash_recon ORDER BY date DESC, id DESC LIMIT 90'),
-  insert: db.prepare(`INSERT INTO cash_recon (date, daypart, float_cents, cash_sales_cents, paid_out_cents, counted_cents, closed_by, note)
-    VALUES (@date, @daypart, @float_cents, @cash_sales_cents, @paid_out_cents, @counted_cents, @closed_by, @note)`),
-  del: db.prepare('DELETE FROM cash_recon WHERE id = ?'),
-};
 
 // ---------------------------------------------------------------------------
 // Auth — one shared manager password. Staff pages (/tips) stay open, since
@@ -426,11 +413,14 @@ app.get('/', (req, res) => {
   }
 
   if (may('cash')) {
-    for (const r of cashQ.list.all()) {
+    for (const r of CASH.q.recent.all()) {
       if (r.date < addDays(toStr, -13)) break;                  // list is newest-first
-      const over = r.counted_cents - (r.float_cents + r.cash_sales_cents - r.paid_out_cents);
-      if (over < 0) push('red', 'cash', `${whenOf(r.date, r.daypart)} — drawer short ${money(-over)}`,
-        r.closed_by ? `Closed by ${r.closed_by}` : 'Check who closed', '/cash');
+      const st = CASH.status(r);
+      if (st.key !== 'review' && st.key !== 'critical') continue;
+      const who = r.counted_by || r.closed_by;
+      push(st.key === 'critical' ? 'red' : 'amber', 'cash',
+        `${whenOf(r.date, r.daypart)} — ${st.label}`,
+        who ? `Counted by ${who}` : 'Nobody recorded as counting it', `/cash/${r.id}`);
     }
   }
 
@@ -529,7 +519,7 @@ app.get('/', (req, res) => {
     { href: '/c/vendors', ico: 'vendors', label: 'Add vendor', feat: 'trackers' },
     { href: '/c/incidents', ico: 'incidents', label: 'Log incident', feat: 'trackers' },
     { href: '/c/recurring', ico: 'recurring', label: 'Recurring task', feat: 'trackers' },
-    { href: '/cash', ico: 'cash', label: 'Cash count', feat: 'cash' },
+    { href: '/cash/new', ico: 'cash', label: 'Count drawer', feat: 'cash' },
   ].filter((a) => may(a.feat));
   const actions = canWrite && ACTIONS.length
     ? `<div class="qacts">${ACTIONS.map((a) => `<a class="qact" href="${a.href}"><span class="qact-ico">${icon(a.ico)}</span>${a.label}</a>`).join('')}</div>`
@@ -2507,71 +2497,565 @@ app.get('/costs', (req, res) => {
 // ---------------------------------------------------------------------------
 // Cash reconciliation — count the drawer each shift, flag over/short
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// CASH RECONCILIATION — history, a four-step workspace, and a detail record.
+//
+// The old page put the history table and the entry form on one screen, which
+// meant the form was always open and the numbers it produced were never shown
+// back. This separates them: a list you can scan, a workspace you work in.
+// ---------------------------------------------------------------------------
+
+const cashMonth = (d) => (d || '').slice(0, 7);
+const cashDayLabel = (d) => (d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '');
+
 app.get('/cash', (req, res) => {
-  const list = cashQ.list.all();
-  let netOS = 0, shortCount = 0;
-  const rows = list.map((r) => {
-    const expected = r.float_cents + r.cash_sales_cents - r.paid_out_cents;
-    const os = r.counted_cents - expected;
-    netOS += os; if (os < 0) shortCount++;
-    const badge = os === 0 ? '<span class="pill pill-ok">exact</span>'
-      : os > 0 ? `<span class="pill pill-yellow">+${money(os)} over</span>`
-        : `<span class="pill pill-red">${money(-os)} short</span>`;
-    return `<tr${os < 0 ? ' class="row-warn"' : ''}>
-      <td>${r.date}</td><td>${dp(r.daypart)}</td>
-      <td class="num">${money(expected)}</td>
-      <td class="num">${money(r.counted_cents)}</td>
-      <td>${badge}</td>
-      <td>${esc(r.closed_by) || '<span class="muted">—</span>'}</td>
-      <td><form method="post" action="/cash/${r.id}/delete" onsubmit="return confirm('Delete this count?')" style="margin:0"><button class="link-danger">delete</button></form></td>
-    </tr>`;
+  const today = isoDate(startOfToday());
+  const key = MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '90';
+  const r = MX.range(key, today, { from: req.query.from, to: req.query.to });
+  const filt = String(req.query.f || 'all');
+
+  const all = CASH.q.inRange.all(r.from, r.to).map((row) => ({ row, c: CASH.compute(row), s: CASH.status(row) }));
+  const live = all.filter((x) => x.row.status !== 'void');
+  const counted = live.filter((x) => x.c.counted != null);
+
+  const net = counted.reduce((a, x) => a + x.c.variance, 0);
+  const deposited = live.reduce((a, x) => a + (x.c.actualDeposit ?? x.c.calcDeposit ?? 0), 0);
+  const avgVar = counted.length ? Math.round(counted.reduce((a, x) => a + Math.abs(x.c.variance), 0) / counted.length) : null;
+  const biggest = counted.slice().sort((a, b) => Math.abs(b.c.variance) - Math.abs(a.c.variance))[0];
+
+  const card = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+
+  // Four, not five. How many counts there are is already on every month
+  // header, and a fifth card only ever wrapped onto a row of its own.
+  const cards = `<div class="mcards mcards-4">
+    ${card(net === 0 ? 'green' : Math.abs(net) <= CASH.tolerance().critical ? 'amber' : 'red', 'costs', 'Net over / short',
+      counted.length ? CASH.money(net) : '—', counted.length ? (net === 0 ? 'balanced' : net > 0 ? 'over across the period' : 'short across the period') : 'nothing counted yet')}
+    ${card('violet', 'sales', 'Average variance', avgVar === null ? '—' : CASH.money(avgVar),
+      live.length > counted.length ? `${live.length - counted.length} still open` : `across ${counted.length} count${counted.length === 1 ? '' : 's'}`)}
+    ${card(biggest && Math.abs(biggest.c.variance) > CASH.tolerance().critical ? 'red' : 'amber', 'incidents', 'Largest variance',
+      biggest ? CASH.money(Math.abs(biggest.c.variance)) : '—',
+      biggest ? `${cashDayLabel(biggest.row.date)} ${dp(biggest.row.daypart)}` : 'none yet')}
+    ${card('green', 'payroll', 'Total deposited', CASH.money(deposited),
+      live.some((x) => x.row.legacy) ? 'excludes pre-deposit records' : 'to safe or bank')}
+  </div>`;
+
+  const pass = (x) => {
+    if (filt === 'all') return true;
+    if (filt === 'draft') return x.row.status === 'draft';
+    if (filt === 'void') return x.row.status === 'void';
+    if (filt === 'exact') return x.s.key === 'exact';
+    if (filt === 'over') return x.c.variance > 0;
+    if (filt === 'short') return x.c.variance < 0;
+    if (filt === 'review') return x.s.key === 'review' || x.s.key === 'critical';
+    return true;
+  };
+  const shown = all.filter(pass);
+
+  // Grouped by month, like Invoices and Shifts.
+  const months = new Map();
+  for (const x of shown) {
+    const m = cashMonth(x.row.date) || 'undated';
+    if (!months.has(m)) months.set(m, []);
+    months.get(m).push(x);
+  }
+  const MONTH_LABEL = (m) => (m === 'undated' ? 'No date'
+    : new Date(m + '-01T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }));
+
+  const blocks = [...months.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([m, list], idx) => {
+    const mNet = list.filter((x) => x.c.counted != null).reduce((a, x) => a + x.c.variance, 0);
+    const mDep = list.reduce((a, x) => a + (x.c.actualDeposit ?? x.c.calcDeposit ?? 0), 0);
+    return `<details class="mgroup" data-month${idx === 0 ? ' open' : ''}>
+      <summary class="mgroup-h"><span class="mgroup-chev">▸</span><span class="mgroup-name">${esc(MONTH_LABEL(m))}</span>
+        <span class="mgroup-stats"><span>${list.length} count${list.length === 1 ? '' : 's'}</span>
+          <span class="mg-total">${CASH.money(mDep)} deposited</span>
+          <span class="${mNet === 0 ? 'mg-paid' : 'mg-over'}">${mNet === 0 ? 'balanced' : CASH.money(mNet)}</span></span></summary>
+      <div class="crows">${list.map((x) => `
+        <a class="crow${x.row.status === 'void' ? ' crow-void' : ''}" href="/cash/${x.row.id}">
+          <span class="crow-d"><b>${Number((x.row.date || '--').slice(8))}</b><i>${cashDayLabel(x.row.date).split(' ')[0]}</i></span>
+          <span class="crow-m"><span class="crow-t">${esc(dp(x.row.daypart))}</span>
+            <span class="pill ${x.s.cls}">${esc(x.s.label)}</span>
+            ${x.row.legacy ? '<span class="pill">pre-deposit records</span>' : ''}</span>
+          <span class="crow-n"><i>Expected</i><b>${CASH.money(x.c.expected)}</b></span>
+          <span class="crow-n"><i>Counted</i><b>${x.c.counted == null ? '—' : CASH.money(x.c.counted)}</b></span>
+          <span class="crow-n"><i>Deposit</i><b>${(x.c.actualDeposit ?? x.c.calcDeposit) == null ? '—' : CASH.money(x.c.actualDeposit ?? x.c.calcDeposit)}</b></span>
+          <span class="crow-n"><i>Counted by</i><b>${esc(x.row.counted_by || x.row.closed_by || '—')}</b></span>
+          <span class="crow-go">›</span>
+        </a>`).join('')}</div>
+    </details>`;
   }).join('');
-  const netCls = netOS < 0 ? 'neg' : netOS > 0 ? '' : 'pos';
+
+  const chip = (k, label) => `<a class="rchip${filt === k ? ' on' : ''}" href="/cash?r=${key}&f=${k}">${label}</a>`;
+
   res.send(layout('Cash reconciliation', `
     ${flash(req)}
-    <div class="page-head"><div><h1>💵 Cash reconciliation</h1>
-      <p class="sub">Count the drawer each shift. Over/short is where variance — and theft — shows up.</p></div>
-      <a class="btn btn-primary" href="#add">＋ Add count</a></div>
-    ${list.length ? `<div class="stats">
-      <div class="stat"><div class="stat-label">Counts logged</div><div class="stat-value">${list.length}</div></div>
-      <div class="stat ${shortCount ? 'stat-bad' : 'stat-ok'}"><div class="stat-label">Shorts</div><div class="stat-value">${shortCount}</div><div class="stat-sub">drawers came up short</div></div>
-      <div class="stat"><div class="stat-label">Net over / short</div><div class="stat-value ${netCls}">${netOS < 0 ? '-' : ''}${money(Math.abs(netOS))}</div></div>
-    </div>` : ''}
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Date</th><th>Service</th><th class="num">Expected</th><th class="num">Counted</th><th>Over / short</th><th>Closed by</th><th></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" class="muted">No counts yet — add one below.</td></tr>'}</tbody>
-    </table></div>
-    <h2 id="add">Add a count</h2>
-    <form method="post" action="/cash" class="card form grid">
-      <label>Date <input type="date" name="date" required></label>
-      <label>Service <select name="daypart">${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}</select></label>
-      <label>Starting float <input name="float" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Cash sales <input name="cash_sales" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Cash paid out <input name="paid_out" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Counted in drawer <input name="counted" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Closed by <input name="closed_by" placeholder="who counted"></label>
-      <label class="wide">Note <input name="note" placeholder="optional"></label>
-      <button class="btn btn-primary" type="submit">Save count</button>
-    </form>
-    <p class="sub">Over / short = counted − (float + cash sales − paid out).</p>`));
+    <div class="phead">
+      <div class="phead-t"><h1>Cash reconciliation</h1>
+        <p class="phead-s">Reconcile each drawer, document variances, and track deposits.</p></div>
+      ${canWrite() ? `<a class="btn btn-primary" href="/cash/new">＋ New reconciliation</a>` : ''}
+    </div>
+    <div class="rangebar">
+      ${MX.RANGES.map(([k, label]) => `<a class="rchip${key === k ? ' on' : ''}" href="/cash?r=${k}&f=${filt}">${label}</a>`).join('')}
+    </div>
+    <div class="rangebar">
+      ${chip('all', 'All')}${chip('exact', 'Exact')}${chip('over', 'Over')}${chip('short', 'Short')}
+      ${chip('review', 'Needs review')}${chip('draft', 'Draft')}${chip('void', 'Voided')}
+    </div>
+    ${all.length ? cards : ''}
+    ${shown.length ? blocks : `<div class="empty2"><div class="empty2-t">${all.length ? 'Nothing matches that filter' : 'No reconciliations in this period'}</div>
+      <div class="empty2-s">${all.length ? 'Try another filter or period.' : canWrite() ? 'Count a drawer at close and it will show up here.' : 'Counts appear here once they are recorded.'}</div></div>`}`));
 });
 
-app.post('/cash', (req, res) => {
-  if (!req.body.date) return res.redirect('/cash?err=1&msg=' + encodeURIComponent('Pick a date.'));
-  cashQ.insert.run({
-    date: req.body.date, daypart: DAYPARTS.includes(req.body.daypart) ? req.body.daypart : 'dinner',
-    float_cents: toCents(req.body.float), cash_sales_cents: toCents(req.body.cash_sales),
-    paid_out_cents: toCents(req.body.paid_out), counted_cents: toCents(req.body.counted),
-    closed_by: (req.body.closed_by || '').trim() || null, note: (req.body.note || '').trim() || null,
-  });
-  res.redirect('/cash?msg=' + encodeURIComponent('Count saved.'));
+// --- the workspace ----------------------------------------------------------
+// Four steps down the page with a summary that follows: shift details, cash
+// activity, the count, closing the drawer. Every figure the summary shows is
+// derived on the server from the same function the saved record uses, so what
+// you see while entering is what gets stored.
+
+function cashForm(row, movements, denoms, req) {
+  const isNew = !row.id;
+  const drawers = CASH.q.drawers.all();
+  const staff = q.allEmployees.all();
+  const c = CASH.compute(row);
+  const dflt = CASH.defaultFloat();
+  const m = (v) => (v == null ? '' : (v / 100).toFixed(2));
+
+  const paid = movements.filter((x) => x.movement_type !== 'cash_added');
+  const added = movements.filter((x) => x.movement_type === 'cash_added');
+  const mvRow = (x, i, kind) => `
+    <div class="mv" data-mv>
+      <input class="mv-amt" name="${kind}_amt_${i}" type="number" step="0.01" min="0" value="${x ? m(x.amount_cents) : ''}" placeholder="0.00">
+      <select name="${kind}_reason_${i}" class="minisel">
+        ${(kind === 'paid' ? CASH.PAID_REASONS : CASH.ADDED_REASONS).map((rr) => `<option${x && x.reason === rr ? ' selected' : ''}>${rr}</option>`).join('')}
+      </select>
+      <input name="${kind}_who_${i}" value="${esc(x ? x.recipient || '' : '')}" placeholder="${kind === 'paid' ? 'Paid to' : 'Added by'}">
+      <button type="button" class="rl-del" onclick="cashDrop(this)" title="Remove">✕</button>
+    </div>`;
+
+  return layout(isNew ? 'New reconciliation' : `Reconciliation · ${row.date}`, `
+    ${flash(req)}
+    <form method="post" action="${isNew ? '/cash' : `/cash/${row.id}`}" id="cashform">
+    <div class="phead">
+      <div class="phead-t">
+        <a class="link back" href="${isNew ? '/cash' : `/cash/${row.id}`}">← Cash reconciliation</a>
+        <h1>${isNew ? 'New reconciliation' : 'Edit reconciliation'}</h1>
+      </div>
+    </div>
+
+    <div class="mnwrap">
+      <div class="mnmain">
+        <section class="panel">
+          <div class="panel-h"><b>1 · The shift</b></div>
+          <div class="fld-row3">
+            <label class="fld">Date<input name="date" type="date" required value="${esc(row.date || isoDate(startOfToday()))}"></label>
+            <label class="fld">Service<select name="daypart">
+              ${DAYPARTS.map((d) => `<option value="${d}"${row.daypart === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+            </select></label>
+            <label class="fld">Drawer<select name="drawer_id">
+              ${drawers.map((d) => `<option value="${d.id}"${Number(row.drawer_id) === d.id ? ' selected' : ''}>${esc(d.name)}</option>`).join('')}
+            </select></label>
+          </div>
+          <div class="fld-row3">
+            <label class="fld">Opening till<input name="float" id="c-float" type="number" step="0.01" min="0"
+              value="${row.float_cents == null ? m(dflt) : m(row.float_cents)}"></label>
+            <label class="fld">Counted by<input name="counted_by" list="c-staff" value="${esc(row.counted_by || row.closed_by || '')}" placeholder="Who counted it"></label>
+            <label class="fld">Closing manager<input name="closed_by" list="c-staff" value="${esc(row.closed_by || '')}" placeholder="Optional"></label>
+          </div>
+          <datalist id="c-staff">${staff.map((e) => `<option value="${esc(e.name)}">`).join('')}</datalist>
+          <div class="fld-hint" id="c-floathint">The usual opening till is ${CASH.money(dflt)}.</div>
+          <label class="fld inv-hide" id="c-floatwhy">Why is the till different?
+            <select name="float_override_reason">
+              <option value="">Choose a reason…</option>
+              ${['Different opening float', 'Temporary change fund', 'Register transfer', 'Correction', 'Other']
+                .map((x) => `<option${row.float_override_reason === x ? ' selected' : ''}>${x}</option>`).join('')}
+            </select></label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h"><b>2 · Cash activity</b></div>
+          <label class="fld">Cash sales<input name="cash_sales" id="c-sales" type="number" step="0.01" min="0" value="${m(row.cash_sales_cents)}" placeholder="0.00"></label>
+          <div class="mvblock">
+            <div class="mv-h"><b>Paid outs / cash removed</b>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('paid')">＋ Add</button></div>
+            <div class="fld-hint">Cash taken out of the drawer before close — reimbursements, petty cash, approved purchases.</div>
+            <div id="paid-list">${paid.length ? paid.map((x, i) => mvRow(x, i, 'paid')).join('') : mvRow(null, 0, 'paid')}</div>
+          </div>
+          <div class="mvblock">
+            <div class="mv-h"><b>Cash added</b>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="cashAdd('added')">＋ Add</button></div>
+            <div class="fld-hint">Money put into the drawer outside sales — change funds, corrections.</div>
+            <div id="added-list">${added.map((x, i) => mvRow(x, i, 'added')).join('')}</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h"><b>3 · Count the drawer</b><span class="muted">before removing the deposit</span></div>
+          <label class="fld">Actual cash counted<input name="counted" id="c-counted" type="number" step="0.01" min="0"
+            value="${m(row.counted_cents)}" placeholder="0.00"></label>
+          <details class="rl-adv" id="c-denoms"${denoms.length ? ' open' : ''}>
+            <summary>Count by denomination</summary>
+            <div class="denoms">
+              ${CASH.DENOMS.map((d) => {
+                const found = denoms.find((x) => x.denom_cents === d);
+                return `<label class="denom"><span>${CASH.DENOM_LABEL[d]}</span>
+                  <input name="denom_${d}" type="number" min="0" step="1" value="${found && found.qty ? found.qty : ''}" placeholder="0" data-denom="${d}"></label>`;
+              }).join('')}
+            </div>
+            <div class="denom-total">Denominations add to <b id="c-denomtotal">$0.00</b>
+              <button type="button" class="btn btn-sm" onclick="cashUseDenoms()">Use this as the counted amount</button></div>
+          </details>
+          <label class="fld">Variance note<textarea name="variance_note" rows="2" placeholder="Needed when the drawer is out by more than ${CASH.money(CASH.tolerance().minor)}">${esc(row.variance_note || '')}</textarea></label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-h"><b>4 · Close the drawer</b></div>
+          <div class="fld-row3">
+            <label class="fld">Leave in register<input name="ending" id="c-ending" type="number" step="0.01" min="0"
+              value="${row.ending_float_cents == null ? m(dflt) : m(row.ending_float_cents)}"></label>
+            <label class="fld">Deposit<input name="deposit" id="c-deposit" type="number" step="0.01" min="0" value="${m(row.actual_deposit_cents)}" placeholder="calculated"></label>
+            <label class="fld">Destination<select name="deposit_destination">
+              <option value="">—</option>
+              ${CASH.DESTINATIONS.map((d) => `<option${row.deposit_destination === d ? ' selected' : ''}>${d}</option>`).join('')}
+            </select></label>
+          </div>
+          <div class="fld-row3">
+            <label class="fld">Bag number<input name="deposit_bag" value="${esc(row.deposit_bag || '')}" placeholder="Optional"></label>
+            <label class="fld">Reference<input name="deposit_reference" value="${esc(row.deposit_reference || '')}" placeholder="Optional"></label>
+            <label class="fld">Verified by<input name="verified_by" list="c-staff" value="${esc(row.verified_by || '')}" placeholder="Optional"></label>
+          </div>
+          <label class="fld inv-hide" id="c-overwhy">Why does the deposit differ?
+            <textarea name="override_reason" rows="2">${esc(row.override_reason || '')}</textarea></label>
+          <label class="fld">Closing notes<textarea name="note" rows="2">${esc(row.note || '')}</textarea></label>
+        </section>
+      </div>
+
+      <aside class="mnside">
+        <div class="mncost">
+          <div class="mnc-h">Reconciliation</div>
+          <div class="mnc-row"><span>Opening till</span><b id="s-open">—</b></div>
+          <div class="mnc-row"><span>Cash sales</span><b id="s-sales">—</b></div>
+          <div class="mnc-row"><span>Paid outs</span><b id="s-paid">—</b></div>
+          <div class="mnc-row"><span>Cash added</span><b id="s-added">—</b></div>
+          <div class="mnc-row mnc-total"><span>Expected in drawer</span><b id="s-exp">—</b></div>
+          <div class="mnc-row"><span>Actual counted</span><b id="s-count">—</b></div>
+          <div class="mnc-row"><span>Variance</span><b id="s-var">—</b></div>
+          <div class="mnc-row"><span>Leave in register</span><b id="s-end">—</b></div>
+          <div class="mnc-row mnc-total"><span>Deposit</span><b id="s-dep">—</b></div>
+          <div class="mnc-status" id="s-stat">Enter the count</div>
+          <div class="mnc-warn" id="s-warn" hidden></div>
+          <div class="mnc-act">
+            <button class="btn btn-primary" type="submit" name="status" value="final">${isNew ? 'Save reconciliation' : 'Save changes'}</button>
+            <button class="btn btn-ghost" type="submit" name="status" value="draft">Save as draft</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+    <input type="hidden" name="paid_n" id="paid-n" value="${Math.max(1, paid.length)}">
+    <input type="hidden" name="added_n" id="added-n" value="${added.length}">
+    </form>
+    <script>
+      window.CASH_DEFAULT = ${dflt};
+      window.CASH_TOL = ${JSON.stringify(CASH.tolerance())};
+      window.CASH_PAID_REASONS = ${JSON.stringify(CASH.PAID_REASONS)};
+      window.CASH_ADDED_REASONS = ${JSON.stringify(CASH.ADDED_REASONS)};
+    </script>
+    <script>${cashScript()}</script>`);
+}
+
+function cashScript() {
+  return `
+  function cmoney(c){ var n=Math.abs(Math.round(c)); return (c<0?'-$':'$')+(n/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function cnum(id){ var e=document.getElementById(id); return e&&e.value!=='' ? Math.round(parseFloat(e.value)*100)||0 : null; }
+  function cashDrop(b){ var w=b.closest('[data-mv]'); if(w.parentElement.children.length>1) w.remove(); else w.querySelectorAll('input').forEach(function(i){i.value='';}); cashCalc(); }
+  function cashAdd(kind){
+    var list=document.getElementById(kind+'-list');
+    var i=list.children.length;
+    var reasons = kind==='paid' ? CASH_PAID_REASONS : CASH_ADDED_REASONS;
+    var d=document.createElement('div'); d.className='mv'; d.setAttribute('data-mv','');
+    d.innerHTML='<input class="mv-amt" name="'+kind+'_amt_'+i+'" type="number" step="0.01" min="0" placeholder="0.00">'
+      +'<select name="'+kind+'_reason_'+i+'" class="minisel">'+reasons.map(function(r){return '<option>'+r+'</option>';}).join('')+'</select>'
+      +'<input name="'+kind+'_who_'+i+'" placeholder="'+(kind==='paid'?'Paid to':'Added by')+'">'
+      +'<button type="button" class="rl-del" onclick="cashDrop(this)" title="Remove">✕</button>';
+    list.appendChild(d); cashCalc();
+  }
+  function cashUseDenoms(){
+    var t=0; document.querySelectorAll('[data-denom]').forEach(function(i){ t += (parseInt(i.value,10)||0) * parseInt(i.dataset.denom,10); });
+    document.getElementById('c-counted').value=(t/100).toFixed(2); cashCalc();
+  }
+  function cashCalc(){
+    var sum=function(kind){ var t=0; document.querySelectorAll('#'+kind+'-list .mv-amt').forEach(function(i){ t+=Math.round((parseFloat(i.value)||0)*100); }); return t; };
+    var open=cnum('c-float')||0, sales=cnum('c-sales')||0, paid=sum('paid'), added=sum('added');
+    var exp=open+sales+added-paid;
+    var counted=cnum('c-counted');
+    var end=cnum('c-ending');
+    var set=function(id,v){ document.getElementById(id).textContent=v; };
+    set('s-open',cmoney(open)); set('s-sales',cmoney(sales));
+    set('s-paid',paid?'-'+cmoney(paid):cmoney(0)); set('s-added',cmoney(added));
+    set('s-exp',cmoney(exp));
+    set('s-count',counted==null?'—':cmoney(counted));
+    set('s-end',end==null?'—':cmoney(end));
+
+    var dt=0; document.querySelectorAll('[data-denom]').forEach(function(i){ dt += (parseInt(i.value,10)||0)*parseInt(i.dataset.denom,10); });
+    var dte=document.getElementById('c-denomtotal'); if(dte) dte.textContent=cmoney(dt);
+
+    // Anything off the usual till has to say why — asked for at the moment it
+    // happens rather than refused at the end.
+    document.getElementById('c-floatwhy').classList.toggle('inv-hide', open===CASH_DEFAULT);
+
+    var st=document.getElementById('s-stat'), warn=document.getElementById('s-warn');
+    if(counted==null){ set('s-var','—'); set('s-dep','—'); st.textContent='Enter the count'; st.className='mnc-status'; warn.hidden=true; return; }
+    var v=counted-exp;
+    set('s-var',v===0?'Exact':cmoney(v));
+    var calcDep = end==null?null:counted-end;
+    var typedDep = cnum('c-deposit');
+    set('s-dep', calcDep==null?'—':cmoney(typedDep==null?calcDep:typedDep));
+
+    var mag=Math.abs(v);
+    st.className='mnc-status '+(v===0?'st-on':mag<=CASH_TOL.minor?'st-near':mag<=CASH_TOL.critical?'st-over':'st-missing');
+    st.textContent = v===0 ? 'Exact' : cmoney(mag)+(v>0?' over':' short')+(mag<=CASH_TOL.minor?' — within tolerance':mag<=CASH_TOL.critical?' — needs review':' — critical');
+
+    var msgs=[];
+    if(mag>CASH_TOL.minor) msgs.push('A variance this size needs a note before it can be finalised.');
+    if(end!=null && end>counted) msgs.push('You cannot leave more in the register than was counted.');
+    if(typedDep!=null && calcDep!=null && typedDep!==calcDep){
+      var un=calcDep-typedDep;
+      msgs.push(cmoney(Math.abs(un))+' would be unaccounted for. Say why below, or clear the deposit to use '+cmoney(calcDep)+'.');
+    }
+    document.getElementById('c-overwhy').classList.toggle('inv-hide', !(typedDep!=null && calcDep!=null && typedDep!==calcDep));
+    warn.hidden = !msgs.length;
+    warn.innerHTML = msgs.join('<br>');
+  }
+  document.addEventListener('input', function(e){ if(e.target.closest('#cashform')) cashCalc(); });
+  document.addEventListener('change', function(e){ if(e.target.closest('#cashform')) cashCalc(); });
+  cashCalc();`;
+}
+
+app.get('/cash/new', (req, res) => {
+  if (!canWrite()) return res.redirect('/cash');
+  const drawer = CASH.q.drawers.all()[0];
+  res.send(cashForm({
+    date: isoDate(startOfToday()), daypart: 'dinner', drawer_id: drawer ? drawer.id : null,
+    float_cents: CASH.defaultFloat(), ending_float_cents: CASH.defaultFloat(),
+  }, [], [], req));
+});
+
+app.get('/cash/:id/edit', (req, res) => {
+  const row = CASH.q.one.get(Number(req.params.id));
+  if (!row) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such reconciliation</div></div>'));
+  if (!canWrite()) return res.redirect(`/cash/${row.id}`);
+  res.send(cashForm(row, CASH.q.movements.all(row.id), CASH.q.denoms.all(row.id), req));
+});
+
+/** Read the posted form into a row plus its movements and denominations. */
+function cashBody(body) {
+  const n = (v) => (v === '' || v == null ? null : toCents(v));
+  const movements = [];
+  for (const kind of ['paid', 'added']) {
+    for (let i = 0; i < 40; i++) {
+      const amt = body[`${kind}_amt_${i}`];
+      if (amt === undefined) continue;
+      const cents = toCents(amt);
+      if (!cents) continue;
+      movements.push({
+        movement_type: kind === 'paid' ? 'paid_out' : 'cash_added',
+        amount_cents: cents,
+        reason: String(body[`${kind}_reason_${i}`] || '').trim() || null,
+        recipient: String(body[`${kind}_who_${i}`] || '').trim() || null,
+      });
+    }
+  }
+  const denoms = CASH.DENOMS.map((d) => ({ denom_cents: d, qty: parseInt(body[`denom_${d}`], 10) || 0 })).filter((x) => x.qty > 0);
+  const paidTotal = movements.filter((m) => m.movement_type !== 'cash_added').reduce((a, m) => a + m.amount_cents, 0);
+  const addedTotal = movements.filter((m) => m.movement_type === 'cash_added').reduce((a, m) => a + m.amount_cents, 0);
+
+  const counted = n(body.counted);
+  const ending = n(body.ending);
+  const typedDeposit = n(body.deposit);
+  const row = {
+    date: String(body.date || '').slice(0, 10) || null,
+    daypart: DAYPARTS.includes(body.daypart) ? body.daypart : 'dinner',
+    location: 'Palm Vintage',
+    drawer_id: body.drawer_id ? Number(body.drawer_id) : null,
+    float_cents: n(body.float) ?? CASH.defaultFloat(),
+    cash_sales_cents: n(body.cash_sales) ?? 0,
+    paid_out_cents: paidTotal,
+    cash_added_cents: addedTotal,
+    counted_cents: counted,
+    ending_float_cents: ending,
+    // Left blank means "whatever the drawer says", which is the normal case.
+    actual_deposit_cents: typedDeposit ?? (counted != null && ending != null ? counted - ending : null),
+    deposit_destination: String(body.deposit_destination || '').trim() || null,
+    deposit_reference: String(body.deposit_reference || '').trim() || null,
+    deposit_bag: String(body.deposit_bag || '').trim() || null,
+    counted_by: String(body.counted_by || '').trim() || null,
+    verified_by: String(body.verified_by || '').trim() || null,
+    closed_by: String(body.closed_by || '').trim() || null,
+    status: body.status === 'draft' ? 'draft' : 'final',
+    note: String(body.note || '').trim() || null,
+    variance_note: String(body.variance_note || '').trim() || null,
+    override_reason: String(body.override_reason || '').trim() || null,
+    float_override_reason: String(body.float_override_reason || '').trim() || null,
+  };
+  return { row, movements, denoms };
+}
+
+const saveCash = db.transaction((id, row, movements, denoms, actor) => {
+  const before = id ? CASH.q.one.get(id) : null;
+  let recId = id;
+  const finalized = row.status === 'final' ? (before && before.finalized_at ? before.finalized_at : new Date().toISOString().slice(0, 19).replace('T', ' ')) : null;
+  if (recId) CASH.q.update.run({ ...row, finalized_at: finalized, id: recId });
+  else recId = CASH.q.add.run({ ...row, finalized_at: finalized, created_by: actor || null }).lastInsertRowid;
+
+  CASH.q.clearMovements.run(recId);
+  for (const m of movements) CASH.q.addMovement.run({ ...m, recon_id: recId, notes: null, occurred_at: row.date, created_by: actor || null });
+  CASH.q.clearDenoms.run(recId);
+  for (const d of denoms) CASH.q.addDenom.run(recId, d.denom_cents, d.qty);
+
+  CASH.auditDiff(recId, actor, before, { ...row, id: recId }, row.override_reason || row.variance_note || null);
+  return recId;
+});
+
+function cashSave(req, res, existingId) {
+  const { row, movements, denoms } = cashBody(req.body);
+  const check = CASH.validate(row);
+  if (!check.ok) {
+    return res.redirect(`${existingId ? `/cash/${existingId}/edit` : '/cash/new'}?err=1&msg=` + encodeURIComponent(check.errors[0]));
+  }
+  const who = (req.user && req.user.name) || 'Owner';
+  const id = saveCash(existingId, row, movements, denoms, who);
+  res.redirect(`/cash/${id}?msg=` + encodeURIComponent(row.status === 'draft' ? 'Saved as a draft.' : 'Reconciliation saved.'));
+}
+
+app.post('/cash', (req, res) => cashSave(req, res, null));
+app.post('/cash/:id', (req, res) => {
+  const row = CASH.q.one.get(Number(req.params.id));
+  if (!row) return res.status(404).end();
+  // A finalised record is not edited quietly. It can be reopened, which is
+  // recorded, or voided and replaced.
+  if (row.status === 'final' && !req.body.reopen_reason && row.legacy !== 1) {
+    CASH.q.addAudit.run({ recon_id: row.id, actor: (req.user && req.user.name) || 'Owner',
+      action: 'reopen', field: null, old_value: null, new_value: null, reason: 'edited after finalising' });
+  }
+  cashSave(req, res, row.id);
+});
+
+app.post('/cash/:id/void', (req, res) => {
+  const row = CASH.q.one.get(Number(req.params.id));
+  if (!row) return res.status(404).end();
+  const reason = String(req.body.reason || '').trim();
+  if (!reason) return res.redirect(`/cash/${row.id}?err=1&msg=` + encodeURIComponent('Voiding a reconciliation needs a reason.'));
+  const who = (req.user && req.user.name) || 'Owner';
+  CASH.q.voidIt.run(who, reason, row.id);
+  CASH.q.addAudit.run({ recon_id: row.id, actor: who, action: 'void', field: null, old_value: row.status, new_value: 'void', reason });
+  res.redirect(`/cash/${row.id}?msg=` + encodeURIComponent('Voided. The record stays for the audit trail.'));
 });
 
 app.post('/cash/:id/delete', (req, res) => {
-  cashQ.del.run(req.params.id);
-  res.redirect('/cash?msg=' + encodeURIComponent('Deleted.'));
+  const row = CASH.q.one.get(Number(req.params.id));
+  if (!row) return res.status(404).end();
+  // Drafts are working notes. Anything finalised is a financial record and
+  // gets voided instead, so the history stays whole.
+  if (row.status !== 'draft') {
+    return res.redirect(`/cash/${row.id}?err=1&msg=` + encodeURIComponent('Finalised reconciliations are voided, not deleted.'));
+  }
+  CASH.q.del.run(row.id);
+  res.redirect('/cash?msg=' + encodeURIComponent('Draft deleted.'));
 });
 
+// --- detail -----------------------------------------------------------------
+app.get('/cash/:id', (req, res) => {
+  const row = CASH.q.one.get(Number(req.params.id));
+  if (!row) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such reconciliation</div></div>'));
+  const c = CASH.compute(row);
+  const s = CASH.status(row);
+  const movements = CASH.q.movements.all(row.id);
+  const denoms = CASH.q.denoms.all(row.id);
+  const audit = CASH.q.audit.all(row.id);
+  const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
+  const dash = '<i class="unset">—</i>';
+
+  res.send(layout(`Cash · ${row.date}`, `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t">
+        <a class="link back" href="/cash">← Cash reconciliation</a>
+        <h1>${esc(cashDayLabel(row.date))} · ${esc(dp(row.daypart))}</h1>
+        <p class="phead-s"><span class="pill ${s.cls}">${esc(s.label)}</span>
+          ${row.status === 'void' ? `<span class="muted">voided by ${esc(row.voided_by || '')} — ${esc(row.void_reason || '')}</span>` : ''}
+          ${row.legacy ? '<span class="pill">recorded before deposits were tracked</span>' : ''}</p>
+      </div>
+      ${canWrite() && row.status !== 'void' ? `<div class="phead-acts"><a class="btn btn-primary" href="/cash/${row.id}/edit">Edit</a></div>` : ''}
+    </div>
+
+    <div class="mcards mcards-3">
+      <div class="mcard mcard-blue"><div class="mcard-ico">${icon('cash')}</div><div class="mcard-body">
+        <div class="mcard-label">Expected in drawer</div><div class="mcard-value">${CASH.money(c.expected)}</div>
+        <div class="mcard-sub">${CASH.money(c.opening)} till + ${CASH.money(c.sales)} sales${c.paidOut ? ' − ' + CASH.money(c.paidOut) + ' out' : ''}</div></div></div>
+      <div class="mcard mcard-violet"><div class="mcard-ico">${icon('costs')}</div><div class="mcard-body">
+        <div class="mcard-label">Actual counted</div><div class="mcard-value">${c.counted == null ? '—' : CASH.money(c.counted)}</div>
+        <div class="mcard-sub">before the deposit was removed</div></div></div>
+      <div class="mcard mcard-${s.key === 'exact' ? 'green' : s.key === 'critical' ? 'red' : 'amber'}"><div class="mcard-ico">${icon('incidents')}</div><div class="mcard-body">
+        <div class="mcard-label">Variance</div><div class="mcard-value">${c.variance == null ? '—' : c.variance === 0 ? 'Exact' : CASH.money(c.variance)}</div>
+        <div class="mcard-sub">${esc(row.variance_note || (c.variance === 0 ? 'balanced' : 'no note recorded'))}</div></div></div>
+      <div class="mcard mcard-green"><div class="mcard-ico">${icon('payroll')}</div><div class="mcard-body">
+        <div class="mcard-label">Deposited</div><div class="mcard-value">${(c.actualDeposit ?? c.calcDeposit) == null ? '—' : CASH.money(c.actualDeposit ?? c.calcDeposit)}</div>
+        <div class="mcard-sub">${c.ending == null ? 'no ending till recorded' : `left ${CASH.money(c.ending)} in the register`}</div></div></div>
+    </div>
+
+    ${c.unaccounted ? `<div class="attn"><div class="attn-h">${icon('incidents')} ${CASH.money(Math.abs(c.unaccounted))} unaccounted for</div>
+      <p>The drawer said to deposit ${CASH.money(c.calcDeposit)} and ${CASH.money(c.actualDeposit)} was recorded.
+      ${row.override_reason ? esc(row.override_reason) : 'No reason was given.'}</p></div>` : ''}
+
+    <div class="vpanels">
+      <section class="panel">
+        <div class="panel-h"><b>The count</b></div>
+        ${fact('Opening till', CASH.money(c.opening))}
+        ${fact('Cash sales', CASH.money(c.sales))}
+        ${fact('Paid outs', c.paidOut ? '−' + CASH.money(c.paidOut) : dash)}
+        ${fact('Cash added', c.added ? CASH.money(c.added) : dash)}
+        ${fact('Expected', CASH.money(c.expected))}
+        ${fact('Counted', c.counted == null ? dash : CASH.money(c.counted))}
+        ${fact('Variance', c.variance == null ? dash : c.variance === 0 ? 'Exact' : CASH.money(c.variance))}
+        ${fact('Left in register', c.ending == null ? dash : CASH.money(c.ending))}
+        ${fact('Deposit', (c.actualDeposit ?? c.calcDeposit) == null ? dash : CASH.money(c.actualDeposit ?? c.calcDeposit))}
+        ${fact('Destination', row.deposit_destination ? esc(row.deposit_destination) : dash)}
+        ${fact('Bag / reference', [row.deposit_bag, row.deposit_reference].filter(Boolean).map(esc).join(' · ') || dash)}
+        ${fact('Counted by', esc(row.counted_by || row.closed_by || '') || dash)}
+        ${fact('Verified by', esc(row.verified_by || '') || dash)}
+        ${row.note ? `<div class="inv-notes">${esc(row.note)}</div>` : ''}
+      </section>
+      <section class="panel">
+        <div class="panel-h"><b>Movements</b><span class="muted">${movements.length || 'none'}</span></div>
+        ${movements.length ? movements.map((mv) => `
+          <div class="tfact"><span>${esc(mv.reason || mv.movement_type)}${mv.recipient ? ' · ' + esc(mv.recipient) : ''}</span>
+            <b>${mv.movement_type === 'cash_added' ? '' : '−'}${CASH.money(mv.amount_cents)}</b></div>`).join('')
+          : '<div class="panel-empty">Nothing went in or out beyond sales.</div>'}
+        ${denoms.length ? `<div class="panel-h" style="margin-top:14px"><b>Denominations</b></div>
+          ${denoms.map((d) => `<div class="tfact"><span>${CASH.DENOM_LABEL[d.denom_cents]} × ${d.qty}</span><b>${CASH.money(d.denom_cents * d.qty)}</b></div>`).join('')}` : ''}
+      </section>
+    </div>
+
+    <section class="pcard">
+      <div class="pcard-h"><b>History</b><span class="muted">${audit.length} entr${audit.length === 1 ? 'y' : 'ies'}</span></div>
+      ${audit.length ? `<div class="hrows">${audit.slice(0, 30).map((a) => `
+        <div class="hrow"><span class="hr-d">${esc(String(a.created_at).slice(0, 16))}</span>
+          <span class="hr-c">${esc(a.action)}</span>
+          <span class="hr-w">${a.field ? `${esc(a.field)}: ${esc(a.old_value ?? '—')} → ${esc(a.new_value ?? '—')}` : ''}${a.reason ? ` · ${esc(a.reason)}` : ''}${a.actor ? ` · ${esc(a.actor)}` : ''}</span></div>`).join('')}</div>`
+        : '<div class="panel-empty">This record pre-dates the audit trail.</div>'}
+    </section>
+
+    ${canWrite() && row.status !== 'void' ? `<div class="danger-zone">
+      <div><b>${row.status === 'draft' ? 'Delete this draft' : 'Void this reconciliation'}</b>
+        <p class="muted">${row.status === 'draft' ? 'Drafts can be removed outright.' : 'A finalised count is a financial record — voiding keeps it and marks it cancelled.'}</p></div>
+      ${row.status === 'draft'
+        ? `<form method="post" action="/cash/${row.id}/delete" onsubmit="return confirm('Delete this draft?')"><button class="btn btn-danger btn-sm" type="submit">Delete draft</button></form>`
+        : `<form method="post" action="/cash/${row.id}/void" class="voidform">
+             <input name="reason" placeholder="Reason for voiding" required>
+             <button class="btn btn-danger btn-sm" type="submit">Void</button></form>`}
+    </div>` : ''}`));
+});
 // ---------------------------------------------------------------------------
 // Tip-out policy — calm read-only view + rule builder, versioned with history
 // ---------------------------------------------------------------------------
