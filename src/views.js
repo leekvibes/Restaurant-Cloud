@@ -56,7 +56,7 @@ const NAV_GROUPS = [
   ] },
   { title: 'Track', links: [
     ['/c/expirations', 'expirations', 'Expirations', '#dc2626'], ['/c/invoices', 'invoices', 'Invoices', '#0891b2'],
-    ['/c/vendors', 'vendors', 'Vendors', '#ea580c'], ['/c/par', 'par', 'Par levels', '#ca8a04'],
+    ['/c/vendors', 'vendors', 'Vendors', '#ea580c'], ['/c/products', 'par', 'Products', '#ca8a04'],
     ['/c/contacts', 'contacts', 'Contacts', '#0d9488'], ['/c/equipment', 'equipment', 'Equipment', '#64748b'],
     ['/c/documents', 'documents', 'Documents', '#6366f1'],
   ] },

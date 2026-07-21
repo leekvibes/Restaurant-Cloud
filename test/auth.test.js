@@ -137,7 +137,7 @@ test('the dashboard shows nothing from areas the account cannot open', async () 
     // Quick actions are writes; a view-only account gets none of them at all.
     assert.ok(!html.includes('class="qact"'), 'no write shortcuts for a viewer');
     // And nothing from the trackers/payroll/cash areas leaks into the lists.
-    for (const leak of ['/c/invoices', '/c/recurring', '/c/par', '/payroll', '/cash']) {
+    for (const leak of ['/c/invoices', '/c/recurring', '/c/products', '/payroll', '/cash']) {
       assert.ok(!html.includes(`href="${leak}"`), `must not link to ${leak}`);
     }
   } finally {

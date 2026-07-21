@@ -161,23 +161,10 @@ const MODULES = [
       { name: 'body', label: 'What & why', type: 'textarea', required: true },
     ],
   },
-  {
-    slug: 'par', table: 'm_par', title: 'Par levels', icon: '📦',
-    blurb: 'What to keep on hand & when to reorder',
-    orderBy: 'item ASC',
-    // Flag anything at or below its reorder point.
-    flag: (row) => (row.on_hand == null || row.reorder_point == null ? null
-      : Number(row.on_hand) <= Number(row.reorder_point) ? { text: '⚠ reorder', cls: 'pill-red', warn: true } : { text: 'ok', cls: 'pill-ok' }),
-    fields: [
-      { name: 'item', label: 'Item', type: 'text', required: true, list: true, placeholder: 'e.g. ribeye, to-go cups' },
-      { name: 'vendor_id', label: 'Vendor', type: 'select', list: true, options: vendorOptions },
-      { name: 'unit', label: 'Unit', type: 'text', list: true, placeholder: 'case, lb, each' },
-      { name: 'par_level', label: 'Par (target)', type: 'number', list: true },
-      { name: 'reorder_point', label: 'Reorder at', type: 'number', list: true },
-      { name: 'on_hand', label: 'On hand', type: 'number', list: true },
-      { name: 'notes', label: 'Notes', type: 'textarea' },
-    ],
-  },
+  // Par levels used to live here. It is now Products — a hand-written
+  // section in server.js backed by its own tables, because purchasing history
+  // needs more than the generic one-table CRUD this registry provides. The
+  // m_par table is left in place; src/products.js migrated its rows once.
   {
     slug: 'recurring', table: 'm_recurring', title: 'Recurring tasks', icon: '🔁',
     blurb: 'Grease trap, hood, pest control, deep cleans',

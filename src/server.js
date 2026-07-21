@@ -313,8 +313,6 @@ const dashQ = {
   recent: db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS} FROM shifts sh ORDER BY sh.date DESC, sh.daypart DESC LIMIT ?`),
   staffToday: db.prepare(`SELECT COUNT(DISTINCT w.employee_id) n FROM work w
     JOIN shifts sh ON sh.id = w.shift_id WHERE sh.date = ?`),
-  lowPar: db.prepare(`SELECT id, item FROM m_par
-    WHERE on_hand IS NOT NULL AND reorder_point IS NOT NULL AND on_hand <= reorder_point`),
   // Only an unpaid invoice can be overdue, and the unpaid pile stays small
   // however many years of paid ones pile up behind it.
   openInvoices: db.prepare("SELECT * FROM m_invoices WHERE status <> 'Paid' ORDER BY due_date"),
@@ -409,9 +407,11 @@ app.get('/', (req, res) => {
           `${what} ${whenOf(r.due)}`, `/c/${slug}/${r.id}`);
       }
     }
-    const low = dashQ.lowPar.all();
-    if (low.length) push('amber', 'par', `${low.length} item${low.length === 1 ? '' : 's'} at reorder point`,
-      low.slice(0, 4).map((x) => x.item).join(' · '), '/c/par');
+    // The "at reorder point" nag is gone with par levels. It counted on an
+    // on-hand number nobody could keep true without POS depletion, and
+    // Products deliberately doesn't show one — so the alert had no page left
+    // to send you to. The columns are still on the table for when inventory
+    // counts exist and it can come back meaning something.
   }
 
   if (may('cash')) {
@@ -3379,9 +3379,13 @@ const invCat = (c) => INV_CATEGORIES[c] || INV_CATEGORIES.Other;
 
 const invQ = {
   all: db.prepare('SELECT * FROM m_invoices ORDER BY invoice_date DESC, id DESC'),
+  one: db.prepare('SELECT * FROM m_invoices WHERE id = ?'),
+  // ai_lines holds the reader's line-item read as JSON until someone reviews
+  // it on the import screen. It is not shown on the invoice itself — invoices
+  // stay an accounting record.
   add: db.prepare(`INSERT INTO m_invoices
-    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, file, notes, ai_status, ai_confidence)
-    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @file, @notes, @ai_status, @ai_confidence)`),
+    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, file, notes, ai_status, ai_confidence, ai_lines)
+    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @file, @notes, @ai_status, @ai_confidence, @ai_lines)`),
   vendors: db.prepare('SELECT id, name FROM m_vendors ORDER BY name'),
   addVendor: db.prepare('INSERT INTO m_vendors (name) VALUES (?)'),
 };
@@ -3442,6 +3446,11 @@ function invoicePanel(r, vName) {
                 <button class="btn btn-sm ${r.status === 'Paid' ? 'btn-ghost' : 'btn-primary'}" type="submit">${r.status === 'Paid' ? 'Mark unpaid' : 'Mark paid'}</button>
               </form>
               <a class="btn btn-sm" href="/c/invoices/${r.id}/edit">Edit</a>
+              ${/* The only product-related thing on the invoice page: a way out
+                    to the import screen. The lines themselves stay off here —
+                    an invoice is an accounting record. */
+                r.lines_imported ? `<a class="btn btn-sm btn-ghost" href="/c/invoices/${r.id}/import">Products imported ✓</a>`
+                : r.ai_lines ? `<a class="btn btn-sm btn-primary" href="/c/invoices/${r.id}/import">Import products</a>` : ''}
               ${r.file ? `<a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" target="_blank">Open original</a>
                           <a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
               ${r.vendor_id ? `<a class="btn btn-sm btn-ghost" href="/c/vendors/${Number(r.vendor_id)}">Vendor</a>` : ''}
@@ -3763,6 +3772,7 @@ function invoiceDrawer(vendors, today) {
         <input type="hidden" name="ai_status" id="inv-ai-status" value="manual">
         <input type="hidden" name="ai_confidence" id="inv-ai-conf" value="">
         <input type="hidden" name="ai_snapshot" id="inv-ai-snap" value="">
+        <input type="hidden" name="ai_lines" id="inv-ai-lines" value="">
         <label class="fld">Vendor
           <select name="vendor_id" id="inv-vendor">
             <option value="">— choose —</option>
@@ -3912,6 +3922,9 @@ function invoiceDrawerScript() {
     document.getElementById('inv-ai-conf').value = d.confidence || '';
     // Snapshot what the AI said, so the save can tell whether you changed it.
     document.getElementById('inv-ai-snap').value = [d.total, d.subtotal, d.tax, d.vendor_id || '', d.category || ''].join('|');
+    // Carried to the save as JSON, then reviewed on the import screen. Not
+    // shown in the drawer: the invoice form is for the numbers the books need.
+    document.getElementById('inv-ai-lines').value = JSON.stringify(d.line_items || []);
 
     var n = document.getElementById('inv-ai-note');
     n.className = 'ai-note' + (d.confidence === 'low' ? ' ai-note-bad' : d.confidence === 'medium' ? ' ai-note-warn' : '');
@@ -3964,6 +3977,26 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
     });
     if (changed) aiStatus = 'ai_edited';
   }
+
+  // The reader's line items ride along in a hidden field. Parsed and re-
+  // serialised rather than trusted through: it arrives as a string from a form
+  // post, and anything that isn't a well-formed array of lines is worth
+  // dropping quietly rather than storing for the import screen to trip over.
+  let lineJson = null, lineCount = 0;
+  try {
+    const parsed = JSON.parse(req.body.ai_lines || '[]');
+    const clean = (Array.isArray(parsed) ? parsed : [])
+      .filter((l) => l && String(l.description || '').trim())
+      .slice(0, 200)
+      .map((l) => ({
+        description: String(l.description).trim().slice(0, 200),
+        qty: Number(l.qty) || 0, unit: String(l.unit || '').trim().slice(0, 20),
+        unit_price: Number(l.unit_price) || 0, total: Number(l.total) || 0,
+      }));
+    lineCount = clean.length;
+    if (lineCount) lineJson = JSON.stringify(clean);
+  } catch { /* not readable as lines — the invoice still saves */ }
+
   invQ.add.run({
     invoice_date: String(req.body.invoice_date || '').slice(0, 10) || null,
     due_date: String(req.body.due_date || '').slice(0, 10) || null,
@@ -3978,7 +4011,15 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
     notes: String(req.body.notes || '').trim() || null,
     ai_status: aiStatus,
     ai_confidence: String(req.body.ai_confidence || '').trim() || null,
+    ai_lines: lineJson,
   });
+  // Straight to the import review when there are lines to review — that's the
+  // moment the invoice is fresh in mind, and the screen is a decision, not a
+  // save. Skipping it just means the invoice is filed without products.
+  const saved = db.prepare('SELECT id FROM m_invoices ORDER BY id DESC LIMIT 1').get();
+  if (lineCount && saved) {
+    return res.redirect(`/c/invoices/${saved.id}/import?msg=` + encodeURIComponent('Invoice saved. Check its products below.'));
+  }
   res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
 });
 
@@ -4360,6 +4401,584 @@ app.post('/c/vendors/:id', (req, res) => {
   if (!data.name) return res.redirect(`/c/vendors/${v.id}/edit?err=1&msg=` + encodeURIComponent('A vendor needs a name.'));
   vendQ.update.run({ ...data, inactive: v.inactive, id: v.id });
   res.redirect(`/c/vendors/${v.id}?msg=` + encodeURIComponent('Saved.'));
+});
+
+
+// ---------------------------------------------------------------------------
+// PRODUCTS — purchasing intelligence, not live inventory.
+//
+// This replaces the par-level tracker. The question it answers is not "what's
+// on the shelf" — without POS ingredient depletion nobody can answer that
+// honestly — but "what do I buy, from whom, what do I pay, and is that
+// moving". Every figure comes from an invoice line, so every figure is
+// defensible.
+//
+// The par/on-hand columns still exist on the table and are deliberately not
+// surfaced. When inventory counts arrive they slot in without a migration.
+// ---------------------------------------------------------------------------
+const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows } = require('./products');
+
+const PROD_CAT_COLORS = {
+  Produce: { color: '#16a34a', tint: '#f0fdf4' }, Meat: { color: '#dc2626', tint: '#fef2f2' },
+  Seafood: { color: '#0891b2', tint: '#ecfeff' }, Dairy: { color: '#2563eb', tint: '#eff6ff' },
+  'Dry goods': { color: '#a16207', tint: '#fefce8' }, Bakery: { color: '#d97706', tint: '#fffbeb' },
+  Coffee: { color: '#78350f', tint: '#fef3c7' }, Beverage: { color: '#0ea5e9', tint: '#f0f9ff' },
+  Alcohol: { color: '#7c3aed', tint: '#f5f3ff' }, Supplies: { color: '#64748b', tint: '#f8fafc' },
+  Cleaning: { color: '#0d9488', tint: '#f0fdfa' }, Other: { color: '#6b7280', tint: '#f9fafb' },
+};
+const prodCat = (c) => PROD_CAT_COLORS[c] || PROD_CAT_COLORS.Other;
+const monthStart = (iso) => iso.slice(0, 8) + '01';
+const yearStart = (iso) => iso.slice(0, 4) + '-01-01';
+
+/** Up / down / steady, as a badge. Null when there's nothing to compare to. */
+function trendBadge(p) {
+  const t = trendOf(p);
+  if (t === null) return '<span class="tr tr-none">—</span>';
+  if (Math.abs(t) < 3) return '<span class="tr tr-flat">steady</span>';
+  return `<span class="tr ${t > 0 ? 'tr-up' : 'tr-down'}">${t > 0 ? '▲' : '▼'} ${Math.abs(t)}%</span>`;
+}
+
+const prodRollupArgs = () => {
+  const today = isoDate(startOfToday());
+  return { from_month: monthStart(today), from_year: yearStart(today), today };
+};
+
+app.get('/c/par', (_req, res) => res.redirect(301, '/c/products'));
+
+app.get('/c/products', (req, res) => {
+  const args = prodRollupArgs();
+  const all = prodQ.all.all(args);
+  const vendors = invQ.vendors.all();
+  const spendMonth = all.reduce((a, p) => a + p.spend_month, 0);
+  const spendYear = all.reduce((a, p) => a + p.spend_year, 0);
+  const priced = all.filter((p) => trendOf(p) !== null);
+  const rising = priced.filter((p) => trendOf(p) >= 3);
+  const tracked = all.filter((p) => p.buys > 0).length;
+
+  const card = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+
+  const cards = `<div class="mcards mcards-4">
+    ${card('blue', 'par', 'Products', String(all.length), tracked ? `${tracked} with purchase history` : 'none bought yet')}
+    ${card('green', 'invoices', 'Spend this month', money(spendMonth), spendYear ? `${money(spendYear)} this year` : 'nothing yet')}
+    ${card(rising.length ? 'amber' : 'green', 'sales', 'Getting pricier', String(rising.length),
+      rising.length ? `of ${priced.length} comparable` : priced.length ? 'nothing is up' : 'need 2 buys to compare')}
+    ${card('violet', 'vendors', 'Vendors used', String(new Set(all.filter((p) => p.vendor_id).map((p) => p.vendor_id)).size),
+      `across ${all.length} product${all.length === 1 ? '' : 's'}`)}
+  </div>`;
+
+  // --- insights: only what the data actually supports --------------------
+  const insights = [];
+  // Phrased with a dash rather than a verb: product names are singular and
+  // plural and nothing here can tell which, so "Avocados is up" is one bad
+  // guess away on every line.
+  const bump = [...rising].sort((a, b) => trendOf(b) - trendOf(a))[0];
+  if (bump) insights.push(`<b>${esc(bump.name)}</b> — up ${trendOf(bump)}% on what you used to pay.`);
+  const drop = priced.filter((p) => trendOf(p) <= -3).sort((a, b) => trendOf(a) - trendOf(b))[0];
+  if (drop) insights.push(`<b>${esc(drop.name)}</b> — down ${Math.abs(trendOf(drop))}%.`);
+  const share = prodQ.vendorShare.all(args.from_year).filter((v) => v.c > 0);
+  const shareTotal = share.reduce((a, v) => a + v.c, 0);
+  if (share.length > 1 && shareTotal) {
+    const top = share[0];
+    insights.push(`<b>${esc(top.name || 'One vendor')}</b> supplies ${Math.round((top.c / shareTotal) * 100)}% of what you've spent this year.`);
+  }
+  const cat = prodQ.categorySpend.all(args.from_month).filter((c) => c.c > 0)[0];
+  if (cat) insights.push(`You've spent <b>${money(cat.c)}</b> on ${esc(cat.cat.toLowerCase())} this month.`);
+  const often = [...all].sort((a, b) => b.buys - a.buys)[0];
+  if (often && often.buys >= 3) insights.push(`<b>${esc(often.name)}</b> — bought ${often.buys} times, more than anything else.`);
+  const insightBlock = insights.length
+    ? `<div class="insights"><div class="ins-h">${icon('sales')} What the invoices say</div>
+        <ul class="ins-list">${insights.slice(0, 4).map((t) => `<li>${t}</li>`).join('')}</ul></div>`
+    : '';
+
+  const usedCats = [...new Set(all.map((p) => p.category).filter(Boolean))].sort();
+  const usedVendors = vendors.filter((v) => all.some((p) => Number(p.vendor_id) === Number(v.id)));
+
+  const rows = all.map((p) => {
+    const cc = prodCat(p.category);
+    const t = trendOf(p);
+    const search = [p.name, p.category, p.vendor_name, p.sku, p.unit].filter(Boolean).join(' ').toLowerCase();
+    return `<a class="pitem" href="/c/products/${p.id}"
+        data-prod data-search="${esc(search)}" data-cat="${esc(p.category || '')}"
+        data-vendor="${p.vendor_id || ''}" data-trend="${t === null ? '' : t >= 3 ? 'up' : t <= -3 ? 'down' : 'flat'}"
+        data-bought="${p.buys ? '1' : '0'}"
+        data-spend="${p.spend_all}" data-buys="${p.buys || 0}" data-rise="${t === null ? -999 : t}" data-last="${p.last_on || ''}">
+      <span class="pitem-main">
+        <span class="pitem-n">${esc(p.name)}</span>
+        <span class="pitem-meta">
+          ${p.category ? `<span class="pchip" style="--c:${cc.color};--ct:${cc.tint}">${esc(p.category)}</span>` : ''}
+          ${p.vendor_name ? `<span class="pitem-v">${esc(p.vendor_name)}</span>` : '<span class="pitem-v unset">No vendor set</span>'}
+          ${p.pack_size || p.unit ? `<span class="pitem-u">${esc(p.pack_size || p.unit)}</span>` : ''}
+        </span>
+      </span>
+      <span class="pitem-f">
+        <span class="pf"><i>Last paid</i><b>${p.last_price ? money(p.last_price) : '—'}</b></span>
+        <span class="pf"><i>Average</i><b>${p.avg_price ? money(p.avg_price) : '—'}</b></span>
+        <span class="pf"><i>Trend</i><b>${trendBadge(p)}</b></span>
+        <span class="pf"><i>Bought</i><b>${p.buys || 0}×</b></span>
+        <span class="pf"><i>Spent</i><b>${money(p.spend_all)}</b></span>
+        <span class="pf pf-w"><i>Last bought</i><b>${p.last_on ? esc(niceDate(p.last_on)) : '—'}</b></span>
+      </span>
+      <span class="pitem-go">›</span>
+    </a>`;
+  }).join('');
+
+  const toolbar = `
+    <div class="toolbar2">
+      <div class="searchbox">${icon('search')}<input id="psearch" type="search" placeholder="Search a product, vendor or SKU..." autocomplete="off"></div>
+      <select id="pvendor" class="minisel">
+        <option value="">Any vendor</option>
+        ${usedVendors.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
+      </select>
+      <select id="psort" class="minisel">
+        <option value="name">Sort: name</option>
+        <option value="spend">Sort: most spent</option>
+        <option value="buys">Sort: bought most</option>
+        <option value="rise">Sort: biggest rise</option>
+        <option value="recent">Sort: last bought</option>
+      </select>
+    </div>
+    <div class="fchips">
+      <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${all.length}</span></button>
+      <button class="fchip" data-f="trend" data-v="up" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Going up</button>
+      <button class="fchip" data-f="trend" data-v="down" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Going down</button>
+      <button class="fchip" data-f="bought" data-v="0" style="--c:#64748b;--ct:#f8fafc"><i class="fdot"></i>Never bought</button>
+      ${usedCats.map((c) => { const cc = prodCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}</button>`; }).join('')}
+    </div>`;
+
+  const body = all.length
+    ? `${cards}${insightBlock}${toolbar}<div class="pitems" id="plist">${rows}</div>
+       <div class="empty2" id="pnone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>`
+    : `<div class="upload-hero">
+        <div class="uh-ico">${icon('par')}</div>
+        <div class="uh-t">No products yet</div>
+        <div class="uh-s">Add what you buy, or let it build itself — when you photograph an invoice, its lines can be imported straight in here with the prices you paid.</div>
+        <button class="btn btn-primary btn-lg" type="button" onclick="prodDrawer(true)">＋ Add your first product</button>
+      </div>`;
+
+  res.send(layout('Products', `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t"><h1>Products</h1><p class="phead-s">What you buy, what it costs, and whether that's moving.</p></div>
+      <button class="btn btn-primary" type="button" onclick="prodDrawer(true)">＋ Add product</button>
+    </div>
+    ${body}
+    ${productDrawer(vendors)}
+    <script>${productListScript()}</script>`));
+});
+
+/** The add-product drawer, shared by the list and the empty state. */
+function productDrawer(vendors, p) {
+  const v = p || {};
+  return `
+  <div class="drawer-scrim" onclick="prodDrawer(false)"></div>
+  <aside class="drawer" id="prod-drawer" aria-hidden="true">
+    <div class="drawer-h"><b>${p ? 'Edit product' : 'Add a product'}</b>
+      <button class="btn btn-ghost btn-sm" type="button" onclick="prodDrawer(false)">Close</button></div>
+    <form method="post" action="${p ? `/c/products/${p.id}` : '/c/products'}">
+      <div class="drawer-b">
+        <label class="fld">Name<input name="name" required value="${esc(v.name || '')}" placeholder="e.g. Roma tomatoes"></label>
+        <div class="fld-row">
+          <label class="fld">Category<select name="category">
+            <option value="">—</option>
+            ${PROD_CATS.map((c) => `<option${v.category === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+          </select></label>
+          <label class="fld">Vendor<select name="vendor_id">
+            <option value="">—</option>
+            ${vendors.map((x) => `<option value="${x.id}"${Number(v.vendor_id) === Number(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+          </select></label>
+        </div>
+        <div class="fld-row3">
+          <label class="fld">Unit<input name="unit" value="${esc(v.unit || '')}" placeholder="case, lb, each"></label>
+          <label class="fld">Pack size<input name="pack_size" value="${esc(v.pack_size || '')}" placeholder="6/#10"></label>
+          <label class="fld">SKU<input name="sku" value="${esc(v.sku || '')}"></label>
+        </div>
+        <label class="fld">Notes<textarea name="notes" rows="2">${esc(v.notes || '')}</textarea></label>
+      </div>
+      <div class="drawer-f">
+        <button class="btn btn-ghost" type="button" onclick="prodDrawer(false)">Cancel</button>
+        <button class="btn btn-primary" type="submit">${p ? 'Save' : 'Add product'}</button>
+      </div>
+    </form>
+  </aside>`;
+}
+
+function productListScript() {
+  return `
+  function prodDrawer(on){ document.getElementById('prod-drawer').setAttribute('aria-hidden', on?'false':'true');
+    document.body.classList.toggle('drawer-open', !!on);
+    if(on){ var i=document.querySelector('#prod-drawer input[name=name]'); if(i) i.focus(); } }
+  (function(){
+    var q='', mode='all', val='', vend='';
+    var list=document.getElementById('plist'); if(!list) return;
+    var rows=[].slice.call(list.querySelectorAll('[data-prod]'));
+    var none=document.getElementById('pnone');
+    function pass(el){
+      if(q && el.dataset.search.indexOf(q)<0) return false;
+      if(vend && el.dataset.vendor!==vend) return false;
+      if(mode==='cat' && el.dataset.cat!==val) return false;
+      if(mode==='trend' && el.dataset.trend!==val) return false;
+      if(mode==='bought' && el.dataset.bought!==val) return false;
+      return true;
+    }
+    function apply(){ var n=0; rows.forEach(function(el){ var ok=pass(el); el.style.display=ok?'':'none'; if(ok)n++; });
+      if(none) none.style.display=n?'none':''; }
+    var s=document.getElementById('psearch');
+    if(s) s.addEventListener('input', function(){ q=this.value.trim().toLowerCase(); apply(); });
+    var v=document.getElementById('pvendor');
+    if(v) v.addEventListener('change', function(){ vend=this.value; apply(); });
+    document.querySelectorAll('.fchip').forEach(function(c){ c.addEventListener('click', function(){
+      document.querySelectorAll('.fchip').forEach(function(x){ x.classList.remove('on'); });
+      c.classList.add('on'); mode=c.dataset.f; val=c.dataset.v; apply(); }); });
+    var so=document.getElementById('psort');
+    if(so) so.addEventListener('change', function(){
+      var k=this.value;
+      var num=function(el,a){ return parseFloat(el.dataset[a]||'0')||0; };
+      var sorted=rows.slice().sort(function(a,b){
+        if(k==='name') return a.querySelector('.pitem-n').textContent.localeCompare(b.querySelector('.pitem-n').textContent);
+        if(k==='spend') return num(b,'spend')-num(a,'spend');
+        if(k==='buys') return num(b,'buys')-num(a,'buys');
+        if(k==='rise') return num(b,'rise')-num(a,'rise');
+        return (b.dataset.last||'').localeCompare(a.dataset.last||'');
+      });
+      sorted.forEach(function(el){ list.appendChild(el); });
+    });
+  })();`;
+}
+
+app.post('/c/products', (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.redirect('/c/products?err=1&msg=' + encodeURIComponent('A product needs a name.'));
+  if (prodQ.byName.get(name)) return res.redirect('/c/products?err=1&msg=' + encodeURIComponent(`You already track "${name}".`));
+  prodQ.add.run({
+    name, category: (req.body.category || '').trim() || null,
+    vendor_id: req.body.vendor_id ? Number(req.body.vendor_id) : null,
+    unit: (req.body.unit || '').trim() || null,
+    pack_size: (req.body.pack_size || '').trim() || null,
+    sku: (req.body.sku || '').trim() || null,
+    notes: (req.body.notes || '').trim() || null,
+  });
+  res.redirect('/c/products?msg=' + encodeURIComponent('Product added.'));
+});
+
+app.get('/c/products/:id', (req, res) => {
+  const args = prodRollupArgs();
+  const p = prodQ.one.get({ ...args, id: Number(req.params.id) });
+  if (!p) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such product</div></div>'));
+  const history = prodQ.history.all(p.id);
+  const vendors = invQ.vendors.all();
+  const t = trendOf(p);
+
+  const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
+  const unset = '<i class="unset">—</i>';
+
+  // A tiny sparkline of unit price over time. Drawn only with three or more
+  // priced purchases, below which a "line" is just two dots and a story.
+  const priced = history.filter((h) => h.unit_price_cents > 0).slice().reverse();
+  let spark = '';
+  if (priced.length >= 3) {
+    const vals = priced.map((h) => h.unit_price_cents);
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+    const W = 260, H = 46;
+    const pts = vals.map((v, i) => `${((i / (vals.length - 1)) * W).toFixed(1)},${(H - ((v - lo) / span) * (H - 8) - 4).toFixed(1)}`);
+    spark = `<div class="spark"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <polyline points="${pts.join(' ')}" fill="none" stroke="${t > 0 ? '#dc2626' : t < 0 ? '#059669' : '#2563eb'}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    </svg><div class="spark-l"><span>${money(lo)}</span><span>${priced.length} priced purchases</span><span>${money(hi)}</span></div></div>`;
+  }
+
+  const histRows = history.length ? history.map((h) => `
+    <tr>
+      <td>${esc(niceDate(h.purchased_on))}</td>
+      <td>${esc(h.vendor_name || '—')}</td>
+      <td>${h.invoice_id ? `<a href="/c/invoices/${h.invoice_id}">${esc(h.invoice_number || '#' + h.invoice_id)}</a>` : '<span class="muted">manual</span>'}</td>
+      <td class="num">${h.qty ? esc(String(h.qty)) + (h.unit ? ' ' + esc(h.unit) : '') : '—'}</td>
+      <td class="num">${h.unit_price_cents ? money(h.unit_price_cents) : '—'}</td>
+      <td class="num">${money(h.total_cents)}</td>
+      <td><form method="post" action="/c/products/purchase/${h.id}/delete" onsubmit="return confirm('Remove this purchase from the history?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Remove</button></form></td>
+    </tr>`).join('') : '';
+
+  const cc = prodCat(p.category);
+  res.send(layout(p.name, `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t">
+        <a class="link back" href="/c/products">← Products</a>
+        <h1>${esc(p.name)}</h1>
+        <p class="phead-s">
+          ${p.category ? `<span class="pchip" style="--c:${cc.color};--ct:${cc.tint}">${esc(p.category)}</span>` : ''}
+          ${p.vendor_name ? esc(p.vendor_name) : '<span class="muted">no vendor set</span>'}
+          ${p.pack_size || p.unit ? ' · ' + esc(p.pack_size || p.unit) : ''}
+        </p>
+      </div>
+      <div class="phead-acts">
+        <button class="btn" type="button" onclick="prodDrawer(true)">Edit</button>
+      </div>
+    </div>
+
+    <div class="mcards mcards-4">
+      <div class="mcard mcard-blue"><div class="mcard-ico">${icon('invoices')}</div><div class="mcard-body">
+        <div class="mcard-label">Last paid</div><div class="mcard-value">${p.last_price ? money(p.last_price) : '—'}</div>
+        <div class="mcard-sub">${p.last_on ? 'on ' + esc(niceDate(p.last_on)) : 'never bought'}</div></div></div>
+      <div class="mcard mcard-green"><div class="mcard-ico">${icon('sales')}</div><div class="mcard-body">
+        <div class="mcard-label">Average price</div><div class="mcard-value">${p.avg_price ? money(p.avg_price) : '—'}</div>
+        <div class="mcard-sub">${p.low_price ? `${money(p.low_price)} – ${money(p.high_price)}` : 'no prices yet'}</div></div></div>
+      <div class="mcard mcard-${t > 2 ? 'red' : t < -2 ? 'green' : 'violet'}"><div class="mcard-ico">${icon('costs')}</div><div class="mcard-body">
+        <div class="mcard-label">Price trend</div><div class="mcard-value">${t === null ? '—' : (t > 0 ? '+' : '') + t + '%'}</div>
+        <div class="mcard-sub">${t === null ? 'needs two purchases' : 'vs what you used to pay'}</div></div></div>
+      <div class="mcard mcard-amber"><div class="mcard-ico">${icon('payroll')}</div><div class="mcard-body">
+        <div class="mcard-label">Total spent</div><div class="mcard-value">${money(p.spend_all)}</div>
+        <div class="mcard-sub">${p.buys} purchase${p.buys === 1 ? '' : 's'}${p.spend_year ? ` · ${money(p.spend_year)} this year` : ''}</div></div></div>
+    </div>
+
+    <div class="vpanels">
+      <section class="panel">
+        <div class="panel-h"><b>Details</b></div>
+        ${fact('Primary vendor', p.vendor_name ? esc(p.vendor_name) : unset)}
+        ${fact('Category', p.category ? esc(p.category) : unset)}
+        ${fact('Unit', p.unit ? esc(p.unit) : unset)}
+        ${fact('Pack size', p.pack_size ? esc(p.pack_size) : unset)}
+        ${fact('SKU', p.sku ? esc(p.sku) : unset)}
+        ${fact('Spend this month', money(p.spend_month))}
+        ${fact('Spend this year', money(p.spend_year))}
+        ${fact('First bought', p.first_on ? esc(niceDate(p.first_on)) : unset)}
+        ${p.notes ? `<div class="inv-notes">${esc(p.notes)}</div>` : ''}
+        ${spark}
+      </section>
+
+      <section class="panel">
+        <div class="panel-h"><b>Add a purchase</b><span class="panel-link muted">for anything not on an invoice</span></div>
+        <form method="post" action="/c/products/${p.id}/purchase" class="phist-add">
+          <div class="fld-row3">
+            <label class="fld">Date<input name="purchased_on" type="date" required value="${esc(args.today)}"></label>
+            <label class="fld">Quantity<input name="qty" type="number" step="0.01" min="0" placeholder="1"></label>
+            <label class="fld">Total paid<input name="total" type="number" step="0.01" min="0" required placeholder="0.00"></label>
+          </div>
+          <label class="fld">Vendor<select name="vendor_id">
+            <option value="">—</option>
+            ${vendors.map((x) => `<option value="${x.id}"${Number(p.vendor_id) === Number(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+          </select></label>
+          <button class="btn btn-primary btn-sm" type="submit">Add purchase</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="head-row"><h2>Purchase history</h2><span class="muted">${p.buys} record${p.buys === 1 ? '' : 's'}</span></div>
+    ${history.length ? `<div class="table-wrap"><table class="table">
+      <thead><tr><th>Date</th><th>Vendor</th><th>Invoice</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th><th></th></tr></thead>
+      <tbody>${histRows}</tbody></table></div>`
+      : `<div class="empty2"><div class="empty2-t">Nothing bought yet</div>
+          <div class="empty2-s">Import an invoice's lines, or add a purchase above.</div></div>`}
+
+    <div class="danger-zone">
+      <form method="post" action="/c/products/${p.id}/delete" onsubmit="return confirm('Delete ${esc(p.name)} and its purchase history?')">
+        <button class="btn btn-danger btn-sm" type="submit">Delete product</button>
+      </form>
+    </div>
+    ${productDrawer(vendors, p)}
+    <script>${productListScript()}</script>`));
+});
+
+app.post('/c/products/:id', (req, res) => {
+  const p = prodQ.one.get({ ...prodRollupArgs(), id: Number(req.params.id) });
+  if (!p) return res.status(404).end();
+  const name = (req.body.name || '').trim();
+  if (!name) return res.redirect(`/c/products/${p.id}?err=1&msg=` + encodeURIComponent('A product needs a name.'));
+  const clash = prodQ.byName.get(name);
+  if (clash && clash.id !== p.id) return res.redirect(`/c/products/${p.id}?err=1&msg=` + encodeURIComponent(`"${name}" is already tracked.`));
+  prodQ.update.run({
+    id: p.id, name, category: (req.body.category || '').trim() || null,
+    vendor_id: req.body.vendor_id ? Number(req.body.vendor_id) : null,
+    unit: (req.body.unit || '').trim() || null,
+    pack_size: (req.body.pack_size || '').trim() || null,
+    sku: (req.body.sku || '').trim() || null,
+    notes: (req.body.notes || '').trim() || null,
+  });
+  res.redirect(`/c/products/${p.id}?msg=` + encodeURIComponent('Saved.'));
+});
+
+app.post('/c/products/:id/delete', (req, res) => {
+  prodQ.del.run(Number(req.params.id));
+  res.redirect('/c/products?msg=' + encodeURIComponent('Product deleted.'));
+});
+
+app.post('/c/products/:id/purchase', (req, res) => {
+  const id = Number(req.params.id);
+  const total = toCents(req.body.total);
+  if (!total) return res.redirect(`/c/products/${id}?err=1&msg=` + encodeURIComponent('A purchase needs an amount.'));
+  const qty = Number(req.body.qty) > 0 ? Number(req.body.qty) : null;
+  prodQ.addPurchase.run({
+    product_id: id, invoice_id: null,
+    vendor_id: req.body.vendor_id ? Number(req.body.vendor_id) : null,
+    purchased_on: req.body.purchased_on || isoDate(startOfToday()),
+    qty, unit: null,
+    unit_price_cents: qty ? Math.round(total / qty) : total,
+    total_cents: total, raw_text: null,
+  });
+  res.redirect(`/c/products/${id}?msg=` + encodeURIComponent('Purchase added.'));
+});
+
+app.post('/c/products/purchase/:pid/delete', (req, res) => {
+  const row = db.prepare('SELECT product_id FROM product_purchases WHERE id = ?').get(Number(req.params.pid));
+  prodQ.delPurchase.run(Number(req.params.pid));
+  res.redirect(row ? `/c/products/${row.product_id}?msg=Removed.` : '/c/products');
+});
+
+// ---------------------------------------------------------------------------
+// IMPORT — invoice lines into products.
+//
+// Kept off the invoice page on purpose: invoices are an accounting record and
+// stay that way. This is a separate, reviewable step, because matching a
+// printed "TOM RMA 6/6" to a product called "Roma tomatoes" is a guess until
+// someone agrees with it. Nothing is written until the form is submitted.
+// ---------------------------------------------------------------------------
+app.get('/c/invoices/:id/import', (req, res) => {
+  const inv = invQ.one.get(Number(req.params.id));
+  if (!inv) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such invoice</div></div>'));
+  let lines = [];
+  try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { lines = []; }
+  const already = prodQ.purchasesForInvoice.all(inv.id);
+  const products = prodQ.plain.all();
+  const rows = reviewRows(lines, products);
+  const vendors = invQ.vendors.all();
+  const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
+
+  const head = `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t">
+        <a class="link back" href="/c/invoices">← Invoices</a>
+        <h1>Import products</h1>
+        <p class="phead-s">${esc(vName.get(Number(inv.vendor_id)) || 'Invoice')}${inv.invoice_number ? ' · ' + esc(inv.invoice_number) : ''}${inv.invoice_date ? ' · ' + esc(inv.invoice_date) : ''}</p>
+      </div>
+    </div>`;
+
+  if (already.length) {
+    return res.send(layout('Import products', `${head}
+      <div class="attn attn-ok"><div class="attn-h">${icon('policy')} Already imported</div>
+        <p>${already.length} line${already.length === 1 ? '' : 's'} from this invoice ${already.length === 1 ? 'is' : 'are'} in your product history.</p></div>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
+        <tbody>${already.map((a) => `<tr><td><a href="/c/products/${a.product_id}">${esc(a.name)}</a></td>
+          <td class="num">${a.qty || '—'}</td><td class="num">${a.unit_price_cents ? money(a.unit_price_cents) : '—'}</td>
+          <td class="num">${money(a.total_cents)}</td></tr>`).join('')}</tbody></table></div>
+      <form method="post" action="/c/invoices/${inv.id}/import/undo" class="danger-zone"
+        onsubmit="return confirm('Remove these purchases from your product history?')">
+        <button class="btn btn-danger btn-sm" type="submit">Undo this import</button></form>`));
+  }
+
+  if (!rows.length) {
+    return res.send(layout('Import products', `${head}
+      <div class="empty2"><div class="empty2-t">No line items on this invoice</div>
+        <div class="empty2-s">The reader either couldn't make out the item table, or this invoice was entered by hand. You can still add purchases from a product's own page.</div>
+        <a class="btn" href="/c/products">Go to Products</a></div>`));
+  }
+
+  const matched = rows.filter((r) => r.action === 'match').length;
+  const skipped = rows.filter((r) => r.action === 'skip').length;
+  const body = rows.map((r) => `
+    <div class="iline">
+      <div class="iline-l">
+        <div class="iline-d">${esc(r.desc)}</div>
+        <div class="iline-m">${r.qty ? `${r.qty}${r.unit ? ' ' + esc(r.unit) : ''} · ` : ''}${r.unit_price_cents ? money(r.unit_price_cents) + ' each · ' : ''}<b>${money(r.total_cents)}</b></div>
+      </div>
+      <div class="iline-r">
+        <select name="action_${r.i}" class="minisel iline-act">
+          <option value="match"${r.action === 'match' ? ' selected' : ''}${r.match ? '' : ' disabled'}>Add to existing</option>
+          <option value="create"${r.action === 'create' ? ' selected' : ''}>Create new product</option>
+          <option value="skip"${r.action === 'skip' ? ' selected' : ''}>Skip</option>
+        </select>
+        <select name="product_${r.i}" class="minisel">
+          ${products.map((p) => `<option value="${p.id}"${r.match && r.match.id === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>
+        <input type="hidden" name="desc_${r.i}" value="${esc(r.desc)}">
+        <input type="hidden" name="qty_${r.i}" value="${r.qty || ''}">
+        <input type="hidden" name="unit_${r.i}" value="${esc(r.unit || '')}">
+        <input type="hidden" name="total_${r.i}" value="${r.total_cents}">
+        <input type="hidden" name="price_${r.i}" value="${r.unit_price_cents || ''}">
+        ${r.match ? `<span class="iline-tag ok">matched ${esc(r.match.name)}</span>`
+          : r.fee ? '<span class="iline-tag fee">not a product</span>'
+          : '<span class="iline-tag new">new</span>'}
+      </div>
+    </div>`).join('');
+
+  res.send(layout('Import products', `${head}
+    <div class="attn attn-soft"><div class="attn-h">${icon('invoices')} ${rows.length} line${rows.length === 1 ? '' : 's'} read${matched ? `, ${matched} matched to products you already buy` : ''}${skipped ? `, ${skipped} look${skipped === 1 ? 's' : ''} like a charge rather than a product` : ''}</div>
+      <p>Check each one before importing. Nothing is saved until you press Import.</p></div>
+    <form method="post" action="/c/invoices/${inv.id}/import">
+      <input type="hidden" name="count" value="${rows.length}">
+      <div class="ilines">${body}</div>
+      <div class="stickybar">
+        <a class="btn btn-ghost" href="/c/invoices">Cancel</a>
+        <button class="btn btn-primary" type="submit">Import ${rows.length - skipped} line${rows.length - skipped === 1 ? '' : 's'}</button>
+      </div>
+    </form>`));
+});
+
+app.post('/c/invoices/:id/import', (req, res) => {
+  const inv = invQ.one.get(Number(req.params.id));
+  if (!inv) return res.status(404).end();
+  if (prodQ.purchasesForInvoice.all(inv.id).length) {
+    return res.redirect(`/c/invoices/${inv.id}/import?err=1&msg=` + encodeURIComponent('That invoice was already imported.'));
+  }
+  const n = Number(req.body.count) || 0;
+  const vendorId = inv.vendor_id ? Number(inv.vendor_id) : null;
+  const on = inv.invoice_date || isoDate(startOfToday());
+
+  const run = db.transaction(() => {
+    let added = 0, created = 0;
+    for (let i = 0; i < n; i++) {
+      const action = req.body[`action_${i}`];
+      if (action !== 'match' && action !== 'create') continue;
+      const desc = (req.body[`desc_${i}`] || '').trim();
+      const total = Number(req.body[`total_${i}`]) || 0;
+      if (!desc && action === 'create') continue;
+
+      let productId;
+      if (action === 'create') {
+        // Someone may have created it a moment ago on another line, or it may
+        // already exist under exactly this name — reuse rather than collide
+        // with the unique index on name.
+        const existing = prodQ.byName.get(desc);
+        productId = existing ? existing.id : prodQ.add.run({
+          name: desc, category: inv.category === 'Food' ? null : inv.category || null,
+          vendor_id: vendorId, unit: (req.body[`unit_${i}`] || '').trim() || null,
+          pack_size: null, sku: null, notes: null,
+        }).lastInsertRowid;
+        if (!existing) created++;
+      } else {
+        productId = Number(req.body[`product_${i}`]);
+        if (!productId) continue;
+      }
+      const qty = Number(req.body[`qty_${i}`]) > 0 ? Number(req.body[`qty_${i}`]) : null;
+      const price = Number(req.body[`price_${i}`]) > 0 ? Number(req.body[`price_${i}`])
+        : qty && total ? Math.round(total / qty) : null;
+      prodQ.addPurchase.run({
+        product_id: productId, invoice_id: inv.id, vendor_id: vendorId,
+        purchased_on: on, qty, unit: (req.body[`unit_${i}`] || '').trim() || null,
+        unit_price_cents: price, total_cents: total, raw_text: desc,
+      });
+      added++;
+    }
+    db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(inv.id);
+    return { added, created };
+  });
+  const { added, created } = run();
+  res.redirect('/c/products?msg=' + encodeURIComponent(
+    `Imported ${added} line${added === 1 ? '' : 's'}${created ? `, ${created} new product${created === 1 ? '' : 's'}` : ''}.`));
+});
+
+app.post('/c/invoices/:id/import/undo', (req, res) => {
+  const id = Number(req.params.id);
+  prodQ.clearInvoice.run(id);
+  db.prepare('UPDATE m_invoices SET lines_imported = NULL WHERE id = ?').run(id);
+  // Products the import created are left alone. One may have been renamed or
+  // categorised since, and deleting someone's work to tidy up is the worse
+  // mistake — the "Never bought" filter on Products finds any strays.
+  res.redirect(`/c/invoices/${id}/import?msg=` + encodeURIComponent(
+    'Import undone. Any products it created are still listed, now with no purchases.'));
 });
 
 

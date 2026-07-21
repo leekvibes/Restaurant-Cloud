@@ -119,6 +119,26 @@ const INVOICE_SCHEMA = {
     category: { type: 'string', enum: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Supplies', 'Repairs', 'Services', 'Other'] },
     notes: { type: 'string', description: 'One short line: what was bought, or anything unusual like a handwritten adjustment' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low if the image is unclear or the totals are ambiguous' },
+    // Line items feed the Products section. Not in `required` on purpose: a
+    // photo can be legible enough to trust the total and too creased to read
+    // the middle of the table, and an empty list is a better answer than a
+    // guessed one — the invoice still saves, there's just nothing to import.
+    line_items: {
+      type: 'array',
+      description: 'Every product line on the invoice. Empty if the lines cannot be read clearly.',
+      items: {
+        type: 'object',
+        properties: {
+          description: { type: 'string', description: 'The product as printed, e.g. "TOMATO ROMA 25LB"' },
+          qty: { type: 'number', description: 'Quantity billed. 0 if not shown.' },
+          unit: { type: 'string', description: 'case, lb, each, gal — as printed. "" if not shown.' },
+          unit_price: { type: 'number', description: 'Price for one unit. 0 if not shown.' },
+          total: { type: 'number', description: 'Extended line total as printed.' },
+        },
+        required: ['description', 'total'],
+        additionalProperties: false,
+      },
+    },
   },
   required: ['vendor_name', 'total', 'category', 'confidence'],
   additionalProperties: false,
@@ -133,6 +153,9 @@ const INVOICE_PROMPT =
   'Beer, wine, spirits → Alcohol. Paper goods, cleaning, to-go containers → Supplies. Repairs and maintenance → Repairs. Pest control, linen, services → Services.\n' +
   'If the invoice is mixed, choose the category covering the largest share and say so in notes.\n' +
   'CONFIDENCE: use "low" if the image is blurry or cut off, or if you had to choose between competing totals. Say why in notes.\n' +
+  'LINE ITEMS: list every product line, using the description exactly as printed — abbreviations and all. ' +
+  'Skip anything that is not a product: delivery charges, fuel surcharges, fees, deposits, subtotal, tax and total rows. ' +
+  'If a line is unreadable, leave it out rather than guessing at it. Return an empty list if the table cannot be read.\n' +
   'If several pages are provided they are one invoice — merge them.';
 
 /**
@@ -189,6 +212,11 @@ async function readInvoice(files) {
   // A credit memo reduces what you owe, so it belongs in the ledger as negative.
   if (data.is_credit) {
     for (const k of ['subtotal', 'tax', 'total']) if (data[k] > 0) data[k] = -data[k];
+    // The lines go negative too, or returning a case of tomatoes would read as
+    // buying one more and push the average price the wrong way.
+    for (const l of data.line_items || []) {
+      if (l.total > 0) l.total = -l.total;
+    }
   }
   return data;
 }

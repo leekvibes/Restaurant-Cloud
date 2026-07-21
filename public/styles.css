@@ -1375,3 +1375,79 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
 }
 .fd-x { font-size: 11px; font-weight: 650; color: var(--muted); background: var(--surface-3);
   border-radius: 5px; padding: 1px 5px; margin-left: 4px; }
+
+/* ===========================================================================
+   PRODUCTS — purchasing intelligence. Rows are wide and fact-dense on the
+   desktop, and fold into a stacked card on a phone.
+   ======================================================================== */
+.insights { background: linear-gradient(160deg, var(--primary-50), var(--surface) 62%);
+  border: 1px solid var(--primary-200); border-radius: var(--radius-lg); padding: 15px 18px; margin-bottom: 18px; }
+.ins-h { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 700;
+  color: var(--primary-700); letter-spacing: -.01em; }
+.ins-h svg { width: 16px; height: 16px; }
+.ins-list { margin: 9px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.ins-list li { position: relative; padding-left: 17px; font-size: 13.5px; line-height: 1.5; color: var(--ink-2); }
+.ins-list li::before { content: ''; position: absolute; left: 3px; top: 8px; width: 5px; height: 5px;
+  border-radius: 50%; background: var(--primary); }
+.ins-list b { font-weight: 650; color: var(--ink); }
+
+.pitems { display: grid; gap: 8px; }
+.pitem { display: flex; align-items: center; gap: 16px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 13px 16px; transition: border-color .16s, transform .16s, box-shadow .16s; }
+.pitem:hover { text-decoration: none; border-color: var(--primary-200); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.pitem-main { flex: 1 1 210px; min-width: 0; }
+.pitem-n { display: block; font-size: 14.5px; font-weight: 650; color: var(--ink); letter-spacing: -.015em; }
+.pitem-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; font-size: 12.5px; color: var(--muted); }
+.pitem-v.unset { font-style: italic; color: var(--faint); }
+.pitem-u { color: var(--faint); }
+.pchip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 650;
+  color: var(--c); background: var(--ct); border: 1px solid color-mix(in srgb, var(--c) 22%, transparent); }
+.pitem-f { display: flex; align-items: center; gap: 20px; flex-shrink: 0; }
+.pf { display: grid; min-width: 0; }
+.pf i { font-style: normal; font-size: 10.5px; font-weight: 650; color: var(--faint);
+  text-transform: uppercase; letter-spacing: .04em; }
+.pf b { font-size: 13.5px; font-weight: 650; color: var(--ink); letter-spacing: -.015em; margin-top: 1px; }
+.pitem-go { color: var(--faint); font-size: 17px; flex-shrink: 0; }
+
+.tr { display: inline-block; font-size: 12px; font-weight: 700; }
+.tr-up   { color: var(--danger); }
+.tr-down { color: var(--ok); }
+.tr-flat { color: var(--muted); font-weight: 600; }
+.tr-none { color: var(--faint); }
+
+.spark { margin-top: 14px; }
+.spark svg { width: 100%; height: 46px; display: block; }
+.spark-l { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); margin-top: 4px; }
+
+.phist-add { display: grid; gap: 10px; }
+.phist-add .btn { justify-self: start; }
+
+/* --- invoice line import review --- */
+.ilines { display: grid; gap: 8px; margin-bottom: 18px; }
+.iline { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 15px; }
+.iline-l { flex: 1 1 240px; min-width: 0; }
+.iline-d { font-size: 13.5px; font-weight: 620; color: var(--ink); overflow-wrap: anywhere; }
+.iline-m { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.iline-m b { color: var(--ink); font-weight: 650; }
+.iline-r { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.iline-r .minisel { min-width: 132px; }
+.iline-tag { font-size: 11.5px; font-weight: 650; padding: 2px 8px; border-radius: 999px; }
+.iline-tag.ok  { background: var(--ok-bg); color: #065f46; }
+.iline-tag.new { background: var(--primary-100); color: var(--primary-700); }
+
+@media (max-width: 900px) {
+  .pitem { flex-wrap: wrap; gap: 10px 14px; }
+  .pitem-f { width: 100%; gap: 0; display: grid; grid-template-columns: repeat(3, 1fr); row-gap: 10px; }
+  .pitem-go { display: none; }
+  .pf-w { grid-column: span 3; }
+}
+@media (max-width: 560px) {
+  /* Two columns, and the date stops spanning — spanning left an empty cell
+     beside "Spent" and made each product a screen and a half tall. */
+  .pitem-f { grid-template-columns: repeat(2, 1fr); }
+  .pf-w { grid-column: auto; }
+  .iline-r { width: 100%; }
+  .iline-r .minisel { flex: 1; min-width: 0; }
+}
+.iline-tag.fee { background: var(--surface-3); color: var(--muted); }
