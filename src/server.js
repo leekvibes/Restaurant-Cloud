@@ -613,24 +613,33 @@ app.get('/', (req, res) => {
   const shiftSeries = withSales.slice(-12);
   const avgWage = withSales.length ? Math.round(p30.wages / withSales.length) : null;
 
-  const kpi = (label, value, sub, series, opts = {}) => `
-    <div class="kpi">
-      <div class="kpi-h"><span class="kpi-l">${label}</span>${opts.chip || ''}</div>
-      <div class="kpi-v">${value}</div>
-      <div class="kpi-f"><span class="kpi-s">${sub}</span>${series && series.length >= 3 ? CH.spark(series, { width: 74, height: 22, invert: opts.invert }) : ''}</div>
-    </div>`;
-  const kpiBand = p30 && withSales.length ? `<div class="kpis">
-    ${kpi('Last service', money(lastShift.sales),
-      `${whenOf(lastShift.date, lastShift.daypart)}`, shiftSeries.map((r) => r.sales))}
-    ${kpi('Average per service', money(p30.avgShift),
-      `${withSales.length} service${withSales.length === 1 ? '' : 's'}, 30 days`, shiftSeries.map((r) => r.sales))}
-    ${kpi('Wage cost per service', avgWage === null ? '—' : money(avgWage),
-      p30.laborPct === null ? 'no sales to compare' : `${p30.laborPct}% of sales`,
-      shiftSeries.map((r) => r.wages), { invert: true })}
-    ${kpi('Sales per labor hour', p30.salesPerHour === null ? '—' : money(p30.salesPerHour),
-      p30.hours ? `${Math.round(p30.hours)} hours worked` : 'no hours entered',
-      shiftSeries.filter((r) => r.hours > 0).map((r) => Math.round(r.sales / r.hours)))}
-  </div>` : '';
+  // Three of the four cards here were "average per service", "wage cost per
+  // service" and "sales per labor hour" — which are the questions the Sales
+  // and Performance pages exist to answer. On a dashboard they were 262px of
+  // numbers nobody acts on before breakfast. What survives is the one thing
+  // that IS a dashboard question: how did the last service go.
+  // Four figures across a 375px phone gives each about 73px, and $6,176.25
+  // wants 78. Rather than shrink the type until a five-figure day breaks it,
+  // summary figures drop the cents above $1,000 — the convention every finance
+  // app uses for a glance view — and carry the exact number in the title.
+  // Nothing that reconciles uses this; it is display only.
+  const brief = (cents) => (Math.abs(cents) >= 100000
+    ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
+  const cell = (label, value, exact, sub) => `<div class="dstrip-c"><i>${label}</i>
+    <b${exact ? ` title="${esc(exact)}"` : ''}>${value}</b>${sub ? `<u>${sub}</u>` : ''}</div>`;
+  const lastCell = (label, cents) => cell(label, cents ? brief(cents) : '—', cents ? money(cents) : '');
+  const lastBand = lastShift ? `
+    <section class="dstrip">
+      <div class="dstrip-h"><h2>Last service</h2>
+        ${may('shifts') ? `<a class="link" href="/shifts/${lastShift.id}">${esc(whenOf(lastShift.date, lastShift.daypart))} →</a>`
+          : `<span class="muted">${esc(whenOf(lastShift.date, lastShift.daypart))}</span>`}</div>
+      <div class="dstrip-r">
+        ${lastCell('Sales', lastShift.sales)}
+        ${lastCell('Tips', lastShift.tips)}
+        ${cell('Hours', lastShift.hours ? Math.round(lastShift.hours) : '—')}
+        ${cell('Staff', lastShift.people || '—')}
+      </div>
+    </section>` : '';
 
   // --- rendering: the business snapshot ------------------------------------
   const pct1 = (v) => (v === null || v === undefined ? '—' : (Math.round(v * 10) / 10) + '%');
@@ -638,39 +647,28 @@ app.get('/', (req, res) => {
   // logged", not "the food was free". Printing 0% food cost, and a prime cost
   // that is really just labor, would read as good news.
   const hasCogs = p7 && p7.cogs > 0;
-  const snapCard = (label, value, sub, series, opts = {}) => `
-    <div class="bsnap">
-      <div class="bsnap-l">${label}</div>
-      <div class="bsnap-v">${value}</div>
-      <div class="bsnap-f">${sub}${series && series.length >= 3 ? CH.spark(series, { width: 56, height: 18, invert: opts.invert }) : ''}</div>
-    </div>`;
-  const snapshot = p7 && seeCosts ? `<div class="bsnaps">
-    ${snapCard('Sales this week', money(p7.sales), CH.delta(p7.sales, prev7.sales), sparkOf((w) => w.sales))}
-    ${snapCard('Labor', pct1(p7.laborPct), p7.laborPct === null ? 'no sales yet' : 'wages ÷ sales',
-      sparkOf((w) => w.laborPct), { invert: true })}
-    ${snapCard('Food cost', hasCogs ? pct1(p7.foodPct) : '—', hasCogs ? 'invoices ÷ sales' : 'no invoices logged',
-      sparkOf((w) => w.foodPct), { invert: true })}
-    ${snapCard('Prime cost', hasCogs ? pct1(p7.primePct) : '—', hasCogs ? 'labor + goods' : 'needs invoices',
-      sparkOf((w) => w.primePct), { invert: true })}
-    ${snapCard('Gross profit', hasCogs ? money(p7.grossProfit) : '—', hasCogs ? 'after wages and goods' : 'needs invoices',
-      hasCogs ? sparkOf((w) => w.profit) : null)}
-    ${snapCard('Invoices this week', money(p7.invoiceTotal), `${p7.invoices.length} logged`, sparkOf((w) => w.cogs), { invert: true })}
-  </div>` : '';
+  // Six 60px cards down the page became one row. The sparkline that mattered
+  // — the week's sales shape — stays; five more of them were decoration.
 
-  // --- rendering: charts ---------------------------------------------------
-  const dayTick = (d) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
-  // Sales and labor share one money axis. A second axis would let the two
-  // lines be scaled independently, which is how a labor problem gets drawn to
-  // look like a good week.
-  const salesChart = daily.length >= 2 ? CH.lineChart([
-    { label: 'Sales', values: daily.map((d) => ({ x: dayTick(d.date), y: d.sales })), color: '#2563eb', area: true },
-    { label: 'Wages', values: daily.map((d) => ({ x: dayTick(d.date), y: d.wages })), color: '#d97706', area: true },
-  ], { height: 190, empty: 'No shifts in the last 30 days' }) : '';
-  const invWeeks = seeCosts ? MX.invoiceWeeks(from56, toStr) : [];
-  const invChart = invWeeks.length ? CH.barChart(
-    invWeeks.map((w) => ({ x: dayTick(w.week), y: w.cents })), { height: 150, color: '#0891b2' }) : '';
+  const weekBand = p7 && seeCosts ? `
+    <section class="dstrip">
+      <div class="dstrip-h"><h2>This week</h2>
+        ${may('costs') ? '<a class="link" href="/costs">Performance →</a>' : ''}</div>
+      <div class="dstrip-r">
+        ${cell('Sales', brief(p7.sales), money(p7.sales), CH.delta(p7.sales, prev7.sales))}
+        ${cell('Labor', pct1(p7.laborPct), '', p7.laborPct === null ? 'no sales' : 'of sales')}
+        ${cell('Food', hasCogs ? pct1(p7.foodPct) : '—', '', hasCogs ? 'of sales' : 'no invoices')}
+        ${cell('Prime', hasCogs ? pct1(p7.primePct) : '—', '', hasCogs ? 'labor + goods' : 'needs invoices')}
+      </div>
+      ${sparkOf((w) => w.sales).length >= 3 ? `<div class="dstrip-spark">${CH.lineChart(
+        [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v, i) => ({ x: '', y: v })), area: true }],
+        { height: 54, empty: '' })}</div>` : ''}
+    </section>` : '';
 
-  // --- rendering: needs attention, by severity -----------------------------
+  // --- rendering: what needs doing -----------------------------------------
+  // The heart of the page. Grouped by how much it matters, and the only pile
+  // that collapses is the informational one — a critical item that needs a
+  // click to be seen is not an alert.
   const nitem = (a) => `
     <a class="nitem" href="${a.href}">
       <span class="nitem-ico ${a.tone}">${icon(a.ico)}</span>
@@ -683,89 +681,31 @@ app.get('/', (req, res) => {
       const list = attn.filter((a) => a.tone === tone);
       if (!list.length) return '';
       const head = `<div class="ngrp"><span class="ngrp-dot ${tone}"></span>${label}<span class="ngrp-n">${list.length}</span></div>`;
-      // Only the informational pile is worth collapsing; a critical item that
-      // needs a click to be seen is not an alert.
-      if (tone === 'blue' && list.length > 4) {
-        return `${head}<div class="nlist">${list.slice(0, 4).map(nitem).join('')}</div>
-          <details class="nrest"><summary>${list.length - 4} more</summary>
-            <div class="nlist">${list.slice(4).map(nitem).join('')}</div></details>`;
-      }
-      return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
+      // Critical is never folded — an alert that needs a tap to be seen is not
+      // an alert. Everything below it opens on request, which is the
+      // difference between a page you scan and a page you scroll.
+      if (tone === 'red') return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
+      const shown = tone === 'amber' ? 2 : 0;
+      if (list.length <= shown) return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
+      return `${head}${shown ? `<div class="nlist">${list.slice(0, shown).map(nitem).join('')}</div>` : ''}
+        <details class="nrest"><summary>${list.length - shown} more</summary>
+          <div class="nlist">${list.slice(shown).map(nitem).join('')}</div></details>`;
     }).join('')
     : `<div class="all-clear">✓ Nothing needs your attention right now.</div>`;
 
-  // --- rendering: recent services ------------------------------------------
-  // Richer than a date and a total: what it sold, what it cost in wages, what
-  // the drawer did. Enough to know whether a service was worth having open.
-  const cashByShift = new Map();
-  if (may('cash')) for (const r of CASH.q.recent.all()) cashByShift.set(`${r.date}|${r.daypart}`, r);
-  const recentRows = may('shifts') ? dashQ.recent.all(6).map((x) => {
-    const st = stateOf(x);
-    const sales = shiftSales(x);
-    const labor = sales > 0 ? Math.round((x.wage_cents / sales) * 1000) / 10 : null;
-    const cr = cashByShift.get(`${x.date}|${x.daypart}`);
-    const cs = cr ? CASH.status(cr) : null;
-    return `<a class="srow" href="/shifts/${x.id}">
-      <span class="srow-d"><b>${Number(x.date.slice(8, 10))}</b><i>${MONTHS[Number(x.date.slice(5, 7)) - 1].slice(0, 3)}</i></span>
-      <span class="srow-svc">${svc(x)}<span class="pill ${st.cls}">${st.label}</span></span>
-      <span class="srow-n"><i>Sales</i><b>${sales ? money(sales) : '—'}</b></span>
-      <span class="srow-n"><i>Tips</i><b>${x.tips ? money(x.tips) : '—'}</b></span>
-      <span class="srow-n"><i>Labor</i><b>${labor === null ? '—' : labor + '%'}</b></span>
-      <span class="srow-n wide"><i>Drawer</i><b class="${cs ? 'c-' + cs.key : ''}">${cs ? esc(cs.label) : '—'}</b></span>
-      <span class="srow-go">›</span>
-    </a>`;
-  }).join('') : '';
-
-  // --- rendering: insights -------------------------------------------------
-  // Everything here is computed and every line says what it was computed
-  // from. The panel is where model-written observations will land, which is
-  // exactly why the arithmetic ones have to be checkable now.
-  const ins = [];
-  const insight = (tone, text, href) => ins.push({ tone, text, href });
-  if (seeShifts && p7 && prev7 && prev7.sales > 0) {
-    const d = ((p7.sales - prev7.sales) / prev7.sales) * 100;
-    if (Math.abs(d) >= 3) insight(d > 0 ? 'good' : 'bad',
-      `Sales ${d > 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}% on the previous week, ${money(p7.sales)} against ${money(prev7.sales)}.`, '/sales');
-  }
-  if (seeCosts && weekly.length >= 2) {
-    const [a, b] = [weekly[weekly.length - 2], weekly[weekly.length - 1]];
-    if (a.laborPct !== null && b.laborPct !== null && Math.abs(b.laborPct - a.laborPct) >= 1.5) {
-      const up = b.laborPct > a.laborPct;
-      insight(up ? 'bad' : 'good',
-        `Labor ${up ? 'rose' : 'fell'} to ${pct1(b.laborPct)} of sales, from ${pct1(a.laborPct)} the week before.`, '/costs');
-    }
-    if (a.primePct !== null && b.primePct !== null && Math.abs(b.primePct - a.primePct) >= 1.5) {
-      const up = b.primePct > a.primePct;
-      insight(up ? 'bad' : 'good', `Prime cost ${up ? 'up' : 'improved'} to ${pct1(b.primePct)} from ${pct1(a.primePct)}.`, '/costs');
-    }
-  }
-  if (seeShifts && daily.length) {
-    const best = daily.filter((d) => d.had).sort((a, b) => b.sales - a.sales)[0];
-    if (best && best.sales > 0) insight('flat',
-      `Best day in the last 30 was ${whenOf(best.date)} at ${money(best.sales)}.`, '/sales');
-  }
-  if (may('trackers')) {
-    // The query buckets spend by month and year, so it needs both anchors
-    // even though the mover list only reads last vs prior price.
-    const movers = prodQ.all.all({ from_month: toStr.slice(0, 8) + '01', from_year: toStr.slice(0, 4) + '-01-01' })
-      .map((p) => ({ p, t: trendOf(p) }))
-      .filter((x) => x.t !== null && Math.abs(x.t) >= 10)
-      .sort((a, b) => Math.abs(b.t) - Math.abs(a.t))
-      .slice(0, 2);
-    for (const m of movers) {
-      insight(m.t > 0 ? 'bad' : 'good',
-        `${m.p.name} ${m.t > 0 ? 'up' : 'down'} ${Math.abs(m.t)}% — ${money(m.p.prior_price)} to ${money(m.p.last_price)}.`,
-        `/c/products/${m.p.id}`);
-    }
-  }
-  if (may('menu')) {
-    const over = MENU.overTargetCount();
-    if (over) insight('bad',
-      `${over} menu item${over === 1 ? '' : 's'} cost${over === 1 ? 's' : ''} more than target.`, '/menu');
-  }
-  const insBlock = ins.length
-    ? `<div class="dins">${ins.slice(0, 5).map((i) => `<a class="din din-${i.tone}" href="${i.href}"><span class="din-d"></span>${i.text}</a>`).join('')}</div>`
-    : '<div class="all-clear">Not enough history yet to compare anything.</div>';
+  // Recent services, the sales/labor chart, the invoice chart and the insights
+  // panel all came off this page. Not deleted — every one of them is the whole
+  // point of a page that already exists:
+  //
+  //   recent services   -> /shifts, which lists them with more detail
+  //   sales and labor   -> /costs, same two series on one money axis
+  //   invoice spend     -> /costs and /c/invoices
+  //   insights          -> /costs "What's driving performance" computes the
+  //                        same labour, prime and sales comparisons; product
+  //                        movers are on /c/products, menu margin on /menu
+  //
+  // Together they were roughly 1,400px of a 3,800px page restating other
+  // pages. A dashboard that repeats every page is not a dashboard.
 
   // --- rendering: upcoming --------------------------------------------------
   const soonBlock = soon.length
@@ -783,10 +723,12 @@ app.get('/', (req, res) => {
     { href: '/c/vendors', ico: 'vendors', label: 'Add a vendor', blurb: 'Contacts, terms and where the login lives', feat: 'trackers' },
     { href: '/c/incidents', ico: 'incidents', label: 'Log an incident', blurb: 'Write it down while it is fresh', feat: 'trackers' },
   ].filter((a) => may(a.feat));
+  // A grid of targets rather than a list of paragraphs. The blurb explained
+  // what "Log a shift" means to somebody who has logged four hundred of them,
+  // and cost 70px a row to do it. It survives as the tooltip.
   const actions = canWrite && ACTIONS.length
-    ? `<div class="qacts">${ACTIONS.map((a) => `<a class="qact" href="${a.href}">
-        <span class="qact-ico">${icon(a.ico)}</span>
-        <span class="qact-m"><b>${a.label}</b><i>${a.blurb}</i></span></a>`).join('')}</div>`
+    ? `<div class="qgrid">${ACTIONS.map((a) => `<a class="qg" href="${a.href}" title="${esc(a.blurb)}">
+        <span class="qg-ico">${icon(a.ico)}</span><b>${esc(a.label)}</b></a>`).join('')}</div>`
     : '';
 
   // --- rendering: activity --------------------------------------------------
@@ -825,7 +767,8 @@ app.get('/', (req, res) => {
     }
     if (events.length >= 24) break;   // room to group before trimming
   }
-  const feedRows = events.slice(0, 10).map((r) => {
+  // Five. Ten was a log, and the page already has somewhere to read the log.
+  const feedRows = events.slice(0, 5).map((r) => {
     const f = FEED[r.kind](r);
     const inner = `<span class="fd-ico">${icon(f.ico)}</span><span class="fd-t">${f.text}</span><span class="fd-w">${ago(r.at, now)}</span>`;
     return f.href ? `<a class="fd" href="${f.href}">${inner}</a>` : `<div class="fd">${inner}</div>`;
@@ -850,9 +793,8 @@ app.get('/', (req, res) => {
   const bodyHtml = `
     ${flash(req)}
     <header class="dhead">
-      <div>
-        <div class="dhead-hi">${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</div>
-        <h1>${esc(RESTAURANT)}</h1>
+      <div class="dhead-l">
+        <h1>${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</h1>
         <p class="dhead-d">${now.toLocaleDateString('en-US', DASH_DATE)}</p>
       </div>
       <div class="dhead-st ${openToday.length ? 'live' : bad ? 'warn' : 'calm'}">
@@ -860,21 +802,13 @@ app.get('/', (req, res) => {
       </div>
     </header>
     ${todayBlock}
-    ${kpiBand}
     <div class="dash">
-      <div class="dash-main">
-        ${sec(`Needs attention${attn.length ? ` <span class="cnt">${attn.length}</span>` : ''}`, attnBlock)}
-        ${sec('This week', snapshot, may('costs') ? '<a class="link" href="/costs">Performance →</a>' : '')}
-        ${sec('Sales and labor', salesChart, '<a class="link" href="/sales">Sales →</a>', 'dsec-chart')}
-        ${sec('Recent services', recentRows && `<div class="srows">${recentRows}</div>`, '<a class="link" href="/shifts">View all →</a>')}
-        ${sec('Invoice spend by week', invChart, '<a class="link" href="/c/invoices">Invoices →</a>', 'dsec-chart')}
-      </div>
-      <aside class="dash-side">
-        ${sec('Quick actions', actions)}
-        ${sec('Upcoming', soonBlock)}
-        ${sec('Insights', insBlock)}
-        ${sec('Recent activity', feed)}
-      </aside>
+      ${sec(`Needs attention${attn.length ? ` <span class="cnt">${attn.length}</span>` : ''}`, attnBlock)}
+      ${lastBand}
+      ${weekBand}
+      ${soon.length ? sec('Coming up', soonBlock) : ''}
+      ${sec('Quick actions', actions)}
+      ${sec('Recent activity', feed, '<a class="link" href="/activity">View all →</a>')}
     </div>`;
   res.send(layout('Dashboard', bodyHtml));
 });
@@ -3595,19 +3529,39 @@ app.get('/sales', (req, res) => {
         <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div>
       ${spark ? `<div class="mcard-spark">${spark}</div>` : ''}</div>`;
 
-  const cards = `<div class="mcards mcards-3">
-    ${kpi('blue', 'sales', 'Total sales', money(sales),
-      `${CH.delta(sales, svc ? prev.rows.filter((x) => x.daypart === svc).reduce((a, x) => a + x.sales, 0) : prev.sales)} vs the period before`,
-      CH.spark(series.map((d) => d.sales)))}
-    ${kpi('green', 'cash', 'Average day', avgDaily === null ? '—' : money(avgDaily),
-      byDay.size ? `over ${byDay.size} day${byDay.size === 1 ? '' : 's'} traded` : 'nothing traded yet')}
-    ${kpi('violet', 'costs', 'Best day', best ? money(best[1]) : '—',
-      best ? `${weekday(best[0])} ${best[0].slice(5)}` : 'nothing yet')}
-    ${kpi('amber', 'expirations', 'Quietest day', worst && dayList.length > 1 ? money(worst[1]) : '—',
-      worst && dayList.length > 1 ? `${weekday(worst[0])} ${worst[0].slice(5)}` : 'need more days')}
-    ${kpi('green', 'tips', 'Tips collected', money(tips), tips ? 'across the same period' : 'none reported')}
-    ${kpi('blue', 'shifts', 'Average ticket', '—', 'comes with the POS')}
-  </div>`;
+  // One headline, then the supporting figures as a strip. Six equal cards made
+  // the reader decide which of six was the answer; "what happened" has one.
+  // The "Average ticket — comes with the POS" card is gone: a card whose value
+  // is a dash and whose subtitle is a roadmap earns nothing, and the POS
+  // section at the foot of the page already says what is coming.
+  const prevSales = svc ? prev.rows.filter((x) => x.daypart === svc).reduce((a, x) => a + x.sales, 0) : prev.sales;
+  const brief = (cents) => (Math.abs(cents) >= 100000
+    ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
+  const scell = (label, value, exact, sub) => `<div class="dstrip-c"><i>${label}</i>
+    <b${exact ? ` title="${esc(exact)}"` : ''}>${value}</b>${sub ? `<u>${sub}</u>` : ''}</div>`;
+  // Per service divides by services that HAVE figures. A logged-but-unfilled
+  // service would otherwise halve it and make every night look worse.
+  const perService = traded.length ? Math.round(sales / traded.length) : null;
+
+  const cards = `
+    <section class="shero">
+      <div class="shero-top">
+        <div class="shero-n">
+          <div class="shero-v" title="${esc(money(sales))}">${brief(sales)}</div>
+          <div class="shero-l">total sales ${CH.delta(sales, prevSales)} <span>vs the period before</span></div>
+        </div>
+        ${series.length >= 3 ? `<div class="shero-spark">${CH.spark(series.map((d) => d.sales), { width: 120, height: 40 })}</div>` : ''}
+      </div>
+      <div class="dstrip-r shero-r">
+        ${scell('Average day', avgDaily === null ? '—' : brief(avgDaily), avgDaily === null ? '' : money(avgDaily),
+          byDay.size ? `${byDay.size} day${byDay.size === 1 ? '' : 's'} traded` : 'nothing traded')}
+        ${scell('Per service', perService === null ? '—' : brief(perService), perService === null ? '' : money(perService),
+          traded.length ? `${traded.length} service${traded.length === 1 ? '' : 's'}` : 'none with figures')}
+        ${scell('Best day', best ? brief(best[1]) : '—', best ? money(best[1]) : '',
+          best ? `${weekday(best[0])} ${best[0].slice(5)}` : 'nothing yet')}
+        ${scell('Tips', tips ? brief(tips) : '—', tips ? money(tips) : '', tips ? 'collected' : 'none reported')}
+      </div>
+    </section>`;
 
   // --- revenue mix ----------------------------------------------------------
   const m = svc
@@ -3631,7 +3585,6 @@ app.get('/sales', (req, res) => {
   // --- highlights: only things the data actually supports -------------------
   const hi = [];
   if (best) hi.push(`🏆 Best day was <b>${weekday(best[0])} ${best[0].slice(5)}</b> at <b>${money(best[1])}</b>.`);
-  const prevSales = svc ? prev.rows.filter((x) => x.daypart === svc).reduce((a, x) => a + x.sales, 0) : prev.sales;
   if (prevSales > 0) {
     const d = ((sales - prevSales) / prevSales) * 100;
     hi.push(`${d >= 0 ? '📈' : '📉'} Sales are <b>${d >= 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}%</b> on the period before.`);

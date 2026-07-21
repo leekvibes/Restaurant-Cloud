@@ -93,22 +93,28 @@ async function account(email, role, features) {
 
 // --- the figures ------------------------------------------------------------
 
-test('the headline figures come from completed services, not from today', async () => {
+// These three moved to /sales and /costs with the pages they belong to — a
+// dashboard answers "what needs me today", and an average per service is a
+// question about a period, not about this morning. The arithmetic they guard
+// is unchanged, so they follow the numbers rather than being deleted with the
+// cards that used to show them.
+
+test('per-service figures come from completed services, not from today', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
-  const html = await page(owner);
+  const sales = await (await as(owner, '/sales?r=30')).text();
+  const perf = await (await as(owner, '/costs?r=30')).text();
 
   // Every seeded service is closed and today has none, so an average that
   // included today would be diluted by an empty service.
-  assert.match(html, /Average per service[\s\S]{0,220}\$1,250\.00/,
+  assert.match(sales, /Per service[\s\S]{0,260}\$1,250/,
     'seven at $1,000 and seven at $1,500 average $1,250');
-  assert.match(html, /Wage cost per service[\s\S]{0,220}\$200\.00/, '10 hours at $20');
-  assert.match(html, /Sales per labor hour[\s\S]{0,220}\$125\.00/, '$1,250 over 10 hours');
+  assert.match(perf, /Sales per labor hour[\s\S]{0,260}\$125\.00/, '$1,250 over 10 hours');
 });
 
 test('an unfilled service does not drag the average down', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
-  const before = await page(owner);
-  assert.match(before, /Average per service[\s\S]{0,220}\$1,250\.00/);
+  const before = await (await as(owner, '/sales?r=30')).text();
+  assert.match(before, /Per service[\s\S]{0,260}\$1,250/);
 
   // A service logged but never filled in. It is a real row, and counting it
   // as a $0 service would report every night as worse than it was.
@@ -116,12 +122,29 @@ test('an unfilled service does not drag the average down', async () => {
   w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(back(2));
   w.close();
 
-  const after = await page(owner);
-  assert.match(after, /Average per service[\s\S]{0,220}\$1,250\.00/, 'the average is unchanged');
+  const after = await (await as(owner, '/sales?r=30')).text();
+  assert.match(after, /Per service[\s\S]{0,260}\$1,250/, 'the average is unchanged');
 
   const back2 = new Database(DB);
   back2.prepare("DELETE FROM shifts WHERE daypart = 'cafe' AND status = 'open'").run();
   back2.close();
+});
+
+test('the dashboard does not restate what Sales and Performance are for', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await page(owner);
+  // Four blocks came off this page because each one WAS another page: recent
+  // services (/shifts), the sales-and-labor chart and the insight list
+  // (/costs), invoice spend (/c/invoices). Keeping them here meant every
+  // number had two homes and could disagree with itself.
+  for (const gone of ['Average per service', 'Wage cost per service', 'Sales per labor hour',
+    'Sales and labor', 'Recent services', 'Invoice spend by week']) {
+    assert.ok(!html.includes(gone), `"${gone}" belongs to another page`);
+  }
+  // What it does answer: what needs doing, how the last service went, the week.
+  assert.match(html, /Needs attention/);
+  assert.match(html, /Last service/);
+  assert.match(html, /This week/);
 });
 
 test('this week and last week are compared, and the direction is right', async () => {
@@ -130,8 +153,12 @@ test('this week and last week are compared, and the direction is right', async (
   // "This week" is the seven days ending today, and today has no service, so
   // it holds days 1-6: six at $1,500. The window before it is days 7-13, which
   // catches the last $1,500 night plus six at $1,000.
-  assert.match(html, /Sales this week[\s\S]{0,220}\$9,000\.00/, 'six services at $1,500');
-  assert.match(html, /Sales up 20\.0% on the previous week/, '$9,000 against $7,500');
+  assert.match(html, /This week[\s\S]{0,300}\$9,000/, 'six services at $1,500');
+  assert.match(html, /dl-up[^>]*>▲ 20\.0%/, '$9,000 against $7,500, and up is up');
+  // The written-out version of the same comparison lives on Performance, which
+  // is the page that exists to explain why a number moved.
+  const perf = await (await as(owner, '/costs?r=7')).text();
+  assert.match(perf, /Sales up 20\.0%/, 'and Performance says it in words');
 });
 
 test('a percentage of nothing is withheld, not printed as zero', async () => {
@@ -149,9 +176,9 @@ test('a percentage of nothing is withheld, not printed as zero', async () => {
       try { await fetch(`http://127.0.0.1:${port}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
     const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-    assert.match(html, /Food cost[\s\S]{0,160}no invoices logged/, 'says why, rather than showing 0%');
+    assert.match(html, /Food[\s\S]{0,160}no invoices/, 'says why, rather than showing 0%');
     assert.ok(!/Food cost[\s\S]{0,120}0(\.0)?%/.test(html), 'and never prints 0%');
-    assert.match(html, /Prime cost[\s\S]{0,160}needs invoices/);
+    assert.match(html, /Prime[\s\S]{0,160}needs invoices/);
   } finally {
     kid.kill();
     fs.rmSync(d2, { recursive: true, force: true });
@@ -166,12 +193,12 @@ test('cost figures do not reach an account without the costs area', async () => 
   // The assertions below only prove something if the owner actually gets
   // these, so that is checked first rather than assumed.
   assert.match(ownerHtml, /Labor.{0,400}%/s, 'the owner sees a labor percentage');
-  assert.match(ownerHtml, /Prime cost/, 'and a prime cost');
+  assert.match(ownerHtml, /Prime/, 'and a prime cost');
 
   const floor = await account('floor@dash.test', 'viewer', ['dashboard', 'shifts']);
   const html = await page(floor);
-  assert.match(html, /Average per service/, 'still gets its own service figures');
-  for (const figure of ['Food cost', 'Prime cost', 'Gross profit', 'Invoices this week']) {
+  assert.match(html, /Last service/, 'still gets its own service figures');
+  for (const figure of ['Food cost', 'Prime cost', 'Gross profit', 'Invoices this week', 'This week']) {
     assert.ok(!html.includes(figure), `${figure} must not reach a shifts-only account`);
   }
   assert.ok(!/Labor (rose|fell) to/.test(html), 'nor a labor insight');
@@ -183,7 +210,7 @@ test('quick actions offer only what the account can actually reach', async () =>
   // being respected rather than the write check doing the work.
   const mgr = await account('kitchen@dash.test', 'editor', ['dashboard', 'shifts']);
   const html = await page(mgr);
-  assert.match(html, /class="qact"/, 'an editor does get quick actions');
+  assert.match(html, /class="qg"/, 'an editor does get quick actions');
   assert.match(html, /href="\/shifts\/new"/, 'including the one for its own area');
   for (const gone of ['/cash/new', '/c/invoices', '/c/vendors', '/menu/new', '/c/incidents']) {
     assert.ok(!html.includes(`href="${gone}"`), `must not offer ${gone}`);
@@ -193,7 +220,7 @@ test('quick actions offer only what the account can actually reach', async () =>
 test('a view-only account is offered no quick actions at all', async () => {
   const ro = await account('ro@dash.test', 'viewer', ['dashboard', 'shifts', 'cash', 'trackers']);
   const html = await page(ro);
-  assert.ok(!html.includes('class="qact"'), 'no write shortcuts');
+  assert.ok(!html.includes('class="qg"'), 'no write shortcuts');
   assert.ok(!html.includes('Quick actions'), 'and not an empty section either');
 });
 

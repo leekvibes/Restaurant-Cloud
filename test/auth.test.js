@@ -163,13 +163,14 @@ test('the dashboard shows nothing from areas the account cannot open', async () 
 test('an owner does see the full dashboard', async () => {
   const owner = await login({ password: 'test-manager-password' });
   const html = await (await as(owner, '/')).text();
-  // Today is a strip of notices rather than a headed section now, so it is
-  // checked by the notice markup rather than by a heading that no longer
-  // exists. Business health became "This week".
-  for (const section of ['Needs attention', 'Quick actions', 'This week', 'Upcoming', 'Insights', 'Recent activity']) {
+  // Today is a strip of notices rather than a headed section, so it is checked
+  // by the notice markup. "Upcoming" is now "Coming up" and only renders when
+  // something is actually due; Insights moved to Performance, which is the
+  // page that exists to explain why a number moved.
+  for (const section of ['Needs attention', 'Quick actions', 'This week', 'Last service', 'Recent activity']) {
     assert.ok(html.includes(section), `${section} renders for the owner`);
   }
-  assert.match(html, /class="tnotices"|class="kpis"/, 'and the today strip or the KPI band');
+  assert.match(html, /class="tnotices"|class="dstrip"/, 'and the today strip or a figure band');
 });
 
 // A view-only account being refused a write is correct. Being *offered* the
