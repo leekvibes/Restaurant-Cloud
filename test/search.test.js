@@ -193,3 +193,103 @@ test('the results panel cannot render before it has something to show', async ()
       || /\.tsearch-pop\[hidden\]/.test(css), 'a display rule needs the [hidden] guard beside it');
   }
 });
+
+// --- the mobile header ---------------------------------------------------------
+//
+// Asserted against the stylesheet because that is where both bugs lived: the
+// results panel opened on every page load because an author `display` beat
+// `[hidden]`, and every sidebar heading vanished on a phone because the mobile
+// override restored opacity but not height. Neither is reachable from the
+// server's HTML, and both are one careless rule away from coming back.
+
+const CSS = () => fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+
+test('the collapsing sidebar heading is scoped to the width that has a rail', () => {
+  const css = CSS();
+  // Below the breakpoint the sidebar is a full-width drawer, never a rail, so
+  // nothing should be collapsing its headings to zero height there. The rules
+  // that do must sit inside a min-width query.
+  const collapse = /html\.no-peek:not\(\.side-pinned\) \.sidebar:hover \.side-group/;
+  assert.match(css, collapse, 'the rail collapse rule still exists');
+
+  const idx = css.search(collapse);
+  const before = css.slice(0, idx);
+  // Walk back to the media query this rule is nested in.
+  const opens = [...before.matchAll(/@media\s*\(([^)]*)\)\s*\{/g)];
+  const depth = (s) => (s.match(/\{/g) || []).length - (s.match(/\}/g) || []).length;
+  const enclosing = opens.reverse().find((m) => depth(before.slice(m.index)) > 0);
+  assert.ok(enclosing, 'the rail collapse rule is inside a media query');
+  assert.match(enclosing[1], /min-width/,
+    `scoped to a min-width, not "${enclosing[1]}" — otherwise it applies on a phone`);
+});
+
+test('a sidebar heading has height by default, so a new context shows it', () => {
+  const css = CSS();
+  // The base rule is what any width that nobody thought about inherits. It
+  // read height: 0 / opacity: 0, so the drawer showed one undifferentiated
+  // list of links until the mobile override was found to be incomplete.
+  const base = css.match(/\n\.side-group \{[^}]*\}/);
+  assert.ok(base, '.side-group has a base rule');
+  assert.ok(!/height:\s*0[;\s]/.test(base[0]), `visible by default, got: ${base[0].replace(/\s+/g, ' ')}`);
+  assert.ok(!/opacity:\s*0[;\s]/.test(base[0]), 'and not transparent by default');
+});
+
+test('the phone header collapses the field and centres the mark', () => {
+  const css = CSS();
+  assert.match(css, /\.topbar\.search-on \.tsearch \{[^}]*width:/, 'expanding is a width change');
+  assert.match(css, /\.topbar-brand \{[^}]*left:\s*50%/, 'the mark is centred on the bar, not on the leftover space');
+  assert.match(css, /\.topbar\.search-on \.topbar-brand \{[^}]*opacity:\s*0/, 'and fades when the field opens');
+});
+
+test('the input becomes focusable the instant the field opens', () => {
+  const css = CSS();
+  // visibility:hidden is what keeps the collapsed input out of the tab order
+  // and away from screen readers. It also makes focus() a no-op, so the open
+  // transition must not delay it — that bug opened the field without ever
+  // giving it the cursor, and the idle timer then closed it again.
+  const open = css.match(/\.topbar\.search-on \.tsearch input \{[^}]*\}/);
+  assert.ok(open, 'there is an expanded-input rule');
+  assert.match(open[0], /visibility:\s*visible/);
+  assert.match(open[0], /visibility\s+0s/, `visibility must flip at once, got: ${open[0].replace(/\s+/g, ' ')}`);
+});
+
+test('reduced motion is respected', () => {
+  // There is more than one reduced-motion block in the sheet, so this picks
+  // the one covering the header rather than whichever comes first.
+  const blocks = [...CSS().matchAll(/@media \(prefers-reduced-motion: reduce\)[^{]*\{[\s\S]*?\n\}/g)];
+  const block = blocks.map((m) => m[0]).filter((b) => b.includes('.topbar-brand'));
+  assert.strictEqual(block.length, 1, 'exactly one reduced-motion block covers the header');
+  // Naming the elements is not enough — the block has to actually stop them
+  // moving. An earlier version of this test passed on a block that mentioned
+  // .topbar-brand only to reposition it.
+  assert.match(block[0], /transition-duration:\s*1ms/, `motion is cut, got: ${block[0].replace(/\s+/g, ' ')}`);
+  for (const el of ['.topbar-brand', '.tsearch']) {
+    assert.ok(block[0].includes(el), `${el} is covered`);
+  }
+});
+
+test('the stylesheet\'s braces balance', () => {
+  // A stray `}` at the top level is recovered from silently by every browser,
+  // so it survives indefinitely — and then the first person to wrap a section
+  // in a media query finds their rules closing one block too early.
+  const css = CSS();
+  let depth = 0, line = 1, bad = 0;
+  for (const ch of css) {
+    if (ch === '\n') line++;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth < 0) { bad = line; break; }
+  }
+  assert.strictEqual(bad, 0, `an unmatched closing brace at line ${bad}`);
+  assert.strictEqual(depth, 0, `${Math.abs(depth)} block(s) left ${depth > 0 ? 'open' : 'over'}`);
+});
+
+test('the search field is operable by keyboard and announced', async () => {
+  const owner = await login({ password: 'owner-pw' });
+  const html = await (await as(owner, '/')).text();
+  const btn = html.match(/<button[^>]*id="rc-sbtn"[^>]*>/);
+  assert.ok(btn, 'the icon is a real button, not a decorative svg');
+  assert.match(btn[0], /aria-label="Search"/, 'and is labelled');
+  assert.match(btn[0], /aria-expanded="false"/, 'and reports its state');
+  assert.match(btn[0], /aria-controls="rc-q"/, 'and says what it opens');
+  assert.match(html, /<button[^>]*id="rc-sx"[^>]*aria-label="Clear search"/, 'with a labelled clear button');
+});

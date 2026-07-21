@@ -3473,17 +3473,23 @@ app.get('/sales', (req, res) => {
   }
 
   // --- daily rows -----------------------------------------------------------
-  const dayRows = [...traded].sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart)).slice(0, 60).map((x) => {
+  // Every service in the range, not only the ones that already have figures.
+  // Listing `traded` hid the one row anybody actually needed to click: a
+  // service with no sales entered yet is exactly what you came here to fix,
+  // and it was invisible on the page whose job is entering them.
+  const awaiting = rows.filter((x) => x.sales === 0);
+  const dayRows = [...rows].sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart)).slice(0, 60).map((x) => {
     const split = x.food + x.coffee + x.alcohol + x.other > 0;
-    return `<a class="srow2" href="/shifts/${x.id}">
+    const none = x.sales === 0;
+    return `<a class="srow2${none ? ' srow2-todo' : ''}" href="/sales/${x.id}">
       <span class="s2-d"><b>${Number(x.date.slice(8))}</b><i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}</i></span>
-      <span class="s2-s">${dp(x.daypart)}</span>
-      <span class="s2-n"><i>Sales</i><b>${money(x.sales)}</b></span>
+      <span class="s2-s">${dp(x.daypart)}${none ? '<span class="s2-tag">no sales yet</span>' : ''}</span>
+      <span class="s2-n"><i>Sales</i><b>${none ? '—' : money(x.sales)}</b></span>
       <span class="s2-n"><i>Food</i><b>${split ? money(x.food) : '—'}</b></span>
       <span class="s2-n"><i>Coffee</i><b>${split ? money(x.coffee) : '—'}</b></span>
       <span class="s2-n"><i>Alcohol</i><b>${split ? money(x.alcohol) : '—'}</b></span>
       <span class="s2-n"><i>Tips</i><b>${money(x.tips)}</b></span>
-      <span class="s2-go">›</span>
+      <span class="s2-go">${canWrite() ? (none ? 'Enter' : 'Edit') : ''} ›</span>
     </a>`;
   }).join('');
 
@@ -3535,9 +3541,16 @@ app.get('/sales', (req, res) => {
       ${CH.shareBars(services.map((x, i) => ({ label: x.label, value: x.sales, color: ['#0891b2', '#7c3aed'][i % 2] })))}
     </section>` : ''}
 
-    <div class="head-row"><h2>Day by day</h2><span class="muted">${traded.length > 60 ? 'most recent 60' : `${traded.length} shift${traded.length === 1 ? '' : 's'}`}</span></div>
+    ${awaiting.length && canWrite() ? `<div class="todobar">
+      <span class="todobar-i">${icon('sales')}</span>
+      <span class="todobar-t"><b>${awaiting.length} service${awaiting.length === 1 ? '' : 's'} without sales</b>
+        <i>Enter what the POS rang and every figure on this page fills in.</i></span>
+      <a class="btn btn-sm btn-primary" href="/sales/${awaiting[awaiting.length - 1].id}">Enter sales →</a>
+    </div>` : ''}
+
+    <div class="head-row"><h2>Day by day</h2><span class="muted">${rows.length > 60 ? 'most recent 60' : `${rows.length} service${rows.length === 1 ? '' : 's'}`}</span></div>
     ${dayRows ? `<div class="srows2">${dayRows}</div>`
-      : '<div class="empty2"><div class="empty2-t">No sales in this range</div><div class="empty2-s">Pick a different period, or close a shift to record some.</div></div>'}
+      : '<div class="empty2"><div class="empty2-t">No services in this range</div><div class="empty2-s">Pick a different period, or log a shift to record some.</div></div>'}
 
     <section class="pcard pcard-future">
       <div class="pcard-h"><b>With a POS connected</b><span class="muted">not available yet</span></div>

@@ -223,3 +223,60 @@ test('today gets a notice even when nothing has been logged', async () => {
   assert.match(html, /class="tnotices"/);
   assert.match(html, /No shift started today/, 'says so rather than showing an empty card');
 });
+
+// --- sales entry --------------------------------------------------------------
+//
+// The Sales redesign turned the page into a report and dropped the table that
+// linked to the entry form, so there was no way to record what the POS rang.
+// The figures were never lost — every page that reads them was just reading
+// zero. These pin the entry path itself, not the analytics on top of it.
+
+test('the sales page links to the form for entering what the POS rang', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/sales?r=30')).text();
+  assert.match(html, /class="srow2[^"]*" href="\/sales\/\d+"/, 'services link to the entry form');
+});
+
+test('a service with no sales entered is listed, not hidden', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const w = new Database(DB);
+  const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')")
+    .run(back(3)).lastInsertRowid;
+  w.close();
+  try {
+    const html = await (await as(owner, '/sales?r=30')).text();
+    // The whole point of the page is entering these. Listing only services
+    // that already have figures hid the one row worth clicking.
+    assert.ok(html.includes(`href="/sales/${id}"`), 'the empty service is on the page');
+    assert.match(html, /no sales yet/, 'and is marked as needing them');
+    assert.match(html, /services? without sales/, 'with a prompt to go and enter them');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
+});
+
+test('sales entered through the form are stored and read back', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const w = new Database(DB);
+  const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')")
+    .run(back(4)).lastInsertRowid;
+  w.close();
+  try {
+    const res = await post(`/sales/${id}`, { food: '1200.50', coffee: '300.25', alcohol: '0', other: '10' }, owner);
+    assert.strictEqual(res.status, 302, 'the form saves');
+
+    const row = db.prepare('SELECT * FROM shifts WHERE id = ?').get(id);
+    assert.strictEqual(row.total_food_cents, 120050, 'stored as integer cents');
+    assert.strictEqual(row.total_coffee_cents, 30025);
+    assert.strictEqual(row.total_other_cents, 1000);
+
+    const html = await (await as(owner, `/sales/${id}`)).text();
+    assert.match(html, /value="1200\.50"/, 'and comes back into the form to be corrected');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
+});

@@ -106,9 +106,15 @@ function topbar() {
            dropdown would promise switching that does not exist. -->
       <span class="topbar-site" title="${esc(RESTAURANT)}">${esc(RESTAURANT)}</span>
       <div class="tsearch" id="rc-search">
-        ${icon('search')}
+        <!-- A real button, not decoration. On a phone the field is collapsed to
+             this icon and the button is what opens it; on the desktop the field
+             is always open and the button just puts the cursor in it. Same
+             markup either way, so there is one thing to keep accessible. -->
+        <button type="button" class="tsearch-ico" id="rc-sbtn"
+          aria-label="Search" aria-expanded="false" aria-controls="rc-q">${icon('search')}</button>
         <input id="rc-q" type="search" autocomplete="off" spellcheck="false"
           placeholder="Search products, invoices, vendors, staff…" aria-label="Search">
+        <button type="button" class="tsearch-x" id="rc-sx" aria-label="Clear search" hidden>×</button>
         <kbd>⌘K</kbd>
         <div class="tsearch-pop" id="rc-out" hidden></div>
       </div>
@@ -135,7 +141,7 @@ function topbar() {
 
 function searchScript() {
   return `
-  var RCS = { seq: 0, sel: -1, timer: null };
+  var RCS = { seq: 0, sel: -1, timer: null, idle: null };
   function rcEsc(s){ return String(s==null?'':s).replace(/[<>&]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}); }
   function rcClose(){ var o=document.getElementById('rc-out'); if(o){ o.hidden=true; o.innerHTML=''; } RCS.sel=-1; }
   function rcOpenResults(html){ var o=document.getElementById('rc-out'); o.innerHTML=html; o.hidden=false; }
@@ -162,6 +168,57 @@ function searchScript() {
     rows[RCS.sel].scrollIntoView({ block:'nearest' });
   }
 
+  // --- the collapsed field on a phone ---------------------------------------
+  // Below 821px the field is an icon until it is asked for. The width it opens
+  // to is measured rather than guessed: the controls on the right differ per
+  // account — not everyone gets "+ New" — so a hard-coded width is wrong for
+  // somebody. Measured once per open, written as one custom property, and the
+  // transition is the browser's from there.
+  function rcMobile(){ return window.matchMedia('(max-width: 820px)').matches; }
+  function rcBar(){ return document.querySelector('.topbar'); }
+
+  function rcExpand(focus){
+    var bar=rcBar(), box=document.getElementById('rc-search'), btn=document.getElementById('rc-sbtn');
+    if(!bar || !box || bar.classList.contains('search-on')) { if(focus) document.getElementById('rc-q').focus(); return; }
+    var barR=bar.getBoundingClientRect(), boxR=box.getBoundingClientRect();
+    // Everything to the right of the field that must stay clear of it.
+    var right=0;
+    ['#tb-create','#tb-user'].forEach(function(sel){
+      var el=bar.querySelector(sel); if(el) right += el.getBoundingClientRect().width + 8;
+    });
+    box.style.setProperty('--tsw', Math.max(120, barR.right - boxR.left - right - 10) + 'px');
+    bar.classList.add('search-on');
+    if(btn) btn.setAttribute('aria-expanded','true');
+    // After the class, so the keyboard comes up with the field already on its
+    // way open rather than over a 34px box.
+    if(focus) document.getElementById('rc-q').focus();
+    rcIdle();
+  }
+
+  function rcCollapse(){
+    var bar=rcBar(), btn=document.getElementById('rc-sbtn'), q=document.getElementById('rc-q');
+    if(!bar) return;
+    bar.classList.remove('search-on');
+    if(btn) btn.setAttribute('aria-expanded','false');
+    if(q) q.blur();
+    rcClose();
+    clearTimeout(RCS.idle);
+  }
+
+  // Idle collapse, but never over somebody's query. A field with something in
+  // it is work in progress; closing it would throw away what they typed, and
+  // "it keeps clearing itself" is a worse bug than a field left open.
+  function rcIdle(){
+    clearTimeout(RCS.idle);
+    if(!rcMobile()) return;
+    RCS.idle = setTimeout(function(){
+      var q=document.getElementById('rc-q');
+      if(q && q.value.trim()) return;               // typed something: leave it
+      if(document.activeElement === q) return;      // still in it: leave it
+      rcCollapse();
+    }, 3000);
+  }
+
   (function(){
     var q=document.getElementById('rc-q');
     if(!q) return;
@@ -172,7 +229,10 @@ function searchScript() {
 
     q.addEventListener('input', function(){
       var term=this.value.trim();
+      var x=document.getElementById('rc-sx');
+      if(x) x.hidden = !this.value;
       clearTimeout(RCS.timer);
+      rcIdle();
       if(term.length < 2){ rcClose(); return; }
       RCS.timer = setTimeout(function(){
         // Sequence-checked: typing fast puts several in flight, and a slow
@@ -186,7 +246,8 @@ function searchScript() {
     });
 
     q.addEventListener('keydown', function(e){
-      if(e.key==='Escape'){ this.value=''; rcClose(); this.blur(); return; }
+      if(e.key==='Escape'){ this.value=''; var x=document.getElementById('rc-sx'); if(x) x.hidden=true;
+        rcClose(); rcCollapse(); return; }
       var rows=document.querySelectorAll('#rc-out .ts-r');
       if(e.key==='ArrowDown'){ e.preventDefault(); rcSel(1); }
       else if(e.key==='ArrowUp'){ e.preventDefault(); rcSel(-1); }
@@ -197,11 +258,39 @@ function searchScript() {
     });
 
     // Re-open on focus if there is still a term worth showing.
-    q.addEventListener('focus', function(){ if(this.value.trim().length >= 2) this.dispatchEvent(new Event('input')); });
-    document.addEventListener('click', function(e){ if(!e.target.closest('#rc-search')) rcClose(); });
+    q.addEventListener('focus', function(){ clearTimeout(RCS.idle); if(this.value.trim().length >= 2) this.dispatchEvent(new Event('input')); });
+    q.addEventListener('blur', function(){ rcIdle(); });
+
+    // Listening on the box, not only the glyph: collapsed it is a 34px pill and
+    // a thumb that lands on its edge should open it, not miss.
+    var box=document.getElementById('rc-search');
+    if(box) box.addEventListener('click', function(e){
+      if(e.target.closest('#rc-sx') || e.target.closest('#rc-out')) return;
+      if(rcMobile() && !rcBar().classList.contains('search-on')){ e.preventDefault(); rcExpand(true); }
+      else if(e.target.closest('#rc-sbtn')){ e.preventDefault(); q.focus(); }
+    });
+    var x=document.getElementById('rc-sx');
+    if(x) x.addEventListener('click', function(e){
+      e.preventDefault(); q.value=''; x.hidden=true; rcClose(); q.focus(); rcIdle();
+    });
+
+    document.addEventListener('click', function(e){
+      if(e.target.closest('#rc-search')) return;
+      rcClose();
+      // Tapping away closes it, but not out from under a query somebody is
+      // part way through writing.
+      if(rcMobile() && !q.value.trim()) rcCollapse();
+    });
 
     document.addEventListener('keydown', function(e){
-      if((e.metaKey||e.ctrlKey) && (e.key==='k'||e.key==='K')){ e.preventDefault(); q.focus(); q.select(); }
+      if((e.metaKey||e.ctrlKey) && (e.key==='k'||e.key==='K')){ e.preventDefault(); rcExpand(false); q.focus(); q.select(); }
+    });
+
+    // Rotating a phone, or resizing a desktop window past the breakpoint,
+    // leaves the expanded width measured against a bar that no longer exists.
+    window.addEventListener('resize', function(){
+      if(!rcMobile()) rcCollapse();
+      else if(rcBar().classList.contains('search-on')){ rcBar().classList.remove('search-on'); rcExpand(false); }
     });
   })();`;
 }
