@@ -13,7 +13,7 @@ const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext }
 const { mountModules, MODULES, expiringSoon } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
-const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales } = require('./reports');
+const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const { readReport, readInvoice } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
@@ -364,7 +364,25 @@ const shiftRollup = db.prepare(`
        FROM server_sales ss WHERE ss.shift_id = sh.id) AS tips,
     (SELECT COUNT(*) FROM server_sales ss WHERE ss.shift_id = sh.id
        AND ss.note IS NOT NULL AND TRIM(ss.note) <> '') AS notes,
-    (SELECT COUNT(*) FROM tip_submissions ts WHERE ts.shift_id = sh.id) AS subs
+    (SELECT COUNT(*) FROM tip_submissions ts WHERE ts.shift_id = sh.id) AS subs,
+    -- Wage cost: hours x rate, summed. This has to resolve the wage exactly
+    -- the way shiftInputs() does — per-shift override, then the wage set for
+    -- THAT role, then the employee's default — because someone covering a
+    -- second position is paid their rate for that position, not their usual
+    -- one. Salaried people are left out: their pay doesn't move with the
+    -- shift, so folding it in would make a quiet Tuesday look as expensive
+    -- as a full Saturday. test/engine.test.js pins this to shiftInputs.
+    (SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0)
+       FROM work w JOIN employees e ON e.id = w.employee_id
+       LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+      WHERE w.shift_id = sh.id AND COALESCE(e.pay_type, 'hourly') <> 'salary') AS wage_cents,
+    -- Anyone who worked hours with no wage on file: they cost real money the
+    -- figure above can't see, so the card says when it's short.
+    (SELECT COUNT(*) FROM work w JOIN employees e ON e.id = w.employee_id
+       LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+      WHERE w.shift_id = sh.id AND w.hours > 0
+        AND COALESCE(e.pay_type, 'hourly') <> 'salary'
+        AND ${WAGE_RATE_SQL} = 0) AS no_wage
   FROM shifts sh ORDER BY sh.date DESC, sh.daypart DESC`);
 
 /** Total sales for a shift: what was rung overall, or server sales if not entered. */
@@ -392,20 +410,46 @@ app.get('/shifts', (req, res) => {
   const monthRows = st.filter(({ x }) => x.date.slice(0, 7) === thisMonth);
   const sum = (list, f) => list.reduce((a, r) => a + f(r), 0);
   const monthSales = sum(monthRows, ({ x }) => shiftSales(x));
-  const monthTips = sum(monthRows, ({ x }) => x.tips);
   const monthHours = sum(monthRows, ({ x }) => x.hours);
+  const monthWages = sum(monthRows, ({ x }) => x.wage_cents);
+  const monthNoWage = sum(monthRows, ({ x }) => x.no_wage);
   const openOnes = st.filter(({ s }) => s.key === 'open' || s.key === 'review' || s.key === 'ready');
+
+  // Averages are per shift, so a month with no shifts has no answer to give —
+  // better a dash than a confident $0.00.
+  const n = monthRows.length;
+  // A shift that's logged but has nothing in it yet — tonight's, or one still
+  // waiting on hours — is not a shift that performed badly. Counting it drags
+  // every average toward zero and makes a good month look middling, so the
+  // averages divide by the shifts that actually have figures against them.
+  const counted = monthRows.filter(({ x }) => x.hours > 0 || shiftSales(x) > 0);
+  const k = counted.length;
+  const per = (total, by) => (by ? money(Math.round(total / by)) : '—');
+  const laborPct = monthSales && monthWages ? Math.round((monthWages / monthSales) * 100) : null;
+  const skipped = n - k;
+  const salesSub = !k ? 'nothing to average yet'
+    : skipped ? `÷ ${k} shift${k === 1 ? '' : 's'} with figures`
+    : 'total sales ÷ shifts';
+  const wageSub = !k ? 'no wages logged yet'
+    : monthNoWage ? `${monthNoWage} without a wage set`
+    // Kept short on purpose: .mcard-sub is a single ellipsised line, and at
+    // 375px anything past ~24 characters gets cut off mid-word.
+    : laborPct !== null ? `${laborPct}% of sales · no tips`
+    : 'wages only, no tips';
 
   const kpi = (tone, ico, label, value, sub) => `
     <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
       <div class="mcard-body"><div class="mcard-label">${label}</div>
         <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
 
-  const cards = `<div class="mcards">
-    ${kpi('blue', 'sales', 'Sales this month', money(monthSales), `${monthRows.length} shift${monthRows.length === 1 ? '' : 's'}`)}
-    ${kpi('green', 'tips', 'Tips this month', money(monthTips), monthRows.length ? `avg ${money(Math.round(monthTips / monthRows.length))} a shift` : 'none yet')}
-    ${kpi('amber', 'payroll', 'Hours this month', String(Math.round(monthHours * 10) / 10), monthSales && monthHours ? `${money(Math.round(monthSales / monthHours))} sales per hour` : 'none logged')}
-    ${kpi(openOnes.length ? 'red' : 'green', openOnes.length ? 'incidents' : 'policy', 'Not sent yet', String(openOnes.length), openOnes.length ? 'waiting on you' : 'all closed out')}
+  // How each shift performed, not just what it took in. The count of unsent
+  // shifts used to sit here; it moved out because the attention panel right
+  // below names them individually, which is the more useful form of it.
+  const cards = `<div class="mcards mcards-4">
+    ${kpi('blue', 'sales', 'Sales this month', money(monthSales), n ? `across ${n} shift${n === 1 ? '' : 's'}` : 'nothing logged yet')}
+    ${kpi('green', 'cash', 'Avg sales a shift', per(monthSales, k), salesSub)}
+    ${kpi('amber', 'payroll', 'Avg wage cost a shift', per(monthWages, k), wageSub)}
+    ${kpi('violet', 'costs', 'Sales per labor hour', per(monthSales, monthHours), monthHours ? `sales ÷ ${Math.round(monthHours * 10) / 10} hrs worked` : 'no hours logged')}
   </div>`;
 
   // --- today, and anything still open ------------------------------------

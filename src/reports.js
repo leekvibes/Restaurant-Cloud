@@ -14,6 +14,20 @@ const { addDays } = require('./dates');
 // COGS categories from the invoices module (what you buy to sell food & drink).
 const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
 
+/**
+ * One person's hourly rate on one shift, in cents, as SQL — the same rule
+ * shiftInputs() applies in JS: a per-shift override wins, then the wage set
+ * for the role they actually worked, then their default rate. A rate of 0
+ * anywhere means "not set", so it falls through rather than paying nothing.
+ *
+ * It exists as a fragment because the shifts list needs wage cost for every
+ * shift at once, and running the tip engine per shift to get it costs ~1ms
+ * each — half a second at five hundred shifts. Expects `w` (work), `e`
+ * (employees) and `er` (employee_roles, LEFT JOINed on employee_id + role).
+ */
+const WAGE_RATE_SQL =
+  'COALESCE(NULLIF(w.hourly_rate_cents, 0), NULLIF(er.wage_cents, 0), e.hourly_rate_cents, 0)';
+
 /** Sales (food+coffee+alcohol) and labor (wages) for a date range, in cents. */
 /** Everything a shift rang, if you've entered it. 0 means not entered yet. */
 function shiftTotalSales(sh) {
@@ -198,4 +212,4 @@ async function buildWorkbook(from, to, restaurant) {
   return wb;
 }
 
-module.exports = { shiftTotalSales, salesAndLabor, aggregatePayroll, buildWorkbook, aggregateCosts };
+module.exports = { shiftTotalSales, salesAndLabor, aggregatePayroll, buildWorkbook, aggregateCosts, WAGE_RATE_SQL };

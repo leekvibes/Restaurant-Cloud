@@ -553,6 +553,10 @@ body.bare { background: #0f1e40; }
 
 /* --- summary cards: tinted, never plain white --- */
 .mcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); gap: 14px; margin: 20px 0 22px; }
+/* A set of four wraps to 3 + a lone orphan between roughly 820px and 1170px,
+   which reads as a mistake. 2x2 is the better shape there. Scoped to a
+   modifier so pages with three or five cards keep their natural wrap. */
+@media (min-width: 821px) and (max-width: 1179px) { .mcards-4 { grid-template-columns: 1fr 1fr; } }
 .mcard { display: flex; align-items: flex-start; gap: 14px; padding: 17px 18px; border-radius: 15px; min-width: 0;
   border: 1px solid; box-shadow: 0 1px 2px rgba(15,23,42,.03); transition: transform .16s ease-out, box-shadow .16s ease-out; }
 .mcard:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(15,23,42,.07); }
@@ -571,6 +575,8 @@ body.bare { background: #0f1e40; }
 .mcard-blue  .mcard-ico { background: #dbeafe; color: #2563eb; }
 .mcard-green { background: linear-gradient(160deg, #ecfdf5, #f6fefa 62%); border-color: #a7f3d0; color: #065f46; }
 .mcard-green .mcard-ico { background: #d1fae5; color: #059669; }
+.mcard-violet { background: linear-gradient(160deg, #f5f3ff, #faf9ff 62%); border-color: #ddd6fe; color: #5b21b6; }
+.mcard-violet .mcard-ico { background: #ede9fe; color: #7c3aed; }
 
 /* --- toolbar: search + category chips + view switch --- */
 .toolbar2 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }

@@ -379,3 +379,85 @@ test('shiftTotalSales adds the four categories, 0 when nothing is entered', () =
   }), 617625);
   assert.strictEqual(shiftTotalSales({}), 0, 'not entered reads as 0, so callers can fall back');
 });
+
+// --- wage cost per shift ----------------------------------------------------
+// The shifts list computes wage cost in SQL so it can do every shift in one
+// pass. That's a second implementation of a rule that already exists in JS
+// (shiftInputs), and a second implementation is a chance to disagree — so
+// these pin it to the first one rather than to hand-written expectations.
+
+test('the SQL wage rate resolves exactly like shiftInputs does', () => {
+  const { WAGE_RATE_SQL } = require('../src/reports');
+  const { db, shiftInputs } = require('../src/db');
+
+  const wageOf = db.prepare(`
+    SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0) AS cents
+      FROM work w JOIN employees e ON e.id = w.employee_id
+      LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+     WHERE w.shift_id = ? AND COALESCE(e.pay_type, 'hourly') <> 'salary'`);
+
+  const compare = (id, msg) => {
+    const inp = shiftInputs(id);
+    // shiftInputs already zeroes salaried people, so this sums the same set.
+    const viaJs = [...inp.servers, ...inp.support]
+      .reduce((a, p) => a + Math.round(toCents(p.hourlyRate || 0) * (p.hours || 0)), 0);
+    assert.strictEqual(wageOf.get(id).cents, viaJs, msg);
+  };
+
+  const shifts = db.prepare('SELECT id FROM shifts').all();
+  assert.ok(shifts.length, 'needs at least one shift to compare against');
+  for (const { id } of shifts) compare(id, `shift ${id} wage cost`);
+
+  // Comparing only the shifts that happen to exist lets the interesting cases
+  // go untested — the live data has a second-role wage on file that nobody has
+  // actually worked, so dropping that level of the rule changed no number here
+  // and this test stayed green. So build the awkward rows and roll them back.
+  const shiftId = shifts[0].id;
+  db.exec('BEGIN');
+  try {
+    const seat = (employee_id, role, hours, hourly_rate_cents) => db.prepare(
+      `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(shift_id, employee_id)
+       DO UPDATE SET role = excluded.role, hours = excluded.hours,
+                     hourly_rate_cents = excluded.hourly_rate_cents`
+    ).run(shiftId, employee_id, role, hours, hourly_rate_cents);
+
+    const emp = db.prepare("SELECT id FROM employees WHERE COALESCE(pay_type,'hourly') <> 'salary' LIMIT 1").get().id;
+    db.prepare('UPDATE employees SET hourly_rate_cents = 1000 WHERE id = ?').run(emp);
+    db.prepare(`INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES (?, 'busser', 1750)
+                ON CONFLICT(employee_id, role) DO UPDATE SET wage_cents = 1750`).run(emp);
+
+    seat(emp, 'busser', 6.5, 0);          // role wage applies: 6.5 x 17.50
+    compare(shiftId, 'second-role wage');
+
+    seat(emp, 'busser', 6.5, 1234);       // per-shift override outranks the role wage
+    compare(shiftId, 'per-shift override wins');
+
+    db.prepare("UPDATE employee_roles SET wage_cents = 0 WHERE employee_id = ? AND role = 'busser'").run(emp);
+    seat(emp, 'busser', 6.5, 0);          // a 0 role wage means "not set" — fall to the default
+    compare(shiftId, 'zero role wage falls through to the default');
+
+    db.prepare("UPDATE employees SET pay_type = 'salary' WHERE id = ?").run(emp);
+    compare(shiftId, 'salaried staff cost the shift nothing');
+  } finally {
+    db.exec('ROLLBACK');
+  }
+});
+
+test('a wage set for a role beats the default when that role is worked', () => {
+  const { WAGE_RATE_SQL } = require('../src/reports');
+  const { db } = require('../src/db');
+  // Esther's default is her barista rate; she's also on file as a busser at a
+  // different rate. Working a busser shift has to pay the busser rate — this
+  // is the case a two-level COALESCE gets wrong and nobody notices, because
+  // the number it produces is perfectly plausible.
+  const row = db.prepare(`
+    SELECT ${WAGE_RATE_SQL} AS rate, e.hourly_rate_cents AS deflt, er.wage_cents AS role_rate
+      FROM employees e
+      LEFT JOIN employee_roles er ON er.employee_id = e.id AND er.role = 'busser'
+      JOIN (SELECT 0 AS hourly_rate_cents) w
+     WHERE er.wage_cents > 0 AND er.wage_cents <> e.hourly_rate_cents LIMIT 1`).get();
+  if (!row) return; // nobody has a distinct second-role wage on file
+  assert.strictEqual(row.rate, row.role_rate, 'pays the rate for the role worked');
+  assert.notStrictEqual(row.rate, row.deflt, 'not the default rate');
+});
