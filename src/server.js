@@ -3416,7 +3416,7 @@ app.get('/cash/:id', (req, res) => {
 // Tip-out policy — calm read-only view + rule builder, versioned with history
 // ---------------------------------------------------------------------------
 const RLBL = { kitchen: 'Kitchen', barista: 'Barista', bartender: 'Bartender', busser: 'Busser' };
-const BLBL = { food: "each server's food sales", coffee: "each server's coffee sales", alcohol: "each server's alcohol sales", total_tips: "each server's total tips", remaining: 'server tips left after other tip-outs' };
+const BLBL = { food: "each server's food sales", coffee: "each server's coffee sales", alcohol: "each server's alcohol sales", total_sales: "each server's total sales", total_tips: "each server's total tips", remaining: 'server tips left after other tip-outs' };
 const SLBL = { hours: 'by hours worked', even: 'evenly', sales: 'by sales' };
 const SRC = { jar: 'the cash tip jar', togo_card: 'to-go card tips', jar_togo: 'the cash jar + to-go card' };
 const AMG = { all_support: 'all support (kitchen, busser, barista)', kitchen: 'kitchen only', foh: 'busser + barista' };
@@ -7487,6 +7487,37 @@ app.get('/search', (req, res) => {
 
 
 mountModules(app);
+
+// ---------------------------------------------------------------------------
+// One-time data migration: the two months of history that pre-date ZWIN.
+//
+// It runs at boot because there is no other way in — the database lives on a
+// Render disk with no shell. It is guarded three ways: a marker so it never
+// runs twice, a date check so it never touches a service that already exists,
+// and one transaction so a failure leaves nothing behind.
+//
+// It must never stop the app starting. A missing backfill is a thing you
+// notice and re-run; a server that will not boot is an outage.
+//
+// Skipped under test, where every file gets an empty database and seventy-two
+// services appearing in it would be seventy-two services nobody asked for.
+// ---------------------------------------------------------------------------
+if (process.env.ZWIN_SKIP_BACKFILL !== '1') {
+  try {
+    const BACKFILL = require('./backfill');
+    const out = BACKFILL.run();
+    if (out.ran) {
+      const r = out.report;
+      console.log(`\n  Backfill: ${r.inserted.length} services imported, ${r.staff} staff rows, ${r.servers} server-sales rows.`);
+      if (r.created.length) console.log(`  Backfill: created ${[...new Set(r.created)].join(', ')}.`);
+      if (r.matched.length) console.log(`  Backfill: matched ${[...new Set(r.matched)].join('; ')}.`);
+      if (r.skipped.length) console.log(`  Backfill: skipped ${r.skipped.length} (${r.skipped.map((x) => x.date).join(', ')}).`);
+    }
+  } catch (e) {
+    console.error('\n  Backfill FAILED and was rolled back. The app is running without it.');
+    console.error('  ' + (e && e.message ? e.message : e) + '\n');
+  }
+}
 
 app.listen(PORT, () => {
   console.log(`\n  ${RESTAURANT} ops running →  http://localhost:${PORT}\n`);

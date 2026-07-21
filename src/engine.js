@@ -7,7 +7,7 @@ const { toCents, pctOf, allocateByWeight, fmt } = require('./money');
 // A policy is a LIST OF RULES (stored as data, editable in the UI). Two types:
 //
 //  tipout: a server gives `percent` of a `base` to a recipient role.
-//    base ∈ food | coffee | alcohol | total_tips | remaining
+//    base ∈ food | coffee | alcohol | total_sales | total_tips | remaining
 //    (remaining = the server's tips left after all the non-remaining tip-outs)
 //    Each recipient role's collected tip-outs are pooled and split among the
 //    people working that role by `split` (hours | even).  → paid on paycheck.
@@ -37,6 +37,11 @@ function baseValue(server, base) {
   if (base === 'food') return server.food;
   if (base === 'coffee') return server.coffee;
   if (base === 'alcohol') return server.alcohol;
+  // Every category a server rang. The busser rule that ran until 18 Jul 2026
+  // was 2% of gross sales rather than a share of tips, and the engine had no
+  // way to say that — which meant the two months before ZWIN could not be
+  // reproduced inside it at all.
+  if (base === 'total_sales') return server.food + server.coffee + server.alcohol;
   if (base === 'total_tips') return server.cardTips + server.cashTips;
   return 0; // 'remaining' handled separately
 }

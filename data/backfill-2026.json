@@ -1,0 +1,6778 @@
+[
+ {
+  "date": "2026-05-07",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 0,
+   "total": null
+  },
+  "servers": [],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.5,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 6,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 5.5,
+    "wage": 1300,
+    "tipOutShare": 0,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 0,
+   "barista": 0,
+   "bartender": 0,
+   "busser": 0,
+   "total": 0
+  },
+  "totals": {
+   "food": 0,
+   "coffee": 0,
+   "alcohol": 0,
+   "total": 0,
+   "cashTips": 0,
+   "cardTips": 0,
+   "totalTips": 0,
+   "tipOut": 0,
+   "kept": 0
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-08",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 0,
+   "total": null
+  },
+  "servers": [],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 10,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 7.25,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 3.33,
+    "wage": 1300,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 3.58,
+    "wage": 1000,
+    "tipOutShare": 0,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 0,
+   "barista": 0,
+   "bartender": 0,
+   "busser": 0,
+   "total": 0
+  },
+  "totals": {
+   "food": 0,
+   "coffee": 0,
+   "alcohol": 0,
+   "total": 0,
+   "cashTips": 0,
+   "cardTips": 0,
+   "totalTips": 0,
+   "tipOut": 0,
+   "kept": 0
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-09",
+  "busser": null,
+  "counter": {
+   "jar": 0,
+   "card": 10233,
+   "total": null
+  },
+  "servers": [],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 10.55,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 2117
+   },
+   {
+    "name": "Stephanie",
+    "role": "Barista",
+    "hours": 10.36,
+    "wage": 1000,
+    "tipOutShare": 0,
+    "counterShare": 2079
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 10.09,
+    "wage": 1300,
+    "tipOutShare": 0,
+    "counterShare": 2025
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 10,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 2006
+   },
+   {
+    "name": "Kevin",
+    "role": "Barista",
+    "hours": 10,
+    "wage": 1400,
+    "tipOutShare": 0,
+    "counterShare": 2006
+   }
+  ],
+  "pools": {
+   "kitchen": 0,
+   "barista": 0,
+   "bartender": 0,
+   "busser": 0,
+   "total": 0
+  },
+  "totals": {
+   "food": 0,
+   "coffee": 0,
+   "alcohol": 0,
+   "total": 0,
+   "cashTips": 0,
+   "cardTips": 0,
+   "totalTips": 0,
+   "tipOut": 0,
+   "kept": 0
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-10",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 2900,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 63000,
+    "coffee": 13500,
+    "alcohol": 0,
+    "cardTips": 9164,
+    "cashTips": 0,
+    "kept": 8017,
+    "tipOut": 1148
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.07,
+    "wage": 1500,
+    "tipOutShare": 474,
+    "counterShare": 776
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 9.03,
+    "wage": 1400,
+    "tipOutShare": 471,
+    "counterShare": 772
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.48,
+    "wage": 1500,
+    "tipOutShare": 109,
+    "counterShare": 725
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.32,
+    "wage": 1300,
+    "tipOutShare": 94,
+    "counterShare": 626
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 9.58,
+    "wage": 1000,
+    "tipOutShare": 8017,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 945,
+   "barista": 203,
+   "bartender": 0,
+   "busser": 0,
+   "total": 1148
+  },
+  "totals": {
+   "food": 63000,
+   "coffee": 13500,
+   "alcohol": 0,
+   "total": 76500,
+   "cashTips": 0,
+   "cardTips": 9164,
+   "totalTips": 9164,
+   "tipOut": 1148,
+   "kept": 8017
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-11",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 7867,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 28270,
+    "coffee": 13205,
+    "alcohol": 0,
+    "cardTips": 7040,
+    "cashTips": 8100,
+    "kept": 13688,
+    "tipOut": 1452
+   }
+  ],
+  "staff": [
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 10.3,
+    "wage": 1000,
+    "tipOutShare": 13688,
+    "counterShare": 0
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.58,
+    "wage": 1500,
+    "tipOutShare": 229,
+    "counterShare": 2393
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.3,
+    "wage": 1500,
+    "tipOutShare": 198,
+    "counterShare": 2323
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.14,
+    "wage": 1400,
+    "tipOutShare": 195,
+    "counterShare": 2033
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.48,
+    "wage": 1300,
+    "tipOutShare": 830,
+    "counterShare": 1119
+   }
+  ],
+  "pools": {
+   "kitchen": 424,
+   "barista": 198,
+   "bartender": 0,
+   "busser": 830,
+   "total": 1452
+  },
+  "totals": {
+   "food": 28270,
+   "coffee": 13205,
+   "alcohol": 0,
+   "total": 41475,
+   "cashTips": 8100,
+   "cardTips": 7040,
+   "totalTips": 15140,
+   "tipOut": 1452,
+   "kept": 13688
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-12",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 6698,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 30540,
+    "coffee": 10726,
+    "alcohol": 0,
+    "cardTips": 12888,
+    "cashTips": 2300,
+    "kept": 13744,
+    "tipOut": 1444
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 10.15,
+    "wage": 1500,
+    "tipOutShare": 256,
+    "counterShare": 1504
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 9.42,
+    "wage": 1300,
+    "tipOutShare": 81,
+    "counterShare": 1396
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.25,
+    "wage": 1500,
+    "tipOutShare": 80,
+    "counterShare": 1370
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 8.37,
+    "wage": 1300,
+    "tipOutShare": 825,
+    "counterShare": 1240
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.02,
+    "wage": 1400,
+    "tipOutShare": 202,
+    "counterShare": 1188
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 5.39,
+    "wage": 1000,
+    "tipOutShare": 13744,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 458,
+   "barista": 161,
+   "bartender": 0,
+   "busser": 825,
+   "total": 1444
+  },
+  "totals": {
+   "food": 30540,
+   "coffee": 10726,
+   "alcohol": 0,
+   "total": 41266,
+   "cashTips": 2300,
+   "cardTips": 12888,
+   "totalTips": 15188,
+   "tipOut": 1444,
+   "kept": 13744
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-13",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 15070,
+   "total": null
+  },
+  "servers": [],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.5,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 3106
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.3,
+    "wage": 1400,
+    "tipOutShare": 0,
+    "counterShare": 3040
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.6,
+    "wage": 1400,
+    "tipOutShare": 0,
+    "counterShare": 2811
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 6.4,
+    "wage": 1500,
+    "tipOutShare": 0,
+    "counterShare": 2092
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.15,
+    "wage": 1300,
+    "tipOutShare": 0,
+    "counterShare": 2010
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.15,
+    "wage": 1300,
+    "tipOutShare": 0,
+    "counterShare": 2010
+   }
+  ],
+  "pools": {
+   "kitchen": 0,
+   "barista": 0,
+   "bartender": 0,
+   "busser": 0,
+   "total": 0
+  },
+  "totals": {
+   "food": 0,
+   "coffee": 0,
+   "alcohol": 0,
+   "total": 0,
+   "cashTips": 0,
+   "cardTips": 0,
+   "totalTips": 0,
+   "tipOut": 0,
+   "kept": 0
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-14",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 11908,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 31800,
+    "coffee": 14450,
+    "alcohol": 0,
+    "cardTips": 7966,
+    "cashTips": 0,
+    "kept": 6347,
+    "tipOut": 1619
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.56,
+    "wage": 1500,
+    "tipOutShare": 169,
+    "counterShare": 2276
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.31,
+    "wage": 1500,
+    "tipOutShare": 128,
+    "counterShare": 2216
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.3,
+    "wage": 1400,
+    "tipOutShare": 165,
+    "counterShare": 2214
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.08,
+    "wage": 1400,
+    "tipOutShare": 143,
+    "counterShare": 1924
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.35,
+    "wage": 1300,
+    "tipOutShare": 925,
+    "counterShare": 1750
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.42,
+    "wage": 1300,
+    "tipOutShare": 88,
+    "counterShare": 1528
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.16,
+    "wage": 1000,
+    "tipOutShare": 6347,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 477,
+   "barista": 217,
+   "bartender": 0,
+   "busser": 925,
+   "total": 1619
+  },
+  "totals": {
+   "food": 31800,
+   "coffee": 14450,
+   "alcohol": 0,
+   "total": 46250,
+   "cashTips": 0,
+   "cardTips": 7966,
+   "totalTips": 7966,
+   "tipOut": 1619,
+   "kept": 6347
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-15",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 22767,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 46900,
+    "coffee": 16300,
+    "alcohol": 0,
+    "cardTips": 14097,
+    "cashTips": 2400,
+    "kept": 14285,
+    "tipOut": 2212
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 10.47,
+    "wage": 1500,
+    "tipOutShare": 301,
+    "counterShare": 5392
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.39,
+    "wage": 1500,
+    "tipOutShare": 131,
+    "counterShare": 4836
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 8.08,
+    "wage": 1300,
+    "tipOutShare": 113,
+    "counterShare": 4161
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8,
+    "wage": 1400,
+    "tipOutShare": 230,
+    "counterShare": 4120
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.31,
+    "wage": 1000,
+    "tipOutShare": 14285,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 6,
+    "wage": 1400,
+    "tipOutShare": 172,
+    "counterShare": 3090
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 2.27,
+    "wage": 1300,
+    "tipOutShare": 1264,
+    "counterShare": 1169
+   }
+  ],
+  "pools": {
+   "kitchen": 704,
+   "barista": 245,
+   "bartender": 0,
+   "busser": 1264,
+   "total": 2212
+  },
+  "totals": {
+   "food": 46900,
+   "coffee": 16300,
+   "alcohol": 0,
+   "total": 63200,
+   "cashTips": 2400,
+   "cardTips": 14097,
+   "totalTips": 16497,
+   "tipOut": 2212,
+   "kept": 14285
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-16",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 6557,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 97100,
+    "coffee": 52250,
+    "alcohol": 0,
+    "cardTips": 29604,
+    "cashTips": 3400,
+    "kept": 27777,
+    "tipOut": 5227
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 10.15,
+    "wage": 1500,
+    "tipOutShare": 772,
+    "counterShare": 1916
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 9.06,
+    "wage": 1300,
+    "tipOutShare": 784,
+    "counterShare": 1711
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 9.01,
+    "wage": 1000,
+    "tipOutShare": 27777,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9,
+    "wage": 1400,
+    "tipOutShare": 685,
+    "counterShare": 1699
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.52,
+    "wage": 1300,
+    "tipOutShare": 2987,
+    "counterShare": 1231
+   }
+  ],
+  "pools": {
+   "kitchen": 1457,
+   "barista": 784,
+   "bartender": 0,
+   "busser": 2987,
+   "total": 5227
+  },
+  "totals": {
+   "food": 97100,
+   "coffee": 52250,
+   "alcohol": 0,
+   "total": 149350,
+   "cashTips": 3400,
+   "cardTips": 29604,
+   "totalTips": 33004,
+   "tipOut": 5227,
+   "kept": 27777
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-17",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 11819,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 117150,
+    "coffee": 59600,
+    "alcohol": 0,
+    "cardTips": 41167,
+    "cashTips": 0,
+    "kept": 34981,
+    "tipOut": 6186
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.44,
+    "wage": 1400,
+    "tipOutShare": 886,
+    "counterShare": 3506
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 8.42,
+    "wage": 1000,
+    "tipOutShare": 34981,
+    "counterShare": 0
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.4,
+    "wage": 1500,
+    "tipOutShare": 894,
+    "counterShare": 3490
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.3,
+    "wage": 1400,
+    "tipOutShare": 871,
+    "counterShare": 3448
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 3.31,
+    "wage": 1300,
+    "tipOutShare": 3535,
+    "counterShare": 1375
+   }
+  ],
+  "pools": {
+   "kitchen": 1757,
+   "barista": 894,
+   "bartender": 0,
+   "busser": 3535,
+   "total": 6186
+  },
+  "totals": {
+   "food": 117150,
+   "coffee": 59600,
+   "alcohol": 0,
+   "total": 176750,
+   "cashTips": 0,
+   "cardTips": 41167,
+   "totalTips": 41167,
+   "tipOut": 6186,
+   "kept": 34981
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-18",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 12067,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 50500,
+    "coffee": 18650,
+    "alcohol": 0,
+    "cardTips": 13889,
+    "cashTips": 2800,
+    "kept": 14269,
+    "tipOut": 2420
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.48,
+    "wage": 1500,
+    "tipOutShare": 408,
+    "counterShare": 3743
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.42,
+    "wage": 1500,
+    "tipOutShare": 280,
+    "counterShare": 3720
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.11,
+    "wage": 1400,
+    "tipOutShare": 349,
+    "counterShare": 3202
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 5.55,
+    "wage": 1000,
+    "tipOutShare": 14269,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 3.55,
+    "wage": 1300,
+    "tipOutShare": 1383,
+    "counterShare": 1402
+   }
+  ],
+  "pools": {
+   "kitchen": 758,
+   "barista": 280,
+   "bartender": 0,
+   "busser": 1383,
+   "total": 2420
+  },
+  "totals": {
+   "food": 50500,
+   "coffee": 18650,
+   "alcohol": 0,
+   "total": 69150,
+   "cashTips": 2800,
+   "cardTips": 13889,
+   "totalTips": 16689,
+   "tipOut": 2420,
+   "kept": 14269
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-19",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 5077,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 83600,
+    "coffee": 26100,
+    "alcohol": 0,
+    "cardTips": 20468,
+    "cashTips": 1800,
+    "kept": 18429,
+    "tipOut": 3840
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.45,
+    "wage": 1500,
+    "tipOutShare": 679,
+    "counterShare": 1107
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.3,
+    "wage": 1500,
+    "tipOutShare": 199,
+    "counterShare": 1089
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.01,
+    "wage": 1400,
+    "tipOutShare": 575,
+    "counterShare": 938
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.2,
+    "wage": 1000,
+    "tipOutShare": 18429,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.58,
+    "wage": 1300,
+    "tipOutShare": 2194,
+    "counterShare": 888
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 9,
+    "wage": 1300,
+    "tipOutShare": 193,
+    "counterShare": 1054
+   }
+  ],
+  "pools": {
+   "kitchen": 1254,
+   "barista": 392,
+   "bartender": 0,
+   "busser": 2194,
+   "total": 3840
+  },
+  "totals": {
+   "food": 83600,
+   "coffee": 26100,
+   "alcohol": 0,
+   "total": 109700,
+   "cashTips": 1800,
+   "cardTips": 20468,
+   "totalTips": 22268,
+   "tipOut": 3840,
+   "kept": 18429
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-20",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 11305,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Ingri",
+    "food": 66440,
+    "coffee": 25765,
+    "alcohol": 0,
+    "cardTips": 16093,
+    "cashTips": 1700,
+    "kept": 14566,
+    "tipOut": 3227
+   },
+   {
+    "name": "Sandra",
+    "food": 8550,
+    "coffee": 3050,
+    "alcohol": 0,
+    "cardTips": 2624,
+    "cashTips": 0,
+    "kept": 2218,
+    "tipOut": 406
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.35,
+    "wage": 1500,
+    "tipOutShare": 432,
+    "counterShare": 2883
+   },
+   {
+    "name": "Ingri",
+    "role": "Server",
+    "hours": 8.29,
+    "wage": 1300,
+    "tipOutShare": 14566,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.07,
+    "wage": 1400,
+    "tipOutShare": 392,
+    "counterShare": 2488
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8,
+    "wage": 1400,
+    "tipOutShare": 388,
+    "counterShare": 2466
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 7.1,
+    "wage": 1500,
+    "tipOutShare": 345,
+    "counterShare": 2189
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 5.4,
+    "wage": 1000,
+    "tipOutShare": 2218,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.15,
+    "wage": 1300,
+    "tipOutShare": 2076,
+    "counterShare": 1279
+   }
+  ],
+  "pools": {
+   "kitchen": 1125,
+   "barista": 432,
+   "bartender": 0,
+   "busser": 2076,
+   "total": 3633
+  },
+  "totals": {
+   "food": 74990,
+   "coffee": 28815,
+   "alcohol": 0,
+   "total": 103805,
+   "cashTips": 1700,
+   "cardTips": 18717,
+   "totalTips": 20417,
+   "tipOut": 3633,
+   "kept": 16784
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-21",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 7792,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 57351,
+    "coffee": 20150,
+    "alcohol": 0,
+    "cardTips": 16592,
+    "cashTips": 500,
+    "kept": 14379,
+    "tipOut": 2713
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.47,
+    "wage": 1500,
+    "tipOutShare": 347,
+    "counterShare": 1563
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.21,
+    "wage": 1500,
+    "tipOutShare": 169,
+    "counterShare": 1520
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8,
+    "wage": 1400,
+    "tipOutShare": 293,
+    "counterShare": 1321
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.31,
+    "wage": 1300,
+    "tipOutShare": 134,
+    "counterShare": 1207
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.21,
+    "wage": 1300,
+    "tipOutShare": 1550,
+    "counterShare": 1190
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 6,
+    "wage": 1400,
+    "tipOutShare": 220,
+    "counterShare": 991
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 5.46,
+    "wage": 1000,
+    "tipOutShare": 14379,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 860,
+   "barista": 302,
+   "bartender": 0,
+   "busser": 1550,
+   "total": 2713
+  },
+  "totals": {
+   "food": 57351,
+   "coffee": 20150,
+   "alcohol": 0,
+   "total": 77501,
+   "cashTips": 500,
+   "cardTips": 16592,
+   "totalTips": 17092,
+   "tipOut": 2713,
+   "kept": 14379
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-22",
+  "busser": true,
+  "counter": {
+   "jar": null,
+   "card": null,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 65360,
+    "coffee": 22525,
+    "alcohol": 0,
+    "cardTips": 16722,
+    "cashTips": 1500,
+    "kept": 15146,
+    "tipOut": 3076
+   },
+   {
+    "name": "Ingri",
+    "food": 30250,
+    "coffee": 20920,
+    "alcohol": 0,
+    "cardTips": 9168,
+    "cashTips": 0,
+    "kept": 7377,
+    "tipOut": 1791
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 10.07,
+    "wage": 1500,
+    "tipOutShare": 652,
+    "counterShare": 1815
+   },
+   {
+    "name": "Ingri",
+    "role": "Server",
+    "hours": 8.56,
+    "wage": 1300,
+    "tipOutShare": 7377,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.27,
+    "wage": 1400,
+    "tipOutShare": 724,
+    "counterShare": 1491
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.11,
+    "wage": 1400,
+    "tipOutShare": 710,
+    "counterShare": 1462
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.31,
+    "wage": 1000,
+    "tipOutShare": 15146,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.06,
+    "wage": 1300,
+    "tipOutShare": 2781,
+    "counterShare": 1093
+   }
+  ],
+  "pools": {
+   "kitchen": 1434,
+   "barista": 652,
+   "bartender": 0,
+   "busser": 2781,
+   "total": 4867
+  },
+  "totals": {
+   "food": 95610,
+   "coffee": 43445,
+   "alcohol": 0,
+   "total": 139055,
+   "cashTips": 1500,
+   "cardTips": 25890,
+   "totalTips": 27390,
+   "tipOut": 4867,
+   "kept": 22523
+  },
+  "sanity": null
+ },
+ {
+  "date": "2026-05-23",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 6686,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 36520,
+    "coffee": 15550,
+    "alcohol": 0,
+    "cardTips": 11865,
+    "cashTips": 0,
+    "kept": 10043,
+    "tipOut": 1822
+   },
+   {
+    "name": "Stephanie",
+    "food": 21260,
+    "coffee": 16940,
+    "alcohol": 0,
+    "cardTips": 10289,
+    "cashTips": 0,
+    "kept": 8952,
+    "tipOut": 1337
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 8.7,
+    "wage": 1500,
+    "tipOutShare": 435,
+    "counterShare": 1511
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.62,
+    "wage": 1400,
+    "tipOutShare": 431,
+    "counterShare": 1497
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.4,
+    "wage": 1500,
+    "tipOutShare": 281,
+    "counterShare": 1459
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.22,
+    "wage": 1000,
+    "tipOutShare": 10043,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 7.67,
+    "wage": 1000,
+    "tipOutShare": 8952,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.6,
+    "wage": 1300,
+    "tipOutShare": 1805,
+    "counterShare": 1146
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.18,
+    "wage": 1300,
+    "tipOutShare": 207,
+    "counterShare": 1073
+   }
+  ],
+  "pools": {
+   "kitchen": 867,
+   "barista": 487,
+   "bartender": 0,
+   "busser": 1805,
+   "total": 3159
+  },
+  "totals": {
+   "food": 57780,
+   "coffee": 32490,
+   "alcohol": 0,
+   "total": 90270,
+   "cashTips": 0,
+   "cardTips": 22154,
+   "totalTips": 22154,
+   "tipOut": 3159,
+   "kept": 18995
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-24",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 2826,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 32340,
+    "coffee": 32545,
+    "alcohol": 0,
+    "cardTips": 11732,
+    "cashTips": 0,
+    "kept": 9461,
+    "tipOut": 2271
+   },
+   {
+    "name": "Stephanie",
+    "food": 31300,
+    "coffee": 19150,
+    "alcohol": 0,
+    "cardTips": 10108,
+    "cashTips": 0,
+    "kept": 8342,
+    "tipOut": 1766
+   }
+  ],
+  "staff": [
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.75,
+    "wage": 1000,
+    "tipOutShare": 9461,
+    "counterShare": 0
+   },
+   {
+    "name": "hendy",
+    "role": "Barista",
+    "hours": 8.6,
+    "wage": 1500,
+    "tipOutShare": 462,
+    "counterShare": 654
+   },
+   {
+    "name": "evendi",
+    "role": "Kitchen",
+    "hours": 8.58,
+    "wage": 1400,
+    "tipOutShare": 480,
+    "counterShare": 652
+   },
+   {
+    "name": "kevin",
+    "role": "Kitchen",
+    "hours": 8.48,
+    "wage": 1400,
+    "tipOutShare": 475,
+    "counterShare": 645
+   },
+   {
+    "name": "stephanie",
+    "role": "Server",
+    "hours": 7.4,
+    "wage": 1000,
+    "tipOutShare": 8342,
+    "counterShare": 0
+   },
+   {
+    "name": "ingri",
+    "role": "Barista",
+    "hours": 5.83,
+    "wage": 1300,
+    "tipOutShare": 313,
+    "counterShare": 443
+   },
+   {
+    "name": "joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 5.68,
+    "wage": 1300,
+    "tipOutShare": 2307,
+    "counterShare": 432
+   }
+  ],
+  "pools": {
+   "kitchen": 955,
+   "barista": 775,
+   "bartender": 0,
+   "busser": 2307,
+   "total": 4037
+  },
+  "totals": {
+   "food": 63640,
+   "coffee": 51695,
+   "alcohol": 0,
+   "total": 115335,
+   "cashTips": 0,
+   "cardTips": 21840,
+   "totalTips": 21840,
+   "tipOut": 4037,
+   "kept": 17803
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-25",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 9759,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 81300,
+    "coffee": 41770,
+    "alcohol": 0,
+    "cardTips": 28689,
+    "cashTips": 0,
+    "kept": 24382,
+    "tipOut": 4307
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 10.25,
+    "wage": 1500,
+    "tipOutShare": 669,
+    "counterShare": 2364
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.65,
+    "wage": 1500,
+    "tipOutShare": 363,
+    "counterShare": 2225
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.43,
+    "wage": 1400,
+    "tipOutShare": 550,
+    "counterShare": 1944
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.15,
+    "wage": 1000,
+    "tipOutShare": 24382,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.02,
+    "wage": 1300,
+    "tipOutShare": 264,
+    "counterShare": 1619
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.97,
+    "wage": 1300,
+    "tipOutShare": 2461,
+    "counterShare": 1607
+   }
+  ],
+  "pools": {
+   "kitchen": 1220,
+   "barista": 627,
+   "bartender": 0,
+   "busser": 2461,
+   "total": 4307
+  },
+  "totals": {
+   "food": 81300,
+   "coffee": 41770,
+   "alcohol": 0,
+   "total": 123070,
+   "cashTips": 0,
+   "cardTips": 28689,
+   "totalTips": 28689,
+   "tipOut": 4307,
+   "kept": 24382
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-26",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 6412,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 38760,
+    "coffee": 24500,
+    "alcohol": 0,
+    "cardTips": 13404,
+    "cashTips": 0,
+    "kept": 11190,
+    "tipOut": 2214
+   }
+  ],
+  "staff": [
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 8.17,
+    "wage": 1300,
+    "tipOutShare": 219,
+    "counterShare": 1457
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.9,
+    "wage": 1400,
+    "tipOutShare": 293,
+    "counterShare": 1409
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 7.77,
+    "wage": 1500,
+    "tipOutShare": 288,
+    "counterShare": 1386
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 7.03,
+    "wage": 1000,
+    "tipOutShare": 11190,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.58,
+    "wage": 1300,
+    "tipOutShare": 1265,
+    "counterShare": 1174
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 5.53,
+    "wage": 1500,
+    "tipOutShare": 148,
+    "counterShare": 986
+   }
+  ],
+  "pools": {
+   "kitchen": 581,
+   "barista": 368,
+   "bartender": 0,
+   "busser": 1265,
+   "total": 2214
+  },
+  "totals": {
+   "food": 38760,
+   "coffee": 24500,
+   "alcohol": 0,
+   "total": 63260,
+   "cashTips": 0,
+   "cardTips": 13404,
+   "totalTips": 13404,
+   "tipOut": 2214,
+   "kept": 11190
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-27",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 8786,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 35800,
+    "coffee": 26301,
+    "alcohol": 0,
+    "cardTips": 11142,
+    "cashTips": 0,
+    "kept": 8968,
+    "tipOut": 2174
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 10,
+    "wage": 1500,
+    "tipOutShare": 168,
+    "counterShare": 2008
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.93,
+    "wage": 1500,
+    "tipOutShare": 167,
+    "counterShare": 1994
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.48,
+    "wage": 1400,
+    "tipOutShare": 269,
+    "counterShare": 1703
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.48,
+    "wage": 1400,
+    "tipOutShare": 269,
+    "counterShare": 1703
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 7.98,
+    "wage": 1000,
+    "tipOutShare": 8968,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 3.52,
+    "wage": 1300,
+    "tipOutShare": 59,
+    "counterShare": 707
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 3.35,
+    "wage": 1300,
+    "tipOutShare": 1242,
+    "counterShare": 673
+   }
+  ],
+  "pools": {
+   "kitchen": 537,
+   "barista": 395,
+   "bartender": 0,
+   "busser": 1242,
+   "total": 2174
+  },
+  "totals": {
+   "food": 35800,
+   "coffee": 26301,
+   "alcohol": 0,
+   "total": 62101,
+   "cashTips": 0,
+   "cardTips": 11142,
+   "totalTips": 11142,
+   "tipOut": 2174,
+   "kept": 8968
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-28",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 7130,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 49080,
+    "coffee": 18395,
+    "alcohol": 0,
+    "cardTips": 14166,
+    "cashTips": 0,
+    "kept": 11804,
+    "tipOut": 2362
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.75,
+    "wage": 1500,
+    "tipOutShare": 110,
+    "counterShare": 1585
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.37,
+    "wage": 1500,
+    "tipOutShare": 106,
+    "counterShare": 1523
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.92,
+    "wage": 1400,
+    "tipOutShare": 381,
+    "counterShare": 1287
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.38,
+    "wage": 1400,
+    "tipOutShare": 355,
+    "counterShare": 1199
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.97,
+    "wage": 1000,
+    "tipOutShare": 11804,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 5.25,
+    "wage": 1500,
+    "tipOutShare": 59,
+    "counterShare": 853
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.2,
+    "wage": 1300,
+    "tipOutShare": 1350,
+    "counterShare": 683
+   }
+  ],
+  "pools": {
+   "kitchen": 736,
+   "barista": 276,
+   "bartender": 0,
+   "busser": 1350,
+   "total": 2362
+  },
+  "totals": {
+   "food": 49080,
+   "coffee": 18395,
+   "alcohol": 0,
+   "total": 67475,
+   "cashTips": 0,
+   "cardTips": 14166,
+   "totalTips": 14166,
+   "tipOut": 2362,
+   "kept": 11804
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-29",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 8115,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 33850,
+    "coffee": 19165,
+    "alcohol": 0,
+    "cardTips": 9668,
+    "cashTips": 0,
+    "kept": 7812,
+    "tipOut": 1856
+   },
+   {
+    "name": "Sandra",
+    "food": 20800,
+    "coffee": 11550,
+    "alcohol": 0,
+    "cardTips": 7512,
+    "cashTips": 0,
+    "kept": 6380,
+    "tipOut": 1132
+   }
+  ],
+  "staff": [
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.7,
+    "wage": 1400,
+    "tipOutShare": 448,
+    "counterShare": 1948
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.52,
+    "wage": 1500,
+    "tipOutShare": 228,
+    "counterShare": 1912
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.03,
+    "wage": 1400,
+    "tipOutShare": 371,
+    "counterShare": 1613
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.78,
+    "wage": 1000,
+    "tipOutShare": 7812,
+    "counterShare": 0
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 5.62,
+    "wage": 1500,
+    "tipOutShare": 134,
+    "counterShare": 1129
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 4.43,
+    "wage": 1000,
+    "tipOutShare": 6380,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 4.12,
+    "wage": 1500,
+    "tipOutShare": 99,
+    "counterShare": 827
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 3.42,
+    "wage": 1300,
+    "tipOutShare": 1707,
+    "counterShare": 687
+   }
+  ],
+  "pools": {
+   "kitchen": 820,
+   "barista": 461,
+   "bartender": 0,
+   "busser": 1707,
+   "total": 2988
+  },
+  "totals": {
+   "food": 54650,
+   "coffee": 30715,
+   "alcohol": 0,
+   "total": 85365,
+   "cashTips": 0,
+   "cardTips": 17180,
+   "totalTips": 17180,
+   "tipOut": 2988,
+   "kept": 14192
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-30",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 6923,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 27000,
+    "coffee": 10550,
+    "alcohol": 0,
+    "cardTips": 7224,
+    "cashTips": 0,
+    "kept": 6661,
+    "tipOut": 563
+   },
+   {
+    "name": "Stephanie",
+    "food": 43180,
+    "coffee": 21995,
+    "alcohol": 0,
+    "cardTips": 14401,
+    "cashTips": 0,
+    "kept": 13423,
+    "tipOut": 978
+   }
+  ],
+  "staff": [
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 8.97,
+    "wage": 1500,
+    "tipOutShare": 249,
+    "counterShare": 1775
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 8.7,
+    "wage": 1500,
+    "tipOutShare": 527,
+    "counterShare": 1722
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.68,
+    "wage": 1400,
+    "tipOutShare": 526,
+    "counterShare": 1718
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.63,
+    "wage": 1500,
+    "tipOutShare": 239,
+    "counterShare": 1708
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 5.97,
+    "wage": 1000,
+    "tipOutShare": 13423,
+    "counterShare": 0
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 5.52,
+    "wage": 1000,
+    "tipOutShare": 6661,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1053,
+   "barista": 488,
+   "bartender": 0,
+   "busser": 0,
+   "total": 1541
+  },
+  "totals": {
+   "food": 70180,
+   "coffee": 32545,
+   "alcohol": 0,
+   "total": 102725,
+   "cashTips": 0,
+   "cardTips": 21625,
+   "totalTips": 21625,
+   "tipOut": 1541,
+   "kept": 20084
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-05-31",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 10844,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 50300,
+    "coffee": 31450,
+    "alcohol": 0,
+    "cardTips": 24909,
+    "cashTips": 0,
+    "kept": 23683,
+    "tipOut": 1226
+   },
+   {
+    "name": "Stephanie",
+    "food": 33891,
+    "coffee": 23124,
+    "alcohol": 0,
+    "cardTips": 9651,
+    "cashTips": 0,
+    "kept": 8796,
+    "tipOut": 855
+   }
+  ],
+  "staff": [
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 10.02,
+    "wage": 1500,
+    "tipOutShare": 819,
+    "counterShare": 3864
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.17,
+    "wage": 1400,
+    "tipOutShare": 640,
+    "counterShare": 3536
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.93,
+    "wage": 1400,
+    "tipOutShare": 623,
+    "counterShare": 3444
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.6,
+    "wage": 1000,
+    "tipOutShare": 23683,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 5.98,
+    "wage": 1000,
+    "tipOutShare": 8796,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1263,
+   "barista": 819,
+   "bartender": 0,
+   "busser": 0,
+   "total": 2081
+  },
+  "totals": {
+   "food": 84191,
+   "coffee": 54574,
+   "alcohol": 0,
+   "total": 138765,
+   "cashTips": 0,
+   "cardTips": 34560,
+   "totalTips": 34560,
+   "tipOut": 2081,
+   "kept": 32479
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-01",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 2242,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 34600,
+    "coffee": 19050,
+    "alcohol": 0,
+    "cardTips": 9667,
+    "cashTips": 0,
+    "kept": 7789,
+    "tipOut": 1878
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.73,
+    "wage": 1500,
+    "tipOutShare": 286,
+    "counterShare": 623
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.68,
+    "wage": 1500,
+    "tipOutShare": 284,
+    "counterShare": 620
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.93,
+    "wage": 1000,
+    "tipOutShare": 7789,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.02,
+    "wage": 1400,
+    "tipOutShare": 235,
+    "counterShare": 514
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.58,
+    "wage": 1300,
+    "tipOutShare": 1073,
+    "counterShare": 485
+   }
+  ],
+  "pools": {
+   "kitchen": 519,
+   "barista": 286,
+   "bartender": 0,
+   "busser": 1073,
+   "total": 1878
+  },
+  "totals": {
+   "food": 34600,
+   "coffee": 19050,
+   "alcohol": 0,
+   "total": 53650,
+   "cashTips": 0,
+   "cardTips": 9667,
+   "totalTips": 9667,
+   "tipOut": 1878,
+   "kept": 7789
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-02",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 9918,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 73290,
+    "coffee": 22725,
+    "alcohol": 0,
+    "cardTips": 18337,
+    "cashTips": 0,
+    "kept": 16897,
+    "tipOut": 1440
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.8,
+    "wage": 1500,
+    "tipOutShare": 341,
+    "counterShare": 3613
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.5,
+    "wage": 1500,
+    "tipOutShare": 611,
+    "counterShare": 3503
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.35,
+    "wage": 1000,
+    "tipOutShare": 16897,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.6,
+    "wage": 1400,
+    "tipOutShare": 489,
+    "counterShare": 2802
+   }
+  ],
+  "pools": {
+   "kitchen": 1099,
+   "barista": 341,
+   "bartender": 0,
+   "busser": 0,
+   "total": 1440
+  },
+  "totals": {
+   "food": 73290,
+   "coffee": 22725,
+   "alcohol": 0,
+   "total": 96015,
+   "cashTips": 0,
+   "cardTips": 18337,
+   "totalTips": 18337,
+   "tipOut": 1440,
+   "kept": 16897
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-03",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 8344,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 41212,
+    "coffee": 12178,
+    "alcohol": 0,
+    "cardTips": 12957,
+    "cashTips": 0,
+    "kept": 11088,
+    "tipOut": 1869
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.72,
+    "wage": 1500,
+    "tipOutShare": 92,
+    "counterShare": 1925
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.67,
+    "wage": 1500,
+    "tipOutShare": 91,
+    "counterShare": 1915
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.15,
+    "wage": 1400,
+    "tipOutShare": 317,
+    "counterShare": 1614
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.75,
+    "wage": 1400,
+    "tipOutShare": 301,
+    "counterShare": 1535
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 7.05,
+    "wage": 1000,
+    "tipOutShare": 11088,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.85,
+    "wage": 1300,
+    "tipOutShare": 1068,
+    "counterShare": 1356
+   }
+  ],
+  "pools": {
+   "kitchen": 618,
+   "barista": 183,
+   "bartender": 0,
+   "busser": 1068,
+   "total": 1869
+  },
+  "totals": {
+   "food": 41212,
+   "coffee": 12178,
+   "alcohol": 0,
+   "total": 53390,
+   "cashTips": 0,
+   "cardTips": 12957,
+   "totalTips": 12957,
+   "tipOut": 1869,
+   "kept": 11088
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-04",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 10159,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 53800,
+    "coffee": 32310,
+    "alcohol": 0,
+    "cardTips": 16383,
+    "cashTips": 0,
+    "kept": 13369,
+    "tipOut": 3014
+   }
+  ],
+  "staff": [
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.7,
+    "wage": 1400,
+    "tipOutShare": 393,
+    "counterShare": 1931
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.7,
+    "wage": 1500,
+    "tipOutShare": 245,
+    "counterShare": 2433
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.5,
+    "wage": 1500,
+    "tipOutShare": 240,
+    "counterShare": 2383
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.1,
+    "wage": 1400,
+    "tipOutShare": 414,
+    "counterShare": 2032
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.4,
+    "wage": 1000,
+    "tipOutShare": 13369,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 5.5,
+    "wage": 1300,
+    "tipOutShare": 1722,
+    "counterShare": 1380
+   }
+  ],
+  "pools": {
+   "kitchen": 807,
+   "barista": 485,
+   "bartender": 0,
+   "busser": 1722,
+   "total": 3014
+  },
+  "totals": {
+   "food": 53800,
+   "coffee": 32310,
+   "alcohol": 0,
+   "total": 86110,
+   "cashTips": 0,
+   "cardTips": 16383,
+   "totalTips": 16383,
+   "tipOut": 3014,
+   "kept": 13369
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-05",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 13394,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 27800,
+    "coffee": 18950,
+    "alcohol": 0,
+    "cardTips": 9356,
+    "cashTips": 0,
+    "kept": 7720,
+    "tipOut": 1636
+   },
+   {
+    "name": "Stephanie",
+    "food": 26000,
+    "coffee": 14250,
+    "alcohol": 0,
+    "cardTips": 8631,
+    "cashTips": 0,
+    "kept": 7222,
+    "tipOut": 1409
+   }
+  ],
+  "staff": [
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.6,
+    "wage": 1400,
+    "tipOutShare": 439,
+    "counterShare": 3138
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.57,
+    "wage": 1500,
+    "tipOutShare": 251,
+    "counterShare": 3129
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.45,
+    "wage": 1500,
+    "tipOutShare": 247,
+    "counterShare": 3089
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.03,
+    "wage": 1400,
+    "tipOutShare": 368,
+    "counterShare": 2625
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 7.67,
+    "wage": 1000,
+    "tipOutShare": 7720,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.05,
+    "wage": 1000,
+    "tipOutShare": 7222,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.32,
+    "wage": 1300,
+    "tipOutShare": 1740,
+    "counterShare": 1412
+   }
+  ],
+  "pools": {
+   "kitchen": 807,
+   "barista": 498,
+   "bartender": 0,
+   "busser": 1740,
+   "total": 3045
+  },
+  "totals": {
+   "food": 53800,
+   "coffee": 33200,
+   "alcohol": 0,
+   "total": 87000,
+   "cashTips": 0,
+   "cardTips": 17987,
+   "totalTips": 17987,
+   "tipOut": 3045,
+   "kept": 14942
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-06",
+  "busser": true,
+  "counter": {
+   "jar": 2200,
+   "card": 8765,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 16640,
+    "coffee": 21165,
+    "alcohol": 0,
+    "cardTips": 9958,
+    "cashTips": 0,
+    "kept": 8635,
+    "tipOut": 1323
+   },
+   {
+    "name": "Sandra",
+    "food": 23760,
+    "coffee": 19740,
+    "alcohol": 0,
+    "cardTips": 12411,
+    "cashTips": 0,
+    "kept": 10889,
+    "tipOut": 1523
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.7,
+    "wage": 1500,
+    "tipOutShare": 371,
+    "counterShare": 2109
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 8.72,
+    "wage": 1500,
+    "tipOutShare": 305,
+    "counterShare": 2114
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.48,
+    "wage": 1300,
+    "tipOutShare": 1626,
+    "counterShare": 1086
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.58,
+    "wage": 1400,
+    "tipOutShare": 301,
+    "counterShare": 2080
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 7.33,
+    "wage": 1000,
+    "tipOutShare": 10889,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.3,
+    "wage": 1000,
+    "tipOutShare": 8635,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 5.68,
+    "wage": 1500,
+    "tipOutShare": 242,
+    "counterShare": 1377
+   }
+  ],
+  "pools": {
+   "kitchen": 606,
+   "barista": 614,
+   "bartender": 0,
+   "busser": 1626,
+   "total": 2846
+  },
+  "totals": {
+   "food": 40400,
+   "coffee": 40905,
+   "alcohol": 0,
+   "total": 81305,
+   "cashTips": 0,
+   "cardTips": 22369,
+   "totalTips": 22369,
+   "tipOut": 2846,
+   "kept": 19523
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-07",
+  "busser": false,
+  "counter": {
+   "jar": 400,
+   "card": 4620,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 41800,
+    "coffee": 32950,
+    "alcohol": 0,
+    "cardTips": 16628,
+    "cashTips": 0,
+    "kept": 15507,
+    "tipOut": 1121
+   },
+   {
+    "name": "Stephanie",
+    "food": 29506,
+    "coffee": 28660,
+    "alcohol": 0,
+    "cardTips": 24595,
+    "cashTips": 0,
+    "kept": 23723,
+    "tipOut": 872
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.5,
+    "wage": 1400,
+    "tipOutShare": 586,
+    "counterShare": 1579
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.02,
+    "wage": 1400,
+    "tipOutShare": 484,
+    "counterShare": 1304
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.65,
+    "wage": 1000,
+    "tipOutShare": 15507,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.77,
+    "wage": 1000,
+    "tipOutShare": 23723,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.35,
+    "wage": 1500,
+    "tipOutShare": 924,
+    "counterShare": 1737
+   }
+  ],
+  "pools": {
+   "kitchen": 1070,
+   "barista": 924,
+   "bartender": 0,
+   "busser": 0,
+   "total": 1994
+  },
+  "totals": {
+   "food": 71306,
+   "coffee": 61610,
+   "alcohol": 0,
+   "total": 132916,
+   "cashTips": 0,
+   "cardTips": 41223,
+   "totalTips": 41223,
+   "tipOut": 1994,
+   "kept": 39229
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-08",
+  "busser": true,
+  "counter": {
+   "jar": 1200,
+   "card": 8934,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 41240,
+    "coffee": 33570,
+    "alcohol": 0,
+    "cardTips": 20482,
+    "cashTips": 0,
+    "kept": 17864,
+    "tipOut": 2618
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.72,
+    "wage": 1500,
+    "tipOutShare": 294,
+    "counterShare": 2193
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.68,
+    "wage": 1500,
+    "tipOutShare": 337,
+    "counterShare": 2184
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 5.23,
+    "wage": 1300,
+    "tipOutShare": 1496,
+    "counterShare": 1180
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.07,
+    "wage": 1400,
+    "tipOutShare": 281,
+    "counterShare": 1821
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 7.57,
+    "wage": 1000,
+    "tipOutShare": 17864,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.9,
+    "wage": 1300,
+    "tipOutShare": 209,
+    "counterShare": 1557
+   }
+  ],
+  "pools": {
+   "kitchen": 619,
+   "barista": 504,
+   "bartender": 0,
+   "busser": 1496,
+   "total": 2618
+  },
+  "totals": {
+   "food": 41240,
+   "coffee": 33570,
+   "alcohol": 0,
+   "total": 74810,
+   "cashTips": 0,
+   "cardTips": 20482,
+   "totalTips": 20482,
+   "tipOut": 2618,
+   "kept": 17864
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-09",
+  "busser": true,
+  "counter": {
+   "jar": 2900,
+   "card": 9895,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 42770,
+    "coffee": 28795,
+    "alcohol": 0,
+    "cardTips": 16982,
+    "cashTips": 0,
+    "kept": 14477,
+    "tipOut": 2505
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.53,
+    "wage": 1500,
+    "tipOutShare": 249,
+    "counterShare": 2401
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 8.5,
+    "wage": 1500,
+    "tipOutShare": 336,
+    "counterShare": 2141
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.47,
+    "wage": 1300,
+    "tipOutShare": 1431,
+    "counterShare": 1630
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.75,
+    "wage": 1400,
+    "tipOutShare": 306,
+    "counterShare": 1952
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.82,
+    "wage": 1000,
+    "tipOutShare": 14477,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.03,
+    "wage": 1300,
+    "tipOutShare": 183,
+    "counterShare": 1771
+   }
+  ],
+  "pools": {
+   "kitchen": 642,
+   "barista": 432,
+   "bartender": 0,
+   "busser": 1431,
+   "total": 2505
+  },
+  "totals": {
+   "food": 42770,
+   "coffee": 28795,
+   "alcohol": 0,
+   "total": 71565,
+   "cashTips": 0,
+   "cardTips": 16982,
+   "totalTips": 16982,
+   "tipOut": 2505,
+   "kept": 14477
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-10",
+  "busser": true,
+  "counter": {
+   "jar": 1700,
+   "card": 10174,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 23500,
+    "coffee": 19910,
+    "alcohol": 0,
+    "cardTips": 10293,
+    "cashTips": 0,
+    "kept": 8774,
+    "tipOut": 1519
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.72,
+    "wage": 1500,
+    "tipOutShare": 168,
+    "counterShare": 2538
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.5,
+    "wage": 1300,
+    "tipOutShare": 868,
+    "counterShare": 1697
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.57,
+    "wage": 1400,
+    "tipOutShare": 176,
+    "counterShare": 1976
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.6,
+    "wage": 1400,
+    "tipOutShare": 177,
+    "counterShare": 1984
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.18,
+    "wage": 1000,
+    "tipOutShare": 8774,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 7.58,
+    "wage": 1500,
+    "tipOutShare": 131,
+    "counterShare": 1979
+   }
+  ],
+  "pools": {
+   "kitchen": 353,
+   "barista": 299,
+   "bartender": 0,
+   "busser": 868,
+   "total": 1519
+  },
+  "totals": {
+   "food": 23500,
+   "coffee": 19910,
+   "alcohol": 0,
+   "total": 43410,
+   "cashTips": 0,
+   "cardTips": 10293,
+   "totalTips": 10293,
+   "tipOut": 1519,
+   "kept": 8774
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-11",
+  "busser": true,
+  "counter": {
+   "jar": 1800,
+   "card": 9190,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 57320,
+    "coffee": 39030,
+    "alcohol": 0,
+    "cardTips": 24862,
+    "cashTips": 0,
+    "kept": 21490,
+    "tipOut": 3372
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.37,
+    "wage": 1500,
+    "tipOutShare": 290,
+    "counterShare": 2093
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.52,
+    "wage": 1500,
+    "tipOutShare": 295,
+    "counterShare": 2127
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.45,
+    "wage": 1300,
+    "tipOutShare": 1927,
+    "counterShare": 1664
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.28,
+    "wage": 1400,
+    "tipOutShare": 423,
+    "counterShare": 1626
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.52,
+    "wage": 1400,
+    "tipOutShare": 437,
+    "counterShare": 1680
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.42,
+    "wage": 1000,
+    "tipOutShare": 21490,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 860,
+   "barista": 585,
+   "bartender": 0,
+   "busser": 1927,
+   "total": 3372
+  },
+  "totals": {
+   "food": 57320,
+   "coffee": 39030,
+   "alcohol": 0,
+   "total": 96350,
+   "cashTips": 0,
+   "cardTips": 24862,
+   "totalTips": 24862,
+   "tipOut": 3372,
+   "kept": 21490
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-12",
+  "busser": true,
+  "counter": {
+   "jar": 600,
+   "card": 8817,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 32600,
+    "coffee": 21140,
+    "alcohol": 0,
+    "cardTips": 18573,
+    "cashTips": 0,
+    "kept": 16692,
+    "tipOut": 1881
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.7,
+    "wage": 1500,
+    "tipOutShare": 159,
+    "counterShare": 2019
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.7,
+    "wage": 1500,
+    "tipOutShare": 159,
+    "counterShare": 2019
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.18,
+    "wage": 1300,
+    "tipOutShare": 1075,
+    "counterShare": 1494
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.95,
+    "wage": 1400,
+    "tipOutShare": 246,
+    "counterShare": 1655
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.83,
+    "wage": 1400,
+    "tipOutShare": 243,
+    "counterShare": 1630
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.57,
+    "wage": 1000,
+    "tipOutShare": 16692,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 489,
+   "barista": 317,
+   "bartender": 0,
+   "busser": 1075,
+   "total": 1881
+  },
+  "totals": {
+   "food": 32600,
+   "coffee": 21140,
+   "alcohol": 0,
+   "total": 53740,
+   "cashTips": 0,
+   "cardTips": 18573,
+   "totalTips": 18573,
+   "tipOut": 1881,
+   "kept": 16692
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-13",
+  "busser": true,
+  "counter": {
+   "jar": 1000,
+   "card": 5773,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 37300,
+    "coffee": 30500,
+    "alcohol": 0,
+    "cardTips": 17104,
+    "cashTips": 0,
+    "kept": 14731,
+    "tipOut": 2373
+   },
+   {
+    "name": "Sandra",
+    "food": 21280,
+    "coffee": 18120,
+    "alcohol": 0,
+    "cardTips": 9418,
+    "cashTips": 0,
+    "kept": 8039,
+    "tipOut": 1379
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.47,
+    "wage": 1500,
+    "tipOutShare": 206,
+    "counterShare": 1148
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 8.68,
+    "wage": 1500,
+    "tipOutShare": 211,
+    "counterShare": 1177
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 5.07,
+    "wage": 1300,
+    "tipOutShare": 2144,
+    "counterShare": 687
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.57,
+    "wage": 1400,
+    "tipOutShare": 879,
+    "counterShare": 1026
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 5.97,
+    "wage": 1000,
+    "tipOutShare": 8039,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 7.1,
+    "wage": 1000,
+    "tipOutShare": 14731,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 5.72,
+    "wage": 1500,
+    "tipOutShare": 139,
+    "counterShare": 776
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.07,
+    "wage": 1300,
+    "tipOutShare": 172,
+    "counterShare": 959
+   }
+  ],
+  "pools": {
+   "kitchen": 879,
+   "barista": 729,
+   "bartender": 0,
+   "busser": 2144,
+   "total": 3752
+  },
+  "totals": {
+   "food": 58580,
+   "coffee": 48620,
+   "alcohol": 0,
+   "total": 107200,
+   "cashTips": 0,
+   "cardTips": 26522,
+   "totalTips": 26522,
+   "tipOut": 3752,
+   "kept": 22770
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-14",
+  "busser": false,
+  "counter": {
+   "jar": 4000,
+   "card": 11048,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 11750,
+    "coffee": 14100,
+    "alcohol": 0,
+    "cardTips": 4732,
+    "cashTips": 0,
+    "kept": 4344,
+    "tipOut": 388
+   },
+   {
+    "name": "Stephanie",
+    "food": 20480,
+    "coffee": 20870,
+    "alcohol": 0,
+    "cardTips": 8854,
+    "cashTips": 0,
+    "kept": 8234,
+    "tipOut": 620
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 9.33,
+    "wage": 1400,
+    "tipOutShare": 254,
+    "counterShare": 3772
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.43,
+    "wage": 1400,
+    "tipOutShare": 229,
+    "counterShare": 3408
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 5.42,
+    "wage": 1000,
+    "tipOutShare": 4344,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.43,
+    "wage": 1000,
+    "tipOutShare": 8234,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.57,
+    "wage": 1500,
+    "tipOutShare": 525,
+    "counterShare": 3869
+   }
+  ],
+  "pools": {
+   "kitchen": 483,
+   "barista": 525,
+   "bartender": 0,
+   "busser": 0,
+   "total": 1008
+  },
+  "totals": {
+   "food": 32230,
+   "coffee": 34970,
+   "alcohol": 0,
+   "total": 67200,
+   "cashTips": 0,
+   "cardTips": 13586,
+   "totalTips": 13586,
+   "tipOut": 1008,
+   "kept": 12578
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-15",
+  "busser": true,
+  "counter": {
+   "jar": 300,
+   "card": 5987,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 42960,
+    "coffee": 37785,
+    "alcohol": 0,
+    "cardTips": 17451,
+    "cashTips": 0,
+    "kept": 14625,
+    "tipOut": 2826
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.77,
+    "wage": 1500,
+    "tipOutShare": 354,
+    "counterShare": 1705
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 3.4,
+    "wage": 1500,
+    "tipOutShare": 189,
+    "counterShare": 593
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.2,
+    "wage": 1400,
+    "tipOutShare": 456,
+    "counterShare": 1431
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 7.28,
+    "wage": 1000,
+    "tipOutShare": 14625,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 5.88,
+    "wage": 1300,
+    "tipOutShare": 213,
+    "counterShare": 1026
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.06,
+    "wage": 1300,
+    "tipOutShare": 1615,
+    "counterShare": 1232
+   }
+  ],
+  "pools": {
+   "kitchen": 644,
+   "barista": 567,
+   "bartender": 0,
+   "busser": 1615,
+   "total": 2826
+  },
+  "totals": {
+   "food": 42960,
+   "coffee": 37785,
+   "alcohol": 0,
+   "total": 80745,
+   "cashTips": 0,
+   "cardTips": 17451,
+   "totalTips": 17451,
+   "tipOut": 2826,
+   "kept": 14625
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-16",
+  "busser": true,
+  "counter": {
+   "jar": 1900,
+   "card": 9128,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 35100,
+    "coffee": 19050,
+    "alcohol": 0,
+    "cardTips": 11366,
+    "cashTips": 0,
+    "kept": 9471,
+    "tipOut": 1895
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.67,
+    "wage": 1500,
+    "tipOutShare": 156,
+    "counterShare": 2583
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.72,
+    "wage": 1500,
+    "tipOutShare": 527,
+    "counterShare": 2597
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.78,
+    "wage": 1300,
+    "tipOutShare": 1083,
+    "counterShare": 1811
+   },
+   {
+    "name": "Kevin",
+    "role": "Server",
+    "hours": 7.87,
+    "wage": 1400,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 5.42,
+    "wage": 1000,
+    "tipOutShare": 9471,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 8,
+    "wage": 1300,
+    "tipOutShare": 129,
+    "counterShare": 2137
+   }
+  ],
+  "pools": {
+   "kitchen": 527,
+   "barista": 286,
+   "bartender": 0,
+   "busser": 1083,
+   "total": 1895
+  },
+  "totals": {
+   "food": 35100,
+   "coffee": 19050,
+   "alcohol": 0,
+   "total": 54150,
+   "cashTips": 0,
+   "cardTips": 11366,
+   "totalTips": 11366,
+   "tipOut": 1895,
+   "kept": 9471
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-17",
+  "busser": true,
+  "counter": {
+   "jar": 2000,
+   "card": 8719,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 27570,
+    "coffee": 15800,
+    "alcohol": 0,
+    "cardTips": 17404,
+    "cashTips": 0,
+    "kept": 15886,
+    "tipOut": 1518
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.7,
+    "wage": 1500,
+    "tipOutShare": 119,
+    "counterShare": 2103
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.58,
+    "wage": 1500,
+    "tipOutShare": 118,
+    "counterShare": 2077
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6,
+    "wage": 1300,
+    "tipOutShare": 867,
+    "counterShare": 1301
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.3,
+    "wage": 1400,
+    "tipOutShare": 202,
+    "counterShare": 1583
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.63,
+    "wage": 1400,
+    "tipOutShare": 211,
+    "counterShare": 1654
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.12,
+    "wage": 1000,
+    "tipOutShare": 15886,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 414,
+   "barista": 237,
+   "bartender": 0,
+   "busser": 867,
+   "total": 1518
+  },
+  "totals": {
+   "food": 27570,
+   "coffee": 15800,
+   "alcohol": 0,
+   "total": 43370,
+   "cashTips": 0,
+   "cardTips": 17404,
+   "totalTips": 17404,
+   "tipOut": 1518,
+   "kept": 15886
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-18",
+  "busser": true,
+  "counter": {
+   "jar": 1700,
+   "card": 6657,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 33920,
+    "coffee": 28701,
+    "alcohol": 0,
+    "cardTips": 16267,
+    "cashTips": 0,
+    "kept": 14075,
+    "tipOut": 2192
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.82,
+    "wage": 1500,
+    "tipOutShare": 215,
+    "counterShare": 1678
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.85,
+    "wage": 1500,
+    "tipOutShare": 216,
+    "counterShare": 1683
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.22,
+    "wage": 1300,
+    "tipOutShare": 1252,
+    "counterShare": 721
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.43,
+    "wage": 1400,
+    "tipOutShare": 251,
+    "counterShare": 1270
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.63,
+    "wage": 1400,
+    "tipOutShare": 258,
+    "counterShare": 1304
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.58,
+    "wage": 1000,
+    "tipOutShare": 14075,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 509,
+   "barista": 431,
+   "bartender": 0,
+   "busser": 1252,
+   "total": 2192
+  },
+  "totals": {
+   "food": 33920,
+   "coffee": 28701,
+   "alcohol": 0,
+   "total": 62621,
+   "cashTips": 0,
+   "cardTips": 16267,
+   "totalTips": 16267,
+   "tipOut": 2192,
+   "kept": 14075
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-19",
+  "busser": true,
+  "counter": {
+   "jar": 500,
+   "card": 8514,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Stephanie",
+    "food": 23900,
+    "coffee": 26635,
+    "alcohol": 0,
+    "cardTips": 12291,
+    "cashTips": 0,
+    "kept": 10522,
+    "tipOut": 1769
+   },
+   {
+    "name": "Sandra",
+    "food": 23660,
+    "coffee": 21710,
+    "alcohol": 0,
+    "cardTips": 14269,
+    "cashTips": 0,
+    "kept": 12681,
+    "tipOut": 1588
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.83,
+    "wage": 1500,
+    "tipOutShare": 366,
+    "counterShare": 2227
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.67,
+    "wage": 1500,
+    "tipOutShare": 360,
+    "counterShare": 2191
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 2.47,
+    "wage": 1300,
+    "tipOutShare": 1918,
+    "counterShare": 560
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.88,
+    "wage": 1400,
+    "tipOutShare": 360,
+    "counterShare": 1785
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.73,
+    "wage": 1400,
+    "tipOutShare": 353,
+    "counterShare": 1751
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 6.28,
+    "wage": 1000,
+    "tipOutShare": 12681,
+    "counterShare": 0
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 8.38,
+    "wage": 1000,
+    "tipOutShare": 10522,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 713,
+   "barista": 725,
+   "bartender": 0,
+   "busser": 1918,
+   "total": 3357
+  },
+  "totals": {
+   "food": 47560,
+   "coffee": 48345,
+   "alcohol": 0,
+   "total": 95905,
+   "cashTips": 0,
+   "cardTips": 26560,
+   "totalTips": 26560,
+   "tipOut": 3357,
+   "kept": 23203
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-20",
+  "busser": true,
+  "counter": {
+   "jar": 2000,
+   "card": 9749,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 58300,
+    "coffee": 38150,
+    "alcohol": 0,
+    "cardTips": 24823,
+    "cashTips": 0,
+    "kept": 21447,
+    "tipOut": 3376
+   },
+   {
+    "name": "Stephanie",
+    "food": 46600,
+    "coffee": 22800,
+    "alcohol": 0,
+    "cardTips": 16058,
+    "cashTips": 0,
+    "kept": 13629,
+    "tipOut": 2429
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9,
+    "wage": 1500,
+    "tipOutShare": 387,
+    "counterShare": 1810
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.27,
+    "wage": 1000,
+    "tipOutShare": 21447,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.75,
+    "wage": 1400,
+    "tipOutShare": 736,
+    "counterShare": 1558
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 10.65,
+    "wage": 1300,
+    "tipOutShare": 3317,
+    "counterShare": 2142
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 5.68,
+    "wage": 1500,
+    "tipOutShare": 244,
+    "counterShare": 1142
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.58,
+    "wage": 1300,
+    "tipOutShare": 283,
+    "counterShare": 1323
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 8.82,
+    "wage": 1500,
+    "tipOutShare": 838,
+    "counterShare": 1774
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.15,
+    "wage": 1000,
+    "tipOutShare": 13629,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1574,
+   "barista": 914,
+   "bartender": 0,
+   "busser": 3317,
+   "total": 5805
+  },
+  "totals": {
+   "food": 104900,
+   "coffee": 60950,
+   "alcohol": 0,
+   "total": 165850,
+   "cashTips": 0,
+   "cardTips": 40881,
+   "totalTips": 40881,
+   "tipOut": 5805,
+   "kept": 35076
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-21",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 5916,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 69825,
+    "coffee": 27660,
+    "alcohol": 0,
+    "cardTips": 7971,
+    "cashTips": 0,
+    "kept": 6509,
+    "tipOut": 1462
+   },
+   {
+    "name": "Stephanie",
+    "food": 34330,
+    "coffee": 15200,
+    "alcohol": 0,
+    "cardTips": 23214,
+    "cashTips": 0,
+    "kept": 22471,
+    "tipOut": 743
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.93,
+    "wage": 1400,
+    "tipOutShare": 840,
+    "counterShare": 1823
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 5.67,
+    "wage": 1000,
+    "tipOutShare": 6509,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.68,
+    "wage": 1400,
+    "tipOutShare": 722,
+    "counterShare": 1568
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 8.85,
+    "wage": 1500,
+    "tipOutShare": 460,
+    "counterShare": 1807
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 3.52,
+    "wage": 1300,
+    "tipOutShare": 183,
+    "counterShare": 719
+   },
+   {
+    "name": "Stephanie",
+    "role": "Server",
+    "hours": 6.87,
+    "wage": 1000,
+    "tipOutShare": 22471,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1562,
+   "barista": 643,
+   "bartender": 0,
+   "busser": 0,
+   "total": 2205
+  },
+  "totals": {
+   "food": 104155,
+   "coffee": 42860,
+   "alcohol": 0,
+   "total": 147015,
+   "cashTips": 0,
+   "cardTips": 31185,
+   "totalTips": 31185,
+   "tipOut": 2205,
+   "kept": 28980
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-22",
+  "busser": true,
+  "counter": {
+   "jar": 3000,
+   "card": 10061,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Esther",
+    "food": 81840,
+    "coffee": 42110,
+    "alcohol": 0,
+    "cardTips": 23035,
+    "cashTips": 0,
+    "kept": 18697,
+    "tipOut": 4338
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 9.8,
+    "wage": 700,
+    "tipOutShare": 18697,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.95,
+    "wage": 1400,
+    "tipOutShare": 549,
+    "counterShare": 1942
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.78,
+    "wage": 1300,
+    "tipOutShare": 2479,
+    "counterShare": 1656
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.85,
+    "wage": 1500,
+    "tipOutShare": 374,
+    "counterShare": 2407
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.77,
+    "wage": 1300,
+    "tipOutShare": 257,
+    "counterShare": 1654
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.83,
+    "wage": 1500,
+    "tipOutShare": 679,
+    "counterShare": 2402
+   }
+  ],
+  "pools": {
+   "kitchen": 1228,
+   "barista": 632,
+   "bartender": 0,
+   "busser": 2479,
+   "total": 4338
+  },
+  "totals": {
+   "food": 81840,
+   "coffee": 42110,
+   "alcohol": 0,
+   "total": 123950,
+   "cashTips": 0,
+   "cardTips": 23035,
+   "totalTips": 23035,
+   "tipOut": 4338,
+   "kept": 18697
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-23",
+  "busser": true,
+  "counter": {
+   "jar": 500,
+   "card": 10796,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 57840,
+    "coffee": 42670,
+    "alcohol": 0,
+    "cardTips": 19879,
+    "cashTips": 0,
+    "kept": 16361,
+    "tipOut": 3518
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.68,
+    "wage": 1500,
+    "tipOutShare": 318,
+    "counterShare": 2609
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.88,
+    "wage": 1400,
+    "tipOutShare": 428,
+    "counterShare": 2124
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.47,
+    "wage": 1000,
+    "tipOutShare": 16361,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.08,
+    "wage": 1400,
+    "tipOutShare": 439,
+    "counterShare": 2178
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.62,
+    "wage": 1300,
+    "tipOutShare": 2010,
+    "counterShare": 1245
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 9.8,
+    "wage": 1300,
+    "tipOutShare": 322,
+    "counterShare": 2641
+   }
+  ],
+  "pools": {
+   "kitchen": 868,
+   "barista": 640,
+   "bartender": 0,
+   "busser": 2010,
+   "total": 3518
+  },
+  "totals": {
+   "food": 57840,
+   "coffee": 42670,
+   "alcohol": 0,
+   "total": 100510,
+   "cashTips": 0,
+   "cardTips": 19879,
+   "totalTips": 19879,
+   "tipOut": 3518,
+   "kept": 16361
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-24",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 4580,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 66080,
+    "coffee": 28470,
+    "alcohol": 0,
+    "cardTips": 19563,
+    "cashTips": 0,
+    "kept": 16254,
+    "tipOut": 3309
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.67,
+    "wage": 1500,
+    "tipOutShare": 210,
+    "counterShare": 987
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.62,
+    "wage": 1400,
+    "tipOutShare": 469,
+    "counterShare": 879
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.65,
+    "wage": 1000,
+    "tipOutShare": 16254,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.6,
+    "wage": 1400,
+    "tipOutShare": 522,
+    "counterShare": 979
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.98,
+    "wage": 1300,
+    "tipOutShare": 1891,
+    "counterShare": 712
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 10.02,
+    "wage": 1300,
+    "tipOutShare": 217,
+    "counterShare": 1022
+   }
+  ],
+  "pools": {
+   "kitchen": 991,
+   "barista": 427,
+   "bartender": 0,
+   "busser": 1891,
+   "total": 3309
+  },
+  "totals": {
+   "food": 66080,
+   "coffee": 28470,
+   "alcohol": 0,
+   "total": 94550,
+   "cashTips": 0,
+   "cardTips": 19563,
+   "totalTips": 19563,
+   "tipOut": 3309,
+   "kept": 16254
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-25",
+  "busser": true,
+  "counter": {
+   "jar": 2100,
+   "card": 11435,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 63360,
+    "coffee": 38130,
+    "alcohol": 0,
+    "cardTips": 20655,
+    "cashTips": 0,
+    "kept": 17103,
+    "tipOut": 3552
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.8,
+    "wage": 1500,
+    "tipOutShare": 290,
+    "counterShare": 2542
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.23,
+    "wage": 1400,
+    "tipOutShare": 442,
+    "counterShare": 2134
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.6,
+    "wage": 1000,
+    "tipOutShare": 17103,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.45,
+    "wage": 1400,
+    "tipOutShare": 508,
+    "counterShare": 2451
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.08,
+    "wage": 1300,
+    "tipOutShare": 2030,
+    "counterShare": 1836
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.53,
+    "wage": 1500,
+    "tipOutShare": 282,
+    "counterShare": 2472
+   }
+  ],
+  "pools": {
+   "kitchen": 950,
+   "barista": 572,
+   "bartender": 0,
+   "busser": 2030,
+   "total": 3552
+  },
+  "totals": {
+   "food": 63360,
+   "coffee": 38130,
+   "alcohol": 0,
+   "total": 101490,
+   "cashTips": 0,
+   "cardTips": 20655,
+   "totalTips": 20655,
+   "tipOut": 3552,
+   "kept": 17103
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-26",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 10063,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 76220,
+    "coffee": 57250,
+    "alcohol": 0,
+    "cardTips": 23782,
+    "cashTips": 0,
+    "kept": 19111,
+    "tipOut": 4671
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 10.17,
+    "wage": 1500,
+    "tipOutShare": 440,
+    "counterShare": 2257
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.27,
+    "wage": 1400,
+    "tipOutShare": 525,
+    "counterShare": 1835
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.73,
+    "wage": 1000,
+    "tipOutShare": 19111,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9.73,
+    "wage": 1400,
+    "tipOutShare": 618,
+    "counterShare": 2159
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.48,
+    "wage": 1300,
+    "tipOutShare": 2669,
+    "counterShare": 1660
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.7,
+    "wage": 1500,
+    "tipOutShare": 419,
+    "counterShare": 2152
+   }
+  ],
+  "pools": {
+   "kitchen": 1143,
+   "barista": 859,
+   "bartender": 0,
+   "busser": 2669,
+   "total": 4671
+  },
+  "totals": {
+   "food": 76220,
+   "coffee": 57250,
+   "alcohol": 0,
+   "total": 133470,
+   "cashTips": 0,
+   "cardTips": 23782,
+   "totalTips": 23782,
+   "tipOut": 4671,
+   "kept": 19111
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-27",
+  "busser": true,
+  "counter": {
+   "jar": 1800,
+   "card": 13524,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 119520,
+    "coffee": 75935,
+    "alcohol": 0,
+    "cardTips": 39041,
+    "cashTips": 0,
+    "kept": 32200,
+    "tipOut": 6841
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.78,
+    "wage": 1500,
+    "tipOutShare": 434,
+    "counterShare": 2517
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.42,
+    "wage": 1400,
+    "tipOutShare": 883,
+    "counterShare": 2414
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.03,
+    "wage": 1000,
+    "tipOutShare": 32200,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.67,
+    "wage": 1400,
+    "tipOutShare": 910,
+    "counterShare": 2486
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 7.05,
+    "wage": 1300,
+    "tipOutShare": 3909,
+    "counterShare": 2021
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 5.23,
+    "wage": 1500,
+    "tipOutShare": 259,
+    "counterShare": 1499
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 9.02,
+    "wage": 1300,
+    "tipOutShare": 446,
+    "counterShare": 2586
+   }
+  ],
+  "pools": {
+   "kitchen": 1793,
+   "barista": 1139,
+   "bartender": 0,
+   "busser": 3909,
+   "total": 6841
+  },
+  "totals": {
+   "food": 119520,
+   "coffee": 75935,
+   "alcohol": 0,
+   "total": 195455,
+   "cashTips": 0,
+   "cardTips": 39041,
+   "totalTips": 39041,
+   "tipOut": 6841,
+   "kept": 32200
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-28",
+  "busser": true,
+  "counter": {
+   "jar": 1000,
+   "card": 8043,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 120310,
+    "coffee": 70175,
+    "alcohol": 0,
+    "cardTips": 32223,
+    "cashTips": 0,
+    "kept": 22866,
+    "tipOut": 6667
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 9.27,
+    "wage": 1400,
+    "tipOutShare": 916,
+    "counterShare": 1834
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 10.43,
+    "wage": 1000,
+    "tipOutShare": 22866,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 9,
+    "wage": 1400,
+    "tipOutShare": 889,
+    "counterShare": 1781
+   },
+   {
+    "name": "Joseph",
+    "role": "Training",
+    "hours": 4.03,
+    "wage": 1300,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.2,
+    "wage": 1500,
+    "tipOutShare": 673,
+    "counterShare": 1820
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 5.18,
+    "wage": 1300,
+    "tipOutShare": 379,
+    "counterShare": 1025
+   },
+   {
+    "name": "Eunji",
+    "role": "Busser/Dishwasher",
+    "hours": 8,
+    "wage": 1000,
+    "tipOutShare": 7500,
+    "counterShare": 1583
+   }
+  ],
+  "pools": {
+   "kitchen": 1805,
+   "barista": 1053,
+   "bartender": 0,
+   "busser": 3810,
+   "total": 6667
+  },
+  "totals": {
+   "food": 120310,
+   "coffee": 70175,
+   "alcohol": 0,
+   "total": 190485,
+   "cashTips": 0,
+   "cardTips": 32223,
+   "totalTips": 32223,
+   "tipOut": 6667,
+   "kept": 22866
+  },
+  "sanity": 1000
+ },
+ {
+  "date": "2026-06-29",
+  "busser": true,
+  "counter": {
+   "jar": 1000,
+   "card": 5734,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Esther",
+    "food": 69720,
+    "coffee": 37610,
+    "alcohol": 0,
+    "cardTips": 16703,
+    "cashTips": 0,
+    "kept": 12946,
+    "tipOut": 3757
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 9.68,
+    "wage": 700,
+    "tipOutShare": 12946,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.02,
+    "wage": 1400,
+    "tipOutShare": 473,
+    "counterShare": 1158
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.52,
+    "wage": 1300,
+    "tipOutShare": 2147,
+    "counterShare": 941
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 8.68,
+    "wage": 1500,
+    "tipOutShare": 316,
+    "counterShare": 1253
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.8,
+    "wage": 1300,
+    "tipOutShare": 248,
+    "counterShare": 982
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.7,
+    "wage": 1500,
+    "tipOutShare": 572,
+    "counterShare": 1400
+   }
+  ],
+  "pools": {
+   "kitchen": 1046,
+   "barista": 564,
+   "bartender": 0,
+   "busser": 2147,
+   "total": 3757
+  },
+  "totals": {
+   "food": 69720,
+   "coffee": 37610,
+   "alcohol": 0,
+   "total": 107330,
+   "cashTips": 0,
+   "cardTips": 16703,
+   "totalTips": 16703,
+   "tipOut": 3757,
+   "kept": 12946
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-06-30",
+  "busser": true,
+  "counter": {
+   "jar": 2400,
+   "card": 6903,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 73740,
+    "coffee": 29884,
+    "alcohol": 0,
+    "cardTips": 25157,
+    "cashTips": 0,
+    "kept": 21530,
+    "tipOut": 3627
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.37,
+    "wage": 1500,
+    "tipOutShare": 256,
+    "counterShare": 1612
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.1,
+    "wage": 1400,
+    "tipOutShare": 506,
+    "counterShare": 1394
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.58,
+    "wage": 1000,
+    "tipOutShare": 21530,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.02,
+    "wage": 1300,
+    "tipOutShare": 2072,
+    "counterShare": 1036
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.03,
+    "wage": 1300,
+    "tipOutShare": 192,
+    "counterShare": 1210
+   },
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.6,
+    "wage": 1500,
+    "tipOutShare": 600,
+    "counterShare": 1652
+   },
+   {
+    "name": "Eunji",
+    "role": "Training",
+    "hours": 5,
+    "wage": 1000,
+    "tipOutShare": 0,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1106,
+   "barista": 448,
+   "bartender": 0,
+   "busser": 2072,
+   "total": 3627
+  },
+  "totals": {
+   "food": 73740,
+   "coffee": 29884,
+   "alcohol": 0,
+   "total": 103624,
+   "cashTips": 0,
+   "cardTips": 25157,
+   "totalTips": 25157,
+   "tipOut": 3627,
+   "kept": 21530
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-01",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 9576,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 49380,
+    "coffee": 20740,
+    "alcohol": 0,
+    "cardTips": 19076,
+    "cashTips": 0,
+    "kept": 16622,
+    "tipOut": 2454
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.33,
+    "wage": 1500,
+    "tipOutShare": 154,
+    "counterShare": 2292
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 5.78,
+    "wage": 1400,
+    "tipOutShare": 319,
+    "counterShare": 1420
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.25,
+    "wage": 1000,
+    "tipOutShare": 16622,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.62,
+    "wage": 1400,
+    "tipOutShare": 421,
+    "counterShare": 1872
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.75,
+    "wage": 1300,
+    "tipOutShare": 1402,
+    "counterShare": 1658
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.5,
+    "wage": 1500,
+    "tipOutShare": 157,
+    "counterShare": 2334
+   },
+   {
+    "name": "Eunji",
+    "role": "Training",
+    "hours": 5,
+    "wage": 1000,
+    "tipOutShare": 0,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 741,
+   "barista": 311,
+   "bartender": 0,
+   "busser": 1402,
+   "total": 2454
+  },
+  "totals": {
+   "food": 49380,
+   "coffee": 20740,
+   "alcohol": 0,
+   "total": 70120,
+   "cashTips": 0,
+   "cardTips": 19076,
+   "totalTips": 19076,
+   "tipOut": 2454,
+   "kept": 16622
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-02",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 4993,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 44540,
+    "coffee": 19400,
+    "alcohol": 0,
+    "cardTips": 10912,
+    "cashTips": 0,
+    "kept": 8674,
+    "tipOut": 2238
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.33,
+    "wage": 1500,
+    "tipOutShare": 158,
+    "counterShare": 1271
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.03,
+    "wage": 1400,
+    "tipOutShare": 371,
+    "counterShare": 958
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.33,
+    "wage": 1000,
+    "tipOutShare": 8674,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 5.63,
+    "wage": 1400,
+    "tipOutShare": 297,
+    "counterShare": 767
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.75,
+    "wage": 1300,
+    "tipOutShare": 1279,
+    "counterShare": 920
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 7.9,
+    "wage": 1500,
+    "tipOutShare": 133,
+    "counterShare": 1077
+   }
+  ],
+  "pools": {
+   "kitchen": 668,
+   "barista": 291,
+   "bartender": 0,
+   "busser": 1279,
+   "total": 2238
+  },
+  "totals": {
+   "food": 44540,
+   "coffee": 19400,
+   "alcohol": 0,
+   "total": 63940,
+   "cashTips": 0,
+   "cardTips": 10912,
+   "totalTips": 10912,
+   "tipOut": 2238,
+   "kept": 8674
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-03",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 2999,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 45460,
+    "coffee": 18210,
+    "alcohol": 0,
+    "cardTips": 11059,
+    "cashTips": 0,
+    "kept": 8831,
+    "tipOut": 2228
+   },
+   {
+    "name": "Esther",
+    "food": 77320,
+    "coffee": 27805,
+    "alcohol": 0,
+    "cardTips": 25522,
+    "cashTips": 0,
+    "kept": 21843,
+    "tipOut": 3679
+   }
+  ],
+  "staff": [
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 9.68,
+    "wage": 700,
+    "tipOutShare": 21843,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.75,
+    "wage": 1400,
+    "tipOutShare": 863,
+    "counterShare": 483
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 5.02,
+    "wage": 1000,
+    "tipOutShare": 8831,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.78,
+    "wage": 1400,
+    "tipOutShare": 978,
+    "counterShare": 547
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.5,
+    "wage": 1300,
+    "tipOutShare": 3376,
+    "counterShare": 405
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.67,
+    "wage": 1500,
+    "tipOutShare": 265,
+    "counterShare": 602
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 9.52,
+    "wage": 1300,
+    "tipOutShare": 261,
+    "counterShare": 593
+   },
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 5.95,
+    "wage": 1500,
+    "tipOutShare": 163,
+    "counterShare": 370
+   }
+  ],
+  "pools": {
+   "kitchen": 1842,
+   "barista": 690,
+   "bartender": 0,
+   "busser": 3376,
+   "total": 5908
+  },
+  "totals": {
+   "food": 122780,
+   "coffee": 46015,
+   "alcohol": 0,
+   "total": 168795,
+   "cashTips": 0,
+   "cardTips": 36581,
+   "totalTips": 36581,
+   "tipOut": 5908,
+   "kept": 30673
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-04",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 8420,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Esther",
+    "food": 67140,
+    "coffee": 32445,
+    "alcohol": 0,
+    "cardTips": 20310,
+    "cashTips": 0,
+    "kept": 16825,
+    "tipOut": 3485
+   },
+   {
+    "name": "Sandra",
+    "food": 88270,
+    "coffee": 24210,
+    "alcohol": 0,
+    "cardTips": 23779,
+    "cashTips": 0,
+    "kept": 19842,
+    "tipOut": 3937
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 8.67,
+    "wage": 1500,
+    "tipOutShare": 1205,
+    "counterShare": 2130
+   },
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 8.83,
+    "wage": 700,
+    "tipOutShare": 16825,
+    "counterShare": 0
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.15,
+    "wage": 1000,
+    "tipOutShare": 19842,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 5.68,
+    "wage": 1500,
+    "tipOutShare": 386,
+    "counterShare": 1395
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.1,
+    "wage": 1400,
+    "tipOutShare": 1126,
+    "counterShare": 1990
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.83,
+    "wage": 1300,
+    "tipOutShare": 464,
+    "counterShare": 1678
+   },
+   {
+    "name": "Eunji",
+    "role": "Busser/Dishwasher",
+    "hours": 5,
+    "wage": 1000,
+    "tipOutShare": 4241,
+    "counterShare": 1228
+   }
+  ],
+  "pools": {
+   "kitchen": 2331,
+   "barista": 850,
+   "bartender": 0,
+   "busser": 4241,
+   "total": 7422
+  },
+  "totals": {
+   "food": 155410,
+   "coffee": 56655,
+   "alcohol": 0,
+   "total": 212065,
+   "cashTips": 0,
+   "cardTips": 44089,
+   "totalTips": 44089,
+   "tipOut": 7422,
+   "kept": 36667
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-05",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 7778,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 158370,
+    "coffee": 74960,
+    "alcohol": 0,
+    "cardTips": 51443,
+    "cashTips": 0,
+    "kept": 43276,
+    "tipOut": 8167
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.98,
+    "wage": 1400,
+    "tipOutShare": 1265,
+    "counterShare": 1653
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.82,
+    "wage": 1000,
+    "tipOutShare": 43276,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.22,
+    "wage": 1500,
+    "tipOutShare": 741,
+    "counterShare": 1697
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.88,
+    "wage": 1400,
+    "tipOutShare": 1110,
+    "counterShare": 1451
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 4.77,
+    "wage": 1300,
+    "tipOutShare": 383,
+    "counterShare": 878
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.57,
+    "wage": 1300,
+    "tipOutShare": 1871,
+    "counterShare": 841
+   },
+   {
+    "name": "Eunji",
+    "role": "Busser/Dishwasher",
+    "hours": 6.83,
+    "wage": 1000,
+    "tipOutShare": 2796,
+    "counterShare": 1257
+   }
+  ],
+  "pools": {
+   "kitchen": 2376,
+   "barista": 1124,
+   "bartender": 0,
+   "busser": 4667,
+   "total": 8167
+  },
+  "totals": {
+   "food": 158370,
+   "coffee": 74960,
+   "alcohol": 0,
+   "total": 233330,
+   "cashTips": 0,
+   "cardTips": 51443,
+   "totalTips": 51443,
+   "tipOut": 8167,
+   "kept": 43276
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-06",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 1980,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Esther",
+    "food": 44700,
+    "coffee": 22600,
+    "alcohol": 0,
+    "cardTips": 16004,
+    "cashTips": 0,
+    "kept": 13649,
+    "tipOut": 2356
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.42,
+    "wage": 1500,
+    "tipOutShare": 124,
+    "counterShare": 464
+   },
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 9.72,
+    "wage": 700,
+    "tipOutShare": 13649,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.85,
+    "wage": 1400,
+    "tipOutShare": 671,
+    "counterShare": 386
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.52,
+    "wage": 1500,
+    "tipOutShare": 126,
+    "counterShare": 468
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.7,
+    "wage": 1300,
+    "tipOutShare": 1346,
+    "counterShare": 330
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.75,
+    "wage": 1300,
+    "tipOutShare": 89,
+    "counterShare": 332
+   }
+  ],
+  "pools": {
+   "kitchen": 671,
+   "barista": 339,
+   "bartender": 0,
+   "busser": 1346,
+   "total": 2356
+  },
+  "totals": {
+   "food": 44700,
+   "coffee": 22600,
+   "alcohol": 0,
+   "total": 67300,
+   "cashTips": 0,
+   "cardTips": 16004,
+   "totalTips": 16004,
+   "tipOut": 2356,
+   "kept": 13649
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-07",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 2702,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "sandra",
+    "food": 52360,
+    "coffee": 15800,
+    "alcohol": 0,
+    "cardTips": 10295,
+    "cashTips": 0,
+    "kept": 7909,
+    "tipOut": 2386
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9,
+    "wage": 1500,
+    "tipOutShare": 101,
+    "counterShare": 763
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 6.88,
+    "wage": 1500,
+    "tipOutShare": 77,
+    "counterShare": 583
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.6,
+    "wage": 1400,
+    "tipOutShare": 785,
+    "counterShare": 644
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.73,
+    "wage": 1000,
+    "tipOutShare": 7909,
+    "counterShare": 0
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 5.25,
+    "wage": 1300,
+    "tipOutShare": 59,
+    "counterShare": 445
+   },
+   {
+    "name": "Arabella",
+    "role": "",
+    "hours": 4.37,
+    "wage": 1000,
+    "tipOutShare": 0,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 3.15,
+    "wage": 1300,
+    "tipOutShare": 1363,
+    "counterShare": 267
+   }
+  ],
+  "pools": {
+   "kitchen": 785,
+   "barista": 237,
+   "bartender": 0,
+   "busser": 1363,
+   "total": 2386
+  },
+  "totals": {
+   "food": 52360,
+   "coffee": 15800,
+   "alcohol": 0,
+   "total": 68160,
+   "cashTips": 0,
+   "cardTips": 10295,
+   "totalTips": 10295,
+   "tipOut": 2386,
+   "kept": 7909
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-08",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 5825,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Esther",
+    "food": 75810,
+    "coffee": 40135,
+    "alcohol": 0,
+    "cardTips": 28543,
+    "cashTips": 0,
+    "kept": 24485,
+    "tipOut": 4058
+   },
+   {
+    "name": "Arabella",
+    "food": 20070,
+    "coffee": 6575,
+    "alcohol": 0,
+    "cardTips": 5547,
+    "cashTips": 0,
+    "kept": 4614,
+    "tipOut": 933
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.4,
+    "wage": 1500,
+    "tipOutShare": 353,
+    "counterShare": 1564
+   },
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 10.1,
+    "wage": 700,
+    "tipOutShare": 24485,
+    "counterShare": 0
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.22,
+    "wage": 1400,
+    "tipOutShare": 707,
+    "counterShare": 1201
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 9.28,
+    "wage": 1500,
+    "tipOutShare": 348,
+    "counterShare": 1544
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.47,
+    "wage": 1400,
+    "tipOutShare": 731,
+    "counterShare": 1243
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 1.65,
+    "wage": 1300,
+    "tipOutShare": 2852,
+    "counterShare": 274
+   },
+   {
+    "name": "Arabella",
+    "role": "Server",
+    "hours": 6.05,
+    "wage": 700,
+    "tipOutShare": 4614,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1438,
+   "barista": 701,
+   "bartender": 0,
+   "busser": 2852,
+   "total": 4991
+  },
+  "totals": {
+   "food": 95880,
+   "coffee": 46710,
+   "alcohol": 0,
+   "total": 142590,
+   "cashTips": 0,
+   "cardTips": 34090,
+   "totalTips": 34090,
+   "tipOut": 4991,
+   "kept": 29099
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-09",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 9914,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 46000,
+    "coffee": 28850,
+    "alcohol": 0,
+    "cardTips": 17775,
+    "cashTips": 0,
+    "kept": 15155,
+    "tipOut": 2620
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 8.77,
+    "wage": 1500,
+    "tipOutShare": 217,
+    "counterShare": 2569
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 8.72,
+    "wage": 1500,
+    "tipOutShare": 216,
+    "counterShare": 2554
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 6.32,
+    "wage": 1400,
+    "tipOutShare": 308,
+    "counterShare": 1851
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.47,
+    "wage": 1000,
+    "tipOutShare": 15155,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.85,
+    "wage": 1400,
+    "tipOutShare": 382,
+    "counterShare": 2299
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 2.19,
+    "wage": 1300,
+    "tipOutShare": 1497,
+    "counterShare": 641
+   }
+  ],
+  "pools": {
+   "kitchen": 690,
+   "barista": 433,
+   "bartender": 0,
+   "busser": 1497,
+   "total": 2620
+  },
+  "totals": {
+   "food": 46000,
+   "coffee": 28850,
+   "alcohol": 0,
+   "total": 74850,
+   "cashTips": 0,
+   "cardTips": 17775,
+   "totalTips": 17775,
+   "tipOut": 2620,
+   "kept": 15155
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-10",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 5214,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 48700,
+    "coffee": 28025,
+    "alcohol": 0,
+    "cardTips": 15143,
+    "cashTips": 0,
+    "kept": 12458,
+    "tipOut": 2685
+   },
+   {
+    "name": "Eunji",
+    "food": 34500,
+    "coffee": 13775,
+    "alcohol": 0,
+    "cardTips": 11269,
+    "cashTips": 0,
+    "kept": 9579,
+    "tipOut": 1690
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.65,
+    "wage": 1500,
+    "tipOutShare": 248,
+    "counterShare": 1116
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.58,
+    "wage": 1500,
+    "tipOutShare": 246,
+    "counterShare": 1108
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.73,
+    "wage": 1400,
+    "tipOutShare": 586,
+    "counterShare": 894
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 9.5,
+    "wage": 1000,
+    "tipOutShare": 12458,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.73,
+    "wage": 1400,
+    "tipOutShare": 662,
+    "counterShare": 1009
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.2,
+    "wage": 1300,
+    "tipOutShare": 2500,
+    "counterShare": 486
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 5.2,
+    "wage": 1300,
+    "tipOutShare": 133,
+    "counterShare": 601
+   },
+   {
+    "name": "Eunji",
+    "role": "Server",
+    "hours": 5,
+    "wage": 700,
+    "tipOutShare": 9579,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 1248,
+   "barista": 627,
+   "bartender": 0,
+   "busser": 2500,
+   "total": 4375
+  },
+  "totals": {
+   "food": 83200,
+   "coffee": 41800,
+   "alcohol": 0,
+   "total": 125000,
+   "cashTips": 0,
+   "cardTips": 26412,
+   "totalTips": 26412,
+   "tipOut": 4375,
+   "kept": 22037
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-11",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 6856,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 72000,
+    "coffee": 30315,
+    "alcohol": 0,
+    "cardTips": 23376,
+    "cashTips": 0,
+    "kept": 19795,
+    "tipOut": 3581
+   },
+   {
+    "name": "Esther",
+    "food": 89100,
+    "coffee": 47177,
+    "alcohol": 0,
+    "cardTips": 25120,
+    "cashTips": 0,
+    "kept": 20350,
+    "tipOut": 4770
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 8.68,
+    "wage": 1500,
+    "tipOutShare": 448,
+    "counterShare": 1445
+   },
+   {
+    "name": "Esther",
+    "role": "Server",
+    "hours": 9.02,
+    "wage": 1500,
+    "tipOutShare": 20350,
+    "counterShare": 0
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 6.23,
+    "wage": 1000,
+    "tipOutShare": 19795,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 6.02,
+    "wage": 1500,
+    "tipOutShare": 311,
+    "counterShare": 1002
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.2,
+    "wage": 1400,
+    "tipOutShare": 2417,
+    "counterShare": 1365
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 3.52,
+    "wage": 1300,
+    "tipOutShare": 1607,
+    "counterShare": 586
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.83,
+    "wage": 1300,
+    "tipOutShare": 404,
+    "counterShare": 1304
+   },
+   {
+    "name": "Eunji",
+    "role": "Busser/Dishwasher",
+    "hours": 6.93,
+    "wage": 700,
+    "tipOutShare": 3164,
+    "counterShare": 1154
+   }
+  ],
+  "pools": {
+   "kitchen": 2417,
+   "barista": 1162,
+   "bartender": 0,
+   "busser": 4772,
+   "total": 8351
+  },
+  "totals": {
+   "food": 161100,
+   "coffee": 77492,
+   "alcohol": 0,
+   "total": 238592,
+   "cashTips": 0,
+   "cardTips": 48496,
+   "totalTips": 48496,
+   "tipOut": 8351,
+   "kept": 40145
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-12",
+  "busser": false,
+  "counter": {
+   "jar": 0,
+   "card": 4468,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 40095,
+    "coffee": 27467,
+    "alcohol": 0,
+    "cardTips": 12070,
+    "cashTips": 0,
+    "kept": 11057,
+    "tipOut": 1013
+   },
+   {
+    "name": "Eunji",
+    "food": 23420,
+    "coffee": 19640,
+    "alcohol": 0,
+    "cardTips": 9666,
+    "cashTips": 0,
+    "kept": 9020,
+    "tipOut": 646
+   }
+  ],
+  "staff": [
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.93,
+    "wage": 1400,
+    "tipOutShare": 500,
+    "counterShare": 1294
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.58,
+    "wage": 1000,
+    "tipOutShare": 11057,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 8.97,
+    "wage": 1500,
+    "tipOutShare": 459,
+    "counterShare": 1300
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.08,
+    "wage": 1400,
+    "tipOutShare": 453,
+    "counterShare": 1171
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 4.85,
+    "wage": 1300,
+    "tipOutShare": 248,
+    "counterShare": 703
+   },
+   {
+    "name": "Eunji",
+    "role": "Server",
+    "hours": 6.03,
+    "wage": 700,
+    "tipOutShare": 9020,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 953,
+   "barista": 707,
+   "bartender": 0,
+   "busser": 0,
+   "total": 1659
+  },
+  "totals": {
+   "food": 63515,
+   "coffee": 47107,
+   "alcohol": 0,
+   "total": 110622,
+   "cashTips": 0,
+   "cardTips": 21736,
+   "totalTips": 21736,
+   "tipOut": 1659,
+   "kept": 20077
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-13",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 4333,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Eunji",
+    "food": 60590,
+    "coffee": 43170,
+    "alcohol": 0,
+    "cardTips": 20097,
+    "cashTips": 0,
+    "kept": 16465,
+    "tipOut": 3632
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.25,
+    "wage": 1500,
+    "tipOutShare": 221,
+    "counterShare": 976
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.15,
+    "wage": 1500,
+    "tipOutShare": 219,
+    "counterShare": 966
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.02,
+    "wage": 1400,
+    "tipOutShare": 909,
+    "counterShare": 847
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 5.93,
+    "wage": 1300,
+    "tipOutShare": 2075,
+    "counterShare": 626
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 8.7,
+    "wage": 1300,
+    "tipOutShare": 208,
+    "counterShare": 918
+   },
+   {
+    "name": "Eunji",
+    "role": "Server",
+    "hours": 9.23,
+    "wage": 700,
+    "tipOutShare": 16465,
+    "counterShare": 0
+   }
+  ],
+  "pools": {
+   "kitchen": 909,
+   "barista": 648,
+   "bartender": 0,
+   "busser": 2075,
+   "total": 3632
+  },
+  "totals": {
+   "food": 60590,
+   "coffee": 43170,
+   "alcohol": 0,
+   "total": 103760,
+   "cashTips": 0,
+   "cardTips": 20097,
+   "totalTips": 20097,
+   "tipOut": 3632,
+   "kept": 16465
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-14",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 8392,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 97200,
+    "coffee": 51027,
+    "alcohol": 0,
+    "cardTips": 28316,
+    "cashTips": 0,
+    "kept": 23128,
+    "tipOut": 5188
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.23,
+    "wage": 1500,
+    "tipOutShare": 274,
+    "counterShare": 2030
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.12,
+    "wage": 1500,
+    "tipOutShare": 271,
+    "counterShare": 2006
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 7.95,
+    "wage": 1400,
+    "tipOutShare": 1458,
+    "counterShare": 1749
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.93,
+    "wage": 1000,
+    "tipOutShare": 23128,
+    "counterShare": 0
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 4.42,
+    "wage": 1300,
+    "tipOutShare": 2965,
+    "counterShare": 972
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 7.43,
+    "wage": 1300,
+    "tipOutShare": 221,
+    "counterShare": 1634
+   }
+  ],
+  "pools": {
+   "kitchen": 1458,
+   "barista": 765,
+   "bartender": 0,
+   "busser": 2965,
+   "total": 5188
+  },
+  "totals": {
+   "food": 97200,
+   "coffee": 51027,
+   "alcohol": 0,
+   "total": 148227,
+   "cashTips": 0,
+   "cardTips": 28316,
+   "totalTips": 28316,
+   "tipOut": 5188,
+   "kept": 23128
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-15",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 4908,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 68300,
+    "coffee": 29776,
+    "alcohol": 0,
+    "cardTips": 19459,
+    "cashTips": 0,
+    "kept": 16026,
+    "tipOut": 3433
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9,
+    "wage": 1500,
+    "tipOutShare": 223,
+    "counterShare": 1145
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.03,
+    "wage": 1500,
+    "tipOutShare": 224,
+    "counterShare": 1149
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 6.92,
+    "wage": 1400,
+    "tipOutShare": 498,
+    "counterShare": 880
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.5,
+    "wage": 1000,
+    "tipOutShare": 16026,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.33,
+    "wage": 1400,
+    "tipOutShare": 527,
+    "counterShare": 932
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.3,
+    "wage": 1300,
+    "tipOutShare": 1962,
+    "counterShare": 801
+   }
+  ],
+  "pools": {
+   "kitchen": 1025,
+   "barista": 447,
+   "bartender": 0,
+   "busser": 1962,
+   "total": 3433
+  },
+  "totals": {
+   "food": 68300,
+   "coffee": 29776,
+   "alcohol": 0,
+   "total": 98076,
+   "cashTips": 0,
+   "cardTips": 19459,
+   "totalTips": 19459,
+   "tipOut": 3433,
+   "kept": 16026
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-16",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 5394,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 59600,
+    "coffee": 25982,
+    "alcohol": 0,
+    "cardTips": 13559,
+    "cashTips": 0,
+    "kept": 10564,
+    "tipOut": 2995
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Barista",
+    "hours": 9.33,
+    "wage": 1500,
+    "tipOutShare": 234,
+    "counterShare": 1316
+   },
+   {
+    "name": "Kevin",
+    "role": "Kitchen",
+    "hours": 8.47,
+    "wage": 1400,
+    "tipOutShare": 471,
+    "counterShare": 1194
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.72,
+    "wage": 1000,
+    "tipOutShare": 10564,
+    "counterShare": 0
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 7.6,
+    "wage": 1400,
+    "tipOutShare": 423,
+    "counterShare": 1072
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.65,
+    "wage": 1300,
+    "tipOutShare": 1712,
+    "counterShare": 938
+   },
+   {
+    "name": "Ingri",
+    "role": "Barista",
+    "hours": 6.2,
+    "wage": 1300,
+    "tipOutShare": 156,
+    "counterShare": 874
+   }
+  ],
+  "pools": {
+   "kitchen": 894,
+   "barista": 390,
+   "bartender": 0,
+   "busser": 1712,
+   "total": 2995
+  },
+  "totals": {
+   "food": 59600,
+   "coffee": 25982,
+   "alcohol": 0,
+   "total": 85582,
+   "cashTips": 0,
+   "cardTips": 13559,
+   "totalTips": 13559,
+   "tipOut": 2995,
+   "kept": 10564
+  },
+  "sanity": 0
+ },
+ {
+  "date": "2026-07-17",
+  "busser": true,
+  "counter": {
+   "jar": 0,
+   "card": 4119,
+   "total": null
+  },
+  "servers": [
+   {
+    "name": "Sandra",
+    "food": 48670,
+    "coffee": 17245,
+    "alcohol": 0,
+    "cardTips": 13346,
+    "cashTips": 0,
+    "kept": 11039,
+    "tipOut": 2307
+   },
+   {
+    "name": "Eunji",
+    "food": 53675,
+    "coffee": 19575,
+    "alcohol": 0,
+    "cardTips": 14217,
+    "cashTips": 0,
+    "kept": 11653,
+    "tipOut": 2564
+   }
+  ],
+  "staff": [
+   {
+    "name": "Hendy",
+    "role": "Kitchen",
+    "hours": 9.5,
+    "wage": 1500,
+    "tipOutShare": 816,
+    "counterShare": 1014
+   },
+   {
+    "name": "Sandra",
+    "role": "Server",
+    "hours": 8.27,
+    "wage": 1000,
+    "tipOutShare": 11039,
+    "counterShare": 0
+   },
+   {
+    "name": "Sebastian",
+    "role": "Barista",
+    "hours": 4.53,
+    "wage": 1500,
+    "tipOutShare": 180,
+    "counterShare": 484
+   },
+   {
+    "name": "Evendi",
+    "role": "Kitchen",
+    "hours": 8.38,
+    "wage": 1400,
+    "tipOutShare": 720,
+    "counterShare": 895
+   },
+   {
+    "name": "Joseph",
+    "role": "Busser/Dishwasher",
+    "hours": 6.77,
+    "wage": 1300,
+    "tipOutShare": 2783,
+    "counterShare": 723
+   },
+   {
+    "name": "Eunji",
+    "role": "Server",
+    "hours": 5.83,
+    "wage": 700,
+    "tipOutShare": 11653,
+    "counterShare": 0
+   },
+   {
+    "name": "Esther",
+    "role": "Barista",
+    "hours": 9.4,
+    "wage": 1500,
+    "tipOutShare": 373,
+    "counterShare": 1004
+   }
+  ],
+  "pools": {
+   "kitchen": 1535,
+   "barista": 552,
+   "bartender": 0,
+   "busser": 2783,
+   "total": 4871
+  },
+  "totals": {
+   "food": 102345,
+   "coffee": 36820,
+   "alcohol": 0,
+   "total": 139165,
+   "cashTips": 0,
+   "cardTips": 27563,
+   "totalTips": 27563,
+   "tipOut": 4871,
+   "kept": 22692
+  },
+  "sanity": 0
+ }
+]

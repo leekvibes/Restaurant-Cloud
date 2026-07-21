@@ -17,7 +17,7 @@ let child;
 
 async function up() {
   child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), APP_PASSWORD: 'test-manager-password' },
+    env: { ...process.env, PORT: String(PORT), APP_PASSWORD: 'test-manager-password', ZWIN_SKIP_BACKFILL: '1' },
     stdio: 'ignore',
   });
   for (let i = 0; i < 60; i++) {

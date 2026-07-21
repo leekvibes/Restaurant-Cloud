@@ -41,7 +41,7 @@ const PID = {};
 test.before(async () => {
   Database = require('better-sqlite3');
   child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '' },
+    env: { ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
     stdio: 'ignore',
   });
   for (let i = 0; i < 80; i++) {

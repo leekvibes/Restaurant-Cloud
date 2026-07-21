@@ -25,7 +25,7 @@ const SERVER = path.join(__dirname, '..', 'src', 'server.js');
 /** Boot the app against `dbPath`, return {ok, status, log}. Always cleans up. */
 async function boot(dbPath, port) {
   const child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, PORT: String(port), DB_PATH: dbPath, TZ: 'America/New_York', APP_PASSWORD: '' },
+    env: { ...process.env, PORT: String(port), DB_PATH: dbPath, TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';

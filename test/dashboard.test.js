@@ -50,7 +50,7 @@ const back = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return i
 test.before(async () => {
   Database = require('better-sqlite3');
   child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: 'dash-owner-pw' },
+    env: { ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: 'dash-owner-pw' },
     stdio: 'ignore',
   });
   for (let i = 0; i < 80; i++) {
@@ -168,7 +168,7 @@ test('a percentage of nothing is withheld, not printed as zero', async () => {
   const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-dash2-'));
   const db2 = path.join(d2, 'e.db');
   const kid = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
-    env: { ...process.env, PORT: String(port), DB_PATH: db2, TZ: 'America/New_York', APP_PASSWORD: '' },
+    env: { ...process.env, PORT: String(port), DB_PATH: db2, TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
     stdio: 'ignore',
   });
   try {
