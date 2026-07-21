@@ -83,6 +83,23 @@ CREATE TABLE IF NOT EXISTS settings (
 // agrees with it.
 const prodCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
 if (!prodCols.includes('brand')) db.exec('ALTER TABLE products ADD COLUMN brand TEXT');
+// What one purchase unit actually contains — 25 lb in a case, 12 in a package,
+// 20 slices in a loaf. Menu costing is impossible without it: an invoice
+// prices a case and a recipe uses an ounce. Parsed from the pack size the
+// reader already captures where that can be done, asked for where it can't.
+if (!prodCols.includes('pack_qty')) db.exec('ALTER TABLE products ADD COLUMN pack_qty REAL');
+if (!prodCols.includes('pack_unit')) db.exec('ALTER TABLE products ADD COLUMN pack_unit TEXT');
+// 'parsed' means we read it off the pack size and nobody has confirmed it;
+// 'manual' means a person set it. Kept apart so a parse can be corrected and
+// never silently overwrite what someone typed.
+if (!prodCols.includes('pack_source')) db.exec('ALTER TABLE products ADD COLUMN pack_source TEXT');
+// Usable fraction after trimming. Null means 100% and is the normal case.
+if (!prodCols.includes('yield_pct')) db.exec('ALTER TABLE products ADD COLUMN yield_pct REAL');
+// A price for products nobody invoices — set by hand, in cents, per purchase
+// unit. Invoice-backed products ignore this: their price comes from what was
+// actually paid, which is the whole point of deriving it.
+if (!prodCols.includes('manual_price_cents')) db.exec('ALTER TABLE products ADD COLUMN manual_price_cents INTEGER');
+if (!prodCols.includes('manual_price_on')) db.exec('ALTER TABLE products ADD COLUMN manual_price_on TEXT');
 
 const invCols = db.prepare('PRAGMA table_info(m_invoices)').all().map((c) => c.name);
 if (!invCols.includes('ai_lines')) db.exec('ALTER TABLE m_invoices ADD COLUMN ai_lines TEXT');
@@ -449,8 +466,101 @@ function likelyDuplicates(p, products) {
     .sort((a, b) => b.score - a.score);
 }
 
+// ---------------------------------------------------------------------------
+// COST PER USABLE UNIT — what menu costing actually asks of a product.
+//
+// The price still comes from purchases, never from a stored field: that is
+// what keeps it honest when a new invoice lands. What products gained is
+// STRUCTURE — what one purchase unit holds — because a price per case cannot
+// be turned into a price per ounce without it.
+// ---------------------------------------------------------------------------
+const units = require('./units');
+
+/**
+ * The price to cost from, and where it came from.
+ * Invoice-backed wins: it is what was actually paid. A manual price is the
+ * fallback for things nobody invoices, and for products bought before the
+ * app existed.
+ */
+function priceOf(p) {
+  const last = db.prepare(`SELECT unit_price_cents, unit, purchased_on, invoice_id
+    FROM product_purchases WHERE product_id = ? AND unit_price_cents > 0
+    ORDER BY purchased_on DESC, id DESC LIMIT 1`).get(p.id);
+  if (last) {
+    return {
+      micros: units.centsToMicros(last.unit_price_cents),
+      unit: last.unit || p.unit,
+      source: last.invoice_id ? 'invoice' : 'manual',
+      on: last.purchased_on,
+    };
+  }
+  if (p.manual_price_cents > 0) {
+    return { micros: units.centsToMicros(p.manual_price_cents), unit: p.unit, source: 'manual', on: p.manual_price_on };
+  }
+  return null;
+}
+
+/**
+ * Cost of one `usageUnit` of this product, in micro-dollars.
+ * @returns {{ok, micros, reason, basis, price}} — never a silent zero.
+ */
+function costFor(p, usageUnit) {
+  const price = priceOf(p);
+  if (!price) {
+    return { ok: false, micros: null, price: null,
+      reason: 'no price yet — import an invoice for it or set one by hand', basis: null };
+  }
+  const r = units.costPerUnit({
+    priceMicros: price.micros,
+    purchaseUnit: price.unit,
+    packQty: p.pack_qty,
+    packUnit: p.pack_unit,
+    yieldPct: p.yield_pct,
+  }, usageUnit);
+  return { ...r, price };
+}
+
+/** Units this product can currently be costed in — for the recipe dropdown. */
+function costableUnits(p) {
+  const out = [];
+  for (const g of units.UNIT_GROUPS) {
+    for (const u of g.units) if (costFor(p, u).ok) out.push(u);
+  }
+  return out;
+}
+
+// --- one-time backfill: read the pack sizes we already have -----------------
+// Auto-parsing is the difference between menu costing working on the products
+// already on file and an evening of data entry. Anything parsed is marked as
+// such so it can be shown as a suggestion to confirm rather than as fact.
+const backfillPacks = db.transaction(() => {
+  let n = 0;
+  const upd = db.prepare("UPDATE products SET pack_qty=?, pack_unit=?, pack_source='parsed' WHERE id=?");
+  for (const p of db.prepare('SELECT id, pack_size, unit FROM products WHERE pack_qty IS NULL').all()) {
+    const parsed = units.parsePack(p.pack_size);
+    if (!parsed) continue;
+    // A pack that just restates the purchase unit ("LB" on something sold by
+    // the pound) adds nothing and would look like confirmed data.
+    if (units.normalizeUnit(p.unit) === parsed.unit && parsed.qty === 1) continue;
+    upd.run(parsed.qty, parsed.unit, p.id);
+    n++;
+  }
+  return n;
+});
+try {
+  const n = backfillPacks();
+  if (n) console.log(`[products] read pack sizes for ${n} product${n === 1 ? '' : 's'}`);
+} catch (e) { console.error('[products] pack backfill skipped:', e.message); }
+
+/** Products that cannot be costed yet, so setup is a visible finite task. */
+const needsPackInfo = () => q.plain.all().filter((p) => {
+  if (!priceOf(p)) return false;                    // no price is a different problem
+  return !costableUnits(p).length;
+});
+
 module.exports = {
   q, CATEGORIES, norm, trendOf, reviewRows,
   matchProduct, matchLine, scoreMatch, aliasIndex, learnAlias,
   mergeProducts, likelyDuplicates, HIGH, MED,
+  priceOf, costFor, costableUnits, needsPackInfo,
 };
