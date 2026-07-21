@@ -65,6 +65,11 @@ const MODULES = [
       { name: 'category', label: 'Category', type: 'select', list: true,
         options: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Supplies', 'Repairs', 'Services', 'Other'] },
       { name: 'status', label: 'Status', type: 'select', list: true, options: ['Unpaid', 'Paid'] },
+      // How it was paid. Declared here as well as on the upload drawer so the
+      // generic edit form can correct it later — the two have to agree or a
+      // field is silently uneditable after it's saved.
+      { name: 'payment_method', label: 'Paid by', type: 'select',
+        options: ['Cash', 'Check', 'ACH', 'Credit card', 'Auto pay', 'Other'] },
       { name: 'file', label: 'Invoice file (PDF or photo)', type: 'file', list: true },
       { name: 'notes', label: 'Notes', type: 'textarea' },
       // How this invoice got its figures: read by AI, read then corrected, or

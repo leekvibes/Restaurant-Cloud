@@ -87,6 +87,11 @@ if (!prodCols.includes('brand')) db.exec('ALTER TABLE products ADD COLUMN brand 
 const invCols = db.prepare('PRAGMA table_info(m_invoices)').all().map((c) => c.name);
 if (!invCols.includes('ai_lines')) db.exec('ALTER TABLE m_invoices ADD COLUMN ai_lines TEXT');
 if (!invCols.includes('lines_imported')) db.exec("ALTER TABLE m_invoices ADD COLUMN lines_imported TEXT");
+// Which line indexes have been imported, as JSON. Indexes rather than the
+// printed text: one invoice can list the same description twice with
+// different pack sizes, and keying on the words would silently hide the
+// second one once the first had gone in.
+if (!invCols.includes('imported_idx')) db.exec('ALTER TABLE m_invoices ADD COLUMN imported_idx TEXT');
 
 // --- one-time migration from the par-level tracker --------------------------
 // m_par is left on disk untouched. It is small, it is the only copy of what
@@ -285,7 +290,11 @@ function scoreMatch(line, p, aliases = []) {
 
   if (line.brand && p.brand) {
     if (norm(line.brand) === norm(p.brand)) { s += 6; why.push('same brand'); }
-    else { s -= 8; why.push('different brand'); }
+    // Heavy enough to be decisive. At -8 a conflicting brand could never pull
+    // an exact-name, same-vendor line out of auto-match territory, which made
+    // brand decorative in exactly the case it matters: Colavita and Pompeian
+    // olive oil are different products at different prices.
+    else { s -= 18; why.push('different brand'); }
   }
   if (line.pack_size && p.pack_size) {
     if (normPack(line.pack_size) === normPack(p.pack_size)) { s += 7; why.push('same pack size'); }

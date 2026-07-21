@@ -3392,8 +3392,8 @@ const invQ = {
   // it on the import screen. It is not shown on the invoice itself — invoices
   // stay an accounting record.
   add: db.prepare(`INSERT INTO m_invoices
-    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, file, notes, ai_status, ai_confidence, ai_lines)
-    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @file, @notes, @ai_status, @ai_confidence, @ai_lines)`),
+    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, payment_method, file, notes, ai_status, ai_confidence, ai_lines)
+    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @payment_method, @file, @notes, @ai_status, @ai_confidence, @ai_lines)`),
   vendors: db.prepare('SELECT id, name FROM m_vendors ORDER BY name'),
   addVendor: db.prepare('INSERT INTO m_vendors (name) VALUES (?)'),
 };
@@ -3446,6 +3446,7 @@ function invoicePanel(r, vName) {
               <div class="tfact"><span>Subtotal</span><b>${r.subtotal_cents ? money(r.subtotal_cents) : '<i class="unset">—</i>'}</b></div>
               <div class="tfact"><span>Tax</span><b>${r.tax_cents ? money(r.tax_cents) : '<i class="unset">—</i>'}</b></div>
               <div class="tfact"><span>Due</span><b>${r.due_date ? esc(niceDate(r.due_date)) : '<i class="unset">—</i>'}</b></div>
+              <div class="tfact"><span>Paid by</span><b>${r.payment_method ? esc(r.payment_method) : '<i class="unset">—</i>'}</b></div>
             </div>
             ${r.notes ? `<div class="inv-notes">${esc(r.notes)}</div>` : ''}
             <div class="inv-acts">
@@ -3733,6 +3734,9 @@ app.get('/c/invoices', (req, res) => {
 });
 
 const INV_CATS = Object.keys(INV_CATEGORIES);
+// How an invoice was paid. Accounting detail, not inventory — it lives on the
+// invoice and nowhere near Products.
+const PAY_METHODS = ['Cash', 'Check', 'ACH', 'Credit card', 'Auto pay', 'Other'];
 
 /** Upload → analysing → review. One drawer, three states. */
 function invoiceDrawer(vendors, today) {
@@ -3799,9 +3803,17 @@ function invoiceDrawer(vendors, today) {
           <label class="fld">Total <input name="amount" id="inv-total" type="number" step="0.01" placeholder="0.00" required></label>
         </div>
         <div class="totalcheck inv-hide" id="inv-check"></div>
+        <div class="aisum inv-hide" id="inv-sum"></div>
         <div class="fld-row">
           <label class="fld">Category <select name="category" id="inv-cat">${INV_CATS.map((c) => `<option>${c}</option>`).join('')}</select></label>
           <label class="fld">Status <select name="status" id="inv-status"><option>Unpaid</option><option>Paid</option></select></label>
+        </div>
+        <div class="fld-row">
+          <label class="fld">Paid by <select name="payment_method" id="inv-pay">
+            <option value="">—</option>
+            ${PAY_METHODS.map((m) => `<option>${m}</option>`).join('')}
+          </select></label>
+          <span class="fld"></span>
         </div>
         <label class="fld">Notes <textarea name="notes" id="inv-notes" rows="2" placeholder="Optional"></textarea></label>
         <input type="file" name="file" id="inv-file" hidden>
@@ -3892,9 +3904,10 @@ function invoiceDrawerScript() {
     if (!d.vendor_id && d.vendor_name) {
       // Offer to create it right here — walking off to the Vendors page to add
       // one would mean abandoning a half-finished invoice.
-      nv.innerHTML = 'Read as <b>' + d.vendor_name.replace(/[<>&]/g, '') + '</b>, which is not in your vendor list yet. ' +
-        '<button type="button" class="link" id="inv-addvendor">Add it as a vendor</button>';
-      nv.classList.remove('inv-hide');
+      nv.innerHTML = '<span class="vdet"><i>Detected vendor</i><b>' + d.vendor_name.replace(/[<>&]/g, '') + '</b>' +
+        '<em>not in your vendor list yet</em></span>' +
+        '<button type="button" class="btn btn-sm btn-primary" id="inv-addvendor">＋ Create vendor</button>';
+      nv.className = 'vconfirm vconfirm-new';
       document.getElementById('inv-addvendor').onclick = function () {
         var b = this; b.textContent = 'Adding…'; b.disabled = true;
         // urlencoded, not FormData: this route has no multipart parser, and
@@ -3911,11 +3924,17 @@ function invoiceDrawerScript() {
             var opt = document.createElement('option');
             opt.value = out.id; opt.textContent = out.name; opt.selected = true;
             sel.appendChild(opt);
-            nv.innerHTML = 'Added <b>' + out.name.replace(/[<>&]/g, '') + '</b> and selected it. Fill in their details later under Vendors.';
+            nv.innerHTML = '<span class="vdet"><i>Vendor</i><b>' + out.name.replace(/[<>&]/g, '') +
+              '</b><em>created and selected — add their details later under Vendors</em></span><span class="vtick">✓</span>';
+            nv.className = 'vconfirm vconfirm-ok';
           })
           .catch(function () { b.textContent = 'Could not add it — pick a vendor instead.'; });
       };
-    } else { nv.classList.add('inv-hide'); }
+    } else if (d.vendor_id && d.matched_vendor) {
+      nv.innerHTML = '<span class="vdet"><i>Detected vendor</i><b>' + d.matched_vendor.replace(/[<>&]/g, '') +
+        '</b><em>matched one you already use</em></span><span class="vtick">✓</span>';
+      nv.className = 'vconfirm vconfirm-ok';
+    } else { nv.className = 'fldhint inv-hide'; }
 
     // Say when the parts don't add up, rather than presenting one confident
     // total. Getting this wrong is silent, so it should never be silent.
@@ -3925,6 +3944,30 @@ function invoiceDrawerScript() {
       chk.textContent = 'Subtotal + tax = ' + (sub + tax).toFixed(2) + ', but the total reads ' + tot.toFixed(2) + '. Check which is right.';
       chk.classList.remove('inv-hide');
     } else { chk.classList.add('inv-hide'); }
+
+    // What the read actually found, before anything is saved. The point is
+    // confidence: a total on its own looks the same whether the reader
+    // understood the invoice or guessed at it.
+    var sum = document.getElementById('inv-sum');
+    var t = d.tally || {};
+    var bits = [];
+    bits.push((d.matched_vendor ? 'Vendor matched' : d.vendor_name ? 'Vendor detected' : 'No vendor read'));
+    bits.push(sub && Math.abs((sub + tax) - tot) <= 0.02 ? 'Total checks out against subtotal + tax'
+      : tot ? 'Total read' : 'No total read');
+    if (t.lines) {
+      bits.push(t.lines + ' product line' + (t.lines === 1 ? '' : 's') + ' detected');
+      if (t.matched) bits.push(t.matched + ' matched to products you already buy');
+      if (t.asks) bits.push(t.asks + ' need a quick look');
+      if (t.fresh) bits.push(t.fresh + ' new product' + (t.fresh === 1 ? '' : 's'));
+      if (t.fees) bits.push(t.fees + ' charge' + (t.fees === 1 ? '' : 's') + ' ignored');
+      bits.push(t.asks || t.fresh ? 'Products import after saving' : 'Products import automatically on save');
+    } else {
+      bits.push('No product lines readable — the invoice still saves');
+    }
+    var lowRead = (d.confidence || '') === 'low';
+    sum.className = 'aisum' + (lowRead ? ' aisum-warn' : '');
+    sum.innerHTML = '<div class="aisum-h">' + (lowRead ? 'Read, but check it' : 'Read successfully') + '</div>' +
+      '<ul>' + bits.map(function (b) { return '<li>' + b + '</li>'; }).join('') + '</ul>';
 
     document.getElementById('inv-ai-status').value = 'ai';
     document.getElementById('inv-ai-conf').value = d.confidence || '';
@@ -3962,7 +4005,23 @@ app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
     const data = await readInvoice(req.files);
     const match = matchVendor(data.vendor_name);
-    res.json({ ...data, vendor_id: match ? match.id : null, matched_vendor: match ? match.name : null });
+    // The line items are matched here, before anything is saved, purely so the
+    // drawer can say what it found. Counting is free and it's the difference
+    // between trusting the read and hoping.
+    const preview = reviewRows(data.line_items || [], prodQ.plain.all(), match ? match.id : null);
+    const tally = {
+      lines: preview.length,
+      matched: preview.filter((r) => r.confidence === 'high').length,
+      asks: preview.filter((r) => r.confidence === 'medium').length,
+      fresh: preview.filter((r) => r.confidence === 'low' && !r.fee).length,
+      fees: preview.filter((r) => r.fee).length,
+    };
+    res.json({
+      ...data,
+      vendor_id: match ? match.id : null,
+      matched_vendor: match ? match.name : null,
+      tally,
+    });
   } catch (e) {
     res.json({ error: e.message || 'Could not read that invoice.' });
   }
@@ -3998,6 +4057,14 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
       .slice(0, 200)
       .map((l) => ({
         description: String(l.description).trim().slice(0, 200),
+        // Carried through, not dropped: the item code is the single strongest
+        // signal for recognising this product on the next invoice, and brand
+        // and pack size are what keep a 1 L bottle apart from a 4/3 L case.
+        // Leaving them out here quietly reduced matching to name-only for
+        // every invoice that actually went through the upload flow.
+        code: String(l.code || '').trim().slice(0, 60),
+        brand: String(l.brand || '').trim().slice(0, 60),
+        pack_size: String(l.pack_size || '').trim().slice(0, 40),
         qty: Number(l.qty) || 0, unit: String(l.unit || '').trim().slice(0, 20),
         unit_price: Number(l.unit_price) || 0, total: Number(l.total) || 0,
       }));
@@ -4015,20 +4082,31 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
     tax_cents: toCents(req.body.tax),
     category: INV_CATS.includes(req.body.category) ? req.body.category : 'Other',
     status: req.body.status === 'Paid' ? 'Paid' : 'Unpaid',
+    payment_method: PAY_METHODS.includes(req.body.payment_method) ? req.body.payment_method : null,
     file: req.file ? req.file.filename : null,
     notes: String(req.body.notes || '').trim() || null,
     ai_status: aiStatus,
     ai_confidence: String(req.body.ai_confidence || '').trim() || null,
     ai_lines: lineJson,
   });
-  // Straight to the import review when there are lines to review — that's the
-  // moment the invoice is fresh in mind, and the screen is a decision, not a
-  // save. Skipping it just means the invoice is filed without products.
   const saved = db.prepare('SELECT id FROM m_invoices ORDER BY id DESC LIMIT 1').get();
-  if (lineCount && saved) {
-    return res.redirect(`/c/invoices/${saved.id}/import?msg=` + encodeURIComponent('Invoice saved. Check its products below.'));
+  if (!lineCount || !saved) return res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
+
+  // Anything the matcher is sure of goes straight in. Hundreds of historical
+  // invoices is hundreds of review screens otherwise, and a high-confidence
+  // match is one the vendor's own item code or an exact name-plus-pack-plus-
+  // unit agreement produced — not a guess worth stopping a person for. What's
+  // left is only what genuinely needs a decision, and the whole import can be
+  // undone in one click if the read was wrong.
+  const auto = autoImport(saved.id);
+  const left = auto.pending;
+  const done = `${auto.added} product${auto.added === 1 ? '' : 's'} imported`;
+  if (left) {
+    return res.redirect(`/c/invoices/${saved.id}/import?msg=` + encodeURIComponent(
+      `Invoice saved${auto.added ? `, ${done}` : ''}. ${left} line${left === 1 ? '' : 's'} need${left === 1 ? 's' : ''} a decision.`));
   }
-  res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
+  res.redirect('/c/invoices?msg=' + encodeURIComponent(
+    auto.added ? `Invoice saved and ${done} automatically.` : 'Invoice saved.'));
 });
 
 app.post('/c/invoices/:id/status', (req, res) => {
@@ -4894,6 +4972,62 @@ app.post('/c/products/purchase/:pid/delete', (req, res) => {
 // printed "TOM RMA 6/6" to a product called "Roma tomatoes" is a guess until
 // someone agrees with it. Nothing is written until the form is submitted.
 // ---------------------------------------------------------------------------
+/** Line indexes already imported for an invoice. */
+function importedIdx(inv) {
+  try {
+    const a = JSON.parse(inv.imported_idx || '[]');
+    return new Set(Array.isArray(a) ? a.map(Number) : []);
+  } catch { return new Set(); }
+}
+const saveIdx = (invoiceId, set) =>
+  db.prepare('UPDATE m_invoices SET imported_idx = ? WHERE id = ?')
+    .run(JSON.stringify([...set].sort((a, b) => a - b)), invoiceId);
+
+/**
+ * Import every line the matcher is confident about, and report what's left.
+ * Fees are dropped here too — they are accounting, not products.
+ *
+ * Runs on save and is idempotent by line: a line already imported for this
+ * invoice is skipped, so calling it twice can't double-count a delivery.
+ */
+function autoImport(invoiceId) {
+  const inv = invQ.one.get(invoiceId);
+  if (!inv) return { added: 0, pending: 0 };
+  let lines = [];
+  try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { lines = []; }
+  if (!lines.length) return { added: 0, pending: 0 };
+
+  const vendorId = inv.vendor_id ? Number(inv.vendor_id) : null;
+  const on = inv.invoice_date || isoDate(startOfToday());
+  const rows = reviewRows(lines, prodQ.plain.all(), vendorId);
+  const already = importedIdx(inv);
+
+  const run = db.transaction(() => {
+    let added = 0;
+    for (const r of rows) {
+      if (r.confidence !== 'high' || !r.match) continue;
+      if (already.has(r.i)) continue;
+      prodQ.addPurchase.run({
+        product_id: r.match.id, invoice_id: invoiceId, vendor_id: vendorId,
+        purchased_on: on, qty: r.qty, unit: r.unit,
+        unit_price_cents: r.unit_price_cents, total_cents: r.total_cents, raw_text: r.desc,
+      });
+      learnAlias(r.match.id, vendorId, r.code, r.desc);
+      already.add(r.i);
+      added++;
+    }
+    if (added) saveIdx(invoiceId, already);
+    return added;
+  });
+  const added = run();
+  // Everything that still wants a person: uncertain matches and genuinely new
+  // products. Charges are not pending — they are deliberately never products.
+  const pending = rows.filter((r) => !already.has(r.i)
+    && (r.confidence === 'medium' || (r.confidence === 'low' && !r.fee))).length;
+  if (added && !pending) db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(invoiceId);
+  return { added, pending };
+}
+
 app.get('/c/invoices/:id/import', (req, res) => {
   const inv = invQ.one.get(Number(req.params.id));
   if (!inv) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such invoice</div></div>'));
@@ -4901,7 +5035,13 @@ app.get('/c/invoices/:id/import', (req, res) => {
   try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { lines = []; }
   const already = prodQ.purchasesForInvoice.all(inv.id);
   const products = prodQ.plain.all();
-  const rows = reviewRows(lines, products, inv.vendor_id ? Number(inv.vendor_id) : null);
+  const allRows = reviewRows(lines, products, inv.vendor_id ? Number(inv.vendor_id) : null);
+  // The confident lines went in when the invoice was saved. What's on this
+  // screen is only what a person still has to decide — showing the rest again
+  // would be asking twice for the same answer.
+  const done = importedIdx(inv);
+  const rows = allRows.filter((r) => !done.has(r.i)
+    && (r.confidence === 'medium' || (r.confidence === 'low' && !r.fee)));
   const vendors = invQ.vendors.all();
   const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
 
@@ -4915,10 +5055,10 @@ app.get('/c/invoices/:id/import', (req, res) => {
       </div>
     </div>`;
 
-  if (already.length) {
+  if (!rows.length && already.length) {
     return res.send(layout('Import products', `${head}
-      <div class="attn attn-ok"><div class="attn-h">${icon('policy')} Already imported</div>
-        <p>${already.length} line${already.length === 1 ? '' : 's'} from this invoice ${already.length === 1 ? 'is' : 'are'} in your product history.</p></div>
+      <div class="attn attn-ok"><div class="attn-h">${icon('policy')} All products imported</div>
+        <p>${already.length} line${already.length === 1 ? '' : 's'} from this invoice ${already.length === 1 ? 'is' : 'are'} in your product history. Nothing else needs a decision.</p></div>
       <div class="table-wrap"><table class="table">
         <thead><tr><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
         <tbody>${already.map((a) => `<tr><td><a href="/c/products/${a.product_id}">${esc(a.name)}</a></td>
@@ -4931,7 +5071,7 @@ app.get('/c/invoices/:id/import', (req, res) => {
 
   if (!rows.length) {
     return res.send(layout('Import products', `${head}
-      <div class="empty2"><div class="empty2-t">No line items on this invoice</div>
+      <div class="empty2"><div class="empty2-t">${allRows.length ? 'Nothing left to decide' : 'No line items on this invoice'}</div>
         <div class="empty2-s">The reader either couldn't make out the item table, or this invoice was entered by hand. You can still add purchases from a product's own page.</div>
         <a class="btn" href="/c/products">Go to Products</a></div>`));
   }
@@ -4981,7 +5121,7 @@ app.get('/c/invoices/:id/import', (req, res) => {
 
   res.send(layout('Import products', `${head}
     <div class="attn ${ask ? 'attn-soft' : 'attn-ok'}"><div class="attn-h">${icon('invoices')} ${rows.length} line${rows.length === 1 ? '' : 's'} read${matched ? `, ${matched} matched confidently` : ''}${ask ? `, ${ask} need${ask === 1 ? 's' : ''} a decision` : ''}${skipped ? `, ${skipped} look${skipped === 1 ? 's' : ''} like a charge` : ''}</div>
-      <p>${ask ? `The ${ask === 1 ? 'highlighted line is' : 'highlighted lines are'} a close but uncertain match — pick what to do with ${ask === 1 ? 'it' : 'them'} before importing. ` : ''}Nothing is saved until you press Import.</p></div>
+      <p>${already.length ? `${already.length} confident line${already.length === 1 ? ' was' : 's were'} imported automatically when you saved. ` : ''}${ask ? `The ${ask === 1 ? 'highlighted line is' : 'highlighted lines are'} a close but uncertain match — pick what to do with ${ask === 1 ? 'it' : 'them'} before importing. ` : ''}Nothing else is saved until you press Import.</p></div>
     <form method="post" action="/c/invoices/${inv.id}/import">
       <input type="hidden" name="count" value="${rows.length}">
       <div class="ilines">${body}</div>
@@ -4995,9 +5135,9 @@ app.get('/c/invoices/:id/import', (req, res) => {
 app.post('/c/invoices/:id/import', (req, res) => {
   const inv = invQ.one.get(Number(req.params.id));
   if (!inv) return res.status(404).end();
-  if (prodQ.purchasesForInvoice.all(inv.id).length) {
-    return res.redirect(`/c/invoices/${inv.id}/import?err=1&msg=` + encodeURIComponent('That invoice was already imported.'));
-  }
+  // Confident lines are already in from the save, so a whole-invoice refusal
+  // would block the leftovers. Duplicates are avoided per line instead.
+  const seen = importedIdx(inv);
   const n = Number(req.body.count) || 0;
   const vendorId = inv.vendor_id ? Number(inv.vendor_id) : null;
   const on = inv.invoice_date || isoDate(startOfToday());
@@ -5010,6 +5150,7 @@ app.post('/c/invoices/:id/import', (req, res) => {
       const desc = (req.body[`desc_${i}`] || '').trim();
       const total = Number(req.body[`total_${i}`]) || 0;
       if (!desc && action === 'create') continue;
+      if (seen.has(i)) continue;                 // already imported on save
 
       let productId;
       if (action === 'create') {
@@ -5041,8 +5182,10 @@ app.post('/c/invoices/:id/import', (req, res) => {
       // makes the next invoice from them recognise the line outright instead
       // of asking the same question again.
       learnAlias(productId, vendorId, (req.body[`code_${i}`] || '').trim(), desc);
+      seen.add(i);
       added++;
     }
+    saveIdx(inv.id, seen);
     db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(inv.id);
     return { added, created };
   });
@@ -5054,7 +5197,7 @@ app.post('/c/invoices/:id/import', (req, res) => {
 app.post('/c/invoices/:id/import/undo', (req, res) => {
   const id = Number(req.params.id);
   prodQ.clearInvoice.run(id);
-  db.prepare('UPDATE m_invoices SET lines_imported = NULL WHERE id = ?').run(id);
+  db.prepare('UPDATE m_invoices SET lines_imported = NULL, imported_idx = NULL WHERE id = ?').run(id);
   // Products the import created are left alone. One may have been renamed or
   // categorised since, and deleting someone's work to tidy up is the worse
   // mistake — the "Never bought" filter on Products finds any strays.
