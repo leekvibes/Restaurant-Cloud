@@ -16,6 +16,13 @@ const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const { readReport, readInvoice } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
+// Required here, not down beside the Products routes, because this module
+// migrates the schema — it adds m_invoices.ai_lines, which invQ.add names in
+// its INSERT. A prepared statement is compiled the moment it is created, so
+// requiring it late meant the app booted fine on a database that already had
+// the column and died on startup on one that didn't. Which is every fresh
+// deploy. test/boot.test.js now covers exactly this.
+const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows } = require('./products');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -4416,7 +4423,6 @@ app.post('/c/vendors/:id', (req, res) => {
 // The par/on-hand columns still exist on the table and are deliberately not
 // surfaced. When inventory counts arrive they slot in without a migration.
 // ---------------------------------------------------------------------------
-const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows } = require('./products');
 
 const PROD_CAT_COLORS = {
   Produce: { color: '#16a34a', tint: '#f0fdf4' }, Meat: { color: '#dc2626', tint: '#fef2f2' },

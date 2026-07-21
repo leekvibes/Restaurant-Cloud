@@ -53,6 +53,14 @@ CREATE INDEX IF NOT EXISTS idx_pp_product ON product_purchases (product_id, purc
 CREATE INDEX IF NOT EXISTS idx_pp_invoice ON product_purchases (invoice_id);
 CREATE INDEX IF NOT EXISTS idx_pp_date    ON product_purchases (purchased_on);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_products_name ON products (LOWER(name));
+-- Declared here too, not just in periods.js. The migration below records that
+-- it has run in this table, and depending on another module having been
+-- required first meant the migration quietly skipped itself on a cold start —
+-- caught only because the log line said so.
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
 `);
 
 // Invoices carry the AI's raw line-item read until someone reviews it. Kept on
@@ -70,6 +78,13 @@ if (!invCols.includes('lines_imported')) db.exec("ALTER TABLE m_invoices ADD COL
 const migrateFromPar = db.transaction(() => {
   const done = db.prepare("SELECT value FROM settings WHERE key = 'products_migrated'").get();
   if (done) return 0;
+  // A database created after par levels was removed never had the table —
+  // that's nothing to migrate, not a failure worth logging as one.
+  const had = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='m_par'").get();
+  if (!had) {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('products_migrated', '0')").run();
+    return 0;
+  }
   let n = 0;
   const has = db.prepare('SELECT id FROM products WHERE LOWER(name) = LOWER(?)');
   const ins = db.prepare(`INSERT INTO products (name, vendor_id, unit, notes, par_level, reorder_point, on_hand, created_at)
