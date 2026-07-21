@@ -451,3 +451,37 @@ test('restaurant totals are left empty for the owner to enter', () => {
   const ss = db.prepare('SELECT COUNT(*) n FROM server_sales').get().n;
   assert.strictEqual(ss, 90, 'while server sales are all there');
 });
+
+// --- reaching the backfilled history ---------------------------------------------
+//
+// The import is only useful if it can be found. Sales defaults to thirty days,
+// which over two months of records hides the older half and makes a completed
+// import look like it half failed.
+
+test('every backfilled day can be opened to enter its POS total', () => {
+  // The owner wants to walk May day by day and type in real totals. Every
+  // service in the range has to be reachable, not just the ones flagged.
+  const may = db.prepare("SELECT id, date FROM shifts WHERE date LIKE '2026-05%' ORDER BY date").all();
+  assert.strictEqual(may.length, 25, 'all 25 May services exist');
+  for (const d of may) {
+    assert.ok(d.id, `${d.date} has an id to open`);
+  }
+  const june = db.prepare("SELECT COUNT(*) n FROM shifts WHERE date LIKE '2026-06%'").get().n;
+  assert.strictEqual(june, 30, 'and all 30 of June');
+  const july = db.prepare("SELECT COUNT(*) n FROM shifts WHERE date LIKE '2026-07%' AND date <= '2026-07-17'").get().n;
+  assert.strictEqual(july, 17, 'and 17 of July up to the handover');
+});
+
+test('a backfilled day is standing on server sales, not a POS total', () => {
+  // This is the distinction that decides whether the figure on the Sales page
+  // is final or a floor. Counter and to-go revenue is in neither the sheet nor
+  // these rows, so a day that has never had a POS total entered must be
+  // visibly different from one that has.
+  const rows = db.prepare(`SELECT
+      SUM(CASE WHEN total_food_cents + total_coffee_cents + total_alcohol_cents + total_other_cents > 0 THEN 1 ELSE 0 END) withTotal,
+      COUNT(*) n FROM shifts`).get();
+  assert.strictEqual(rows.withTotal, 0, 'no backfilled service claims a POS total');
+
+  const withServer = db.prepare(`SELECT COUNT(DISTINCT shift_id) n FROM server_sales`).get().n;
+  assert.strictEqual(withServer, 68, 'and 68 carry what servers rang');
+});

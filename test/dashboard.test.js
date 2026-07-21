@@ -430,3 +430,53 @@ test('the ledger groups by month and every service can be reached', async () => 
     w2.close();
   }
 });
+
+test('history older than the range is offered, not silently hidden', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const w = new Database(DB);
+  // A service well outside the default thirty-day window.
+  const old = w.prepare("INSERT INTO shifts (date, daypart, status, total_food_cents) VALUES (?, 'cafe', 'emailed', 90000)")
+    .run(back(75)).lastInsertRowid;
+  w.close();
+  try {
+    const html = await (await as(owner, '/sales?r=30')).text();
+    // Two months of records behind a thirty-day default is two months nobody
+    // finds — the page reported its own window and gave no sign of the rest.
+    assert.match(html, /class="sp-more"/, 'the older history is offered');
+    assert.match(html, /services? outside this range/, 'and says how many');
+    const link = html.match(/class="sp-more" href="([^"]+)"/)[1];
+    const wide = await (await as(owner, link.replace(/&amp;/g, '&'))).text();
+    assert.ok(wide.includes(`href="/sales/${old}"`), 'and following it reaches the old service');
+    assert.ok(!/class="sp-more"/.test(wide), 'with nothing left outside');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(old);
+    w2.close();
+  }
+});
+
+test('a day standing on server sales says so, rather than looking final', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const w = new Database(DB);
+  const day = back(4);
+  // A backfilled service: what the servers rang, and no POS total. The figure
+  // is a floor — counter and to-go revenue is in neither — so the page must
+  // not present it as the day's takings.
+  const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'emailed')").run(day).lastInsertRowid;
+  const emp = w.prepare('SELECT id FROM employees LIMIT 1').get().id;
+  w.prepare(`INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents, card_tips_cents, cash_tips_cents)
+    VALUES (?, ?, 80000, 30000, 0, 12000, 0)`).run(id, emp);
+  w.close();
+  try {
+    const html = await (await as(owner, '/sales?r=30')).text();
+    assert.match(html, /class="sp-note"/, 'the page says how many are estimates');
+    assert.match(html, /show what servers rang, not a POS total/);
+    assert.match(html, /server sales only/, 'and the row is tagged');
+    assert.ok(html.includes(`href="/sales/${id}"`), 'and can be opened to fix');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM server_sales WHERE shift_id = ?').run(id);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
+});

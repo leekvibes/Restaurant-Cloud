@@ -3736,6 +3736,9 @@ app.get('/sales', (req, res) => {
   // service with no sales entered yet is exactly what you came here to fix,
   // and it was invisible on the page whose job is entering them.
   const awaiting = rows.filter((x) => x.sales === 0);
+  // Days standing on server sales because no restaurant total was ever entered.
+  const serverOnlyCount = rows.filter((x) =>
+    x.sales > 0 && x.food + x.coffee + x.alcohol + x.other === 0 && x.server_sales > 0).length;
   const dayRows = [...rows].sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart)).slice(0, 60).map((x) => {
     const split = x.food + x.coffee + x.alcohol + x.other > 0;
     const none = x.sales === 0;
@@ -3778,6 +3781,10 @@ app.get('/sales', (req, res) => {
   const ledgerRow = (x) => {
     const split = x.food + x.coffee + x.alcohol + x.other > 0;
     const none = x.sales === 0;
+    // A backfilled day carries what SERVERS rang, which is not the whole
+    // restaurant — counter and to-go revenue is not in it. The figure shown is
+    // a floor, not the total, and the row has to say so or it reads as final.
+    const serverOnly = !none && !split && x.server_sales > 0;
     const st = shiftState(x, today);
     const cr = cash.get(`${x.date}|${x.daypart}`);
     const cs = cr ? CASH.status(cr) : null;
@@ -3792,8 +3799,11 @@ app.get('/sales', (req, res) => {
       <summary>
         <span class="lr-d"><b>${Number(x.date.slice(8))}</b><i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' })}</i></span>
         <span class="lr-m">
-          <span class="lr-t">${dp(x.daypart)}<span class="pill ${st.cls}">${esc(st.label)}</span></span>
-          <span class="lr-b">${parts.length ? parts.join(' · ') : (none ? 'No sales entered' : 'Not split by category')}</span>
+          <span class="lr-t">${dp(x.daypart)}<span class="pill ${st.cls}">${esc(st.label)}</span>${serverOnly ? '<span class="lr-tag">server sales only</span>' : ''}</span>
+          <span class="lr-b">${parts.length ? parts.join(' · ')
+            : none ? 'No sales entered'
+            : serverOnly ? 'What servers rang — the POS total has not been entered'
+            : 'Not split by category'}</span>
         </span>
         <span class="lr-v">${none ? '<i>—</i>' : money(x.sales)}</span>
       </summary>
@@ -3836,7 +3846,18 @@ app.get('/sales', (req, res) => {
     if (o.r === 'custom') p.push(`from=${o.from}`, `to=${o.to}`);
     return '/sales?' + p.join('&');
   };
-  const ALL_RANGES = [...MX.RANGES, ['custom', 'Custom range']];
+  // Two months of history behind a thirty-day default is two months nobody
+  // finds. The page said "26 services with sales" and gave no hint that 46
+  // more existed before the window — so the backfill looked like it had only
+  // half arrived.
+  const span = db.prepare('SELECT MIN(date) a, MAX(date) b, COUNT(*) n FROM shifts').get();
+  const outside = span.n
+    ? db.prepare('SELECT COUNT(*) n FROM shifts WHERE date < ? OR date > ?').get(r.from, r.to).n
+    : 0;
+  const allFrom = span.a && span.a < r.from ? span.a : r.from;
+  const allTo = span.b && span.b > r.to ? span.b : r.to;
+
+  const ALL_RANGES = [...MX.RANGES, ['all', 'All time'], ['custom', 'Custom range']];
   const activeLabel = (ALL_RANGES.find(([k]) => k === key) || ['', r.label])[1];
 
   const filterSheet = `
@@ -3847,7 +3868,7 @@ app.get('/sales', (req, res) => {
         <div class="fs-panel">
           <div class="fs-h">Period</div>
           <div class="fs-opts">
-            ${ALL_RANGES.map(([k, label]) => `<a class="fs-o${key === k ? ' on' : ''}" href="${qs({ r: k })}">${esc(label)}</a>`).join('')}
+            ${ALL_RANGES.map(([k, label]) => `<a class="fs-o${key === k ? ' on' : ''}" href="${k === 'all' ? `/sales?r=custom&from=${allFrom}&to=${allTo}${svc ? `&svc=${svc}` : ''}` : qs({ r: k })}">${esc(label)}</a>`).join('')}
           </div>
           ${key === 'custom' ? `<form class="fs-dates" method="get" action="/sales">
             <input type="hidden" name="r" value="custom">${svc ? `<input type="hidden" name="svc" value="${svc}">` : ''}
@@ -3871,6 +3892,10 @@ app.get('/sales', (req, res) => {
     </details>`;
 
   const ctxLine = `${esc(r.from)} – ${esc(r.to)}${svc ? ` · ${esc(dp(svc))}` : ''} · ${traded.length} service${traded.length === 1 ? '' : 's'} with sales`;
+  const outsideLine = outside
+    ? `<a class="sp-more" href="/sales?r=custom&from=${allFrom}&to=${allTo}${svc ? `&svc=${svc}` : ''}">
+        ${outside} service${outside === 1 ? '' : 's'} outside this range — show everything from ${esc(whenOf(span.a))}</a>`
+    : '';
 
   // --- the chart, with a day's detail on tap --------------------------------
   // A day with no service is a gap in the line, not a zero. `MX.days` marks
@@ -3901,6 +3926,7 @@ app.get('/sales', (req, res) => {
         <div class="sp-filters">${filterSheet}</div>
       </div>
       <p class="sp-ctx">${ctxLine}</p>
+      ${outsideLine}
 
       ${cards}
 
@@ -3928,6 +3954,11 @@ app.get('/sales', (req, res) => {
         <div class="pcard-h"><b>By service</b></div>
         ${CH.shareBars(services.map((x, i) => ({ label: x.label, value: x.sales, color: ['#0891b2', '#7c3aed'][i % 2] })))}
       </section>` : ''}
+
+      ${serverOnlyCount ? `<div class="sp-note">
+        <b>${serverOnlyCount} service${serverOnlyCount === 1 ? '' : 's'} show what servers rang, not a POS total.</b>
+        <i>Counter and to-go revenue is not in those figures, so they are a floor. Open any day below to enter the real total — it replaces the estimate everywhere.</i>
+      </div>` : ''}
 
       ${awaiting.length ? `<section class="sp-todo">
         <div class="sp-todo-h"><b>Needs sales entry</b><span>${awaiting.length}</span></div>
