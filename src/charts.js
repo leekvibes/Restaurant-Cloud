@@ -39,6 +39,9 @@ const empty = (msg, h = 120) =>
 function spark(values, opts = {}) {
   const v = (values || []).filter((x) => Number.isFinite(x));
   if (v.length < 3) return '<span class="spark-none">—</span>';
+  // Every value zero means nothing was logged, not that the figure held
+  // steady at nothing. Drawing the flat line would say the opposite.
+  if (v.every((x) => x === 0)) return '<span class="spark-none">—</span>';
   const w = opts.width || 90, h = opts.height || 26;
   const lo = Math.min(...v), hi = Math.max(...v), span = (hi - lo) || 1;
   const x = (i) => (i / (v.length - 1)) * w;

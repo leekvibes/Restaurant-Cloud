@@ -1278,37 +1278,55 @@ body.drawer-open .drawer { transform: translateX(0); visibility: visible; }
 .dsec-h .cnt { display: inline-block; min-width: 20px; padding: 1px 7px; margin-left: 5px; border-radius: 999px;
   background: var(--danger-bg); color: var(--danger); font-size: 12px; font-weight: 700; text-align: center; }
 
-/* --- today's operations (the primary card) --- */
-.hero { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  padding: 18px 20px; box-shadow: var(--shadow-sm); margin-bottom: 12px; }
-.hero:last-of-type { margin-bottom: 0; }
-.hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
-.hero-id { display: flex; align-items: center; gap: 13px; min-width: 0; }
-.hero-ico { flex-shrink: 0; width: 44px; height: 44px; border-radius: 13px; background: var(--primary); color: #fff;
-  display: flex; align-items: center; justify-content: center; }
-.hero-ico svg { width: 22px; height: 22px; }
-.hero-ico.ok { background: var(--ok); }
-.hero-ico.soft { background: var(--primary-100); color: var(--primary-700); }
-.hero-t { font-size: 18px; font-weight: 750; letter-spacing: -.025em; color: var(--ink); }
-.hero-s { font-size: 13px; color: var(--muted); margin-top: 3px; }
-.hero-prog { margin-top: 16px; }
-.hero-prog-h { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); margin-bottom: 7px; }
-.hero-prog-h b { color: var(--ink); font-weight: 650; }
-.bar { height: 7px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
-.bar span { display: block; height: 100%; border-radius: 999px; background: var(--primary); transition: width .5s cubic-bezier(.4,0,.2,1); }
-.hero-warn { margin-top: 9px; font-size: 12.5px; font-weight: 560; color: var(--danger); }
-.hero-warn.note { color: var(--primary-700); }
-.hero-act { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 17px; }
-.hero-empty, .hero-done { background: linear-gradient(160deg, var(--primary-50), var(--surface) 62%); border-color: var(--primary-200); }
-.hero-done { background: linear-gradient(160deg, #ecfdf5, var(--surface) 62%); border-color: #a7f3d0; }
+/* --- today: a strip of notices ---------------------------------------------
+   Not one card. On a real evening several things are true at once — a service
+   running, a drawer waiting to be counted, payroll ready to go — and a single
+   card can only say one of them. */
+.tnotices { display: grid; gap: 10px; margin: 0 0 18px; }
+.tn { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--line);
+  border-left: 3px solid var(--line-2); border-radius: var(--radius-lg); padding: 14px 18px; box-shadow: var(--shadow-sm); }
+.tn-ico { flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px; display: flex; align-items: center;
+  justify-content: center; background: var(--surface-3); color: var(--muted); }
+.tn-ico svg { width: 19px; height: 19px; }
+.tn-body { flex: 1; min-width: 0; }
+.tn-t { font-size: 15px; font-weight: 700; letter-spacing: -.02em; color: var(--ink); }
+.tn-s { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.tn-bar { margin-top: 9px; max-width: 320px; }
+.tn-warn { margin-top: 7px; font-size: 12px; font-weight: 560; color: var(--danger); }
+.tn-go { flex-shrink: 0; font-size: 13px; font-weight: 650; color: var(--primary-700); white-space: nowrap; }
+.tn-go:hover { text-decoration: none; }
+.tn-live { border-left-color: var(--primary); }
+.tn-live .tn-ico { background: var(--primary); color: #fff; }
+.tn-todo { border-left-color: #d97706; }
+.tn-todo .tn-ico { background: var(--amber-bg); color: #b45309; }
+.tn-done { border-left-color: var(--ok); }
+.tn-done .tn-ico { background: #ecfdf5; color: #047857; }
+.tn-idle { border-left-color: var(--line-2); }
 
-/* --- today's snapshot --- */
-.snaps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
-.snap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; min-width: 0; }
-.snap-l { font-size: 11.5px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.snap-v { font-size: 21px; font-weight: 750; letter-spacing: -.03em; color: var(--ink); margin: 3px 0 1px;
+/* --- the shift KPI band ----------------------------------------------------
+   Completed services over a trailing window, never today. A service halfway
+   through has half its sales and none of its tips. */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 0 0 22px; }
+.kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 15px 17px; min-width: 0; box-shadow: var(--shadow-sm); }
+.kpi-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.kpi-l { font-size: 11.5px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.kpi-v { font-size: 27px; font-weight: 760; letter-spacing: -.035em; color: var(--ink); margin: 6px 0 4px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.snap-s { font-size: 11.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kpi-f { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; min-height: 22px; }
+.kpi-s { font-size: 11.5px; color: var(--faint); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kpi .spark-svg { width: 74px; height: 22px; flex-shrink: 0; }
+
+/* --- this week's snapshot --- */
+.bsnaps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.bsnap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; min-width: 0; }
+.bsnap-l { font-size: 11px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bsnap-v { font-size: 20px; font-weight: 750; letter-spacing: -.03em; color: var(--ink); margin: 4px 0 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bsnap-f { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; min-height: 18px;
+  font-size: 11.5px; color: var(--faint); }
+.bsnap .spark-svg { width: 56px; height: 18px; flex-shrink: 0; }
 
 /* --- needs attention --- */
 .nlist { display: grid; gap: 8px; }
@@ -1335,25 +1353,59 @@ body.drawer-open .drawer { transform: translateX(0); visibility: visible; }
 .nrest[open] > summary { margin-bottom: 8px; }
 .nrest[open] > summary::after { content: ' — hide'; }
 
+/* Severity headings. A critical item and an expiry reminder are not the same
+   kind of thing and should not sit in one undifferentiated list. */
+.ngrp { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .05em; margin: 14px 0 8px; }
+.ngrp:first-child { margin-top: 0; }
+.ngrp-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.ngrp-dot.red { background: var(--danger); }
+.ngrp-dot.amber { background: #d97706; }
+.ngrp-dot.blue { background: var(--primary); }
+.ngrp-n { font-size: 11px; color: var(--faint); font-weight: 650; }
+.nrest { margin-top: 8px; }
+
 /* --- quick actions --- */
-.qacts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.qact { display: flex; align-items: center; gap: 9px; padding: 11px 12px; border-radius: var(--radius);
+.qacts { display: grid; gap: 8px; }
+.qact { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: var(--radius);
   background: var(--surface); border: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--ink);
   transition: border-color .16s, transform .16s, box-shadow .16s; min-width: 0; }
+.qact-m { min-width: 0; display: grid; }
+.qact-m b { font-size: 13px; font-weight: 650; color: var(--ink); }
+.qact-m i { font-style: normal; font-size: 11.5px; font-weight: 450; color: var(--muted); line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qact:hover .qact-m b { color: var(--primary-700); }
 .qact:hover { text-decoration: none; border-color: var(--primary-200); color: var(--primary-700); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .qact-ico { flex-shrink: 0; width: 26px; height: 26px; border-radius: 8px; background: var(--primary-100); color: var(--primary-700);
   display: flex; align-items: center; justify-content: center; }
 .qact-ico svg { width: 14px; height: 14px; }
 
-/* --- business health --- */
-.bhealth { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-.bh { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 15px; min-width: 0; }
-.bh-wide { grid-column: 1 / -1; }
-.bh-l { font-size: 11.5px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.bh-v { font-size: 22px; font-weight: 760; letter-spacing: -.03em; color: var(--ink); margin: 3px 0 1px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bh-s { font-size: 11.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bh-wide .bh-v { font-size: 26px; }
+/* --- upcoming --- */
+.ups { display: grid; gap: 7px; }
+.up { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--line); min-width: 0; transition: border-color .16s, transform .16s; }
+.up:hover { text-decoration: none; border-color: var(--primary-200); transform: translateX(2px); }
+.up-ico { flex-shrink: 0; width: 26px; height: 26px; border-radius: 8px; background: var(--surface-3);
+  color: var(--muted); display: flex; align-items: center; justify-content: center; }
+.up-ico svg { width: 13px; height: 13px; }
+.up-m { min-width: 0; display: grid; }
+.up-m b { font-size: 13px; font-weight: 620; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-m i { font-style: normal; font-size: 11.5px; color: var(--muted); }
+
+/* --- insights ---------------------------------------------------------------
+   Named dins, not ins: Products already owns .ins-h and .ins-list, and a
+   two-letter prefix collision is how the vendor page broke last time.
+   Everything here is arithmetic with its source named. The panel is where
+   model-written observations will land, which is exactly why the computed
+   ones have to be checkable now. */
+.dins { display: grid; gap: 7px; }
+.din { display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--line); font-size: 12.5px; line-height: 1.45;
+  color: var(--ink-2); transition: border-color .16s; }
+.din:hover { text-decoration: none; border-color: var(--primary-200); }
+.din-d { flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; margin-top: 6px; background: var(--faint); }
+.din-good .din-d { background: var(--ok); }
+.din-bad .din-d { background: var(--danger); }
 
 /* --- recent activity --- */
 .fd { display: flex; align-items: center; gap: 11px; padding: 10px 13px; border-radius: var(--radius);
@@ -1366,18 +1418,34 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
 .fd-t b { font-weight: 650; color: var(--ink); }
 .fd-w { flex-shrink: 0; font-size: 11.5px; color: var(--faint); }
 
-/* --- recent shifts (compact) --- */
-.drows { display: grid; gap: 7px; }
-.drow { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: 10px 14px; transition: border-color .16s, transform .16s; }
-.drow:hover { text-decoration: none; border-color: var(--primary-200); transform: translateX(2px); }
-.drow-d { flex-shrink: 0; width: 36px; text-align: center; }
-.drow-d b { display: block; font-size: 16px; font-weight: 750; letter-spacing: -.03em; color: var(--ink); line-height: 1.1; }
-.drow-d i { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--faint); text-transform: uppercase; }
-.drow-m { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.drow-t { font-size: 13.5px; font-weight: 620; color: var(--ink); }
-.drow-n { font-size: 14px; font-weight: 700; letter-spacing: -.02em; color: var(--ink); flex-shrink: 0; }
-.drow-go { color: var(--faint); font-size: 17px; flex-shrink: 0; }
+/* --- recent services --------------------------------------------------------
+   Wider than a date and a total. What it sold, what it cost in wages, what the
+   drawer did — enough to tell whether a service was worth having open. */
+.srows { display: grid; gap: 7px; }
+.srow { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 11px 15px; transition: border-color .16s, transform .16s; }
+.srow:hover { text-decoration: none; border-color: var(--primary-200); transform: translateX(2px); }
+.srow-d { flex-shrink: 0; width: 34px; text-align: center; }
+.srow-d b { display: block; font-size: 16px; font-weight: 750; letter-spacing: -.03em; color: var(--ink); line-height: 1.1; }
+.srow-d i { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--faint); text-transform: uppercase; }
+.srow-svc { flex: 1 1 96px; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13.5px; font-weight: 620; color: var(--ink); }
+.srow-n { flex: 0 0 74px; min-width: 0; display: grid; }
+/* "$18.00 short" does not fit in the same column as "12%", and the amount is
+   the half that gets ellipsised away. */
+.srow-n.wide { flex: 0 0 96px; }
+.srow-n i { font-style: normal; font-size: 10.5px; font-weight: 650; color: var(--faint);
+  text-transform: uppercase; letter-spacing: .04em; }
+.srow-n b { font-size: 13.5px; font-weight: 700; letter-spacing: -.02em; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow-n b.c-critical { color: var(--danger); }
+.srow-n b.c-review { color: #b45309; }
+.srow-n b.c-exact, .srow-n b.c-within { color: #047857; }
+.srow-go { color: var(--faint); font-size: 17px; flex-shrink: 0; }
+
+.dsec-chart { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 15px 17px; box-shadow: var(--shadow-sm); }
+.dsec-chart .dsec-h { margin-bottom: 6px; }
 
 @media (max-width: 1100px) {
   .dash { grid-template-columns: minmax(0, 1fr); }
@@ -1388,10 +1456,22 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
   .dhead-st { width: 100%; align-items: flex-start; border-radius: var(--radius); }
   .dhead-st .dot { margin-top: 5px; }
   .dash, .dash-main, .dash-side { gap: 16px; }
-  .snaps { grid-template-columns: 1fr 1fr; }
-  .hero { padding: 16px; }
-  .hero-t { font-size: 16.5px; }
-  .hero-act .btn { flex: 1; text-align: center; }
+  .bsnaps { grid-template-columns: 1fr 1fr; }
+  /* Four cards one to a row is most of a phone screen of scrolling before
+     anything actionable. Two up, with the value sized to fit. */
+  .kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .kpi { padding: 13px 14px; }
+  .kpi-v { font-size: clamp(18px, 5.6vw, 24px); }
+  .kpi .spark-svg { display: none; }
+  .tn { flex-wrap: wrap; padding: 14px; }
+  .tn-go { width: 100%; text-align: right; }
+  /* The per-service figures stop fitting on one line long before the phone
+     breakpoint. They wrap under the service rather than being ellipsised
+     into uselessness. */
+  .srow { flex-wrap: wrap; row-gap: 10px; }
+  .srow-svc { flex: 1 1 auto; }
+  .srow-n { flex: 1 1 60px; }
+  .srow-go { display: none; }
 }
 @media (max-width: 380px) {
   .qacts { grid-template-columns: 1fr; }

@@ -321,6 +321,12 @@ const dashQ = {
     WHERE expires_on IS NOT NULL ORDER BY expires_on LIMIT 40`),
   warranties: db.prepare(`SELECT id, name, warranty_expires AS due FROM m_equipment
     WHERE warranty_expires IS NOT NULL ORDER BY warranty_expires LIMIT 40`),
+  // An invoice whose lines were read but never imported. The read is the
+  // cheap half; the products only move when somebody confirms the matches,
+  // so an invoice sitting here is cost data the app has and isn't using.
+  unimported: db.prepare(`SELECT id, invoice_number, amount_cents FROM m_invoices
+    WHERE ai_lines IS NOT NULL AND ai_lines <> '' AND ai_lines <> '[]'
+      AND COALESCE(lines_imported, 0) = 0 ORDER BY invoice_date DESC LIMIT 20`),
 };
 
 /** The whole activity feed in one query, newest first. */
@@ -345,31 +351,97 @@ const ACTIVITY_SQL = `
   ) WHERE at IS NOT NULL ORDER BY at DESC LIMIT ?`;
 const activityFeed = db.prepare(ACTIVITY_SQL);
 
+// ---------------------------------------------------------------------------
+// DASHBOARD — the page every account opens on.
+//
+// It answers four questions, in this order, and nothing is on the page that
+// doesn't serve one of them:
+//
+//   1. What needs my attention?      Needs attention, grouped by severity.
+//   2. How is the business doing?    The snapshot band and the charts.
+//   3. What changed?                 Recent services, recent activity.
+//   4. What should I do next?        Today, Upcoming, Quick actions.
+//
+// Two rules the figures follow:
+//
+//   Today is not a measurement. A shift that is halfway through has half its
+//   sales and none of its tips, so the headline numbers use COMPLETED shifts
+//   over a trailing window. Today gets its own strip, where "in progress" is
+//   the point rather than a distortion.
+//
+//   A percentage of nothing is withheld, not printed as zero. With no
+//   invoices logged, food cost isn't 0% — it's unknown, and printing 0% reads
+//   as extraordinarily good news.
+//
+// Everything comes from metrics.js, which Performance and Sales also use, so
+// the three pages cannot disagree about what a week sold.
+// ---------------------------------------------------------------------------
 app.get('/', (req, res) => {
   const now = new Date();
   const today = startOfToday();
   const toStr = isoDate(today);
   const from7 = addDays(toStr, -6);
+  const from30 = addDays(toStr, -29);
+  const from56 = addDays(toStr, -55);
 
   // What this account is allowed to see, so the dashboard never offers a
   // shortcut to a page that answers with 403.
   const me = currentUser(req);
   const may = (key) => !me || me.master || !me.features || !me.features.length || me.features.includes(key);
   const canWrite = !me || me.role !== 'viewer';
+  // Two different permissions, deliberately not one. Shift takings and what
+  // a service costs in wages belong to whoever runs the floor; what the food
+  // costs and what the business keeps is the costs area. Lumping them into
+  // one "can see money" flag handed a shift supervisor the P&L.
+  const seeShifts = may('shifts') || may('sales');
+  const seeCosts = may('costs');
+
+  // --- the numbers ---------------------------------------------------------
+  const p7 = seeShifts || seeCosts ? MX.period(from7, toStr) : null;
+  const prev7 = seeShifts || seeCosts ? MX.previous(from7, toStr) : null;
+  const p30 = seeShifts ? MX.period(from30, toStr) : null;
+  const daily = seeShifts ? MX.days(from30, toStr) : [];
+  // Eight weeks of history is what the sparklines are drawn from. One pass
+  // over the days, bucketed here, rather than eight period() calls.
+  const weekly = [];
+  if (seeShifts || seeCosts) {
+    const invByWeek = new Map(MX.invoiceWeeks(from56, toStr).map((w) => [w.week, w.cents]));
+    const byWeek = new Map();
+    for (const d of MX.days(from56, toStr)) {
+      const dow = (new Date(d.date + 'T00:00:00').getDay() + 6) % 7;   // Monday = 0
+      const wk = addDays(d.date, -dow);
+      const b = byWeek.get(wk) || { week: wk, sales: 0, wages: 0, hours: 0 };
+      b.sales += d.sales; b.wages += d.wages; b.hours += d.hours;
+      byWeek.set(wk, b);
+    }
+    for (const b of [...byWeek.values()].sort((a, x) => a.week.localeCompare(x.week))) {
+      const cogs = invByWeek.get(b.week) || 0;
+      weekly.push({
+        ...b, cogs,
+        laborPct: b.sales > 0 ? (b.wages / b.sales) * 100 : null,
+        foodPct: b.sales > 0 && cogs > 0 ? (cogs / b.sales) * 100 : null,
+        primePct: b.sales > 0 && cogs > 0 ? ((b.wages + cogs) / b.sales) * 100 : null,
+        profit: b.sales - b.wages - cogs,
+      });
+    }
+  }
+  const sparkOf = (f) => weekly.map(f).filter((v) => Number.isFinite(v));
 
   // --- today ---------------------------------------------------------------
-  const todays = dashQ.onDate.all(toStr);
+  const todays = may('shifts') ? dashQ.onDate.all(toStr) : [];
   const openToday = todays.filter((x) => x.status !== 'emailed');
   const todaySales = todays.reduce((a, x) => a + shiftSales(x), 0);
-  const todayTips = todays.reduce((a, x) => a + x.tips, 0);
-  const todayHours = todays.reduce((a, x) => a + x.hours, 0);
-  const staffToday = dashQ.staffToday.get(toStr).n;
 
   // --- needs attention -----------------------------------------------------
   // Every entry names the specific thing and links to it. A count with no
   // route attached is a nag, not a to-do.
   const attn = [];
   const push = (tone, ico, title, sub, href) => attn.push({ tone, ico, title, sub, href });
+  // Things that haven't happened yet. Separate from attention on purpose: a
+  // deadline on Friday is not a problem, and mixing the two turns the
+  // attention list into a list you stop reading.
+  const soon = [];
+  const due = (ico, title, sub, href) => soon.push({ ico, title, sub, href });
 
   /** "Jul 19 Dinner" — an ISO date in a to-do list reads like a serial number. */
   const whenOf = (date, daypart) =>
@@ -389,17 +461,25 @@ app.get('/', (req, res) => {
   if (may('trackers')) {
     for (const r of recurQ.all.all()) {
       const st = statusOf(r);
+      const d = daysTo(r.next_due);
       if (st.key === 'over') push('red', 'recurring', `${r.name} — ${st.label.toLowerCase()}`, r.responsible || 'Recurring task', `/c/recurring`);
-      else if (st.key === 'soon' && daysTo(r.next_due) <= 0) push('amber', 'recurring', `${r.name} — due today`, r.responsible || 'Recurring task', `/c/recurring`);
+      else if (st.key === 'soon' && d <= 0) push('amber', 'recurring', `${r.name} — due today`, r.responsible || 'Recurring task', `/c/recurring`);
+      else if (st.key === 'soon' && d <= 7) due('recurring', r.name, `due ${d === 1 ? 'tomorrow' : `in ${d} days`}`, '/c/recurring');
     }
     for (const i of dashQ.openInvoices.all()) {
       const st = invStatus(i);
       if (st.key === 'overdue') push('red', 'invoices', `Invoice ${i.invoice_number || '#' + i.id} — ${st.label}`, money(i.amount_cents), `/c/invoices`);
+      else if (st.key === 'soon') due('invoices', `Invoice ${i.invoice_number || '#' + i.id}`, `${st.label} · ${money(i.amount_cents)}`, '/c/invoices');
+    }
+    for (const i of dashQ.unimported.all()) {
+      push('blue', 'invoices', `Invoice ${i.invoice_number || '#' + i.id} — lines not imported`,
+        `${money(i.amount_cents)} read but product costs unchanged`, `/c/invoices/${i.id}/import`);
     }
     for (const [rows, slug, what] of [[dashQ.expiring.all(), 'expirations', 'Expires'], [dashQ.warranties.all(), 'equipment', 'Warranty ends']]) {
       for (const r of rows) {
         const d = daysTo(r.due);
         if (d === null || d > 30) continue;
+        if (d > 7) { due(slug === 'equipment' ? 'equipment' : 'expirations', r.name, `${what.toLowerCase()} in ${d} days`, `/c/${slug}/${r.id}`); continue; }
         push(d < 0 ? 'red' : 'amber', slug === 'equipment' ? 'equipment' : 'expirations',
           `${r.name} — ${d < 0 ? 'expired' : d === 0 ? 'expires today' : `${d} day${d === 1 ? '' : 's'} left`}`,
           `${what} ${whenOf(r.due)}`, `/c/${slug}/${r.id}`);
@@ -422,6 +502,17 @@ app.get('/', (req, res) => {
         `${whenOf(r.date, r.daypart)} — ${st.label}`,
         who ? `Counted by ${who}` : 'Nobody recorded as counting it', `/cash/${r.id}`);
     }
+    // A service that sold cash and was never counted is not a variance — it
+    // is a drawer nobody looked at, which is the one nobody notices.
+    if (may('shifts')) {
+      const counted = new Set(CASH.q.recent.all().map((r) => `${r.date}|${r.daypart}`));
+      for (const x of dashQ.recent.all(14)) {
+        if (x.date === toStr || x.date < addDays(toStr, -6)) continue;
+        if (shiftSales(x) <= 0 || counted.has(`${x.date}|${x.daypart}`)) continue;
+        push('amber', 'cash', `${whenOf(x.date, x.daypart)} — drawer never counted`,
+          `${money(shiftSales(x))} rung and no reconciliation`, '/cash/new');
+      }
+    }
   }
 
   if (may('payroll')) {
@@ -429,117 +520,276 @@ app.get('/', (req, res) => {
     if (justEnded && !sendRecord(justEnded.start)) {
       push('blue', 'payroll', `Payroll ready — ${labelFor(justEnded)}`, 'The period has ended and nothing has gone out', '/payroll');
     }
+    const cur = currentPeriod();
+    if (cur) {
+      const d = daysTo(cur.end);
+      if (d !== null && d >= 0 && d <= 7) due('payroll', `Payroll — ${labelFor(cur)}`, d === 0 ? 'period ends today' : `period ends in ${d} day${d === 1 ? '' : 's'}`, '/payroll');
+    }
   }
 
-  // --- business health -----------------------------------------------------
-  const costs = may('costs') ? aggregateCosts(from7, toStr) : null;
+  // Worst first, so a drawer that came up short is never buried under six
+  // expiry reminders.
+  const TONE_RANK = { red: 0, amber: 1, blue: 2 };
+  attn.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone]);
+  const bad = attn.filter((a) => a.tone === 'red').length;
 
-  // --- rendering -----------------------------------------------------------
+  // --- rendering: today ----------------------------------------------------
   const svc = (x) => dp(x.daypart);
   const stateOf = (x) => shiftState(x, toStr);
 
-  const heroCard = (x) => {
-    const st = stateOf(x);
-    const pct = x.people ? Math.round((Math.min(x.submitters, x.people) / x.people) * 100) : 0;
-    const bits = [`${x.people} on shift`];
-    if (x.hours) bits.push(`${Math.round(x.hours * 10) / 10} hrs in`);
-    if (x.tips) bits.push(`${money(x.tips)} tips`);
-    return `
-      <div class="hero">
-        <div class="hero-top">
-          <div class="hero-id">
-            <span class="hero-ico">${icon('shifts')}</span>
-            <div><div class="hero-t">Today · ${svc(x)}</div><div class="hero-s">${bits.join(' · ')}</div></div>
-          </div>
-          <span class="pill ${st.cls}">${st.label}</span>
-        </div>
-        <div class="hero-prog">
-          <div class="hero-prog-h"><span>Staff submissions</span><b>${Math.min(x.submitters, x.people)} of ${x.people}</b></div>
-          <div class="bar"><span style="width:${pct}%"></span></div>
-          ${x.no_hours ? `<div class="hero-warn">${x.no_hours} still ${x.no_hours === 1 ? 'has' : 'have'} no hours entered</div>` : ''}
-          ${x.notes ? `<div class="hero-warn note">${x.notes === 1 ? 'A note' : x.notes + ' notes'} from staff to read</div>` : ''}
-        </div>
-        <div class="hero-act">
-          <a class="btn btn-primary" href="/shifts/${x.id}">Continue shift →</a>
-          <a class="link" href="/shifts">All shifts</a>
-        </div>
-      </div>`;
-  };
+  // Today is a strip of notices rather than one card, because on a real
+  // evening there is more than one thing true at once: a service running, a
+  // drawer waiting, payroll ready to go.
+  const notices = [];
+  const notice = (tone, ico, title, sub, cta, href) => notices.push({ tone, ico, title, sub, cta, href });
 
-  const todayBlock = openToday.length
-    ? openToday.map(heroCard).join('')
-    : todays.length
-      ? `<div class="hero hero-done">
-           <div class="hero-top"><div class="hero-id">
-             <span class="hero-ico ok">${icon('policy')}</span>
-             <div><div class="hero-t">Today is closed out</div>
-               <div class="hero-s">${todays.length} service${todays.length === 1 ? '' : 's'} sent · ${money(todaySales)} in sales</div></div>
-           </div></div>
-           <div class="hero-act">${canWrite ? '<a class="btn" href="/shifts/new">Log another shift</a>' : ''}<a class="link" href="/shifts">All shifts</a></div>
-         </div>`
-      : `<div class="hero hero-empty">
-           <div class="hero-top"><div class="hero-id">
-             <span class="hero-ico soft">${icon('shifts')}</span>
-             <div><div class="hero-t">No shift started today</div>
-               <div class="hero-s">Start one and staff can submit their tips from their phones.</div></div>
-           </div></div>
-           <div class="hero-act">${canWrite ? '<a class="btn btn-primary" href="/shifts/new">Log today\'s shift →</a>' : '<span class="muted">View-only account</span>'}</div>
-         </div>`;
+  if (may('shifts')) {
+    for (const x of openToday) {
+      const st = stateOf(x);
+      const pct = x.people ? Math.round((Math.min(x.submitters, x.people) / x.people) * 100) : 0;
+      const bits = [`${x.people} on`];
+      if (x.hours) bits.push(`${Math.round(x.hours * 10) / 10} hrs`);
+      if (x.tips) bits.push(`${money(x.tips)} tips`);
+      notice('live', 'shifts', `${svc(x)} · ${st.label.toLowerCase()}`,
+        `${bits.join(' · ')} — ${Math.min(x.submitters, x.people)} of ${x.people} submitted`,
+        'Open shift', `/shifts/${x.id}`, pct);
+      notices[notices.length - 1].pct = pct;
+      notices[notices.length - 1].warn = x.no_hours
+        ? `${x.no_hours} still ${x.no_hours === 1 ? 'has' : 'have'} no hours`
+        : x.notes ? `${x.notes === 1 ? 'A note' : x.notes + ' notes'} from staff to read` : null;
+    }
+    if (!todays.length) {
+      notice('idle', 'shifts', 'No shift started today',
+        'Start one and staff can submit their tips from their phones.',
+        canWrite ? "Log today's shift" : null, '/shifts/new');
+    } else if (!openToday.length) {
+      notice('done', 'policy', 'Today is closed out',
+        `${todays.length} service${todays.length === 1 ? '' : 's'} sent · ${money(todaySales)} rung`,
+        'All shifts', '/shifts');
+    }
+  }
+  if (may('cash')) {
+    const need = todays.filter((x) => shiftSales(x) > 0
+      && !CASH.q.recent.all().some((r) => r.date === x.date && r.daypart === x.daypart));
+    if (need.length && canWrite) {
+      notice('todo', 'cash', `Cash reconciliation due · ${need.map(svc).join(' and ')}`,
+        'The drawer has not been counted for today yet.', 'Count the drawer', '/cash/new');
+    }
+  }
+  if (may('payroll')) {
+    const justEnded = recentPeriods(2)[1];
+    if (justEnded && !sendRecord(justEnded.start)) {
+      notice('todo', 'payroll', 'Payroll ready to send', labelFor(justEnded), 'Review payroll', '/payroll');
+    }
+  }
+  if (may('trackers')) {
+    const waiting = dashQ.unimported.all();
+    if (waiting.length) notice('todo', 'invoices', `${waiting.length} invoice${waiting.length === 1 ? '' : 's'} awaiting review`,
+      'Lines have been read but the product costs have not been updated.',
+      'Review lines', waiting.length === 1 ? `/c/invoices/${waiting[0].id}/import` : '/c/invoices');
+  }
 
-  const snap = (label, value, sub) =>
-    `<div class="snap"><div class="snap-l">${label}</div><div class="snap-v">${value}</div><div class="snap-s">${sub}</div></div>`;
-  const snapshot = `<div class="snaps">
-    ${snap('Sales', money(todaySales), todays.length ? `${todays.length} service${todays.length === 1 ? '' : 's'}` : 'nothing yet')}
-    ${snap('Tips', money(todayTips), todayTips ? 'collected today' : 'none reported')}
-    ${snap('Labor hours', todayHours ? String(Math.round(todayHours * 10) / 10) : '—', todayHours ? 'entered so far' : 'none entered')}
-    ${snap('Staff on', staffToday ? String(staffToday) : '—', staffToday ? 'people today' : 'nobody yet')}
-  </div>`;
+  const noticeCard = (n) => `
+    <div class="tn tn-${n.tone}">
+      <span class="tn-ico">${icon(n.ico)}</span>
+      <div class="tn-body">
+        <div class="tn-t">${esc(n.title)}</div>
+        <div class="tn-s">${esc(n.sub)}</div>
+        ${n.pct != null ? `<div class="bar tn-bar"><span style="width:${n.pct}%"></span></div>` : ''}
+        ${n.warn ? `<div class="tn-warn">${esc(n.warn)}</div>` : ''}
+      </div>
+      ${n.cta ? `<a class="tn-go" href="${n.href}">${esc(n.cta)} →</a>` : ''}
+    </div>`;
+  const todayBlock = notices.length
+    ? `<div class="tnotices">${notices.map(noticeCard).join('')}</div>`
+    : '';
 
-  // Worst first, so a drawer that came up short is never buried under six
-  // reorder reminders.
-  const TONE_RANK = { red: 0, amber: 1, blue: 2 };
-  attn.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone]);
+  // --- rendering: the shift KPI band ---------------------------------------
+  // Averages divide by shifts that HAVE figures. Counting a shift that was
+  // logged but never filled in halves the average and makes every service
+  // look worse than it was.
+  const withSales = p30 ? p30.rows.filter((r) => r.sales > 0) : [];
+  const lastShift = withSales.length ? withSales[withSales.length - 1] : null;
+  const shiftSeries = withSales.slice(-12);
+  const avgWage = withSales.length ? Math.round(p30.wages / withSales.length) : null;
+
+  const kpi = (label, value, sub, series, opts = {}) => `
+    <div class="kpi">
+      <div class="kpi-h"><span class="kpi-l">${label}</span>${opts.chip || ''}</div>
+      <div class="kpi-v">${value}</div>
+      <div class="kpi-f"><span class="kpi-s">${sub}</span>${series && series.length >= 3 ? CH.spark(series, { width: 74, height: 22, invert: opts.invert }) : ''}</div>
+    </div>`;
+  const kpiBand = p30 && withSales.length ? `<div class="kpis">
+    ${kpi('Last service', money(lastShift.sales),
+      `${whenOf(lastShift.date, lastShift.daypart)}`, shiftSeries.map((r) => r.sales))}
+    ${kpi('Average per service', money(p30.avgShift),
+      `${withSales.length} service${withSales.length === 1 ? '' : 's'}, 30 days`, shiftSeries.map((r) => r.sales))}
+    ${kpi('Wage cost per service', avgWage === null ? '—' : money(avgWage),
+      p30.laborPct === null ? 'no sales to compare' : `${p30.laborPct}% of sales`,
+      shiftSeries.map((r) => r.wages), { invert: true })}
+    ${kpi('Sales per labor hour', p30.salesPerHour === null ? '—' : money(p30.salesPerHour),
+      p30.hours ? `${Math.round(p30.hours)} hours worked` : 'no hours entered',
+      shiftSeries.filter((r) => r.hours > 0).map((r) => Math.round(r.sales / r.hours)))}
+  </div>` : '';
+
+  // --- rendering: the business snapshot ------------------------------------
+  const pct1 = (v) => (v === null || v === undefined ? '—' : (Math.round(v * 10) / 10) + '%');
+  // With no invoices in the range, cost of goods is 0 — but 0 means "nothing
+  // logged", not "the food was free". Printing 0% food cost, and a prime cost
+  // that is really just labor, would read as good news.
+  const hasCogs = p7 && p7.cogs > 0;
+  const snapCard = (label, value, sub, series, opts = {}) => `
+    <div class="bsnap">
+      <div class="bsnap-l">${label}</div>
+      <div class="bsnap-v">${value}</div>
+      <div class="bsnap-f">${sub}${series && series.length >= 3 ? CH.spark(series, { width: 56, height: 18, invert: opts.invert }) : ''}</div>
+    </div>`;
+  const snapshot = p7 && seeCosts ? `<div class="bsnaps">
+    ${snapCard('Sales this week', money(p7.sales), CH.delta(p7.sales, prev7.sales), sparkOf((w) => w.sales))}
+    ${snapCard('Labor', pct1(p7.laborPct), p7.laborPct === null ? 'no sales yet' : 'wages ÷ sales',
+      sparkOf((w) => w.laborPct), { invert: true })}
+    ${snapCard('Food cost', hasCogs ? pct1(p7.foodPct) : '—', hasCogs ? 'invoices ÷ sales' : 'no invoices logged',
+      sparkOf((w) => w.foodPct), { invert: true })}
+    ${snapCard('Prime cost', hasCogs ? pct1(p7.primePct) : '—', hasCogs ? 'labor + goods' : 'needs invoices',
+      sparkOf((w) => w.primePct), { invert: true })}
+    ${snapCard('Gross profit', hasCogs ? money(p7.grossProfit) : '—', hasCogs ? 'after wages and goods' : 'needs invoices',
+      hasCogs ? sparkOf((w) => w.profit) : null)}
+    ${snapCard('Invoices this week', money(p7.invoiceTotal), `${p7.invoices.length} logged`, sparkOf((w) => w.cogs), { invert: true })}
+  </div>` : '';
+
+  // --- rendering: charts ---------------------------------------------------
+  const dayTick = (d) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
+  // Sales and labor share one money axis. A second axis would let the two
+  // lines be scaled independently, which is how a labor problem gets drawn to
+  // look like a good week.
+  const salesChart = daily.length >= 2 ? CH.lineChart([
+    { label: 'Sales', values: daily.map((d) => ({ x: dayTick(d.date), y: d.sales })), color: '#2563eb', area: true },
+    { label: 'Wages', values: daily.map((d) => ({ x: dayTick(d.date), y: d.wages })), color: '#d97706', area: true },
+  ], { height: 190, empty: 'No shifts in the last 30 days' }) : '';
+  const invWeeks = seeCosts ? MX.invoiceWeeks(from56, toStr) : [];
+  const invChart = invWeeks.length ? CH.barChart(
+    invWeeks.map((w) => ({ x: dayTick(w.week), y: w.cents })), { height: 150, color: '#0891b2' }) : '';
+
+  // --- rendering: needs attention, by severity -----------------------------
   const nitem = (a) => `
     <a class="nitem" href="${a.href}">
       <span class="nitem-ico ${a.tone}">${icon(a.ico)}</span>
       <span class="nitem-main"><span class="nitem-t">${esc(a.title)}</span><span class="nitem-s">${esc(a.sub)}</span></span>
       <span class="nitem-go">›</span>
     </a>`;
-  const rest = attn.slice(8);
+  const GROUPS = [['red', 'Critical'], ['amber', 'Warning'], ['blue', 'For information']];
   const attnBlock = attn.length
-    ? `<div class="nlist">${attn.slice(0, 8).map(nitem).join('')}
-        ${rest.length ? `<details class="nrest"><summary>${rest.length} more</summary>
-          <div class="nlist">${rest.map(nitem).join('')}</div></details>` : ''}
-      </div>`
+    ? GROUPS.map(([tone, label]) => {
+      const list = attn.filter((a) => a.tone === tone);
+      if (!list.length) return '';
+      const head = `<div class="ngrp"><span class="ngrp-dot ${tone}"></span>${label}<span class="ngrp-n">${list.length}</span></div>`;
+      // Only the informational pile is worth collapsing; a critical item that
+      // needs a click to be seen is not an alert.
+      if (tone === 'blue' && list.length > 4) {
+        return `${head}<div class="nlist">${list.slice(0, 4).map(nitem).join('')}</div>
+          <details class="nrest"><summary>${list.length - 4} more</summary>
+            <div class="nlist">${list.slice(4).map(nitem).join('')}</div></details>`;
+      }
+      return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
+    }).join('')
     : `<div class="all-clear">✓ Nothing needs your attention right now.</div>`;
 
+  // --- rendering: recent services ------------------------------------------
+  // Richer than a date and a total: what it sold, what it cost in wages, what
+  // the drawer did. Enough to know whether a service was worth having open.
+  const cashByShift = new Map();
+  if (may('cash')) for (const r of CASH.q.recent.all()) cashByShift.set(`${r.date}|${r.daypart}`, r);
+  const recentRows = may('shifts') ? dashQ.recent.all(6).map((x) => {
+    const st = stateOf(x);
+    const sales = shiftSales(x);
+    const labor = sales > 0 ? Math.round((x.wage_cents / sales) * 1000) / 10 : null;
+    const cr = cashByShift.get(`${x.date}|${x.daypart}`);
+    const cs = cr ? CASH.status(cr) : null;
+    return `<a class="srow" href="/shifts/${x.id}">
+      <span class="srow-d"><b>${Number(x.date.slice(8, 10))}</b><i>${MONTHS[Number(x.date.slice(5, 7)) - 1].slice(0, 3)}</i></span>
+      <span class="srow-svc">${svc(x)}<span class="pill ${st.cls}">${st.label}</span></span>
+      <span class="srow-n"><i>Sales</i><b>${sales ? money(sales) : '—'}</b></span>
+      <span class="srow-n"><i>Tips</i><b>${x.tips ? money(x.tips) : '—'}</b></span>
+      <span class="srow-n"><i>Labor</i><b>${labor === null ? '—' : labor + '%'}</b></span>
+      <span class="srow-n wide"><i>Drawer</i><b class="${cs ? 'c-' + cs.key : ''}">${cs ? esc(cs.label) : '—'}</b></span>
+      <span class="srow-go">›</span>
+    </a>`;
+  }).join('') : '';
+
+  // --- rendering: insights -------------------------------------------------
+  // Everything here is computed and every line says what it was computed
+  // from. The panel is where model-written observations will land, which is
+  // exactly why the arithmetic ones have to be checkable now.
+  const ins = [];
+  const insight = (tone, text, href) => ins.push({ tone, text, href });
+  if (seeShifts && p7 && prev7 && prev7.sales > 0) {
+    const d = ((p7.sales - prev7.sales) / prev7.sales) * 100;
+    if (Math.abs(d) >= 3) insight(d > 0 ? 'good' : 'bad',
+      `Sales ${d > 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}% on the previous week, ${money(p7.sales)} against ${money(prev7.sales)}.`, '/sales');
+  }
+  if (seeCosts && weekly.length >= 2) {
+    const [a, b] = [weekly[weekly.length - 2], weekly[weekly.length - 1]];
+    if (a.laborPct !== null && b.laborPct !== null && Math.abs(b.laborPct - a.laborPct) >= 1.5) {
+      const up = b.laborPct > a.laborPct;
+      insight(up ? 'bad' : 'good',
+        `Labor ${up ? 'rose' : 'fell'} to ${pct1(b.laborPct)} of sales, from ${pct1(a.laborPct)} the week before.`, '/costs');
+    }
+    if (a.primePct !== null && b.primePct !== null && Math.abs(b.primePct - a.primePct) >= 1.5) {
+      const up = b.primePct > a.primePct;
+      insight(up ? 'bad' : 'good', `Prime cost ${up ? 'up' : 'improved'} to ${pct1(b.primePct)} from ${pct1(a.primePct)}.`, '/costs');
+    }
+  }
+  if (seeShifts && daily.length) {
+    const best = daily.filter((d) => d.had).sort((a, b) => b.sales - a.sales)[0];
+    if (best && best.sales > 0) insight('flat',
+      `Best day in the last 30 was ${whenOf(best.date)} at ${money(best.sales)}.`, '/sales');
+  }
+  if (may('trackers')) {
+    // The query buckets spend by month and year, so it needs both anchors
+    // even though the mover list only reads last vs prior price.
+    const movers = prodQ.all.all({ from_month: toStr.slice(0, 8) + '01', from_year: toStr.slice(0, 4) + '-01-01' })
+      .map((p) => ({ p, t: trendOf(p) }))
+      .filter((x) => x.t !== null && Math.abs(x.t) >= 10)
+      .sort((a, b) => Math.abs(b.t) - Math.abs(a.t))
+      .slice(0, 2);
+    for (const m of movers) {
+      insight(m.t > 0 ? 'bad' : 'good',
+        `${m.p.name} ${m.t > 0 ? 'up' : 'down'} ${Math.abs(m.t)}% — ${money(m.p.prior_price)} to ${money(m.p.last_price)}.`,
+        `/c/products/${m.p.id}`);
+    }
+  }
+  if (may('menu')) {
+    const over = MENU.overTargetCount();
+    if (over) insight('bad',
+      `${over} menu item${over === 1 ? '' : 's'} cost${over === 1 ? 's' : ''} more than target.`, '/menu');
+  }
+  const insBlock = ins.length
+    ? `<div class="dins">${ins.slice(0, 5).map((i) => `<a class="din din-${i.tone}" href="${i.href}"><span class="din-d"></span>${i.text}</a>`).join('')}</div>`
+    : '<div class="all-clear">Not enough history yet to compare anything.</div>';
+
+  // --- rendering: upcoming --------------------------------------------------
+  const soonBlock = soon.length
+    ? `<div class="ups">${soon.slice(0, 6).map((u) => `<a class="up" href="${u.href}">
+        <span class="up-ico">${icon(u.ico)}</span>
+        <span class="up-m"><b>${esc(u.title)}</b><i>${esc(u.sub)}</i></span></a>`).join('')}</div>`
+    : '<div class="all-clear">Nothing due in the next week.</div>';
+
+  // --- rendering: quick actions --------------------------------------------
   const ACTIONS = [
-    { href: '/shifts/new', ico: 'shifts', label: 'Log shift', feat: 'shifts' },
-    { href: '/c/invoices', ico: 'invoices', label: 'Upload invoice', feat: 'trackers' },
-    { href: '/c/vendors', ico: 'vendors', label: 'Add vendor', feat: 'trackers' },
-    { href: '/c/incidents', ico: 'incidents', label: 'Log incident', feat: 'trackers' },
-    { href: '/c/recurring', ico: 'recurring', label: 'Recurring task', feat: 'trackers' },
-    { href: '/cash/new', ico: 'cash', label: 'Count drawer', feat: 'cash' },
+    { href: '/shifts/new', ico: 'shifts', label: 'Log a shift', blurb: 'Hours, sales and tips for a service', feat: 'shifts' },
+    { href: '/cash/new', ico: 'cash', label: 'Count the drawer', blurb: 'Reconcile cash and record the deposit', feat: 'cash' },
+    { href: '/c/invoices', ico: 'invoices', label: 'Upload an invoice', blurb: 'Read the lines and update product costs', feat: 'trackers' },
+    { href: '/menu/new', ico: 'costs', label: 'Cost a menu item', blurb: 'Build a recipe and see its margin', feat: 'menu' },
+    { href: '/c/vendors', ico: 'vendors', label: 'Add a vendor', blurb: 'Contacts, terms and where the login lives', feat: 'trackers' },
+    { href: '/c/incidents', ico: 'incidents', label: 'Log an incident', blurb: 'Write it down while it is fresh', feat: 'trackers' },
   ].filter((a) => may(a.feat));
   const actions = canWrite && ACTIONS.length
-    ? `<div class="qacts">${ACTIONS.map((a) => `<a class="qact" href="${a.href}"><span class="qact-ico">${icon(a.ico)}</span>${a.label}</a>`).join('')}</div>`
+    ? `<div class="qacts">${ACTIONS.map((a) => `<a class="qact" href="${a.href}">
+        <span class="qact-ico">${icon(a.ico)}</span>
+        <span class="qact-m"><b>${a.label}</b><i>${a.blurb}</i></span></a>`).join('')}</div>`
     : '';
 
-  const pctOf = (v) => (v === null || v === undefined ? '—' : v + '%');
-  const trend = (v) => (v === null ? '<span class="muted">no prior week</span>'
-    : `<span class="delta ${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '▲' : '▼'} ${Math.abs(v)}%</span> vs last week`);
-  // With no invoices in the range, cost of goods is 0 — but 0 means "nothing
-  // logged", not "the food was free". Printing "0%" food cost and a prime cost
-  // that is really just labor would read as good news. Both are withheld until
-  // there's something to divide.
-  const hasCogs = costs && costs.cogs > 0;
-  const health = costs ? `<div class="bhealth">
-      <div class="bh bh-wide"><div class="bh-l">Sales this week</div><div class="bh-v">${money(costs.sales)}</div><div class="bh-s">${trend(costs.wow)}</div></div>
-      <div class="bh"><div class="bh-l">Labor</div><div class="bh-v">${pctOf(costs.laborPct)}</div><div class="bh-s">wages ÷ sales</div></div>
-      <div class="bh"><div class="bh-l">Food cost</div><div class="bh-v">${hasCogs ? pctOf(costs.foodPct) : '—'}</div><div class="bh-s">${hasCogs ? 'invoices ÷ sales' : 'no invoices logged'}</div></div>
-      <div class="bh"><div class="bh-l">Prime cost</div><div class="bh-v">${hasCogs ? pctOf(costs.primePct) : '—'}</div><div class="bh-s">${hasCogs ? 'labor + goods' : 'needs invoices'}</div></div>
-    </div>` : '';
-
+  // --- rendering: activity --------------------------------------------------
   const FEED = {
     shift: (r) => {
       const who = r.names && r.names.length > 1
@@ -552,7 +802,7 @@ app.get('/', (req, res) => {
     vendor: (r) => ({ ico: 'vendors', text: `<b>${esc(r.who || 'A vendor')}</b> added to vendors`, href: '/c/vendors' }),
     incident: (r) => ({ ico: 'incidents', text: `Incident logged${r.what ? ` · ${esc(r.what)}` : ''}`, href: '/c/incidents' }),
     note: (r) => ({ ico: 'notes', text: `Decision logged${r.what ? ` · ${esc(r.what)}` : ''}`, href: '/c/notes' }),
-    cash: (r) => ({ ico: 'cash', text: `Cash counted${r.what ? ` · ${esc(dp(r.what))}` : ''}${r.who ? ` by <b>${esc(r.who)}</b>` : ''}`, href: '/cash' }),
+    cash: (r) => ({ ico: 'cash', text: `Drawer reconciled${r.what ? ` · ${esc(dp(r.what))}` : ''}${r.who ? ` by <b>${esc(r.who)}</b>` : ''}`, href: '/cash' }),
     payroll: (r) => ({ ico: 'payroll', text: `Payroll sent${r.what ? ` · period from ${esc(r.what)}` : ''}`, href: '/payroll' }),
   };
   const FEED_FEAT = { shift: 'shifts', invoice: 'trackers', vendor: 'trackers', incident: 'trackers', note: 'trackers', cash: 'cash', payroll: 'payroll' };
@@ -573,27 +823,16 @@ app.get('/', (req, res) => {
     } else {
       events.push(r);
     }
-    if (events.length >= 20) break;   // room to group before trimming to 8
+    if (events.length >= 24) break;   // room to group before trimming
   }
-  const feedRows = events.slice(0, 8).map((r) => {
+  const feedRows = events.slice(0, 10).map((r) => {
     const f = FEED[r.kind](r);
     const inner = `<span class="fd-ico">${icon(f.ico)}</span><span class="fd-t">${f.text}</span><span class="fd-w">${ago(r.at, now)}</span>`;
     return f.href ? `<a class="fd" href="${f.href}">${inner}</a>` : `<div class="fd">${inner}</div>`;
   }).join('');
   const feed = feedRows || '<div class="all-clear">Nothing has happened yet.</div>';
 
-  const recentRows = may('shifts') ? dashQ.recent.all(5).map((x) => {
-    const st = stateOf(x);
-    return `<a class="drow" href="/shifts/${x.id}">
-      <span class="drow-d"><b>${Number(x.date.slice(8, 10))}</b><i>${MONTHS[Number(x.date.slice(5, 7)) - 1].slice(0, 3)}</i></span>
-      <span class="drow-m"><span class="drow-t">${svc(x)}</span><span class="pill ${st.cls}">${st.label}</span></span>
-      <span class="drow-n">${money(shiftSales(x))}</span>
-      <span class="drow-go">›</span>
-    </a>`;
-  }).join('') : '';
-
   // --- the one-line status under the greeting ------------------------------
-  const bad = attn.filter((a) => a.tone === 'red').length;
   const status = openToday.length
     ? `Your ${openToday.map(svc).join(' and ')} shift${openToday.length === 1 ? ' is' : 's are'} open.${attn.length ? ` ${attn.length} thing${attn.length === 1 ? '' : 's'} need${attn.length === 1 ? 's' : ''} your attention.` : ''}`
     : bad
@@ -602,8 +841,8 @@ app.get('/', (req, res) => {
         ? `${attn.length} thing${attn.length === 1 ? '' : 's'} to look at, nothing urgent.`
         : 'Everything is running smoothly today.';
 
-  const sec = (title, body, link) => !body ? '' : `
-    <section class="dsec">
+  const sec = (title, body, link, cls) => !body ? '' : `
+    <section class="dsec${cls ? ' ' + cls : ''}">
       <div class="dsec-h"><h2>${title}</h2>${link || ''}</div>
       ${body}
     </section>`;
@@ -620,15 +859,20 @@ app.get('/', (req, res) => {
         <span class="dot"></span>${esc(status)}
       </div>
     </header>
+    ${todayBlock}
+    ${kpiBand}
     <div class="dash">
       <div class="dash-main">
-        ${sec('Today', todayBlock + snapshot)}
         ${sec(`Needs attention${attn.length ? ` <span class="cnt">${attn.length}</span>` : ''}`, attnBlock)}
-        ${sec('Recent shifts', recentRows && `<div class="drows">${recentRows}</div>`, '<a class="link" href="/shifts">View all →</a>')}
+        ${sec('This week', snapshot, may('costs') ? '<a class="link" href="/costs">Performance →</a>' : '')}
+        ${sec('Sales and labor', salesChart, '<a class="link" href="/sales">Sales →</a>', 'dsec-chart')}
+        ${sec('Recent services', recentRows && `<div class="srows">${recentRows}</div>`, '<a class="link" href="/shifts">View all →</a>')}
+        ${sec('Invoice spend by week', invChart, '<a class="link" href="/c/invoices">Invoices →</a>', 'dsec-chart')}
       </div>
       <aside class="dash-side">
         ${sec('Quick actions', actions)}
-        ${sec('Business health', health, may('costs') ? '<a class="link" href="/costs">Details →</a>' : '')}
+        ${sec('Upcoming', soonBlock)}
+        ${sec('Insights', insBlock)}
         ${sec('Recent activity', feed)}
       </aside>
     </div>`;

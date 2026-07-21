@@ -94,3 +94,24 @@ test('the app boots against a database from before Products existed', async () =
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Two files binding the same port is not a test failure, it is a coin toss:
+// the suite runs them in parallel and whichever loses shows up as a dozen
+// unrelated assertions failing in a file you did not touch. Cheaper to check
+// than to diagnose again.
+test('every test file that spawns a server claims its own port', () => {
+  const dir = require('node:path').join(__dirname);
+  const seen = new Map();
+  for (const f of require('node:fs').readdirSync(dir).filter((x) => x.endsWith('.test.js'))) {
+    const src = require('node:fs').readFileSync(require('node:path').join(dir, f), 'utf8');
+    const m = src.match(/^const PORT = (\d+);/m);
+    if (!m) continue;
+    const port = Number(m[1]);
+    assert.ok(!seen.has(port), `${f} and ${seen.get(port)} both bind ${port}`);
+    seen.set(port, f);
+    // dashboard.test.js starts a second server on PORT + 1.
+    assert.ok(!seen.has(port + 1) || seen.get(port + 1) === f,
+      `${f} may also use ${port + 1}, which ${seen.get(port + 1)} claims`);
+  }
+  assert.ok(seen.size >= 4, `found ${seen.size} spawning files, expected several`);
+});

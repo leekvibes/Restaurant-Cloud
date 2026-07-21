@@ -134,8 +134,19 @@ test('the dashboard shows nothing from areas the account cannot open', async () 
     const html = await res.text();
 
     assert.ok(html.includes('Needs attention'), 'still gets the sections it may see');
-    for (const withheld of ['Business health', 'Quick actions']) {
-      assert.ok(!html.includes(withheld), `${withheld} must not render`);
+    // A section only counts as withheld if an owner actually gets it —
+    // otherwise the assertion passes because the string was renamed and stops
+    // testing anything. These are checked against the owner's page below.
+    const ownerHtml = await (await as(owner, '/')).text();
+    for (const withheld of ['This week', 'Quick actions']) {
+      assert.ok(ownerHtml.includes(withheld), `${withheld} must exist for an owner, or this proves nothing`);
+      assert.ok(!html.includes(withheld), `${withheld} must not render for a viewer`);
+    }
+    // Shift takings belong to whoever runs the floor. What the food costs and
+    // what the business keeps do not, and they travel together in the
+    // snapshot — so they are checked by name, not by section heading.
+    for (const figure of ['Food cost', 'Prime cost', 'Gross profit', 'Invoices this week']) {
+      assert.ok(!html.includes(figure), `${figure} is a costs figure and must not reach a shifts viewer`);
     }
     // Quick actions are writes; a view-only account gets none of them at all.
     assert.ok(!html.includes('class="qact"'), 'no write shortcuts for a viewer');
@@ -152,9 +163,13 @@ test('the dashboard shows nothing from areas the account cannot open', async () 
 test('an owner does see the full dashboard', async () => {
   const owner = await login({ password: 'test-manager-password' });
   const html = await (await as(owner, '/')).text();
-  for (const section of ['Today', 'Needs attention', 'Quick actions', 'Business health', 'Recent activity']) {
+  // Today is a strip of notices rather than a headed section now, so it is
+  // checked by the notice markup rather than by a heading that no longer
+  // exists. Business health became "This week".
+  for (const section of ['Needs attention', 'Quick actions', 'This week', 'Upcoming', 'Insights', 'Recent activity']) {
     assert.ok(html.includes(section), `${section} renders for the owner`);
   }
+  assert.match(html, /class="tnotices"|class="kpis"/, 'and the today strip or the KPI band');
 });
 
 // A view-only account being refused a write is correct. Being *offered* the

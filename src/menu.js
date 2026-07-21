@@ -375,8 +375,27 @@ const usedBy = (productId) => db.prepare(`SELECT DISTINCT m.id, m.name, m.status
   FROM menu_components c JOIN menu_items m ON m.id = c.menu_item_id
   WHERE c.product_id = ? ORDER BY m.name COLLATE NOCASE`).all(productId);
 
+/**
+ * How many active items cost more than they are meant to, read off the latest
+ * snapshot per item rather than by costing them all again.
+ *
+ * The dashboard asks this on every load. Costing every item walks its whole
+ * component tree, so doing it live would put the entire recipe book on the
+ * critical path of the page every account opens. Snapshots are written
+ * whenever a cost actually moves, which is exactly when this answer changes.
+ */
+function overTargetCount() {
+  return db.prepare(`
+    SELECT COUNT(*) AS n FROM menu_items mi
+    JOIN menu_snapshots s ON s.id = (
+      SELECT id FROM menu_snapshots WHERE menu_item_id = mi.id ORDER BY id DESC LIMIT 1)
+    WHERE mi.status = 'active'
+      AND s.food_cost_pct IS NOT NULL
+      AND s.food_cost_pct > COALESCE(mi.target_food_cost_pct, ?)`).get(DEFAULT_TARGET).n;
+}
+
 module.exports = {
-  usedBy,
+  usedBy, overTargetCount,
   q, CATEGORIES, TYPES, TYPE_LABEL, STATUSES, GROUPS, DEFAULT_TARGET,
   costItem, costStatus, snapshot, drivers, recalcForProducts, validate,
   wasteFactor, prepUnitCost,
