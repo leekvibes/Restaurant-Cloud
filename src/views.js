@@ -4,8 +4,7 @@ const { fmt } = require('./money');
 
 // APP_NAME is the product (shown in the app chrome + PWA). RESTAURANT is the
 // venue's own name, used to brand staff emails — set RESTAURANT_NAME in .env.
-const APP_NAME = 'Restaurant Cloud';
-const RESTAURANT = process.env.RESTAURANT_NAME || APP_NAME;
+const { APP_NAME, RESTAURANT } = require('./brand');
 
 // Grouped navigation — organized instead of one long list.
 
@@ -119,7 +118,9 @@ function sidebar() {
     : '';
   return `<aside class="sidebar">
     <div class="side-top">
-      <a href="/" class="side-brand" title="${esc(APP_NAME)}"><img src="/static/logo.png" alt="" width="30" height="30"><span>${esc(APP_NAME)}</span></a>
+      <a href="/" class="side-brand" title="${esc(APP_NAME)}">
+        <img class="brand-mark" src="/static/brand-mark.png" alt="" width="30" height="30">
+        <span><img class="brand-word" src="/static/brand-word.png" alt="${esc(APP_NAME)}" width="78" height="16"></span></a>
       <button class="side-pin" type="button" onclick="rcPin()" aria-label="Collapse or pin the menu" title="Collapse / pin the menu">${icon('pin')}</button>
     </div>
     <nav class="side-nav">${groups}${signOut}</nav>
@@ -144,7 +145,7 @@ function head(title, opts = {}) {
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'black-translucent' : 'default'}">
-    <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : 'Restaurant Cloud'}">
+    <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : APP_NAME}">
     <meta name="mobile-web-app-capable" content="yes">
     <script>
       // Runs before first paint so a pinned sidebar never flashes collapsed.
@@ -217,7 +218,8 @@ function layout(title, body, opts = {}) {
     <body>
       <div class="topbar">
         <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="Menu">☰</button>
-        <span class="topbar-brand"><img src="/static/logo.png" alt="" width="22" height="22">${esc(APP_NAME)}</span>
+        <span class="topbar-brand"><img class="brand-mark" src="/static/brand-mark.png" alt="" width="24" height="24">
+          <img class="brand-word" src="/static/brand-word.png" alt="${esc(APP_NAME)}" width="68" height="14"></span>
       </div>
       <div class="app">
         ${sidebar()}

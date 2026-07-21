@@ -2463,7 +2463,7 @@ app.get('/email', (req, res) => {
       <ol class="steps">
         <li>Sign in to the Gmail account you want the emails to come from.</li>
         <li>Turn on <b>2-Step Verification</b> at <code>myaccount.google.com/security</code> — App Passwords don't exist without it.</li>
-        <li>Go to <code>myaccount.google.com/apppasswords</code>, name it “Restaurant Cloud”, and create it.</li>
+        <li>Go to <code>myaccount.google.com/apppasswords</code>, name it “ZWIN”, and create it.</li>
         <li>Google shows a 16-character password. Put it in your <code>.env</code> file yourself — never paste it into a chat:
           <pre>GMAIL_USER=you@gmail.com
 GMAIL_APP_PASSWORD=the16charpassword

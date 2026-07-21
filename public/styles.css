@@ -1479,3 +1479,8 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
 .aisum li { position: relative; padding-left: 16px; font-size: 12.5px; line-height: 1.45; color: var(--ink-2); }
 .aisum li::before { content: '•'; position: absolute; left: 3px; color: var(--ok); font-weight: 700; }
 .aisum-warn li::before { color: var(--amber); }
+
+/* --- brand: Z tile stays in the rail, wordmark fades in with it --- */
+.brand-word { display: block; width: auto; height: 16px; }
+.topbar-brand .brand-word { height: 14px; }
+.side-brand span { display: flex; align-items: center; }
