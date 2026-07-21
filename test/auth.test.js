@@ -154,6 +154,54 @@ test('an owner does see the full dashboard', async () => {
   }
 });
 
+// A view-only account being refused a write is correct. Being *offered* the
+// write first is not: someone signed in as a viewer, picked an invoice,
+// waited for it to be read, and got an error blaming the file. The server did
+// its job — it was the page that shouldn't have asked.
+test('a view-only account is not offered writes it cannot perform', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const gone = users.byEmail.get('ro@test.local');
+  if (gone) users.del.run(gone.id);
+  await as(owner, '/users', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams([['name', 'Read Only Two'], ['email', 'ro@test.local'],
+      ['password', 'ro-password-1'], ['role', 'viewer'],
+      ['features', 'dashboard'], ['features', 'shifts'], ['features', 'trackers'],
+      ['features', 'cash']]).toString(),
+  });
+  const v = await login({ email: 'ro@test.local', password: 'ro-password-1' });
+  try {
+    for (const path of ['/c/invoices', '/c/products', '/c/vendors', '/c/recurring',
+      '/c/expirations', '/c/contacts', '/shifts']) {
+      const res = await as(v, path);
+      assert.strictEqual(res.status, 200, `${path} is readable`);
+      const html = await res.text();
+      // Everything that opens or submits a write.
+      for (const trap of ['invDrawer(true)', 'prodDrawer(true)', 'vDrawer(true)',
+        'rcDrawer(true)', 'class="add-panel"', 'Save invoice', 'Mark done']) {
+        assert.ok(!html.includes(trap), `${path} still offers "${trap}" to a viewer`);
+      }
+      assert.ok(html.includes('viewer-warn'), `${path} says the account is view-only`);
+    }
+
+    // And the upload endpoint refuses in a way the page can explain, rather
+    // than returning something that blows up JSON.parse on the client.
+    const refused = await as(v, '/c/invoices/read', { method: 'POST' });
+    assert.strictEqual(refused.status, 403);
+    assert.match(await refused.text(), /view-only/i, 'says why, so the UI can too');
+  } finally {
+    const row = users.byEmail.get('ro@test.local');
+    if (row) users.del.run(row.id);
+  }
+});
+
+test('the owner still gets every write control', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const html = await (await as(owner, '/c/invoices')).text();
+  assert.ok(html.includes('invDrawer(true)'), 'upload is offered');
+  assert.ok(!html.includes('viewer-warn'), 'and no view-only notice');
+});
+
 test('disabling an account revokes it immediately, not at cookie expiry', async () => {
   const v = await login({ email: 'viewer@test.local', password: 'viewer-password-1' });
   assert.strictEqual((await as(v, '/sales')).status, 200);

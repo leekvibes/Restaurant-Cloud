@@ -9,7 +9,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
 const { db } = require('./db');
-const { layout, flash, esc, money } = require('./views');
+const { layout, flash, esc, money, canWrite } = require('./views');
 const { toCents } = require('./money');
 const { isoDate, startOfToday } = require('./dates');
 
@@ -357,18 +357,19 @@ function mountModules(app) {
       <a class="back" href="/">← Dashboard</a>
       <div class="page-head">
         <div><h1>${m.icon} ${esc(m.title)}</h1><p class="sub">${esc(m.blurb)}</p></div>
-        <a class="btn btn-primary" href="#add" onclick="document.getElementById('add-panel').open=true">＋ Add</a>
+        ${canWrite() ? `<a class="btn btn-primary" href="#add" onclick="document.getElementById('add-panel').open=true">＋ Add</a>` : ''}
       </div>
       ${vendorHint}${appendHint}
       ${searchBar}
       ${tableOrEmpty}
+      ${!canWrite() ? '' : `
       <details class="add-panel" id="add-panel"${rows.length ? '' : ' open'}>
         <summary id="add">＋ Add ${esc(m.title.toLowerCase().replace(/s$/, '')) || 'entry'}</summary>
         <form method="post" action="/c/${m.slug}" class="card form grid"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
           ${formFields}
           <button class="btn btn-primary" type="submit">Save</button>
         </form>
-      </details>
+      </details>`}
       <script>function modFilter(){var q=(document.getElementById('mod-search').value||'').toLowerCase(),n=0;document.querySelectorAll('#mod-body tr').forEach(function(r){var show=r.textContent.toLowerCase().indexOf(q)!==-1;r.style.display=show?'':'none';if(show)n++;});var c=document.getElementById('mod-count');if(c)c.textContent=n+' items';}</script>`));
   });
 
@@ -411,11 +412,11 @@ function mountModules(app) {
       <div class="page-head">
         <div><h1>${esc(rowTitle(m, row))}</h1>
           <p class="sub">${flag ? `<span class="pill ${flag.cls}">${flag.text}</span> · ` : ''}Added ${esc(String(row.created_at || '').slice(0, 10))}</p></div>
-        ${m.appendOnly ? '' : `<a class="btn btn-primary" href="/c/${m.slug}/${row.id}/edit">Edit</a>`}
+        ${m.appendOnly || !canWrite() ? '' : `<a class="btn btn-primary" href="/c/${m.slug}/${row.id}/edit">Edit</a>`}
       </div>
       ${m.appendOnly ? '<p class="muted">This log is append-only, so entries can\'t be changed after the fact.</p>' : ''}
       <div class="card detail">${rows}</div>
-      ${m.appendOnly ? '' : `
+      ${m.appendOnly || !canWrite() ? '' : `
         <div class="danger-zone">
           <div><b>Delete this entry</b><p class="muted">Removes it permanently. This can't be undone.</p></div>
           <form method="post" action="/c/${m.slug}/${row.id}/delete" onsubmit="return confirm('Delete ${esc(rowTitle(m, row)).replace(/'/g, "\\'")}?')" style="margin:0">

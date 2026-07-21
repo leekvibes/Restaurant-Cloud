@@ -1484,3 +1484,9 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
 .brand-word { display: block; width: auto; height: 16px; }
 .topbar-brand .brand-word { height: 14px; }
 .side-brand span { display: flex; align-items: center; }
+
+/* --- standing notice for a view-only account --- */
+.viewer-warn { display: flex; align-items: center; gap: 9px; padding: 9px 18px; font-size: 13px;
+  background: var(--primary-50); border-bottom: 1px solid var(--primary-200); color: var(--primary-700); }
+.viewer-warn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.viewer-warn b { font-weight: 700; }

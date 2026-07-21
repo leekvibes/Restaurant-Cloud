@@ -84,6 +84,21 @@ const setViewContext = (als) => { viewCtx = als; };
 const currentViewUser = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().user : null);
 
 /** Which nav areas this account can open. Null user = auth off, show all. */
+/**
+ * Whether the signed-in account may change anything. A null user means auth is
+ * switched off entirely, which is the local default.
+ *
+ * Pages use this to not offer what the server will refuse. Access control was
+ * built and tested from the server's side — writes are correctly rejected —
+ * but nothing stopped a view-only account being shown the buttons. Someone
+ * picked an invoice, waited for it to be read, and got an error blaming the
+ * file. A refusal after the work is done is the worst possible time for it.
+ */
+function canWrite() {
+  const u = currentViewUser();
+  return !u || u.role !== 'viewer';
+}
+
 function navAllowed(href) {
   const u = currentViewUser();
   if (!u || u.master || !u.features || !u.features.length) return true;
@@ -130,6 +145,10 @@ function sidebar() {
 /** Loud warning when the app is reachable with no password set. */
 const openWarning = () => (process.env.APP_PASSWORD ? '' :
   `<div class="open-warn">⚠️ <b>No password set.</b> Anyone with this link can see payroll and staff data. Set <code>APP_PASSWORD</code> to lock it down.</div>`);
+
+/** Standing notice for a view-only account, so nothing it can't do is a shock. */
+const viewerNote = () => (canWrite() ? '' :
+  `<div class="viewer-warn">${icon('users')}<span><b>View only.</b> You can see everything here and change nothing. Ask the owner if you need to edit.</span></div>`);
 
 /** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
 function head(title, opts = {}) {
@@ -224,7 +243,7 @@ function layout(title, body, opts = {}) {
       <div class="app">
         ${sidebar()}
         <div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>
-        <main class="content">${openWarning()}<div class="wrap">${body}</div></main>
+        <main class="content">${openWarning()}${viewerNote()}<div class="wrap">${body}</div></main>
       </div>
       <script>
         // Pin / unpin the rail, remembered between sessions.
@@ -303,4 +322,4 @@ function flash(req) {
   return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
 }
 
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, canWrite };

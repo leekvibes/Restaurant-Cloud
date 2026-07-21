@@ -9,7 +9,7 @@ const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftI
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
-const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, canWrite } = require('./views');
 const { mountModules, MODULES } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
@@ -852,7 +852,7 @@ app.get('/shifts', (req, res) => {
     <div class="phead">
       <div class="phead-t"><h1>Shifts</h1>
         <p class="phead-s">${all.length ? `${all.length} logged. Staff submissions start a shift on their own.` : 'Where every service gets closed out.'}</p></div>
-      <a class="btn btn-primary" href="/shifts/new">＋ Log a shift</a>
+      ${canWrite() ? `<a class="btn btn-primary" href="/shifts/new">＋ Log a shift</a>` : ''}
     </div>
     ${all.length ? cards : ''}
     ${todayCards}
@@ -2757,7 +2757,7 @@ app.get('/users', (req, res) => {
     <div class="phead">
       <div class="phead-t"><h1>Users</h1>
         <p class="phead-s">Logins for owners and partners. Staff logging tips don't need one.</p></div>
-      <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New user</button>
+      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New user</button>` : ''}
     </div>
 
     <div class="flash flash-info"><div>
@@ -2769,7 +2769,7 @@ app.get('/users', (req, res) => {
       <div class="empty2">
         <div class="empty2-t">No user accounts yet</div>
         <div class="empty2-s">Create one for each owner or partner. They sign in with their own email, so you can disable one without changing anything for everyone else.</div>
-        <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New user</button>
+        ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New user</button>` : ''}
       </div>`}
 
     <div class="drawer-scrim" onclick="rcDrawer(false)"></div>
@@ -3149,12 +3149,12 @@ app.get('/c/recurring', (req, res) => {
         <h1>Recurring tasks</h1>
         <p class="phead-s">Everything that has to happen again — and how close it is.</p>
       </div>
-      <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>
+      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>` : ''}
     </div>
     ${cards}
     ${toolbar}
     ${main}
-    ${recurDrawer(today)}
+    ${canWrite() ? recurDrawer(today) : ''}
     <script>
       // Live filter: search text + category chip, both narrowing the same set.
       (function () {
@@ -3201,7 +3201,7 @@ function recurBoard(st) {
       <div class="empty2-ico">${icon('recurring')}</div>
       <div class="empty2-t">No recurring tasks yet</div>
       <div class="empty2-s">Add the ones that bite when they're forgotten — hood cleaning, grease trap, pest control.</div>
-      <button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>
+      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>` : ''}
     </div>`;
   }
   const groups = [
@@ -3237,7 +3237,7 @@ function recurBoard(st) {
             </div>
             <div class="tcard-act">
               <form method="post" action="/c/recurring/${r.id}/done" style="margin:0">
-                <button class="btn btn-sm ${s.key === 'over' || s.key === 'soon' ? 'btn-primary' : ''}" type="submit">✓ Mark done</button>
+                ${canWrite() ? `<button class="btn btn-sm ${s.key === 'over' || s.key === 'soon' ? 'btn-primary' : ''}" type="submit">✓ Mark done</button>` : ''}
               </form>
               <a class="btn btn-sm btn-ghost" href="/c/recurring/${r.id}/edit">Edit</a>
             </div>
@@ -3636,23 +3636,25 @@ app.get('/c/invoices', (req, res) => {
     : `<div class="upload-hero">
         <div class="uh-ico">${icon('invoices')}</div>
         <div class="uh-t">No invoices yet</div>
-        <div class="uh-s">Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.</div>
-        <button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>
-        <div class="uh-ways"><span>📷 Take a photo</span><span>📄 Upload a PDF</span><span>📁 Drag &amp; drop</span></div>
+        <div class="uh-s">${canWrite()
+          ? 'Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.'
+          : 'Once the owner uploads invoices, they show up here.'}</div>
+        ${canWrite() ? `<button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>` : ''}
+        ${canWrite() ? `<div class="uh-ways"><span>📷 Take a photo</span><span>📄 Upload a PDF</span><span>📁 Drag &amp; drop</span></div>` : ''}
       </div>`);
 
   res.send(layout('Invoices', `
     ${flash(req)}
     <div class="phead">
       <div class="phead-t"><h1>Invoices</h1>
-        <p class="phead-s">Photograph or drop an invoice — it reads the details for you.</p></div>
-      <button class="btn btn-primary" type="button" onclick="invDrawer(true)">＋ Upload invoice</button>
+        <p class="phead-s">${canWrite() ? 'Photograph or drop an invoice — it reads the details for you.' : 'Every invoice on file, with the original attached.'}</p></div>
+      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="invDrawer(true)">＋ Upload invoice</button>` : ''}
     </div>
     ${all.length ? cards : ''}
     ${all.length ? toolbar : ''}
     ${body}
     <div class="empty2" id="inone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>
-    ${invoiceDrawer(vendors, today)}
+    ${canWrite() ? invoiceDrawer(vendors, today) : ''}
     <script>
       // Filters combine, and sorting reorders within each month rather than
       // flattening the grouping — the month totals are the point of the page.
@@ -3730,7 +3732,7 @@ app.get('/c/invoices', (req, res) => {
           .catch(function () { box.innerHTML = '<div class="panel-empty">Could not load that invoice.</div>'; });
       }, true);
     </script>
-    ${invoiceDrawerScript()}`));
+    ${canWrite() ? invoiceDrawerScript() : ''}`));
 });
 
 const INV_CATS = Object.keys(INV_CATEGORIES);
@@ -3876,20 +3878,37 @@ function invoiceDrawerScript() {
     }, 1600);
 
     fetch('/c/invoices/read', { method: 'POST', body: fd })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        // Not every refusal is JSON. A view-only account gets a plain-text 403,
+        // and calling .json() on it threw straight into the catch below — which
+        // then blamed the file for a permissions problem.
+        if (!r.ok) {
+          return r.text().then(function (t) {
+            if (r.status === 403) throw new Error(t || 'This account is view-only, so it cannot upload invoices.');
+            if (r.status === 401) throw new Error('Your session has expired. Sign in again and retry.');
+            if (r.status === 413) throw new Error('That file is too large to upload.');
+            throw new Error('The server refused that upload (' + r.status + ').');
+          });
+        }
+        return r.json();
+      })
       .then(function (d) {
         clearInterval(tick);
         if (d.error) { invFail(d.error); return; }
         invFill(d);
         invShow('inv-review');
       })
-      .catch(function () { clearInterval(tick); invFail('Something went wrong reading that file.'); });
+      .catch(function (e) {
+        clearInterval(tick);
+        invFail((e && e.message) || 'Something went wrong reading that file.');
+      });
   }
 
   function invFail(msg) {
     var n = document.getElementById('inv-ai-note');
     n.className = 'ai-note ai-note-bad';
-    n.textContent = msg + ' Enter the details by hand below — the file is still attached.';
+    n.textContent = msg + (/view-only|view only|expired/i.test(msg) ? ''
+      : ' Enter the details by hand below — the file is still attached.');
     invShow('inv-review');
   }
 
@@ -4237,7 +4256,7 @@ app.get('/c/vendors', (req, res) => {
       <div class="uh-ico">${icon('vendors')}</div>
       <div class="uh-t">No vendors yet</div>
       <div class="uh-s">Vendors added here show up automatically when you upload an invoice — and later for purchase orders, deliveries and inventory.</div>
-      <button class="btn btn-primary btn-lg" type="button" onclick="vDrawer(true)">＋ Add your first vendor</button>
+      ${canWrite() ? `<button class="btn btn-primary btn-lg" type="button" onclick="vDrawer(true)">＋ Add your first vendor</button>` : ''}
     </div>`;
 
   res.send(layout('Vendors', `
@@ -4245,11 +4264,11 @@ app.get('/c/vendors', (req, res) => {
     <div class="phead">
       <div class="phead-t"><h1>Vendors</h1>
         <p class="phead-s">Everyone you order from. Invoices match against this list automatically.</p></div>
-      <button class="btn btn-primary" type="button" onclick="vDrawer(true)">＋ Add vendor</button>
+      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="vDrawer(true)">＋ Add vendor</button>` : ''}
     </div>
     ${rows.length ? cards + toolbar : ''}
     ${grid}
-    ${vendorDrawer()}
+    ${canWrite() ? vendorDrawer() : ''}
     <script>
       (function () {
         var q = '', mode = 'all', val = '';
@@ -4644,18 +4663,20 @@ app.get('/c/products', (req, res) => {
     : `<div class="upload-hero">
         <div class="uh-ico">${icon('par')}</div>
         <div class="uh-t">No products yet</div>
-        <div class="uh-s">Add what you buy, or let it build itself — when you photograph an invoice, its lines can be imported straight in here with the prices you paid.</div>
-        <button class="btn btn-primary btn-lg" type="button" onclick="prodDrawer(true)">＋ Add your first product</button>
+        <div class="uh-s">${canWrite()
+          ? 'Add what you buy, or let it build itself — when you photograph an invoice, its lines can be imported straight in here with the prices you paid.'
+          : 'Once products are added, what you pay for each of them shows up here.'}</div>
+        ${canWrite() ? `<button class="btn btn-primary btn-lg" type="button" onclick="prodDrawer(true)">＋ Add your first product</button>` : ''}
       </div>`;
 
   res.send(layout('Products', `
     ${flash(req)}
     <div class="phead">
       <div class="phead-t"><h1>Products</h1><p class="phead-s">What you buy, what it costs, and whether that's moving.</p></div>
-      <button class="btn btn-primary" type="button" onclick="prodDrawer(true)">＋ Add product</button>
+      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="prodDrawer(true)">＋ Add product</button>` : ''}
     </div>
     ${body}
-    ${productDrawer(vendors)}
+    ${canWrite() ? productDrawer(vendors) : ''}
     <script>${productListScript()}</script>`));
 });
 
@@ -4901,7 +4922,7 @@ app.get('/c/products/:id', (req, res) => {
         <button class="btn btn-danger btn-sm" type="submit">Delete product</button>
       </form>
     </div>
-    ${productDrawer(vendors, p)}
+    ${canWrite() ? productDrawer(vendors, p) : ''}
     <script>${productListScript()}</script>`));
 });
 
