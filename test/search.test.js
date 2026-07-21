@@ -167,3 +167,29 @@ test('results are capped so one query cannot return the whole database', async (
   assert.ok(d.groups.every((g) => g.results.length <= 5), 'per-source cap too');
   assert.ok(d.truncated, 'and says it was cut short');
 });
+
+// The search panel shipped open on every page load: it carried the `hidden`
+// attribute, but an author rule setting `display: flex` beats the browser's
+// `[hidden] { display: none }`, so the attribute did nothing. Server-rendered
+// HTML looked correct — the markup said hidden — which is why this checks the
+// stylesheet rather than the page.
+test('the results panel cannot render before it has something to show', async () => {
+  const owner = await login({ password: 'owner-pw' });
+  const html = await (await as(owner, '/')).text();
+
+  const panel = html.match(/<div class="tsearch-pop"[^>]*>/);
+  assert.ok(panel, 'the results panel is on the page');
+  assert.match(panel[0], /\bhidden\b/, 'and starts hidden');
+  assert.ok(!/<div class="pal"/.test(html), 'no full-screen overlay any more');
+
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  assert.match(css, /\.tsearch-pop\[hidden\]\s*\{[^}]*display:\s*none/,
+    'the hidden attribute must beat whatever display the panel is given');
+
+  // And nothing may set a display on the panel that outranks it.
+  const rules = css.match(/^\.tsearch-pop\s*\{[^}]*\}/m);
+  if (rules) {
+    assert.ok(!/display:\s*(flex|block|grid)/.test(rules[0])
+      || /\.tsearch-pop\[hidden\]/.test(css), 'a display rule needs the [hidden] guard beside it');
+  }
+});
