@@ -261,7 +261,8 @@ test('today gets a notice even when nothing has been logged', async () => {
 test('the sales page links to the form for entering what the POS rang', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
   const html = await (await as(owner, '/sales?r=30')).text();
-  assert.match(html, /class="srow2[^"]*" href="\/sales\/\d+"/, 'services link to the entry form');
+  // Every service in the ledger can reach the form that records its figures.
+  assert.match(html, /href="\/sales\/\d+">(Enter|Edit) sales</, 'services link to the entry form');
 });
 
 test('a service with no sales entered is listed, not hidden', async () => {
@@ -275,8 +276,9 @@ test('a service with no sales entered is listed, not hidden', async () => {
     // The whole point of the page is entering these. Listing only services
     // that already have figures hid the one row worth clicking.
     assert.ok(html.includes(`href="/sales/${id}"`), 'the empty service is on the page');
-    assert.match(html, /no sales yet/, 'and is marked as needing them');
-    assert.match(html, /services? without sales/, 'with a prompt to go and enter them');
+    assert.match(html, /lrow-todo/, 'and is marked in the ledger');
+    assert.match(html, /Needs sales entry/, 'and called out above it');
+
   } finally {
     const w2 = new Database(DB);
     w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
@@ -317,4 +319,114 @@ test('the closing manager does not type their own name', async () => {
   const field = html.match(/<input name="counted_by"[^>]*>/);
   assert.ok(field, 'the field is on the form');
   assert.match(field[0], /value="[^"]+"/, `prefilled from the session, got: ${field[0]}`);
+});
+
+
+// Every plotted y in a chart: polyline vertices AND the lone dots that a point
+// with gaps either side turns into. Scanning polylines alone misses the one
+// case that matters here — a single unentered day between two closed ones.
+const plottedYs = (svg) => [
+  ...[...svg.matchAll(/<polyline points="([^"]+)"/g)]
+    .flatMap((m) => m[1].split(/\s+/)).filter(Boolean).map((p) => Number(p.split(',')[1])),
+  ...[...svg.matchAll(/<circle[^>]*cy="([\d.]+)"[^>]*r="2\.75"/g)].map((m) => Number(m[1])),
+];
+const zeroLineOf = (svg) => Number(svg.match(/viewBox="0 0 \d+ (\d+)"/)[1]) - 22;
+
+// --- the sales trend ------------------------------------------------------------
+
+test('a day with no service is a gap in the trend, not a zero', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  // The seed has no service today, so today is a day the chart must not claim
+  // took $0. A closed Monday drawn at the axis reads as a catastrophic Monday.
+  const html = await (await as(owner, '/sales?r=7')).text();
+  const svg = html.slice(html.indexOf('sp-chart'), html.indexOf('id="sp-point"'));
+  assert.match(svg, /viewBox=/, 'the chart rendered');
+  const zero = zeroLineOf(svg);
+  const onAxis = plottedYs(svg).filter((y) => Math.abs(y - zero) < 0.6);
+  assert.strictEqual(onAxis.length, 0, `no point sits at the zero line, found ${onAxis.length}`);
+});
+
+test('an unentered service is a gap too, and is not counted as a $0 day', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  // The day has to have NO sales at all, and the seed already puts a service
+  // on every recent date — adding an empty one beside it leaves the day's
+  // total positive, so the chart has nothing to get wrong. This empties a real
+  // day instead, which is what an unentered service actually looks like.
+  const w = new Database(DB);
+  const day = back(3);
+  const saved = w.prepare('SELECT id, total_food_cents, total_coffee_cents, total_alcohol_cents, total_other_cents FROM shifts WHERE date = ?').all(day);
+  assert.ok(saved.length, 'the seed put a service on this day');
+  w.prepare('UPDATE shifts SET total_food_cents=0, total_coffee_cents=0, total_alcohol_cents=0, total_other_cents=0 WHERE date = ?').run(day);
+  w.prepare('DELETE FROM server_sales WHERE shift_id IN (SELECT id FROM shifts WHERE date = ?)').run(day);
+  const id = saved[0].id;
+  w.close();
+  try {
+    const html = await (await as(owner, '/sales?r=7')).text();
+    const days = JSON.parse(html.match(/window\.SP_DAYS = (\{[\s\S]*?\});<\/script>/)[1]);
+    // It is in the day map (the ledger and the todo list need it) but the
+    // service has no sales, so the trend has nothing to draw for it.
+    const svg = html.slice(html.indexOf('sp-chart'), html.indexOf('id="sp-point"'));
+    const zero = zeroLineOf(svg);
+    const onAxis = plottedYs(svg).filter((y) => Math.abs(y - zero) < 0.6);
+    assert.strictEqual(onAxis.length, 0,
+      `an unfinished service is not drawn as a day that sold nothing, found ${onAxis.length}`);
+    assert.ok(Object.keys(days).length, 'though the day map still carries it for the ledger');
+  } finally {
+    const w2 = new Database(DB);
+    for (const r of saved) {
+      w2.prepare('UPDATE shifts SET total_food_cents=?, total_coffee_cents=?, total_alcohol_cents=?, total_other_cents=? WHERE id=?')
+        .run(r.total_food_cents, r.total_coffee_cents, r.total_alcohol_cents, r.total_other_cents, r.id);
+    }
+    w2.close();
+  }
+});
+
+test('a nonsense custom range cannot hang the server', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  // "from=bad&to=worse" passed the old guard, because 'bad' <= 'worse' is true
+  // when you compare them as strings. `days()` then counted from an Invalid
+  // Date towards a target it could never reach and allocated until the process
+  // died — any visitor could take the site down with a URL.
+  for (const q of ['from=bad&to=worse', 'from=2026-02-30&to=2026-03-01', 'from=2026-07-01&to=2026-06-01', 'from=&to=']) {
+    const res = await as(owner, `/sales?r=custom&${q}`);
+    assert.strictEqual(res.status, 200, `${q} falls back instead of hanging`);
+  }
+  const still = await as(owner, '/sales');
+  assert.strictEqual(still.status, 200, 'and the server is still up afterwards');
+});
+
+test('the ledger groups by month and every service can be reached', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  // The seed spans a fortnight, which can sit inside one month and make a
+  // grouping assertion pass without grouping anything. These reach back far
+  // enough to guarantee three.
+  const w = new Database(DB);
+  const extra = [40, 75].map((n) => w.prepare(
+    "INSERT INTO shifts (date, daypart, status, total_food_cents) VALUES (?, 'cafe', 'emailed', 100000)")
+    .run(back(n)).lastInsertRowid);
+  w.close();
+  try {
+  const html = await (await as(owner, '/sales?r=90')).text();
+  const months = [...html.matchAll(/class="lm-n">([^<]+)</g)].map((m) => m[1]);
+  assert.ok(months.length >= 3, `grouped by month, got ${months.length}`);
+  // Compared as dates, not as strings — "July" sorts before "June".
+  const asDate = months.map((m) => new Date(m + ' 1').getTime());
+  assert.deepStrictEqual(asDate, [...asDate].sort((a, b) => b - a), `newest month first, got ${months.join(', ')}`);
+  // Only the first month is expanded; the rest are one tap away. Ninety days
+  // of services rendered flat is the thing this replaced.
+  assert.strictEqual((html.match(/class="lmonth" open/g) || []).length, 1,
+    'only the newest month is expanded — ninety days rendered flat is what this replaced');
+  // `class="lrow` also matches the `lrows` container, which is one more than
+  // there are rows.
+  const rows = (html.match(/class="lrow[" ]/g) || []).length;
+  const links = (html.match(/href="\/shifts\/\d+">Open the shift/g) || []).length;
+  assert.ok(rows > 0, 'the ledger has rows');
+  assert.strictEqual(links, rows, 'every row keeps its link to the shift');
+  assert.ok((html.match(/href="\/sales\/\d+">(Enter|Edit) sales</g) || []).length >= rows,
+    'and its link to the sales form');
+  } finally {
+    const w2 = new Database(DB);
+    for (const id of extra) w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
 });

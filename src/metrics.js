@@ -17,6 +17,12 @@
 // ---------------------------------------------------------------------------
 
 const { db } = require('./db');
+// m_invoices is created by modules.js, and the statements below are prepared at
+// require time. Declaring the dependency here means this file can be loaded on
+// its own — by a test, a script, or a future entry point — rather than only
+// working because server.js happens to require modules first. The same
+// boot-order trap stopped Products deploying once already.
+require('./modules');
 const { WAGE_RATE_SQL } = require('./reports');
 const { addDays } = require('./dates');
 
@@ -36,6 +42,10 @@ const shiftRows = db.prepare(`
     (SELECT COALESCE(SUM(ss.card_tips_cents + ss.cash_tips_cents), 0) FROM server_sales ss WHERE ss.shift_id = sh.id) AS tips,
     (SELECT COALESCE(SUM(w.hours), 0) FROM work w WHERE w.shift_id = sh.id) AS hours,
     (SELECT COUNT(DISTINCT w.employee_id) FROM work w WHERE w.shift_id = sh.id) AS people,
+    -- Needed so shiftState can be shared rather than reimplemented. A second
+    -- copy of is-this-shift-ready is how two pages come to disagree about the
+    -- same service.
+    (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id AND (w.hours IS NULL OR w.hours = 0)) AS no_hours,
     (SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0)
        FROM work w JOIN employees e ON e.id = w.employee_id
        LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
@@ -114,8 +124,12 @@ function days(from, to) {
     d.sales += r.sales; d.wages += r.wages; d.hours += r.hours; d.tips += r.tips; d.shifts++;
     byDate.set(r.date, d);
   }
+  // Belt and braces: the range helper validates its input, but a bad date
+  // reaching here would loop forever rather than throw, and an infinite loop
+  // is a much worse failure than a wrong answer.
+  if (!isDate(from) || !isDate(to) || from > to) return [];
   const out = [];
-  for (let d = from; d <= to; d = addDays(d, 1)) {
+  for (let d = from; d <= to && out.length <= 3660; d = addDays(d, 1)) {
     out.push(byDate.get(d) || { date: d, sales: 0, wages: 0, hours: 0, tips: 0, shifts: 0, had: false });
   }
   return out;
@@ -135,6 +149,11 @@ function invoiceWeeks(from, to) {
   return [...weeks.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([week, cents]) => ({ week, cents }));
 }
 
+/** A real YYYY-MM-DD, not just something shaped like one. */
+const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '')
+  && !Number.isNaN(new Date(v + 'T00:00:00Z').getTime())
+  && new Date(v + 'T00:00:00Z').toISOString().slice(0, 10) === v;
+
 /** Named ranges the date pickers offer. `today` is the caller's business day. */
 function range(key, today, custom) {
   const startOfMonth = (d) => d.slice(0, 8) + '01';
@@ -149,11 +168,17 @@ function range(key, today, custom) {
       return { from: startOfMonth(endLast), to: endLast, label: 'Last month' };
     }
     case 'ytd': return { from: today.slice(0, 4) + '-01-01', to: today, label: 'Year to date' };
-    case 'custom':
-      if (custom && custom.from && custom.to && custom.from <= custom.to) {
+    case 'custom': {
+      // Both ends must be real dates. "from=bad&to=worse" used to pass this
+      // guard — 'bad' <= 'worse' is true when you compare them as strings —
+      // and `days()` then counted from an Invalid Date towards a target it
+      // could never reach, allocating until the process died. Any visitor
+      // could take the site down with a URL.
+      if (custom && isDate(custom.from) && isDate(custom.to) && custom.from <= custom.to) {
         return { from: custom.from, to: custom.to, label: 'Custom' };
       }
       return { from: addDays(today, -29), to: today, label: 'Last 30 days' };
+    }
     default: return { from: addDays(today, -29), to: today, label: 'Last 30 days' };
   }
 }
@@ -163,4 +188,4 @@ const RANGES = [
   ['month', 'This month'], ['lastmonth', 'Last month'], ['ytd', 'Year to date'],
 ];
 
-module.exports = { shifts, period, previous, days, invoiceWeeks, range, RANGES, COGS_CATEGORIES };
+module.exports = { shifts, period, previous, days, invoiceWeeks, range, RANGES, COGS_CATEGORIES, isDate };

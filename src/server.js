@@ -9,7 +9,7 @@ const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftI
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
-const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, canWrite } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, canWrite, navAllowed } = require('./views');
 const { mountModules, MODULES } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
@@ -444,9 +444,6 @@ app.get('/', (req, res) => {
   const due = (ico, title, sub, href) => soon.push({ ico, title, sub, href });
 
   /** "Jul 19 Dinner" — an ISO date in a to-do list reads like a serial number. */
-  const whenOf = (date, daypart) =>
-    `${MONTHS[Number(date.slice(5, 7)) - 1].slice(0, 3)} ${Number(date.slice(8, 10))}${daypart ? ' ' + dp(daypart) : ''}`;
-
   if (may('shifts')) {
     for (const x of dashQ.recent.all(30)) {
       if (x.status === 'emailed' || x.date === toStr) continue;
@@ -817,6 +814,9 @@ app.get('/', (req, res) => {
 // Shifts — list of all shifts + "log a shift"
 // ---------------------------------------------------------------------------
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+/** "Jul 16 Dinner" — the way a service is named everywhere it is mentioned. */
+const whenOf = (date, daypart) =>
+  `${MONTHS[Number(date.slice(5, 7)) - 1].slice(0, 3)} ${Number(date.slice(8, 10))}${daypart ? ' ' + dp(daypart) : ''}`;
 // ---------------------------------------------------------------------------
 // SHIFTS — the command centre. Today first, then anything needing attention,
 // then history by month.
@@ -3503,8 +3503,16 @@ app.post('/email/test', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.get('/sales', (req, res) => {
   const today = isoDate(startOfToday());
-  const key = MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '30';
-  const r = MX.range(key, today, { from: req.query.from, to: req.query.to });
+  // "Jump to a month" posts ?m=YYYY-MM — a custom range over that whole month,
+  // which is the quickest way to reach a day once there are months of them.
+  const jump = /^\d{4}-\d{2}$/.test(req.query.m || '') ? req.query.m : null;
+  const key = jump ? 'custom'
+    : MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '30';
+  const r = jump
+    ? { from: `${jump}-01`,
+        to: isoDate(new Date(Date.UTC(Number(jump.slice(0, 4)), Number(jump.slice(5, 7)), 0))),
+        label: 'Custom' }
+    : MX.range(key, today, { from: req.query.from, to: req.query.to });
   const svc = ['cafe', 'dinner'].includes(req.query.svc) ? req.query.svc : '';
 
   const all = MX.period(r.from, r.to);
@@ -3553,12 +3561,12 @@ app.get('/sales', (req, res) => {
         ${series.length >= 3 ? `<div class="shero-spark">${CH.spark(series.map((d) => d.sales), { width: 120, height: 40 })}</div>` : ''}
       </div>
       <div class="dstrip-r shero-r">
-        ${scell('Average day', avgDaily === null ? '—' : brief(avgDaily), avgDaily === null ? '' : money(avgDaily),
-          byDay.size ? `${byDay.size} day${byDay.size === 1 ? '' : 's'} traded` : 'nothing traded')}
+        ${scell('Avg day', avgDaily === null ? '—' : brief(avgDaily), avgDaily === null ? '' : money(avgDaily),
+          byDay.size ? `${byDay.size} day${byDay.size === 1 ? '' : 's'}` : 'none traded')}
         ${scell('Per service', perService === null ? '—' : brief(perService), perService === null ? '' : money(perService),
-          traded.length ? `${traded.length} service${traded.length === 1 ? '' : 's'}` : 'none with figures')}
+          traded.length ? `${traded.length} service${traded.length === 1 ? '' : 's'}` : 'none yet')}
         ${scell('Best day', best ? brief(best[1]) : '—', best ? money(best[1]) : '',
-          best ? `${weekday(best[0])} ${best[0].slice(5)}` : 'nothing yet')}
+          best ? whenOf(best[0]) : 'nothing yet')}
         ${scell('Tips', tips ? brief(tips) : '—', tips ? money(tips) : '', tips ? 'collected' : 'none reported')}
       </div>
     </section>`;
@@ -3624,74 +3632,242 @@ app.get('/sales', (req, res) => {
     </a>`;
   }).join('');
 
-  const svcChip = (k, label) => `<a class="rchip${svc === k ? ' on' : ''}" href="/sales?r=${key}&svc=${k}${key === 'custom' ? `&from=${r.from}&to=${r.to}` : ''}">${label}</a>`;
+  // --- the day ledger -------------------------------------------------------
+  // Grouped by month and collapsed, because after two months of backfill this
+  // is 60+ services and a flat stack of cards is unusable. Each row is one
+  // line to scan; the detail opens in place rather than on another page.
+  const perDay = new Map();
+  for (const x of rows) {
+    const d = perDay.get(x.date) || { date: x.date, sales: 0, food: 0, coffee: 0, alcohol: 0, other: 0, tips: 0 };
+    d.sales += x.sales; d.food += x.food; d.coffee += x.coffee;
+    d.alcohol += x.alcohol; d.other += x.other; d.tips += x.tips;
+    perDay.set(x.date, d);
+  }
+
+  const cash = new Map();
+  if (navAllowed('/cash')) for (const c of CASH.q.recent.all()) cash.set(`${c.date}|${c.daypart}`, c);
+
+  const MONTH_LBL = (ym) => new Date(ym + '-01T00:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const ordered = [...rows].sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart));
+  const months = [];
+  for (const x of ordered) {
+    const ym = x.date.slice(0, 7);
+    if (!months.length || months[months.length - 1].ym !== ym) months.push({ ym, list: [] });
+    months[months.length - 1].list.push(x);
+  }
+
+  const ledgerRow = (x) => {
+    const split = x.food + x.coffee + x.alcohol + x.other > 0;
+    const none = x.sales === 0;
+    const st = shiftState(x, today);
+    const cr = cash.get(`${x.date}|${x.daypart}`);
+    const cs = cr ? CASH.status(cr) : null;
+    const parts = [
+      split && x.food ? `Food ${money(x.food)}` : '',
+      split && x.coffee ? `Coffee ${money(x.coffee)}` : '',
+      split && x.alcohol ? `Alcohol ${money(x.alcohol)}` : '',
+      split && x.other ? `Other ${money(x.other)}` : '',
+      x.tips ? `Tips ${money(x.tips)}` : '',
+    ].filter(Boolean);
+    return `<details class="lrow${none ? ' lrow-todo' : ''}">
+      <summary>
+        <span class="lr-d"><b>${Number(x.date.slice(8))}</b><i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' })}</i></span>
+        <span class="lr-m">
+          <span class="lr-t">${dp(x.daypart)}<span class="pill ${st.cls}">${esc(st.label)}</span></span>
+          <span class="lr-b">${parts.length ? parts.join(' · ') : (none ? 'No sales entered' : 'Not split by category')}</span>
+        </span>
+        <span class="lr-v">${none ? '<i>—</i>' : money(x.sales)}</span>
+      </summary>
+      <div class="lr-x">
+        <div class="lr-grid">
+          ${[['Food', x.food], ['Coffee', x.coffee], ['Alcohol', x.alcohol], ['Other', x.other]]
+            .map(([l, v]) => `<div><i>${l}</i><b>${split ? money(v) : '—'}</b></div>`).join('')}
+          <div><i>Tips</i><b>${x.tips ? money(x.tips) : '—'}</b></div>
+          <div><i>Hours</i><b>${x.hours ? Math.round(x.hours * 10) / 10 : '—'}</b></div>
+          <div><i>Staff</i><b>${x.people || '—'}</b></div>
+          <div><i>Drawer</i><b class="${cs ? 'c-' + cs.key : ''}">${cs ? esc(cs.label) : '—'}</b></div>
+        </div>
+        <div class="lr-acts">
+          ${canWrite() ? `<a class="btn btn-sm btn-primary" href="/sales/${x.id}">${none ? 'Enter sales' : 'Edit sales'}</a>` : ''}
+          ${navAllowed('/shifts') ? `<a class="btn btn-sm" href="/shifts/${x.id}">Open the shift</a>` : ''}
+          ${cr ? `<a class="btn btn-sm" href="/cash/${cr.id}">Drawer</a>` : ''}
+        </div>
+      </div>
+    </details>`;
+  };
+
+  const ledger = months.map((mo, i) => {
+    const tot = mo.list.reduce((a, x) => a + x.sales, 0);
+    return `<details class="lmonth" ${i === 0 ? 'open' : ''}>
+      <summary><span class="lm-n">${esc(MONTH_LBL(mo.ym))}</span>
+        <span class="lm-c">${mo.list.length} service${mo.list.length === 1 ? '' : 's'}</span>
+        <span class="lm-v">${money(tot)}</span></summary>
+      <div class="lrows">${mo.list.map(ledgerRow).join('')}</div>
+    </details>`;
+  }).join('');
+
+  // --- the filter sheet -----------------------------------------------------
+  // One control and a sheet rather than eight pills and a date form. Built on
+  // <details> so it works with no JavaScript at all: the sheet is a disclosure
+  // and every option inside it is a link.
+  const qs = (over) => {
+    const o = { r: key, svc, from: r.from, to: r.to, ...over };
+    const p = [`r=${o.r}`];
+    if (o.svc) p.push(`svc=${o.svc}`);
+    if (o.r === 'custom') p.push(`from=${o.from}`, `to=${o.to}`);
+    return '/sales?' + p.join('&');
+  };
+  const ALL_RANGES = [...MX.RANGES, ['custom', 'Custom range']];
+  const activeLabel = (ALL_RANGES.find(([k]) => k === key) || ['', r.label])[1];
+
+  const filterSheet = `
+    <details class="fsheet" id="salesfilter">
+      <summary class="fs-btn">${esc(activeLabel)} <span class="fs-caret">▾</span></summary>
+      <div class="fs-body">
+        <div class="fs-scrim" aria-hidden="true"></div>
+        <div class="fs-panel">
+          <div class="fs-h">Period</div>
+          <div class="fs-opts">
+            ${ALL_RANGES.map(([k, label]) => `<a class="fs-o${key === k ? ' on' : ''}" href="${qs({ r: k })}">${esc(label)}</a>`).join('')}
+          </div>
+          ${key === 'custom' ? `<form class="fs-dates" method="get" action="/sales">
+            <input type="hidden" name="r" value="custom">${svc ? `<input type="hidden" name="svc" value="${svc}">` : ''}
+            <label>From<input type="date" name="from" value="${esc(r.from)}"></label>
+            <label>To<input type="date" name="to" value="${esc(r.to)}"></label>
+            <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+          </form>` : ''}
+          ${services.length > 1 ? `<div class="fs-h">Service</div>
+          <div class="fs-opts">
+            <a class="fs-o${svc ? '' : ' on'}" href="${qs({ svc: '' })}">All services</a>
+            ${services.map((x) => `<a class="fs-o${svc === x.k ? ' on' : ''}" href="${qs({ svc: x.k })}">${esc(x.label)}</a>`).join('')}
+          </div>` : ''}
+          <div class="fs-h">Jump to a month</div>
+          <form class="fs-jump" method="get" action="/sales">
+            <input type="hidden" name="r" value="custom">${svc ? `<input type="hidden" name="svc" value="${svc}">` : ''}
+            <input type="month" name="m" value="${esc(r.to.slice(0, 7))}" aria-label="Month">
+            <button class="btn btn-sm" type="submit">Go</button>
+          </form>
+        </div>
+      </div>
+    </details>`;
+
+  const ctxLine = `${esc(r.from)} – ${esc(r.to)}${svc ? ` · ${esc(dp(svc))}` : ''} · ${traded.length} service${traded.length === 1 ? '' : 's'} with sales`;
+
+  // --- the chart, with a day's detail on tap --------------------------------
+  // A day with no service is a gap in the line, not a zero. `MX.days` marks
+  // them; drawing them at the axis would report every closed Monday as a
+  // catastrophic Monday.
+  // Two kinds of day have nothing to plot, and neither of them is a zero: a
+  // day the restaurant was shut, and a day whose service exists but whose
+  // sales have not been entered yet. Drawing either at the axis reports a
+  // closed Monday, or an unfinished Tuesday, as a catastrophe. The gap is
+  // honest, and the "Needs sales entry" list says which days are which.
+  const chartVals = series.map((d) => ({ x: dm(d), y: d.had && d.sales > 0 ? d.sales : null }));
+  const dayJson = {};
+  for (const d of series) {
+    const p = perDay.get(d.date);
+    dayJson[dm(d)] = p
+      ? { d: d.date, s: p.sales, f: p.food, c: p.coffee, a: p.alcohol, o: p.other, t: p.tips }
+      : null;
+  }
 
   res.send(layout('Sales', `
     ${flash(req)}
-    <div class="phead">
-      <div class="phead-t"><h1>Sales</h1>
-        <p class="phead-s">Where the money came from. Costs and margins live on <a class="link" href="/costs">Performance</a>.</p></div>
-    </div>
-    <div class="rangebar">
-      ${MX.RANGES.map(([k, label]) => `<a class="rchip${key === k ? ' on' : ''}" href="/sales?r=${k}${svc ? `&svc=${svc}` : ''}">${label}</a>`).join('')}
-      <form class="rcustom" method="get" action="/sales">
-        <input type="hidden" name="r" value="custom">${svc ? `<input type="hidden" name="svc" value="${svc}">` : ''}
-        <input type="date" name="from" value="${esc(r.from)}"><span>to</span>
-        <input type="date" name="to" value="${esc(r.to)}">
-        <button class="btn btn-sm" type="submit">Go</button>
-      </form>
-    </div>
-    ${services.length > 1 ? `<div class="rangebar">
-      <a class="rchip${svc ? '' : ' on'}" href="/sales?r=${key}">All services</a>
-      ${services.map((x) => svcChip(x.k, x.label)).join('')}
-    </div>` : ''}
-    <p class="rangenote">${esc(r.label)} · ${esc(r.from)} to ${esc(r.to)}${svc ? ` · ${esc(dp(svc))} only` : ''} · ${traded.length} shift${traded.length === 1 ? '' : 's'} with sales</p>
-
-    ${cards}
-
-    <section class="pcard">
-      <div class="pcard-h"><b>Sales trend</b><span class="muted">daily, whole restaurant</span></div>
-      ${CH.lineChart([{ label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.sales })), area: true }], { height: 230 })}
-    </section>
-
-    <div class="pgrid2">
-      <section class="pcard">
-        <div class="pcard-h"><b>Where it came from</b><span class="muted">${mixTotal ? money(mixTotal) + ' split' : 'not split'}</span></div>
-        ${CH.shareBars(mixRows, { empty: 'No category totals entered for this period.' })}
-        ${m.unsplit ? `<p class="rangenote" style="margin:12px 0 0">${money(m.unsplit)} came from shifts entered before category totals existed, so it can't be split.</p>` : ''}
-      </section>
-      <section class="pcard">
-        <div class="pcard-h"><b>Sales highlights</b></div>
-        ${hi.length ? `<ul class="hilite">${hi.map((h) => `<li>${h}</li>`).join('')}</ul>`
-          : '<div class="panel-empty">Trade for a few more days and the highlights fill in.</div>'}
-      </section>
-    </div>
-
-    ${services.length > 1 ? `<section class="pcard">
-      <div class="pcard-h"><b>By service</b></div>
-      ${CH.shareBars(services.map((x, i) => ({ label: x.label, value: x.sales, color: ['#0891b2', '#7c3aed'][i % 2] })))}
-    </section>` : ''}
-
-    ${awaiting.length && canWrite() ? `<div class="todobar">
-      <span class="todobar-i">${icon('sales')}</span>
-      <span class="todobar-t"><b>${awaiting.length} service${awaiting.length === 1 ? '' : 's'} without sales</b>
-        <i>Enter what the POS rang and every figure on this page fills in.</i></span>
-      <a class="btn btn-sm btn-primary" href="/sales/${awaiting[awaiting.length - 1].id}">Enter sales →</a>
-    </div>` : ''}
-
-    <div class="head-row"><h2>Day by day</h2><span class="muted">${rows.length > 60 ? 'most recent 60' : `${rows.length} service${rows.length === 1 ? '' : 's'}`}</span></div>
-    ${dayRows ? `<div class="srows2">${dayRows}</div>`
-      : '<div class="empty2"><div class="empty2-t">No services in this range</div><div class="empty2-s">Pick a different period, or log a shift to record some.</div></div>'}
-
-    <section class="pcard pcard-future">
-      <div class="pcard-h"><b>With a POS connected</b><span class="muted">not available yet</span></div>
-      <div class="futuregrid">
-        ${['Average check', 'Transactions', 'Items sold', 'Peak hours', 'Hourly sales', 'Payment methods', 'Discounts', 'Voids']
-          .map((f) => `<span class="future">${esc(f)}</span>`).join('')}
+    <div class="sp">
+      <div class="sp-head">
+        <div class="sp-title">
+          <h1>Sales</h1>
+          <p>Where the money came from. Costs and margins are on <a class="link" href="/costs">Performance</a>.</p>
+        </div>
+        <div class="sp-filters">${filterSheet}</div>
       </div>
-      <p class="rangenote" style="margin:10px 0 0">These need per-transaction data. Nothing here is estimated in the meantime.</p>
-    </section>`));
+      <p class="sp-ctx">${ctxLine}</p>
+
+      ${cards}
+
+      <section class="pcard sp-chart">
+        <div class="pcard-h"><b>Sales trend</b><span class="muted" id="sp-legend">daily${svc ? ` · ${esc(dp(svc))}` : ''}</span></div>
+        ${CH.lineChart([{ label: 'Sales', values: chartVals, area: true }],
+          { height: 250, empty: 'No days with sales in this period.' })}
+        <div class="sp-point" id="sp-point" hidden></div>
+      </section>
+
+      <div class="pgrid2">
+        <section class="pcard">
+          <div class="pcard-h"><b>Where it came from</b><span class="muted">${mixTotal ? money(mixTotal) + ' split' : 'not split'}</span></div>
+          ${CH.shareBars(mixRows, { empty: 'No category totals entered for this period.' })}
+          ${m.unsplit ? `<p class="rangenote" style="margin:12px 0 0">${money(m.unsplit)} came from services entered before category totals existed, so it can't be split.</p>` : ''}
+        </section>
+        <section class="pcard">
+          <div class="pcard-h"><b>Highlights</b></div>
+          ${hi.length ? `<ul class="hilite">${hi.map((h) => `<li>${h}</li>`).join('')}</ul>`
+            : '<div class="panel-empty">Trade for a few more days and the highlights fill in.</div>'}
+        </section>
+      </div>
+
+      ${services.length > 1 ? `<section class="pcard">
+        <div class="pcard-h"><b>By service</b></div>
+        ${CH.shareBars(services.map((x, i) => ({ label: x.label, value: x.sales, color: ['#0891b2', '#7c3aed'][i % 2] })))}
+      </section>` : ''}
+
+      ${awaiting.length ? `<section class="sp-todo">
+        <div class="sp-todo-h"><b>Needs sales entry</b><span>${awaiting.length}</span></div>
+        ${awaiting.slice(0, 5).map((x) => `<div class="sp-todo-r">
+          <span class="sp-todo-m"><b>${esc(whenOf(x.date, x.daypart))}</b>
+            <i>${x.tips ? 'Tips were submitted, but sales have not been entered.' : 'The service was logged with no sales.'}</i></span>
+          ${canWrite() ? `<a class="btn btn-sm btn-primary" href="/sales/${x.id}">Enter sales</a>` : ''}
+        </div>`).join('')}
+        ${awaiting.length > 5 ? `<p class="rangenote" style="padding:9px 15px;margin:0">${awaiting.length - 5} more in this period — they are marked in the ledger below.</p>` : ''}
+      </section>` : ''}
+
+      <div class="sp-lhead"><h2>Day by day</h2><span class="muted">${rows.length} service${rows.length === 1 ? '' : 's'}</span></div>
+      ${ledger || '<div class="empty2"><div class="empty2-t">No services in this range</div><div class="empty2-s">Pick a different period, or log a shift to record some.</div></div>'}
+
+      <details class="sp-pos">
+        <summary>With a POS connected<i>8 more measures</i></summary>
+        <div class="futuregrid">
+          ${['Average check', 'Transactions', 'Items sold', 'Peak hours', 'Hourly sales', 'Payment methods', 'Discounts', 'Voids']
+            .map((f) => `<span class="future">${esc(f)}</span>`).join('')}
+        </div>
+        <p class="rangenote" style="margin:10px 0 0">These need per-transaction data. Nothing here is estimated in the meantime.</p>
+      </details>
+    </div>
+    <script>window.SP_DAYS = ${JSON.stringify(dayJson)};</script>
+    <script>${salesScript()}</script>`));
 });
+
+function salesScript() {
+  return `
+  (function(){
+    var box=document.getElementById('sp-point');
+    if(!box || !window.SP_DAYS) return;
+    var money=function(c){ return '$'+(Math.round(c)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+    function show(key){
+      var d=SP_DAYS[key];
+      if(!d){ box.hidden=true; return; }
+      var when=new Date(d.d+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'});
+      var parts=[['Food',d.f],['Coffee',d.c],['Alcohol',d.a],['Other',d.o],['Tips',d.t]]
+        .filter(function(p){ return p[1]; })
+        .map(function(p){ return '<span><i>'+p[0]+'</i><b>'+money(p[1])+'</b></span>'; }).join('');
+      box.innerHTML='<div class="spp-h"><b>'+when+'</b><span>'+money(d.s)+'</span></div>'
+        + (parts ? '<div class="spp-g">'+parts+'</div>' : '<div class="spp-n">Not split by category.</div>');
+      box.hidden=false;
+    }
+    // The chart's hit targets already exist for the tooltip; this reuses them
+    // rather than adding a second set of listeners over the same pixels.
+    var svg=document.querySelector('.sp-chart .chart-svg');
+    if(!svg) return;
+    var hits=svg.querySelectorAll('.ch-hit');
+    var ticks=[].map.call(svg.querySelectorAll('.ch-tick'), function(t){ return t.textContent; });
+    hits.forEach(function(g,i){
+      var t=g.querySelector('title');
+      var key=t ? (t.textContent.split(' — ')[0]) : ticks[i];
+      var pick=function(){ show(key); hits.forEach(function(o){ o.classList.remove('on'); }); g.classList.add('on'); };
+      g.addEventListener('click', pick);
+      g.addEventListener('mouseenter', pick);
+    });
+  })();`;
+}
 
 app.get('/sales/:id', (req, res) => {
   const sh = s.shiftById.get(req.params.id);

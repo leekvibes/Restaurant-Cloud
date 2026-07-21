@@ -68,7 +68,7 @@ function lineChart(series, opts = {}) {
   if (pointCount < 2) return empty(opts.empty || 'One day is not a trend yet', opts.height || 180);
 
   const W = 1000, H = opts.height || 180, padL = 8, padR = 8, padT = 12, padB = 22;
-  const all = sets.flatMap((s) => s.values.map((p) => p.y)).filter(Number.isFinite);
+  const all = sets.flatMap((s) => s.values.map((p) => p.y)).filter((v) => v != null && Number.isFinite(v));
   const lo = opts.zero === false ? Math.min(...all) : Math.min(0, ...all);
   const hi = Math.max(...all, lo + 1);
   const span = (hi - lo) || 1;
@@ -81,21 +81,39 @@ function lineChart(series, opts = {}) {
   }).join('');
 
   const paths = sets.map((s, si) => {
-    const pts = s.values.map((p, i) => `${x(i).toFixed(1)},${y(p.y).toFixed(1)}`).join(' ');
+    // A null y is a day with no service — not a day that took nothing. The
+    // line breaks there rather than diving to the axis, because a closed
+    // Monday drawn at zero reads as a catastrophic Monday.
+    const runs = [];
+    let run = [];
+    s.values.forEach((p, i) => {
+      if (p.y == null) { if (run.length) runs.push(run); run = []; return; }
+      run.push(`${x(i).toFixed(1)},${y(p.y).toFixed(1)}`);
+    });
+    if (run.length) runs.push(run);
+    const pts = runs.map((r) => r.join(' ')).join('  ');
     const colour = s.color || ['#2563eb', '#d97706', '#059669', '#7c3aed'][si % 4];
     const fill = s.area
-      ? `<polygon points="${x(0)},${H - padB} ${pts} ${x(s.values.length - 1)},${H - padB}" fill="${colour}" opacity=".10"/>`
+      ? runs.filter((r) => r.length > 1).map((r) => {
+        const first = r[0].split(',')[0], last = r[r.length - 1].split(',')[0];
+        return `<polygon points="${first},${H - padB} ${r.join(' ')} ${last},${H - padB}" fill="${colour}" opacity=".10"/>`;
+      }).join('')
       : '';
-    return `${fill}<polyline points="${pts}" fill="none" stroke="${colour}" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>`;
+    // One point with gaps either side has no line to draw, so it gets a dot.
+    const lone = runs.filter((r) => r.length === 1)
+      .map((r) => `<circle cx="${r[0].split(',')[0]}" cy="${r[0].split(',')[1]}" r="2.75" fill="${colour}"/>`).join('');
+    return `${fill}${runs.filter((r) => r.length > 1).map((r) =>
+      `<polyline points="${r.join(' ')}" fill="none" stroke="${colour}" stroke-width="2.25" stroke-linejoin="round" stroke-linecap="round"/>`).join('')}${lone}`;
   }).join('');
 
   // One hover target per x, carrying every series' value for that point.
   const fmt = opts.fmt || money;
   const hits = Array.from({ length: pointCount }, (_, i) => {
     const label = (sets[0].values[i] || {}).x || '';
-    const readout = sets.map((s) => `${esc(s.label)}: ${fmt(s.values[i] ? s.values[i].y : 0, s)}`).join(' · ');
+    const readout = sets.map((s) => (s.values[i] && s.values[i].y != null)
+      ? `${esc(s.label)}: ${fmt(s.values[i].y, s)}` : `${esc(s.label)}: no service`).join(' · ');
     const cx = x(i);
-    const dots = sets.map((s, si) => s.values[i]
+    const dots = sets.map((s, si) => (s.values[i] && s.values[i].y != null)
       ? `<circle cx="${cx.toFixed(1)}" cy="${y(s.values[i].y).toFixed(1)}" r="3.5" fill="${s.color || ['#2563eb', '#d97706', '#059669', '#7c3aed'][si % 4]}"/>` : '').join('');
     return `<g class="ch-hit"><rect x="${(cx - (W / pointCount) / 2).toFixed(1)}" y="0" width="${(W / pointCount).toFixed(1)}" height="${H}" fill="transparent"/>
       <line class="ch-rule" x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${padT}" y2="${H - padB}"/>

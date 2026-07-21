@@ -518,4 +518,7 @@ function flash(req) {
   return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
 }
 
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, canWrite };
+// navAllowed is the one gate the sidebar and the routes both read, so it is
+// exported rather than reimplemented per page — a second copy is how a link
+// ends up visible to somebody who gets a 403 when they follow it.
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, canWrite, navAllowed };

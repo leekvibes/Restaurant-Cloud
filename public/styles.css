@@ -2395,3 +2395,149 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .shero-v { font-size: 29px; }
   .shero-spark { display: none; }   /* the full chart is directly below it */
 }
+
+/* ===========================================================================
+   SALES — one control, one chart, one ledger
+   ---------------------------------------------------------------------------
+   Eight range pills plus a date form plus a service row took three lines and
+   most of the first screen. It is one button and a sheet now. The sheet is a
+   <details> and every option inside it is a link, so the whole filter works
+   with JavaScript switched off.
+   ======================================================================== */
+.sp { display: block; }
+.sp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.sp-title h1 { margin: 0; font-size: 25px; letter-spacing: -.025em; }
+.sp-title p { margin: 3px 0 0; font-size: 13px; color: var(--muted); }
+.sp-ctx { margin: 10px 0 16px; font-size: 12.5px; color: var(--faint); }
+
+.fsheet { position: relative; }
+.fs-btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 10px; background: var(--surface);
+  font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; list-style: none; }
+.fs-btn::-webkit-details-marker { display: none; }
+.fs-btn:hover { border-color: var(--primary); }
+.fsheet[open] .fs-btn { border-color: var(--primary); background: var(--primary-50); color: var(--primary-700); }
+.fs-caret { font-size: 10px; color: var(--faint); }
+.fs-scrim { display: none; }
+.fs-panel { position: absolute; right: 0; top: calc(100% + 7px); z-index: 60; width: 280px;
+  padding: 13px; border-radius: 13px; background: var(--surface);
+  border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); }
+.fs-h { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--faint); margin: 0 0 7px; }
+.fs-h:not(:first-child) { margin-top: 14px; }
+.fs-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.fs-o { padding: 7px 11px; border-radius: 8px; border: 1px solid var(--line-2);
+  background: var(--surface); font-size: 12.5px; font-weight: 550; color: var(--ink-2); text-decoration: none; }
+.fs-o:hover { border-color: var(--primary); color: var(--primary); text-decoration: none; }
+.fs-o.on { background: var(--primary); border-color: var(--primary); color: #fff; }
+.fs-dates, .fs-jump { display: flex; align-items: flex-end; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.fs-dates label { display: grid; gap: 3px; font-size: 11px; color: var(--muted); flex: 1; min-width: 108px; }
+.fs-dates input, .fs-jump input { width: 100%; }
+
+/* The point readout under the chart. */
+.sp-chart { position: relative; }
+.sp-point { margin: 4px 14px 14px; padding: 11px 13px; border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--line); }
+.sp-point[hidden] { display: none; }
+.spp-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.spp-h b { font-size: 13.5px; font-weight: 650; }
+.spp-h span { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.spp-g { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 7px; }
+.spp-g span { display: flex; gap: 6px; align-items: baseline; }
+.spp-g i { font-style: normal; font-size: 11.5px; color: var(--muted); }
+.spp-g b { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.spp-n { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.ch-hit.on .ch-rule { opacity: 1; }
+
+/* Needs sales entry — separated from history so it cannot be scrolled past. */
+.sp-todo { margin: 18px 0; border: 1px solid var(--primary-200); border-radius: var(--radius-lg);
+  background: var(--primary-50); overflow: hidden; }
+.sp-todo-h { display: flex; align-items: center; gap: 9px; padding: 11px 15px;
+  border-bottom: 1px solid var(--primary-200); }
+.sp-todo-h b { font-size: 13px; font-weight: 650; color: var(--primary-700); }
+.sp-todo-h span { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+  background: var(--primary); color: #fff; }
+.sp-todo-r { display: flex; align-items: center; gap: 12px; padding: 11px 15px; }
+.sp-todo-r + .sp-todo-r { border-top: 1px solid var(--primary-200); }
+.sp-todo-m { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.sp-todo-m b { font-size: 13px; font-weight: 620; color: var(--ink); }
+.sp-todo-m i { font-style: normal; font-size: 12px; color: var(--muted); }
+
+/* The ledger. One line per service, months collapsible. */
+.sp-lhead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 20px 0 10px; }
+.sp-lhead h2 { margin: 0; font-size: 16px; }
+.lmonth { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface);
+  margin-bottom: 10px; overflow: hidden; }
+.lmonth > summary { display: flex; align-items: baseline; gap: 12px; padding: 12px 15px; cursor: pointer;
+  list-style: none; background: var(--surface-2); }
+.lmonth > summary::-webkit-details-marker { display: none; }
+.lmonth > summary::before { content: '▸'; font-size: 10px; color: var(--faint); }
+.lmonth[open] > summary::before { content: '▾'; }
+.lm-n { font-size: 13.5px; font-weight: 650; color: var(--ink); }
+.lm-c { font-size: 12px; color: var(--faint); }
+.lm-v { margin-left: auto; font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.lrow { border-top: 1px solid var(--line); }
+.lrow > summary { display: flex; align-items: center; gap: 12px; padding: 10px 15px; cursor: pointer;
+  list-style: none; min-height: 44px; }
+.lrow > summary::-webkit-details-marker { display: none; }
+.lrow > summary:hover { background: var(--surface-2); }
+.lrow-todo > summary { background: var(--primary-50); }
+.lr-d { flex-shrink: 0; width: 32px; text-align: center; }
+.lr-d b { display: block; font-size: 15px; font-weight: 700; line-height: 1.1; }
+.lr-d i { font-style: normal; font-size: 10px; text-transform: uppercase; color: var(--faint); }
+.lr-m { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.lr-t { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.lr-b { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lr-v { flex-shrink: 0; font-size: 14.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.lr-v i { font-style: normal; color: var(--faint); }
+.lr-x { padding: 0 15px 14px 59px; }
+.lr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 9px 14px; margin-bottom: 12px; }
+.lr-grid div { display: grid; gap: 1px; }
+.lr-grid i { font-style: normal; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--faint); }
+.lr-grid b { font-size: 13px; font-weight: 620; font-variant-numeric: tabular-nums; }
+.lr-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* The POS list is a promise, not data. It sits at the foot, closed. */
+.sp-pos { margin-top: 22px; border-top: 1px solid var(--line); }
+.sp-pos > summary { display: flex; align-items: baseline; gap: 9px; padding: 13px 2px; cursor: pointer;
+  list-style: none; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.sp-pos > summary::-webkit-details-marker { display: none; }
+.sp-pos > summary::before { content: '▸'; font-size: 10px; color: var(--faint); }
+.sp-pos[open] > summary::before { content: '▾'; }
+.sp-pos > summary i { font-style: normal; margin-left: auto; font-size: 11.5px; color: var(--faint); }
+
+@media (max-width: 640px) {
+  .sp-head { flex-direction: column; gap: 11px; }
+  .sp-title h1 { font-size: 21px; }
+  .sp-filters { display: flex; gap: 8px; }
+  .fs-btn { flex: 1; justify-content: space-between; padding: 11px 14px; }
+  /* A real bottom sheet: anchored dropdowns at this width either run off the
+     screen or cover the thing you are filtering. */
+  .fs-body { position: fixed; inset: 0; z-index: 200; }
+  .fs-scrim { display: block; position: absolute; inset: 0; background: rgba(15,23,42,.42); }
+  .fs-panel { position: absolute; right: 0; left: 0; bottom: 0; top: auto; width: auto;
+    max-height: 78vh; overflow-y: auto; padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    border-radius: 18px 18px 0 0; border-bottom: 0; }
+  .fs-o { padding: 11px 13px; min-height: 44px; display: flex; align-items: center; font-size: 13px; }
+  .lr-x { padding-left: 15px; }
+  .lr-b { font-size: 11px; }
+  /* One line each. Stacking the action under the text made every item 105px,
+     and seven of them 700px — a to-do list you have to scroll is one you stop
+     reading. The button is still a 44px target. */
+  .sp-todo-r { padding: 9px 13px; gap: 10px; }
+  .sp-todo-m b { font-size: 12.5px; }
+  .sp-todo-m i { font-size: 11.5px; line-height: 1.35; }
+  /* 44px, because that is the smallest thing a thumb reliably hits. */
+  .sp-todo-r .btn { flex-shrink: 0; min-height: 44px; padding: 8px 13px; display: flex;
+    align-items: center; }
+}
+
+/* Four labelled figures on a 375px phone: the label has to fit on one line or
+   the whole band grows a row and the numbers stop lining up. */
+@media (max-width: 560px) {
+  .shero-r .dstrip-c i { font-size: 9.5px; letter-spacing: .03em; }
+  .shero-r .dstrip-c b { font-size: 15px; }
+  .shero-r .dstrip-c u { font-size: 10px; line-height: 1.3; }
+  .shero-r { gap: 4px 6px; }
+}
