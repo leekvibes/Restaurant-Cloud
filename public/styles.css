@@ -1604,3 +1604,54 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
   .hrow { grid-template-columns: 1fr 70px 70px; }
   .hr-w { grid-column: 1 / -1; }
 }
+
+/* ===========================================================================
+   TOP BAR — global controls, above the sidebar. On mobile this is the only
+   bar: the menu button lives in it rather than in a second one below.
+   ======================================================================== */
+.topbar { display: flex; align-items: center; gap: 12px; height: 54px; padding: 0 14px 0 16px;
+  background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 60; }
+.topbar-brand { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
+.topbar-brand:hover { text-decoration: none; }
+.topbar-site { font-size: 13px; font-weight: 650; color: var(--ink-2); padding: 4px 11px; border-radius: 999px;
+  background: var(--surface-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px; }
+.topbar-gap { flex: 1; }
+.side-spacer { flex: 1; }
+
+.tmenu { position: relative; }
+.tmenu > summary { list-style: none; cursor: pointer; }
+.tmenu > summary::-webkit-details-marker { display: none; }
+.tmenu-pop { position: absolute; top: calc(100% + 7px); right: 0; z-index: 70; min-width: 210px;
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); padding: 5px; }
+.tmenu-pop a { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px;
+  font-size: 13.5px; color: var(--ink-2); }
+.tmenu-pop a:hover { background: var(--surface-2); text-decoration: none; color: var(--ink); }
+.tmenu-pop svg { width: 15px; height: 15px; color: var(--muted); flex-shrink: 0; }
+.tmenu-who { padding: 8px 10px 9px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.tmenu-who b { display: block; font-size: 13.5px; }
+.tmenu-who i { font-style: normal; font-size: 11.5px; color: var(--muted); }
+.avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 750; }
+
+/* the shell sits under the bar */
+.app { min-height: calc(100vh - 54px); }
+.sidebar { top: 54px; bottom: 0; height: auto; }
+
+/* Settings */
+.setgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.setcard { display: flex; align-items: center; gap: 13px; padding: 14px 16px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius); transition: border-color .16s, transform .16s, box-shadow .16s; }
+.setcard:hover { text-decoration: none; border-color: var(--primary-200); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.setcard-ico { width: 36px; height: 36px; border-radius: 10px; background: var(--primary-100); color: var(--primary-700);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.setcard-ico svg { width: 18px; height: 18px; }
+.setcard-b { display: grid; min-width: 0; flex: 1; }
+.setcard-b b { font-size: 14px; font-weight: 650; color: var(--ink); }
+.setcard-b i { font-style: normal; font-size: 12px; color: var(--muted); line-height: 1.45; }
+.setcard-go { color: var(--faint); font-size: 17px; }
+
+@media (max-width: 820px) {
+  .topbar-site { display: none; }
+  .topbar { padding: 0 10px; }
+}

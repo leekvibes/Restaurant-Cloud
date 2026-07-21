@@ -47,28 +47,7 @@ const icon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 // Each item carries its own accent. Colour here is wayfinding, not decoration:
 // the rail stays recognisable when collapsed to icons, and the page you're on
 // picks up its accent in the header — so Payroll never looks like Sales.
-const NAV_GROUPS = [
-  { title: null, links: [
-    ['/', 'dashboard', 'Dashboard', '#2563eb'], ['/shifts', 'shifts', 'Shifts', '#4f46e5'],
-    ['/sales', 'sales', 'Sales', '#059669'], ['/costs', 'costs', 'Cost %', '#0891b2'],
-    ['/cash', 'cash', 'Cash count', '#d97706'], ['/payroll', 'payroll', 'Payroll', '#7c3aed'],
-  ] },
-  { title: 'Track', links: [
-    ['/c/expirations', 'expirations', 'Expirations', '#dc2626'], ['/c/invoices', 'invoices', 'Invoices', '#0891b2'],
-    ['/c/vendors', 'vendors', 'Vendors', '#ea580c'], ['/c/products', 'par', 'Products', '#ca8a04'], ['/menu', 'costs', 'Menu costing', '#7c3aed', 'BETA'],
-    ['/c/contacts', 'contacts', 'Contacts', '#0d9488'], ['/c/equipment', 'equipment', 'Equipment', '#64748b'],
-    ['/c/documents', 'documents', 'Documents', '#6366f1'],
-  ] },
-  { title: 'Tasks & logs', links: [
-    ['/c/recurring', 'recurring', 'Recurring tasks', '#059669'], ['/c/incidents', 'incidents', 'Incident log', '#dc2626'],
-    ['/c/notes', 'notes', 'Decisions log', '#7c3aed'],
-  ] },
-  { title: 'Settings', links: [
-    ['/employees', 'staff', 'Staff', '#2563eb'], ['/policy', 'policy', 'Tip-out policy', '#0891b2'],
-    ['/positions', 'positions', 'Positions', '#7c3aed'], ['/email', 'email', 'Email', '#0d9488'], ['/users', 'users', 'Users', '#4f46e5'],
-    ['/tips', 'tips', 'Cash tips (staff)', '#059669'],
-  ] },
-];
+const { SECTIONS, areaFor, CREATE_ACTIONS } = require('./nav');
 
 /** Accent plus the two tints the active pill needs, from one hex. */
 const accentVars = (hex) => `--ac:${hex};--ac-soft:${hex}14;--ac-soft2:${hex}24`;
@@ -83,48 +62,77 @@ let viewCtx = null;
 const setViewContext = (als) => { viewCtx = als; };
 const currentViewUser = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().user : null);
 
-/** Which nav areas this account can open. Null user = auth off, show all. */
 /**
  * Whether the signed-in account may change anything. A null user means auth is
  * switched off entirely, which is the local default.
  *
- * Pages use this to not offer what the server will refuse. Access control was
- * built and tested from the server's side — writes are correctly rejected —
- * but nothing stopped a view-only account being shown the buttons. Someone
- * picked an invoice, waited for it to be read, and got an error blaming the
- * file. A refusal after the work is done is the worst possible time for it.
+ * Pages use this to not offer what the server will refuse — a view-only
+ * account being shown an upload button it cannot use means finding out after
+ * choosing a file, which is the worst possible moment.
  */
 function canWrite() {
   const u = currentViewUser();
   return !u || u.role !== 'viewer';
 }
 
+/** Which nav areas this account can open. Null user = auth off, show all. */
 function navAllowed(href) {
   const u = currentViewUser();
   if (!u || u.master || !u.features || !u.features.length) return true;
-  const key = href === '/' ? 'dashboard'
-    : href.startsWith('/shifts') ? 'shifts'
-    : href.startsWith('/sales') ? 'sales'
-    : href.startsWith('/costs') ? 'costs'
-    : href.startsWith('/cash') ? 'cash'
-    : href.startsWith('/payroll') ? 'payroll'
-    : href.startsWith('/c/') ? 'trackers'
-    : href.startsWith('/menu') ? 'menu'
-    : href.startsWith('/employees') ? 'staff'
-    // /tips is a public staff page; this is just the manager's shortcut to it,
-    // so it follows Settings rather than showing to an owner who has no others.
-    : ['/policy', '/positions', '/email', '/users', '/tips'].some((x) => href.startsWith(x)) ? 'settings'
-    : null;
+  const key = areaFor(href);
   return !key || u.features.includes(key);
 }
 
+/**
+ * The bar across the top: what is useful from anywhere, as opposed to the
+ * sidebar, which is where the day's work happens.
+ *
+ * Deliberately not here yet: search, notifications, an assistant and help.
+ * Each of those is a control that would do nothing, and chrome that lies
+ * about what the app can do is worse than a gap where it will go.
+ */
+function topbar() {
+  const u = currentViewUser();
+  const create = CREATE_ACTIONS.filter((a) => navAllowed(a.href));
+  const initials = (n) => String(n || '').split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || '·';
+  return `
+    <header class="topbar">
+      <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="Menu">☰</button>
+      <a class="topbar-brand" href="/">
+        <img class="brand-mark" src="/static/brand-mark.png" alt="" width="26" height="26">
+        <img class="brand-word" src="/static/brand-word.png" alt="${esc(APP_NAME)}" width="70" height="15">
+      </a>
+      <!-- A label, not a picker. There is one restaurant in the data and a
+           dropdown would promise switching that does not exist. -->
+      <span class="topbar-site" title="${esc(RESTAURANT)}">${esc(RESTAURANT)}</span>
+      <span class="topbar-gap"></span>
+      ${canWrite() && create.length ? `
+      <details class="tmenu" id="tb-create">
+        <summary class="btn btn-primary btn-sm">＋ New</summary>
+        <div class="tmenu-pop">
+          ${create.map((a) => `<a href="${a.href}">${icon(a.icon)}${esc(a.label)}</a>`).join('')}
+        </div>
+      </details>` : ''}
+      <details class="tmenu tmenu-right" id="tb-user">
+        <summary class="avatar" title="${esc(u && u.name ? u.name : 'Account')}">${esc(initials(u && u.name ? u.name : 'Owner'))}</summary>
+        <div class="tmenu-pop">
+          <div class="tmenu-who"><b>${esc(u && u.name ? u.name : 'Owner')}</b>
+            <i>${esc(u && u.email ? u.email : 'signed in')}${u && u.role === 'viewer' ? ' · view only' : ''}</i></div>
+          ${navAllowed('/settings') ? `<a href="/settings">${icon('policy')}Settings</a>` : ''}
+          ${navAllowed('/users') ? `<a href="/users">${icon('users')}Users &amp; access</a>` : ''}
+          <a href="/logout">${icon('signout')}Sign out</a>
+        </div>
+      </details>
+    </header>`;
+}
+
 function sidebar() {
-  const groups = NAV_GROUPS.map((g) => {
+  const groups = SECTIONS.map((g) => {
     const links = g.links.filter(([href]) => navAllowed(href));
     if (!links.length) return '';           // a group with nothing left just goes
     return `
     ${g.title ? `<div class="side-group">${g.title}</div>` : ''}
-    ${links.map(([href, ico, label, accent, tag]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}${tag ? `<span class="side-tag">${esc(tag)}</span>` : ''}</span></a>`).join('')}
+    ${links.map(([href, ico, label, accent, , tag]) => `<a class="side-link" href="${href}" style="${accentVars(accent)}" title="${esc(label)}"><span class="side-ico">${icon(ico)}</span><span class="side-label">${label}${tag ? `<span class="side-tag">${esc(tag)}</span>` : ''}</span></a>`).join('')}
   `;
   }).join('');
   const who = currentViewUser();
@@ -134,9 +142,7 @@ function sidebar() {
     : '';
   return `<aside class="sidebar">
     <div class="side-top">
-      <a href="/" class="side-brand" title="${esc(APP_NAME)}">
-        <img class="brand-mark" src="/static/brand-mark.png" alt="" width="30" height="30">
-        <span><img class="brand-word" src="/static/brand-word.png" alt="${esc(APP_NAME)}" width="78" height="16"></span></a>
+      <span class="side-spacer"></span>
       <button class="side-pin" type="button" onclick="rcPin()" aria-label="Collapse or pin the menu" title="Collapse / pin the menu">${icon('pin')}</button>
     </div>
     <nav class="side-nav">${groups}${signOut}</nav>
@@ -236,11 +242,7 @@ function layout(title, body, opts = {}) {
   }
   return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
     <body>
-      <div class="topbar">
-        <button class="menu-btn" onclick="document.body.classList.toggle('nav-open')" aria-label="Menu">☰</button>
-        <span class="topbar-brand"><img class="brand-mark" src="/static/brand-mark.png" alt="" width="24" height="24">
-          <img class="brand-word" src="/static/brand-word.png" alt="${esc(APP_NAME)}" width="68" height="14"></span>
-      </div>
+      ${topbar()}
       <div class="app">
         ${sidebar()}
         <div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>

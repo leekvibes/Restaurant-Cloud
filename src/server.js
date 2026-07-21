@@ -122,24 +122,20 @@ const readCookie = (req, name) => {
 // Page-level, deliberately. Finer rules (edit shifts but not delete, see
 // payroll totals but not individual wages) get impossible to hold in your head,
 // and access control you can't state plainly is access control you can't trust.
-const FEATURES = [
-  { key: 'dashboard', label: 'Dashboard',        test: (p) => p === '/' },
-  { key: 'shifts',    label: 'Shifts & tip-outs', test: (p) => p.startsWith('/shifts') },
-  { key: 'sales',     label: 'Sales',            test: (p) => p.startsWith('/sales') },
-  { key: 'costs',     label: 'Cost %',           test: (p) => p.startsWith('/costs') },
-  { key: 'cash',      label: 'Cash count',       test: (p) => p.startsWith('/cash') },
-  { key: 'payroll',   label: 'Payroll',          test: (p) => p.startsWith('/payroll') },
-  { key: 'trackers',  label: 'Trackers & logs',  test: (p) => p.startsWith('/c/') },
-  // Menu costing shows recipe costs, margins and what suppliers charge. It
-  // shipped without an entry here, which left it readable by any signed-in
-  // account regardless of what it was restricted to — featureFor() returns
-  // null for an unlisted path, and null means open.
-  { key: 'menu',      label: 'Menu costing',     test: (p) => p.startsWith('/menu') },
-  { key: 'staff',     label: 'Staff',            test: (p) => p.startsWith('/employees') },
-  { key: 'settings',  label: 'Settings & users', test: (p) => ['/policy', '/positions', '/email', '/users'].some((x) => p.startsWith(x)) },
-];
-const featureFor = (path) => (FEATURES.find((f) => f.test(path)) || {}).key || null;
+// Areas come from src/nav.js, which the sidebar reads too — one list, so a
+// module cannot appear in navigation without also being gated.
+const { AREAS, areaFor: featureFor, CREATE_ACTIONS, SETTINGS_GROUPS } = require('./nav');
+const FEATURES = AREAS;
 const MASTER = { id: 'm', name: 'Owner', role: 'editor', features: [], master: true };
+
+/** Whether the current request's account may open a path. Mirrors the sidebar. */
+function navAllowedFor(href) {
+  const store = reqCtx.getStore();
+  const u = store && store.user;
+  if (!u || u.master || !u.features || !u.features.length) return true;
+  const key = featureFor(href);
+  return !key || u.features.includes(key);
+}
 
 function currentUser(req) {
   const uid = readToken(readCookie(req, COOKIE));
@@ -292,7 +288,7 @@ const SHIFT_ROLLUP_COLS = `
 //
 // Deliberately NOT a copy of every other page. Anything here is either about
 // today, waiting on a decision, or one tap from the next action. Trend
-// analysis lives on Cost % and Shifts, which is why the 14-day sales chart
+// analysis lives on Performance and Shifts, which is why the 14-day sales chart
 // that used to sit at the top is gone — it was the thing people looked at
 // least and it pushed the open shift below the fold.
 // ---------------------------------------------------------------------------
@@ -2336,9 +2332,9 @@ app.get('/costs', (req, res) => {
   // Simple health coloring on the headline percentages (industry rules of thumb).
   const band = (v, warn, bad) => (v === null ? '' : v >= bad ? 'stat-bad' : v >= warn ? 'stat-warn' : 'stat-ok');
 
-  res.send(layout('Cost %', `
+  res.send(layout('Performance', `
     ${flash(req)}
-    <div class="page-head"><div><h1>Cost dashboard</h1>
+    <div class="page-head"><div><h1>Performance</h1>
       <p class="sub">The numbers you actually check — not just the raw data. Sales &amp; labor come from your closes; food cost from invoices tagged Food/Coffee/Beverage/Alcohol.</p></div></div>
     <form method="get" action="/costs" class="card form inline-range">
       <label>From <input type="date" name="from" value="${from}"></label>
@@ -6148,6 +6144,39 @@ app.get('/menu/:id', (req, res) => {
       </form>
     </div>` : ''}`));
 });
+
+
+// ---------------------------------------------------------------------------
+// SETTINGS — one place for everything about the restaurant and the account,
+// so the sidebar can be about the day's work.
+// ---------------------------------------------------------------------------
+app.get('/settings', (req, res) => {
+  const groups = SETTINGS_GROUPS
+    .map((g) => ({ ...g, items: g.items.filter((i) => navAllowedFor(i.href)) }))
+    .filter((g) => g.items.length);
+
+  res.send(layout('Settings', `
+    ${flash(req)}
+    <div class="phead">
+      <div class="phead-t"><h1>Settings</h1>
+        <p class="phead-s">How this restaurant is set up, and who can see it.</p></div>
+    </div>
+    ${groups.map((g) => `
+      <div class="head-row"><h2>${esc(g.title)}</h2></div>
+      <div class="setgrid">
+        ${g.items.map((i) => `
+          <a class="setcard" href="${i.href}">
+            <span class="setcard-ico">${icon(i.icon)}</span>
+            <span class="setcard-b"><b>${esc(i.label)}</b><i>${esc(i.blurb)}</i></span>
+            <span class="setcard-go">›</span>
+          </a>`).join('')}
+      </div>`).join('')}
+    ${groups.length ? '' : '<div class="empty2"><div class="empty2-t">Nothing here for this account</div><div class="empty2-s">Settings are limited to accounts with access to them.</div></div>'}`));
+});
+
+// /performance is the name on the page now; /costs is where it has always
+// lived and what every existing link and bookmark points at.
+app.get('/performance', (_req, res) => res.redirect(301, '/costs'));
 
 
 mountModules(app);
