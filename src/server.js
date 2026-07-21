@@ -16,6 +16,8 @@ const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const { readReport, readInvoice } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
+const MX = require('./metrics');
+const CH = require('./charts');
 // Required here, not down beside the Products routes, because this module
 // migrates the schema — it adds m_invoices.ai_lines, which invQ.add names in
 // its INSERT. A prepared statement is compiled the moment it is created, so
@@ -2320,42 +2322,186 @@ app.get('/payroll/export', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Cost dashboard — the calculated numbers (labor %, food cost %, prime cost)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// PERFORMANCE — how the restaurant is doing over time, and why.
+//
+// Not the Dashboard, which answers "what needs me today". This answers "how
+// are we doing, and what moved it". Costs live here; revenue lives on Sales.
+// Anything that belongs to another module links out rather than being
+// reimplemented — the fastest way to two different answers is two owners.
+// ---------------------------------------------------------------------------
 app.get('/costs', (req, res) => {
-  const def = defaultRange();
-  const from = req.query.from || def.from;
-  const to = req.query.to || def.to;
-  const c = aggregateCosts(from, to);
-  const pct = (v) => (v === null ? '<span class="muted">—</span>' : v + '%');
-  const wowBadge = c.wow === null ? '<span class="muted">no prior period</span>'
-    : c.wow >= 0 ? `<span class="pos">▲ ${c.wow}%</span>` : `<span style="color:var(--danger)">▼ ${-c.wow}%</span>`;
+  const today = isoDate(startOfToday());
+  const key = MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '30';
+  const r = MX.range(key, today, { from: req.query.from, to: req.query.to });
+  const cur = MX.period(r.from, r.to);
+  const prev = MX.previous(r.from, r.to);
+  const series = MX.days(r.from, r.to);
 
-  // Simple health coloring on the headline percentages (industry rules of thumb).
-  const band = (v, warn, bad) => (v === null ? '' : v >= bad ? 'stat-bad' : v >= warn ? 'stat-warn' : 'stat-ok');
+  // Targets. Rules of thumb until they're configurable — stated on the page
+  // rather than hidden in the colour of a tile.
+  const TGT = { labor: 30, food: 32, prime: 60 };
+  const dm = (d) => d.date.slice(5).replace('-', '/');
+
+  const kpi = (tone, ico, label, value, sub, spark) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div>
+      ${spark ? `<div class="mcard-spark">${spark}</div>` : ''}</div>`;
+
+  const vs = (v, target) => {
+    if (v === null) return 'no data yet';
+    const d = v - target;
+    if (Math.abs(d) < 0.1) return `on the ${target}% target`;
+    return `${Math.abs(d).toFixed(1)} pts ${d > 0 ? 'over' : 'under'} target`;
+  };
+  const band = (v, target) => (v === null ? 'blue' : v <= target ? 'green' : v <= target * 1.1 ? 'amber' : 'red');
+
+  const salesSpark = CH.spark(series.map((d) => d.sales));
+  const laborSpark = CH.spark(series.filter((d) => d.sales > 0).map((d) => (d.wages / d.sales) * 100), { invert: true });
+
+  const cards = `<div class="mcards mcards-3">
+    ${kpi('blue', 'sales', 'Sales', money(cur.sales),
+      `${CH.delta(cur.sales, prev.sales)} vs the period before`, salesSpark)}
+    ${kpi(band(cur.laborPct, TGT.labor), 'payroll', 'Labor %', cur.laborPct === null ? '—' : cur.laborPct + '%',
+      vs(cur.laborPct, TGT.labor), laborSpark)}
+    ${kpi(cur.foodPct === null ? 'blue' : band(cur.foodPct, TGT.food), 'invoices', 'Food cost %',
+      cur.foodPct === null ? '—' : cur.foodPct + '%',
+      cur.foodPct === null ? 'no invoices in this range' : vs(cur.foodPct, TGT.food))}
+    ${kpi(cur.primePct === null ? 'blue' : band(cur.primePct, TGT.prime), 'costs', 'Prime cost',
+      cur.primePct === null ? '—' : cur.primePct + '%',
+      cur.primePct === null ? 'needs invoices' : vs(cur.primePct, TGT.prime))}
+    ${kpi('green', 'cash', 'Gross profit', money(cur.grossProfit),
+      `${CH.delta(cur.grossProfit, prev.grossProfit)} · after wages${cur.cogs ? ' and goods' : ''}`)}
+    ${kpi('violet', 'shifts', 'Average daily sales', cur.avgDaily === null ? '—' : money(cur.avgDaily),
+      cur.dayCount ? `over ${cur.dayCount} day${cur.dayCount === 1 ? '' : 's'} traded` : 'nothing traded yet')}
+  </div>`;
+
+  // --- what moved -----------------------------------------------------------
+  const drivers = [];
+  if (prev.laborPct !== null && cur.laborPct !== null) {
+    const d = cur.laborPct - prev.laborPct;
+    if (Math.abs(d) >= 0.5) {
+      const hoursMoved = cur.hours - prev.hours;
+      drivers.push({ bad: d > 0, text: `Labor ${d > 0 ? 'rose' : 'fell'} ${Math.abs(d).toFixed(1)} points to ${cur.laborPct}%`,
+        why: hoursMoved ? `${Math.abs(Math.round(hoursMoved * 10) / 10)} ${hoursMoved > 0 ? 'more' : 'fewer'} hours worked` : 'sales moved, hours held' });
+    }
+  }
+  if (prev.foodPct !== null && cur.foodPct !== null) {
+    const d = cur.foodPct - prev.foodPct;
+    if (Math.abs(d) >= 0.5) drivers.push({ bad: d > 0, text: `Food cost ${d > 0 ? 'rose' : 'fell'} ${Math.abs(d).toFixed(1)} points to ${cur.foodPct}%`, why: `${money(cur.cogs)} invoiced against ${money(cur.sales)} of sales`, href: '/c/invoices' });
+  }
+  // Products whose price moved most in this window, from real purchase data.
+  let risers = [];
+  try {
+    risers = PRODUCTS.q.all.all({ from_month: r.from, from_year: r.from })
+      .map((p) => ({ p, t: PRODUCTS.trendOf(p) }))
+      .filter((x) => x.t !== null && x.t >= 5 && x.p.spend_year > 0)
+      .sort((a, b) => b.t - a.t).slice(0, 4);
+  } catch { risers = []; }
+  if (risers.length) {
+    drivers.push({ bad: true, text: `${risers.length} ingredient${risers.length === 1 ? '' : 's'} costing more than they were`,
+      why: risers.map((x) => `${x.p.name} +${x.t}%`).join(' · '), href: '/c/products' });
+  }
+  if (prev.sales > 0) {
+    const d = ((cur.sales - prev.sales) / prev.sales) * 100;
+    if (Math.abs(d) >= 2) drivers.push({ bad: d < 0, text: `Sales ${d > 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}% on the previous period`, why: `${money(cur.sales)} against ${money(prev.sales)}`, href: '/sales' });
+  }
+
+  const driversBlock = `
+    <section class="pcard">
+      <div class="pcard-h"><b>What's driving performance</b><span class="muted">${esc(r.label.toLowerCase())} vs the period before</span></div>
+      ${drivers.length ? `<div class="drivers">${drivers.map((d) => `
+        ${d.href ? `<a class="driver" href="${d.href}">` : '<div class="driver">'}
+          <span class="driver-dot ${d.bad ? 'bad' : 'good'}"></span>
+          <span class="driver-b"><b>${esc(d.text)}</b><i>${esc(d.why)}</i></span>
+          ${d.href ? '<span class="driver-go">›</span>' : ''}
+        ${d.href ? '</a>' : '</div>'}`).join('')}</div>`
+        : `<div class="panel-empty">Nothing moved much this period${prev.sales ? '' : ', and there is no earlier period to compare against yet'}.</div>`}
+    </section>`;
+
+  // --- charts ---------------------------------------------------------------
+  const salesLine = CH.lineChart([{ label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.sales })), area: true }], { height: 190 });
+  const laborLine = CH.lineChart([
+    { label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.sales })), color: '#2563eb' },
+    { label: 'Wages', values: series.map((d) => ({ x: dm(d), y: d.wages })), color: '#d97706' },
+  ], { height: 180 });
+  const invWeeks = MX.invoiceWeeks(r.from, r.to);
+  const invBar = CH.barChart(invWeeks.map((w) => ({ x: w.week.slice(5).replace('-', '/'), y: w.cents })), { height: 150, color: '#0891b2' });
+
+  // --- labour and food ------------------------------------------------------
+  const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
+  const topVendors = db.prepare(`SELECT v.name, SUM(i.amount_cents) c FROM m_invoices i
+    LEFT JOIN m_vendors v ON CAST(v.id AS REAL) = CAST(i.vendor_id AS REAL)
+    WHERE i.invoice_date >= ? AND i.invoice_date <= ? GROUP BY i.vendor_id ORDER BY c DESC LIMIT 4`).all(r.from, r.to);
+
+  // --- menu margin ----------------------------------------------------------
+  let menuAlerts = [];
+  try {
+    menuAlerts = MENU.q.all.all().filter((m) => m.status === 'active').map((m) => MENU.costItem(m.id))
+      .filter((c) => c.foodCostPct !== null && !c.unresolved && c.foodCostPct > c.target)
+      .sort((a, b) => (b.foodCostPct - b.target) - (a.foodCostPct - a.target)).slice(0, 5);
+  } catch { menuAlerts = []; }
 
   res.send(layout('Performance', `
     ${flash(req)}
-    <div class="page-head"><div><h1>Performance</h1>
-      <p class="sub">The numbers you actually check — not just the raw data. Sales &amp; labor come from your closes; food cost from invoices tagged Food/Coffee/Beverage/Alcohol.</p></div></div>
-    <form method="get" action="/costs" class="card form inline-range">
-      <label>From <input type="date" name="from" value="${from}"></label>
-      <label>To <input type="date" name="to" value="${to}"></label>
-      <button class="btn" type="submit">Update</button>
-    </form>
-    <div class="stats">
-      <div class="stat"><div class="stat-label">Net sales</div><div class="stat-value">${money(c.sales)}</div><div class="stat-sub">vs. prior period ${wowBadge}</div></div>
-      <div class="stat ${band(c.laborPct, 30, 40)}"><div class="stat-label">Labor %</div><div class="stat-value">${pct(c.laborPct)}</div><div class="stat-sub">${money(c.labor)} in wages</div></div>
-      <div class="stat ${band(c.foodPct, 32, 40)}"><div class="stat-label">Food cost %</div><div class="stat-value">${pct(c.foodPct)}</div><div class="stat-sub">${money(c.cogs)} purchased</div></div>
-      <div class="stat ${band(c.primePct, 60, 70)}"><div class="stat-label">Prime cost %</div><div class="stat-value">${pct(c.primePct)}</div><div class="stat-sub">${money(c.prime)} (labor + goods)</div></div>
+    <div class="phead">
+      <div class="phead-t"><h1>Performance</h1>
+        <p class="phead-s">How the restaurant is doing over time, and what moved it.</p></div>
     </div>
-    <div class="table-wrap"><table class="table">
-      <tbody>
-        <tr><td>Net sales</td><td class="num">${money(c.sales)}</td></tr>
-        <tr><td>Labor cost (wages)</td><td class="num">${money(c.labor)}</td></tr>
-        <tr><td>Cost of goods (invoices)</td><td class="num">${money(c.cogs)}</td></tr>
-        <tr><td><b>Prime cost</b> (labor + goods)</td><td class="num"><b>${money(c.prime)}</b></td></tr>
-      </tbody>
-    </table></div>
-    <p class="sub">Rules of thumb: labor under ~30%, food cost under ~32%, prime cost under ~60% is healthy — amber/red tiles flag when a number runs high. Food cost % only counts invoices you've logged, so keep them current.</p>`));
+    <div class="rangebar">
+      ${MX.RANGES.map(([k, label]) => `<a class="rchip${key === k ? ' on' : ''}" href="/costs?r=${k}">${label}</a>`).join('')}
+      <form class="rcustom" method="get" action="/costs">
+        <input type="hidden" name="r" value="custom">
+        <input type="date" name="from" value="${esc(r.from)}"><span>to</span>
+        <input type="date" name="to" value="${esc(r.to)}">
+        <button class="btn btn-sm" type="submit">Go</button>
+      </form>
+    </div>
+    <p class="rangenote">${esc(r.label)} · ${esc(r.from)} to ${esc(r.to)} · ${cur.completedShifts} shift${cur.completedShifts === 1 ? '' : 's'} with figures</p>
+
+    ${cards}
+    ${driversBlock}
+
+    <div class="pgrid2">
+      <section class="pcard"><div class="pcard-h"><b>Sales</b><span class="muted">daily</span></div>${salesLine}</section>
+      <section class="pcard"><div class="pcard-h"><b>Sales against wages</b><span class="muted">where labor % comes from</span></div>${laborLine}</section>
+    </div>
+
+    <div class="pgrid2">
+      <section class="pcard">
+        <div class="pcard-h"><b>Labor</b><a class="panel-link" href="/payroll">Payroll →</a></div>
+        ${fact('Wages', money(cur.wages))}
+        ${fact('Hours worked', cur.hours ? String(Math.round(cur.hours * 10) / 10) : '<i class="unset">none</i>')}
+        ${fact('Labor %', cur.laborPct === null ? '<i class="unset">—</i>' : cur.laborPct + '%')}
+        ${fact('Sales per labor hour', cur.salesPerHour === null ? '<i class="unset">—</i>' : money(cur.salesPerHour))}
+        ${fact('Wage cost per sales dollar', cur.sales ? '$' + (cur.wages / cur.sales).toFixed(3) : '<i class="unset">—</i>')}
+      </section>
+      <section class="pcard">
+        <div class="pcard-h"><b>Food &amp; goods</b><a class="panel-link" href="/c/invoices">Invoices →</a></div>
+        ${fact('Invoiced this period', money(cur.invoiceTotal))}
+        ${fact('Of that, food &amp; drink', cur.cogs ? money(cur.cogs) : '<i class="unset">none tagged</i>')}
+        ${fact('Food cost %', cur.foodPct === null ? '<i class="unset">needs invoices</i>' : cur.foodPct + '%')}
+        ${topVendors.length ? topVendors.map((v) => fact(esc(v.name || 'Unknown vendor'), money(v.c))).join('') : '<div class="panel-empty">No invoices in this range.</div>'}
+      </section>
+    </div>
+
+    <div class="pgrid2">
+      <section class="pcard"><div class="pcard-h"><b>Invoice spending</b><span class="muted">by week</span></div>${invBar}</section>
+      <section class="pcard">
+        <div class="pcard-h"><b>Menu margin alerts</b><a class="panel-link" href="/menu">Menu costing →</a></div>
+        ${menuAlerts.length ? menuAlerts.map((c) => `
+          <a class="driver" href="/menu/${c.item.id}">
+            <span class="driver-dot bad"></span>
+            <span class="driver-b"><b>${esc(c.item.name)} — ${c.foodCostPct.toFixed(1)}% food cost</b>
+              <i>target ${c.target}% · ${money(c.totalCents)} to make, sells for ${money(c.sellCents)}</i></span>
+            <span class="driver-go">›</span></a>`).join('')
+          : '<div class="panel-empty">No active menu item is over its target. Items without a full cost are not counted.</div>'}
+      </section>
+    </div>
+
+    <p class="rangenote">Targets are rules of thumb for now — labor under ${TGT.labor}%, food under ${TGT.food}%, prime under ${TGT.prime}%.
+      Food and prime cost only count invoices you have logged, so they read low until the month's invoices are in.</p>`));
 });
 
 // ---------------------------------------------------------------------------

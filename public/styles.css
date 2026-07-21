@@ -577,7 +577,7 @@ body.bare { background: #0f1e40; }
    which reads as a mistake. 2x2 is the better shape there. Scoped to a
    modifier so pages with three or five cards keep their natural wrap. */
 @media (min-width: 821px) and (max-width: 1179px) { .mcards-4 { grid-template-columns: 1fr 1fr; } }
-.mcard { display: flex; align-items: flex-start; gap: 14px; padding: 17px 18px; border-radius: 15px; min-width: 0;
+.mcard { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; padding: 17px 18px; border-radius: 15px; min-width: 0;
   border: 1px solid; box-shadow: 0 1px 2px rgba(15,23,42,.03); transition: transform .16s ease-out, box-shadow .16s ease-out; }
 .mcard:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(15,23,42,.07); }
 .mcard-ico { flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px; display: flex;
@@ -1721,3 +1721,74 @@ a.fd:hover { text-decoration: none; background: var(--surface); border-color: va
     max-width: calc(100vw - 20px); }
 }
 }
+
+/* ===========================================================================
+   CHARTS — inline SVG, rendered on the server. No library, nothing to boot.
+   ======================================================================== */
+.chart { width: 100%; }
+.chart-svg { width: 100%; display: block; overflow: visible; }
+.chart-empty { display: flex; align-items: center; justify-content: center; text-align: center;
+  font-size: 12.5px; color: var(--muted); background: var(--surface-2);
+  border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 12px; }
+.ch-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ch-tick { font-size: 11px; fill: var(--faint); }
+.ch-rule { stroke: var(--line-2); stroke-width: 1; opacity: 0; vector-effect: non-scaling-stroke; }
+.ch-hit circle { opacity: 0; transition: opacity .1s; }
+.ch-hit:hover .ch-rule, .ch-hit:hover circle { opacity: 1; }
+.ch-bar rect { transition: opacity .12s; }
+.ch-bar:hover rect { opacity: .78; }
+.ch-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11.5px; color: var(--muted); }
+.ch-legend span { display: flex; align-items: center; gap: 5px; }
+.ch-legend i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+
+.spark-svg { width: 90px; height: 26px; display: block; }
+.spark-none { color: var(--faint); font-size: 12px; }
+
+.sharebars { display: grid; gap: 11px; }
+.sb-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.sb-n { font-size: 13px; font-weight: 620; color: var(--ink); }
+.sb-v { font-size: 13px; font-weight: 650; color: var(--ink); }
+.sb-v i { font-style: normal; font-size: 11.5px; color: var(--muted); margin-left: 7px; }
+.sb-track { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.sb-track span { display: block; height: 100%; border-radius: 999px; }
+
+.dl { font-size: 12px; font-weight: 700; }
+.dl-up { color: var(--ok); } .dl-down { color: var(--danger); }
+.dl-flat { color: var(--muted); font-weight: 600; } .dl-none { color: var(--faint); font-weight: 500; font-size: 11.5px; }
+
+/* ===========================================================================
+   PERFORMANCE / SALES — range bar, KPI grid with sparklines, panel cards.
+   ======================================================================== */
+.rangebar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.rchip { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line-2);
+  font-size: 12.5px; font-weight: 600; color: var(--muted); background: var(--surface); }
+.rchip:hover { text-decoration: none; border-color: var(--primary-200); color: var(--primary-700); }
+.rchip.on { background: var(--ink); border-color: var(--ink); color: #fff; }
+.rcustom { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12.5px; color: var(--muted); }
+.rcustom input { padding: 5px 8px; border: 1px solid var(--line-2); border-radius: 8px; font: inherit; font-size: 12.5px; }
+.rangenote { font-size: 12px; color: var(--faint); margin: 0 0 18px; }
+
+.mcards-3 { grid-template-columns: repeat(auto-fit, minmax(232px, 1fr)); }
+/* Its own line. Beside the text it stole the width the subtitle needed and
+   every card ended in an ellipsis. */
+.mcard-spark { flex-basis: 100%; margin-top: 8px; opacity: .85; }
+.mcard-spark .spark-svg { width: 100%; height: 24px; }
+
+.pgrid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 14px; margin-bottom: 14px; }
+.pcard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 15px 17px; box-shadow: var(--shadow-sm); min-width: 0; margin-bottom: 14px; }
+.pgrid2 .pcard { margin-bottom: 0; }
+.pcard-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 11px; }
+.pcard-h b { font-size: 14px; font-weight: 700; letter-spacing: -.015em; }
+.pcard-h .muted, .pcard-h .panel-link { font-size: 12px; }
+
+.drivers { display: grid; gap: 7px; }
+.driver { display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+a.driver:hover { text-decoration: none; border-color: var(--primary-200); transform: translateX(2px); }
+.driver-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.driver-dot.bad { background: var(--danger); } .driver-dot.good { background: var(--ok); }
+.driver-b { display: grid; min-width: 0; flex: 1; }
+.driver-b b { font-size: 13px; font-weight: 620; }
+.driver-b i { font-style: normal; font-size: 11.5px; color: var(--muted); }
+.driver-go { color: var(--faint); font-size: 16px; }
