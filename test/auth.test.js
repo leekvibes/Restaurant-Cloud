@@ -97,6 +97,9 @@ test('a view-only account can open its areas and is refused every write', async 
   assert.strictEqual((await as(v, '/')).status, 200, 'dashboard allowed');
   assert.strictEqual((await as(v, '/sales')).status, 200, 'sales allowed');
   assert.strictEqual((await as(v, '/payroll')).status, 403, 'payroll withheld');
+  // Menu costing exposes recipe costs and supplier pricing. It shipped
+  // unlisted in FEATURES, which meant every signed-in account could read it.
+  assert.strictEqual((await as(v, '/menu')).status, 403, 'menu costing withheld');
   assert.strictEqual((await as(v, '/employees')).status, 403, 'staff withheld');
   assert.strictEqual((await as(v, '/users')).status, 403, 'cannot reach user admin');
 

@@ -130,6 +130,11 @@ const FEATURES = [
   { key: 'cash',      label: 'Cash count',       test: (p) => p.startsWith('/cash') },
   { key: 'payroll',   label: 'Payroll',          test: (p) => p.startsWith('/payroll') },
   { key: 'trackers',  label: 'Trackers & logs',  test: (p) => p.startsWith('/c/') },
+  // Menu costing shows recipe costs, margins and what suppliers charge. It
+  // shipped without an entry here, which left it readable by any signed-in
+  // account regardless of what it was restricted to — featureFor() returns
+  // null for an unlisted path, and null means open.
+  { key: 'menu',      label: 'Menu costing',     test: (p) => p.startsWith('/menu') },
   { key: 'staff',     label: 'Staff',            test: (p) => p.startsWith('/employees') },
   { key: 'settings',  label: 'Settings & users', test: (p) => ['/policy', '/positions', '/email', '/users'].some((x) => p.startsWith(x)) },
 ];

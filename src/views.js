@@ -109,6 +109,7 @@ function navAllowed(href) {
     : href.startsWith('/cash') ? 'cash'
     : href.startsWith('/payroll') ? 'payroll'
     : href.startsWith('/c/') ? 'trackers'
+    : href.startsWith('/menu') ? 'menu'
     : href.startsWith('/employees') ? 'staff'
     // /tips is a public staff page; this is just the manager's shortcut to it,
     // so it follows Settings rather than showing to an owner who has no others.
