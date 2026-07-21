@@ -247,10 +247,24 @@ const q = {
 function auditDiff(id, actor, before, after, reason) {
   const watch = ['date', 'daypart', 'float_cents', 'cash_sales_cents', 'paid_out_cents', 'cash_added_cents',
     'counted_cents', 'ending_float_cents', 'actual_deposit_cents', 'counted_by', 'status'];
+
+  // Creating a record is ONE thing that happened, not eleven. Diffing a new
+  // row against nothing logged every populated field as its own entry, each
+  // carrying the same reason, so a history read as eleven near-identical lines
+  // for a single save. What matters about a create is that it happened, who
+  // did it, and what the drawer came to.
+  if (!before) {
+    q.addAudit.run({ recon_id: id, actor: actor || null, action: 'create',
+      field: null, old_value: null,
+      new_value: after.counted_cents == null ? null : String(after.counted_cents),
+      reason: reason || null });
+    return;
+  }
+
   for (const f of watch) {
-    const a = before ? before[f] : null, b = after[f];
+    const a = before[f], b = after[f];
     if (String(a ?? '') === String(b ?? '')) continue;
-    q.addAudit.run({ recon_id: id, actor: actor || null, action: before ? 'edit' : 'create',
+    q.addAudit.run({ recon_id: id, actor: actor || null, action: 'edit',
       field: f, old_value: a == null ? null : String(a), new_value: b == null ? null : String(b), reason: reason || null });
   }
 }

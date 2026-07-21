@@ -2138,3 +2138,148 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .cq-act { flex-direction: column-reverse; align-items: stretch; }
   .cq-save { width: 100%; }
 }
+
+/* ===========================================================================
+   CASH RECONCILIATION DETAIL — how the drawer closed that night
+   ---------------------------------------------------------------------------
+   Reads top to bottom as five answers: was it right, how was that worked out,
+   what moved, what was banked, who closed it. The arithmetic is presented as a
+   receipt because the sum IS the explanation — a list of labelled figures
+   makes the reader do the addition themselves.
+   ======================================================================== */
+.cr { max-width: 900px; margin: 0 auto; }
+.cr-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.cr-top h1 { margin: 2px 0 0; font-size: 25px; letter-spacing: -.02em; }
+
+.cr-void, .cr-draft, .cr-flag { border-radius: var(--radius-lg); padding: 13px 16px; margin-bottom: 14px; }
+.cr-void { background: #f8fafc; border: 1px solid var(--line-2); display: grid; gap: 3px; }
+.cr-void b { font-size: 14px; color: var(--ink); }
+.cr-void span { font-size: 13px; color: var(--ink-2); }
+.cr-void i { font-style: normal; font-size: 12px; color: var(--faint); }
+.cr-draft { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; font-size: 13px; font-weight: 600; }
+.cr-flag { background: #fef2f2; border: 1px solid #fecaca; display: grid; gap: 3px; }
+.cr-flag b { font-size: 14px; color: #991b1b; }
+.cr-flag span { font-size: 12.5px; color: #7f1d1d; line-height: 1.5; }
+
+/* 1 — the answer, before anything else */
+.cr-hero { padding: 20px 22px; margin-bottom: 16px; border-radius: var(--radius-lg);
+  background: var(--surface-2); border: 1px solid var(--line); }
+.cr-hero-m { display: flex; align-items: center; gap: 11px; }
+.cr-hero-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
+.cr-hero-m b { font-size: 24px; font-weight: 700; letter-spacing: -.02em; color: var(--ink); }
+.cr-hero-s { margin-top: 4px; padding-left: 22px; font-size: 13.5px; color: var(--muted); }
+.cr-hero-n { margin: 12px 0 0 22px; padding: 10px 13px; border-radius: 9px; background: var(--surface);
+  border: 1px solid var(--line); font-size: 13px; line-height: 1.55; color: var(--ink-2); }
+.cr-hero-exact, .cr-hero-near { background: #f0fdf4; border-color: #bbf7d0; }
+.cr-hero-exact .cr-hero-dot { background: #16a34a; }
+.cr-hero-near .cr-hero-dot { background: #65a30d; }
+.cr-hero-review { background: #fffbeb; border-color: #fde68a; }
+.cr-hero-review .cr-hero-dot { background: #d97706; }
+.cr-hero-bad { background: #fef2f2; border-color: #fecaca; }
+.cr-hero-bad .cr-hero-dot { background: #dc2626; }
+
+.cr-grid { display: grid; grid-template-columns: 1fr 300px; gap: 14px; margin-bottom: 14px; align-items: start; }
+.cr-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); min-width: 0; }
+.cr-card-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 13px 17px; border-bottom: 1px solid var(--line); }
+.cr-card-h b { font-size: 13.5px; font-weight: 650; color: var(--ink); }
+.cr-card-h span { font-size: 12px; color: var(--faint); }
+
+/* 2 — the receipt */
+.cr-receipt { padding: 8px 17px 14px; }
+.cr-l { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 7px 0; }
+.cr-l span { font-size: 13.5px; color: var(--ink-2); }
+.cr-l b { font-size: 14px; font-weight: 600; color: var(--ink);
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cr-l.cr-sum { margin-top: 4px; padding-top: 11px; border-top: 1px solid var(--line); }
+.cr-l.cr-sum span { font-weight: 620; color: var(--ink); }
+.cr-l.cr-sum b { font-size: 16px; font-weight: 700; }
+.cr-var { margin-top: 2px; }
+.cr-var-exact b, .cr-var-near b { color: #15803d; }
+.cr-var-review b { color: #b45309; }
+.cr-var-bad b { color: #b91c1c; }
+
+/* 4 — what left the building */
+.cr-dep { padding: 17px; border-radius: var(--radius-lg); background: #f0fdf4; border: 1px solid #bbf7d0; }
+.cr-dep-l { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #15803d; }
+.cr-dep-v { margin-top: 3px; font-size: 30px; font-weight: 700; letter-spacing: -.025em; color: #14532d;
+  font-variant-numeric: tabular-nums; }
+.cr-dep-w { font-size: 12.5px; color: #166534; }
+.cr-dep-rest { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  margin-top: 13px; padding-top: 12px; border-top: 1px solid #bbf7d0; }
+.cr-dep-rest span { font-size: 12.5px; color: #166534; }
+.cr-dep-rest b { font-size: 13.5px; font-weight: 650; color: #14532d; font-variant-numeric: tabular-nums; }
+.cr-dep-ref { margin-top: 9px; font-size: 11.5px; color: #166534; }
+.cr-dep-none { background: var(--surface-2); border-color: var(--line); }
+.cr-dep-none .cr-dep-l { color: var(--faint); }
+.cr-dep-empty { margin-top: 5px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+/* 3 — movements */
+.cr-mv { padding: 6px 17px 12px; }
+.cr-mv-r { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.cr-mv-r:last-child { border-bottom: 0; }
+.cr-mv-i { flex-shrink: 0; width: 25px; height: 25px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }
+.cr-mv-i.out { background: #fef2f2; color: #dc2626; }
+.cr-mv-i.in { background: #f0fdf4; color: #16a34a; }
+.cr-mv-t { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.cr-mv-t b { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.cr-mv-t i { font-style: normal; font-size: 12px; color: var(--muted); }
+.cr-mv-a { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cr-mv-a.out { color: #b91c1c; }
+.cr-mv-a.in { color: #15803d; }
+
+/* 5 — the byline */
+.cr-by { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 0; padding: 0 2px;
+  font-size: 12.5px; color: var(--muted); }
+.cr-by b { font-weight: 650; color: var(--ink-2); }
+.cr-note { margin-top: 10px; padding: 12px 15px; border-radius: var(--radius-lg);
+  background: var(--surface-2); border: 1px solid var(--line); font-size: 13px;
+  line-height: 1.55; color: var(--ink-2); }
+
+/* Behind a disclosure: everything a normal review never opens */
+.cr-extras { margin-top: 20px; border-top: 1px solid var(--line); }
+.cr-x { border-bottom: 1px solid var(--line); }
+.cr-x > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 13px 2px; cursor: pointer; list-style: none;
+  font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.cr-x > summary::-webkit-details-marker { display: none; }
+.cr-x > summary::before { content: '▸'; margin-right: 9px; color: var(--faint); font-size: 10px;
+  transition: transform .15s ease-out; display: inline-block; }
+.cr-x[open] > summary::before { transform: rotate(90deg); }
+.cr-x > summary i { font-style: normal; margin-left: auto; font-size: 12px;
+  font-weight: 500; color: var(--faint); }
+.cr-x > summary:hover { color: var(--primary); }
+.cr-x-note { margin: 0 0 12px; padding: 0 2px; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+.cr-x-danger > summary { color: #b91c1c; }
+.cr-x-danger > summary:hover { color: #991b1b; }
+.cr-x-danger .voidform { display: flex; gap: 9px; flex-wrap: wrap; padding: 0 2px 14px; }
+.cr-x-danger .voidform input { flex: 1; min-width: 200px; }
+.cr-x-danger form { padding-bottom: 14px; }
+
+.cr-denoms { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 7px; padding: 2px 2px 14px; }
+.cr-dn { display: flex; align-items: baseline; gap: 8px; padding: 7px 11px; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--line); }
+.cr-dn span { font-size: 12.5px; font-weight: 650; color: var(--ink); min-width: 32px; }
+.cr-dn i { font-style: normal; font-size: 12px; color: var(--muted); }
+.cr-dn b { margin-left: auto; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* The audit trail as a timeline — what changed, when, by whom */
+.cr-tl { list-style: none; margin: 0 0 14px; padding: 4px 0 0 2px; }
+.cr-tl-i { position: relative; display: flex; gap: 13px; padding: 0 0 14px 0; }
+.cr-tl-d { position: relative; flex-shrink: 0; width: 9px; height: 9px; margin-top: 5px;
+  border-radius: 50%; background: var(--surface); border: 2px solid var(--line-2); }
+.cr-tl-i:not(:last-child) .cr-tl-d::after { content: ''; position: absolute; left: 50%; top: 11px;
+  transform: translateX(-50%); width: 1px; height: calc(100% + 14px); background: var(--line); }
+.cr-tl-b { display: grid; gap: 1px; min-width: 0; }
+.cr-tl-b b { font-size: 12.5px; font-weight: 650; color: var(--ink); text-transform: capitalize; }
+.cr-tl-b i { font-style: normal; font-size: 12px; color: var(--ink-2); word-break: break-word; }
+.cr-tl-b time { font-size: 11px; color: var(--faint); }
+
+@media (max-width: 760px) {
+  .cr-grid { grid-template-columns: 1fr; }
+  .cr-hero-m b { font-size: 20px; }
+  .cr-dep-v { font-size: 26px; }
+  .cr-top { flex-direction: column; align-items: stretch; gap: 12px; }
+}

@@ -2750,6 +2750,9 @@ app.get('/costs', (req, res) => {
 // ---------------------------------------------------------------------------
 
 const cashMonth = (d) => (d || '').slice(0, 7);
+/** Audit values are stored as raw column values; cents columns read as cents. */
+const cashAuditVal = (field, v) => (v == null || v === '' ? '—'
+  : /_cents$/.test(field) && /^-?\d+$/.test(v) ? CASH.money(Number(v)) : String(v));
 const cashDayLabel = (d) => (d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '');
 
 app.get('/cash', (req, res) => {
@@ -3290,96 +3293,191 @@ app.post('/cash/:id/delete', (req, res) => {
 
 // --- detail -----------------------------------------------------------------
 app.get('/cash/:id', (req, res) => {
+  // -------------------------------------------------------------------------
+  // How the drawer closed that night — not a database record with a UI on top.
+  //
+  // The page answers five questions in order, and the order is the point:
+  //
+  //   1. Was the drawer right?      the hero line, readable in about a second
+  //   2. How was that worked out?   a receipt, because the arithmetic IS the
+  //                                 explanation and a table of labels isn't
+  //   3. What moved?                only rendered when something did
+  //   4. What was banked?           beside the receipt, not buried under it
+  //   5. Who closed it?             one byline, not a panel
+  //
+  // Everything else — denominations, the audit trail, references, voiding —
+  // is behind a disclosure. It was previously a fourteen-row list restating
+  // the four cards directly above it, which is how a page ends up long
+  // without ever saying anything twice as clearly.
+  // -------------------------------------------------------------------------
   const row = CASH.q.one.get(Number(req.params.id));
   if (!row) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such reconciliation</div></div>'));
   const c = CASH.compute(row);
-  const s = CASH.status(row);
+  const st = CASH.status(row);
   const movements = CASH.q.movements.all(row.id);
   const denoms = CASH.q.denoms.all(row.id);
   const audit = CASH.q.audit.all(row.id);
-  const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
-  const dash = '<i class="unset">—</i>';
+  const M = CASH.money;
+  const voided = row.status === 'void';
+  const draft = row.status === 'draft';
+
+  // --- 1. was it right ------------------------------------------------------
+  const tone = c.counted == null ? 'none'
+    : st.key === 'exact' ? 'exact' : st.key === 'within' ? 'near'
+    : st.key === 'review' ? 'review' : 'bad';
+  const headline = c.counted == null ? 'Not counted yet'
+    : c.variance === 0 ? 'The drawer was exact'
+    : `${M(Math.abs(c.variance))} ${c.variance > 0 ? 'over' : 'short'}`;
+  const headsub = c.counted == null
+    ? 'This one was saved before the drawer was counted.'
+    : `${M(c.counted)} counted against ${M(c.expected)} expected`
+      + (st.key === 'within' ? ' · within tolerance' : '');
+
+  // --- 2. the receipt -------------------------------------------------------
+  const line = (label, value, cls = '') =>
+    `<div class="cr-l ${cls}"><span>${label}</span><b>${value}</b></div>`;
+  const receipt = [
+    line('Opening till', M(c.opening)),
+    line('Cash sales', '+ ' + M(c.sales)),
+    c.added ? line('Cash added', '+ ' + M(c.added)) : '',
+    c.paidOut ? line('Paid out', '− ' + M(c.paidOut)) : '',
+    line('Should be in the drawer', M(c.expected), 'cr-sum'),
+    c.counted == null ? '' : line('Actually counted', M(c.counted)),
+    c.counted == null ? '' : line('Variance',
+      c.variance === 0 ? 'Exact' : (c.variance > 0 ? '+ ' : '− ') + M(Math.abs(c.variance)),
+      'cr-sum cr-var cr-var-' + tone),
+  ].filter(Boolean).join('');
+
+  // --- 4. the deposit -------------------------------------------------------
+  const dep = c.actualDeposit ?? c.calcDeposit;
+  const depBlock = row.legacy
+    ? `<div class="cr-dep cr-dep-none"><div class="cr-dep-l">Deposit</div>
+        <div class="cr-dep-empty">Not recorded — this night pre-dates deposit tracking.</div></div>`
+    : dep == null
+      ? `<div class="cr-dep cr-dep-none"><div class="cr-dep-l">Deposit</div>
+          <div class="cr-dep-empty">Nothing banked yet.</div></div>`
+      : `<div class="cr-dep">
+          <div class="cr-dep-l">${dep > 0 ? 'Banked' : 'Nothing banked'}</div>
+          <div class="cr-dep-v">${M(dep)}</div>
+          <div class="cr-dep-w">${row.deposit_destination ? 'to the ' + esc(row.deposit_destination.toLowerCase()) : 'destination not recorded'}</div>
+          <div class="cr-dep-rest">
+            <span>Left in the register</span><b>${c.ending == null ? '—' : M(c.ending)}</b>
+          </div>
+          ${row.deposit_bag || row.deposit_reference
+            ? `<div class="cr-dep-ref">${[row.deposit_bag && 'Bag ' + esc(row.deposit_bag), row.deposit_reference && 'Ref ' + esc(row.deposit_reference)].filter(Boolean).join(' · ')}</div>` : ''}
+        </div>`;
+
+  // --- 3. what moved --------------------------------------------------------
+  const mvBlock = movements.length ? `
+    <section class="cr-card">
+      <div class="cr-card-h"><b>What moved in and out</b><span>${movements.length} entr${movements.length === 1 ? 'y' : 'ies'}</span></div>
+      <div class="cr-mv">${movements.map((mv) => {
+        const out = mv.movement_type !== 'cash_added';
+        return `<div class="cr-mv-r">
+          <span class="cr-mv-i ${out ? 'out' : 'in'}">${out ? '↓' : '↑'}</span>
+          <span class="cr-mv-t"><b>${esc(mv.reason || (out ? 'Paid out' : 'Cash added'))}</b>
+            ${mv.recipient ? `<i>${out ? 'to' : 'by'} ${esc(mv.recipient)}</i>` : ''}</span>
+          <b class="cr-mv-a ${out ? 'out' : 'in'}">${out ? '−' : '+'}${M(mv.amount_cents)}</b>
+        </div>`;
+      }).join('')}</div>
+    </section>` : '';
+
+  const denomTotal = denoms.reduce((a, d) => a + d.denom_cents * d.qty, 0);
+  const when = (t) => (t ? String(t).slice(0, 16).replace('T', ' ') : '');
 
   res.send(layout(`Cash · ${row.date}`, `
     ${flash(req)}
-    <div class="phead">
-      <div class="phead-t">
-        <a class="link back" href="/cash">← Cash reconciliation</a>
-        <h1>${esc(cashDayLabel(row.date))} · ${esc(dp(row.daypart))}</h1>
-        <p class="phead-s"><span class="pill ${s.cls}">${esc(s.label)}</span>
-          ${row.status === 'void' ? `<span class="muted">voided by ${esc(row.voided_by || '')} — ${esc(row.void_reason || '')}</span>` : ''}
-          ${row.legacy ? '<span class="pill">recorded before deposits were tracked</span>' : ''}</p>
+    <div class="cr">
+      <div class="cr-top">
+        <div class="cr-top-t">
+          <a class="link back" href="/cash">← Cash reconciliation</a>
+          <h1>${esc(cashDayLabel(row.date))} · ${esc(dp(row.daypart))}</h1>
+        </div>
+        ${canWrite() && !voided ? `<a class="btn btn-primary btn-sm" href="/cash/${row.id}/edit">Edit</a>` : ''}
       </div>
-      ${canWrite() && row.status !== 'void' ? `<div class="phead-acts"><a class="btn btn-primary" href="/cash/${row.id}/edit">Edit</a></div>` : ''}
-    </div>
 
-    <div class="mcards mcards-3">
-      <div class="mcard mcard-blue"><div class="mcard-ico">${icon('cash')}</div><div class="mcard-body">
-        <div class="mcard-label">Expected in drawer</div><div class="mcard-value">${CASH.money(c.expected)}</div>
-        <div class="mcard-sub">${CASH.money(c.opening)} till + ${CASH.money(c.sales)} sales${c.paidOut ? ' − ' + CASH.money(c.paidOut) + ' out' : ''}</div></div></div>
-      <div class="mcard mcard-violet"><div class="mcard-ico">${icon('costs')}</div><div class="mcard-body">
-        <div class="mcard-label">Actual counted</div><div class="mcard-value">${c.counted == null ? '—' : CASH.money(c.counted)}</div>
-        <div class="mcard-sub">before the deposit was removed</div></div></div>
-      <div class="mcard mcard-${s.key === 'exact' ? 'green' : s.key === 'critical' ? 'red' : 'amber'}"><div class="mcard-ico">${icon('incidents')}</div><div class="mcard-body">
-        <div class="mcard-label">Variance</div><div class="mcard-value">${c.variance == null ? '—' : c.variance === 0 ? 'Exact' : CASH.money(c.variance)}</div>
-        <div class="mcard-sub">${esc(row.variance_note || (c.variance === 0 ? 'balanced' : 'no note recorded'))}</div></div></div>
-      <div class="mcard mcard-green"><div class="mcard-ico">${icon('payroll')}</div><div class="mcard-body">
-        <div class="mcard-label">Deposited</div><div class="mcard-value">${(c.actualDeposit ?? c.calcDeposit) == null ? '—' : CASH.money(c.actualDeposit ?? c.calcDeposit)}</div>
-        <div class="mcard-sub">${c.ending == null ? 'no ending till recorded' : `left ${CASH.money(c.ending)} in the register`}</div></div></div>
-    </div>
+      ${voided ? `<div class="cr-void">
+        <b>This reconciliation was voided</b>
+        <span>${esc(row.void_reason || 'No reason recorded')}${row.voided_by ? ' — ' + esc(row.voided_by) : ''}${row.voided_at ? ' · ' + esc(when(row.voided_at)) : ''}</span>
+        <i>The figures below are kept as they were. A financial record is cancelled, never deleted.</i>
+      </div>` : ''}
+      ${draft ? '<div class="cr-draft">Saved as a draft — not finalised.</div>' : ''}
 
-    ${c.unaccounted ? `<div class="attn"><div class="attn-h">${icon('incidents')} ${CASH.money(Math.abs(c.unaccounted))} unaccounted for</div>
-      <p>The drawer said to deposit ${CASH.money(c.calcDeposit)} and ${CASH.money(c.actualDeposit)} was recorded.
-      ${row.override_reason ? esc(row.override_reason) : 'No reason was given.'}</p></div>` : ''}
+      <!-- 1. Was the drawer correct? -->
+      <div class="cr-hero cr-hero-${tone}">
+        <div class="cr-hero-m"><span class="cr-hero-dot"></span><b>${esc(headline)}</b></div>
+        <div class="cr-hero-s">${esc(headsub)}</div>
+        ${row.variance_note ? `<div class="cr-hero-n">${esc(row.variance_note)}</div>` : ''}
+      </div>
 
-    <div class="vpanels">
-      <section class="panel">
-        <div class="panel-h"><b>The count</b></div>
-        ${fact('Opening till', CASH.money(c.opening))}
-        ${fact('Cash sales', CASH.money(c.sales))}
-        ${fact('Paid outs', c.paidOut ? '−' + CASH.money(c.paidOut) : dash)}
-        ${fact('Cash added', c.added ? CASH.money(c.added) : dash)}
-        ${fact('Expected', CASH.money(c.expected))}
-        ${fact('Counted', c.counted == null ? dash : CASH.money(c.counted))}
-        ${fact('Variance', c.variance == null ? dash : c.variance === 0 ? 'Exact' : CASH.money(c.variance))}
-        ${fact('Left in register', c.ending == null ? dash : CASH.money(c.ending))}
-        ${fact('Deposit', (c.actualDeposit ?? c.calcDeposit) == null ? dash : CASH.money(c.actualDeposit ?? c.calcDeposit))}
-        ${fact('Destination', row.deposit_destination ? esc(row.deposit_destination) : dash)}
-        ${fact('Bag / reference', [row.deposit_bag, row.deposit_reference].filter(Boolean).map(esc).join(' · ') || dash)}
-        ${fact('Counted by', esc(row.counted_by || row.closed_by || '') || dash)}
-        ${fact('Verified by', esc(row.verified_by || '') || dash)}
-        ${row.note ? `<div class="inv-notes">${esc(row.note)}</div>` : ''}
-      </section>
-      <section class="panel">
-        <div class="panel-h"><b>Movements</b><span class="muted">${movements.length || 'none'}</span></div>
-        ${movements.length ? movements.map((mv) => `
-          <div class="tfact"><span>${esc(mv.reason || mv.movement_type)}${mv.recipient ? ' · ' + esc(mv.recipient) : ''}</span>
-            <b>${mv.movement_type === 'cash_added' ? '' : '−'}${CASH.money(mv.amount_cents)}</b></div>`).join('')
-          : '<div class="panel-empty">Nothing went in or out beyond sales.</div>'}
-        ${denoms.length ? `<div class="panel-h" style="margin-top:14px"><b>Denominations</b></div>
-          ${denoms.map((d) => `<div class="tfact"><span>${CASH.DENOM_LABEL[d.denom_cents]} × ${d.qty}</span><b>${CASH.money(d.denom_cents * d.qty)}</b></div>`).join('')}` : ''}
-      </section>
-    </div>
+      ${c.unaccounted ? `<div class="cr-flag">
+        <b>${M(Math.abs(c.unaccounted))} unaccounted for</b>
+        <span>The drawer said to bank ${M(c.calcDeposit)} and ${M(c.actualDeposit)} was recorded.
+          ${row.override_reason ? esc(row.override_reason) : 'No reason was given.'}</span>
+      </div>` : ''}
 
-    <section class="pcard">
-      <div class="pcard-h"><b>History</b><span class="muted">${audit.length} entr${audit.length === 1 ? 'y' : 'ies'}</span></div>
-      ${audit.length ? `<div class="hrows">${audit.slice(0, 30).map((a) => `
-        <div class="hrow"><span class="hr-d">${esc(String(a.created_at).slice(0, 16))}</span>
-          <span class="hr-c">${esc(a.action)}</span>
-          <span class="hr-w">${a.field ? `${esc(a.field)}: ${esc(a.old_value ?? '—')} → ${esc(a.new_value ?? '—')}` : ''}${a.reason ? ` · ${esc(a.reason)}` : ''}${a.actor ? ` · ${esc(a.actor)}` : ''}</span></div>`).join('')}</div>`
-        : '<div class="panel-empty">This record pre-dates the audit trail.</div>'}
-    </section>
+      <!-- 2. How was it worked out?   4. What was banked? -->
+      <div class="cr-grid">
+        <section class="cr-card">
+          <div class="cr-card-h"><b>How that was worked out</b></div>
+          <div class="cr-receipt">${receipt}</div>
+        </section>
+        ${depBlock}
+      </div>
 
-    ${canWrite() && row.status !== 'void' ? `<div class="danger-zone">
-      <div><b>${row.status === 'draft' ? 'Delete this draft' : 'Void this reconciliation'}</b>
-        <p class="muted">${row.status === 'draft' ? 'Drafts can be removed outright.' : 'A finalised count is a financial record — voiding keeps it and marks it cancelled.'}</p></div>
-      ${row.status === 'draft'
-        ? `<form method="post" action="/cash/${row.id}/delete" onsubmit="return confirm('Delete this draft?')"><button class="btn btn-danger btn-sm" type="submit">Delete draft</button></form>`
-        : `<form method="post" action="/cash/${row.id}/void" class="voidform">
-             <input name="reason" placeholder="Reason for voiding" required>
-             <button class="btn btn-danger btn-sm" type="submit">Void</button></form>`}
-    </div>` : ''}`));
+      <!-- 3. What moved? -->
+      ${mvBlock}
+
+      <!-- 5. Who closed it? -->
+      <div class="cr-by">
+        <span><b>${esc(row.counted_by || row.closed_by || 'Nobody recorded')}</b> counted it</span>
+        ${row.verified_by ? `<span>· verified by <b>${esc(row.verified_by)}</b></span>` : ''}
+        ${row.finalized_at ? `<span>· finalised ${esc(when(row.finalized_at))}</span>` : ''}
+      </div>
+      ${row.note ? `<div class="cr-note">${esc(row.note)}</div>` : ''}
+
+      <!-- Everything a normal review never needs -->
+      <div class="cr-extras">
+        ${denoms.length ? `<details class="cr-x">
+          <summary>Counted by denomination<i>${M(denomTotal)}</i></summary>
+          <div class="cr-denoms">${denoms.map((d) => `<div class="cr-dn">
+            <span>${CASH.DENOM_LABEL[d.denom_cents]}</span><i>× ${d.qty}</i><b>${M(d.denom_cents * d.qty)}</b></div>`).join('')}</div>
+          ${denomTotal !== c.counted && c.counted != null
+            ? `<p class="cr-x-note">These add to ${M(denomTotal)}, and ${M(c.counted)} was recorded as the count.</p>` : ''}
+        </details>` : ''}
+
+        <details class="cr-x">
+          <summary>History<i>${audit.length} entr${audit.length === 1 ? 'y' : 'ies'}</i></summary>
+          ${audit.length ? `<ol class="cr-tl">${audit.slice(0, 40).map((a) => `
+            <li class="cr-tl-i">
+              <span class="cr-tl-d"></span>
+              <div class="cr-tl-b">
+                <b>${esc(a.action === 'create' ? 'Counted and saved' : a.action)}${a.actor ? ` · ${esc(a.actor)}` : ''}</b>
+                ${a.field ? `<i>${esc(a.field.replace(/_cents$/, '').replace(/_/g, ' '))}: ${esc(cashAuditVal(a.field, a.old_value))} → ${esc(cashAuditVal(a.field, a.new_value))}</i>`
+                  : a.action === 'create' && a.new_value ? `<i>drawer came to ${CASH.money(Number(a.new_value))}</i>` : ''}
+                ${a.reason ? `<i>${esc(a.reason)}</i>` : ''}
+                <time>${esc(when(a.created_at))}</time>
+              </div>
+            </li>`).join('')}</ol>
+            ${audit.length > 40 ? `<p class="cr-x-note">Showing the last 40 of ${audit.length}.</p>` : ''}`
+            : '<p class="cr-x-note">This record pre-dates the audit trail.</p>'}
+        </details>
+
+        ${canWrite() && !voided ? `<details class="cr-x cr-x-danger">
+          <summary>${draft ? 'Delete this draft' : 'Void this reconciliation'}<i>careful</i></summary>
+          ${draft
+            ? `<p class="cr-x-note">A draft was never finalised, so it can be removed outright.</p>
+               <form method="post" action="/cash/${row.id}/delete" onsubmit="return confirm('Delete this draft?')">
+                 <button class="btn btn-danger btn-sm" type="submit">Delete draft</button></form>`
+            : `<p class="cr-x-note">A finalised count is a financial record. Voiding keeps every figure and marks it cancelled — it cannot be deleted.</p>
+               <form method="post" action="/cash/${row.id}/void" class="voidform">
+                 <input name="reason" placeholder="Why is this being voided?" required>
+                 <button class="btn btn-danger btn-sm" type="submit">Void</button></form>`}
+        </details>` : ''}
+      </div>
+    </div>`));
 });
+
 // ---------------------------------------------------------------------------
 // Tip-out policy — calm read-only view + rule builder, versioned with history
 // ---------------------------------------------------------------------------

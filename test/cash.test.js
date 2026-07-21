@@ -269,8 +269,78 @@ test('the list groups by month and the detail page opens', async () => {
   const id = db.prepare("SELECT id FROM cash_recon WHERE status='final' ORDER BY id DESC LIMIT 1").get().id;
   db.close();
   const detail = await (await fetch(`${BASE}/cash/${id}`)).text();
-  assert.ok(detail.includes('Expected in drawer') && detail.includes('Actual counted'));
   assert.ok(detail.includes('History'), 'with its audit trail');
+});
+
+// --- the detail page ------------------------------------------------------------
+//
+// A summary of how the drawer closed, not a record with a UI on it. It answers
+// five questions in order and the order is the point.
+
+test('the detail page answers the five questions in order', async () => {
+  const id = idOf(await post('/cash', base({
+    date: '2026-07-05', counted: '433',
+    paid_amt_0: '80', paid_reason_0: 'Store purchase', paid_who_0: 'Kevin',
+    paid_amt_1: '40', paid_reason_1: 'Petty cash', paid_who_1: 'Sandra',
+    variance_note: 'Found a twenty under the tray', deposit_destination: 'Safe',
+  })));
+  const h = await (await fetch(`${BASE}/cash/${id}`)).text();
+
+  const at = (needle) => h.indexOf(needle);
+  assert.ok(at('cr-hero') > -1, '1. was it right');
+  assert.ok(at('How that was worked out') > -1, '2. how was that reached');
+  assert.ok(at('What moved in and out') > -1, '3. what moved');
+  assert.ok(at('cr-dep') > -1, '4. what was banked');
+  assert.ok(at('cr-by') > -1, '5. who closed it');
+  assert.ok(at('cr-hero') < at('How that was worked out'), 'the verdict comes before the arithmetic');
+  assert.ok(at('How that was worked out') < at('What moved in and out'));
+  assert.ok(at('What moved in and out') < at('cr-by'), 'and the byline is last');
+
+  assert.match(h, /\$20\.00 over/, 'the verdict is in words, not a signed number');
+  assert.match(h, /Found a twenty under the tray/, 'with the explanation beside it');
+  assert.match(h, /to the safe/, 'and where the money went');
+});
+
+test('history, denominations and voiding are collapsed, not on the page', async () => {
+  const id = idOf(await post('/cash', base({ date: '2026-07-06', denom_10000: '5', denom_500: '6', denom_100: '3' })));
+  const h = await (await fetch(`${BASE}/cash/${id}`)).text();
+  // Present and reachable, but folded away — a normal review never opens them.
+  for (const [label, what] of [['Counted by denomination', 'denominations'], ['History', 'the audit trail'], ['Void this reconciliation', 'voiding']]) {
+    const i = h.indexOf(label);
+    assert.ok(i > -1, `${what} is still reachable`);
+    const before = h.lastIndexOf('<details', i);
+    assert.ok(before > -1 && !h.slice(before, i).includes('</details>'), `${what} sits inside a disclosure`);
+  }
+});
+
+test('creating a record is one thing that happened, not eleven', async () => {
+  const id = idOf(await post('/cash', base({ date: '2026-07-07' })));
+  const db2 = new Database(DB, { readonly: true });
+  const made = db2.prepare("SELECT * FROM cash_audit WHERE recon_id=? AND action='create'").all(id);
+  db2.close();
+  // Diffing a new row against nothing logged every populated field separately,
+  // so one save read as eleven near-identical lines carrying the same reason.
+  assert.strictEqual(made.length, 1, `one create entry, got ${made.length}`);
+  assert.strictEqual(made[0].field, null, 'covering the record, not a field');
+  assert.strictEqual(made[0].new_value, '53300', 'and noting what the drawer came to');
+});
+
+test('an edit is still itemised field by field', async () => {
+  const id = idOf(await post('/cash', base({ date: '2026-07-08' })));
+  await post(`/cash/${id}`, base({ date: '2026-07-08', cash_sales: '400', counted: '600',
+    variance_note: 'Recount' }));
+  const db2 = new Database(DB, { readonly: true });
+  const edits = db2.prepare("SELECT field FROM cash_audit WHERE recon_id=? AND action='edit'").all(id).map((a) => a.field);
+  db2.close();
+  assert.ok(edits.includes('cash_sales_cents') && edits.includes('counted_cents'),
+    `collapsing create must not collapse edits, got: ${edits.join(',')}`);
+});
+
+test('money in the audit trail reads as money', async () => {
+  const id = idOf(await post('/cash', base({ date: '2026-07-04' })));
+  await post(`/cash/${id}`, base({ date: '2026-07-04', cash_sales: '400', counted: '600', variance_note: 'Recount' }));
+  const h = await (await fetch(`${BASE}/cash/${id}`)).text();
+  assert.match(h, /\$333\.00 → \$400\.00/, 'not 33300 → 40000');
 });
 
 // --- closing at 10:30pm ---------------------------------------------------------
