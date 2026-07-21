@@ -1167,3 +1167,55 @@ body.drawer-open .drawer { transform: translateX(0); visibility: visible; }
   border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .inv-spin { animation: none; } }
+
+/* ===========================================================================
+   SHIFT LIST — command centre, then history
+   =========================================================================== */
+.s-ready { background: #ede9fe; color: #6d28d9; }
+
+/* --- today's open shift --- */
+.today { display: grid; gap: 10px; margin-bottom: 18px; }
+.tcard-open { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  background: linear-gradient(135deg, var(--primary-50), var(--surface) 62%);
+  border: 1px solid var(--primary-200); border-radius: 16px; padding: 16px 19px;
+  box-shadow: 0 1px 2px rgba(37,99,235,.06); transition: transform .16s, box-shadow .16s; }
+.tcard-open:hover { text-decoration: none; transform: translateY(-2px); box-shadow: 0 10px 26px rgba(37,99,235,.14); }
+.tco-l { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.tco-ico { flex-shrink: 0; width: 42px; height: 42px; border-radius: 12px; background: var(--primary); color: #fff;
+  display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(37,99,235,.3); }
+.tco-ico svg { width: 21px; height: 21px; }
+.tco-t { font-size: 16.5px; font-weight: 720; letter-spacing: -.02em; color: var(--ink); }
+.tco-s { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.tco-r { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.tco-go { font-size: 14px; font-weight: 700; color: var(--primary-700); }
+
+.attn-list a { color: inherit; }
+.attn-list a:hover { text-decoration: underline; }
+
+/* --- shift rows --- */
+.srows { border-top: 1px solid var(--line); }
+.srow { display: flex; align-items: center; gap: 16px; padding: 12px 17px; border-bottom: 1px solid var(--line); }
+.srow:last-child { border-bottom: 0; }
+.srow:hover { background: var(--surface-2); text-decoration: none; }
+.srow-date { flex-shrink: 0; width: 40px; text-align: center; }
+.srow-date b { display: block; font-size: 17px; font-weight: 750; letter-spacing: -.03em; color: var(--ink); line-height: 1.1; }
+.srow-date i { display: block; font-style: normal; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--faint); font-weight: 700; }
+.srow-svc { flex-shrink: 0; font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+.svc-cafe { background: #ecfeff; color: #0e7490; }
+.svc-dinner { background: #eef2ff; color: #4338ca; }
+.srow-st { flex-shrink: 0; }
+.srow-figs { margin-left: auto; display: flex; gap: 22px; flex-wrap: wrap; }
+.srow-figs span { font-size: 14px; font-weight: 650; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.srow-figs i { display: block; font-style: normal; font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--faint); margin-bottom: 1px; }
+.srow-go { flex-shrink: 0; color: var(--faint); font-size: 15px; }
+.srow:hover .srow-go { color: var(--primary); }
+
+@media (max-width: 820px) {
+  .tcard-open { padding: 14px 15px; }
+  .tco-r { width: 100%; justify-content: space-between; }
+  .srow { flex-wrap: wrap; gap: 10px 12px; padding: 12px 14px; }
+  .srow-figs { margin-left: 0; width: 100%; gap: 16px; justify-content: space-between; }
+  .srow-go { display: none; }
+}

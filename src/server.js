@@ -344,92 +344,234 @@ app.get('/', (req, res) => {
 // Shifts — list of all shifts + "log a shift"
 // ---------------------------------------------------------------------------
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// ---------------------------------------------------------------------------
+// SHIFTS — the command centre. Today first, then anything needing attention,
+// then history by month.
+//
+// Row figures come from one SQL pass rather than running the tip engine per
+// shift: the engine costs ~1ms each, which is five seconds at five thousand
+// shifts. It's still run — but only for the handful that aren't closed out,
+// because that's the only place its answers are needed.
+// ---------------------------------------------------------------------------
+const shiftRollup = db.prepare(`
+  SELECT sh.*,
+    (SELECT COALESCE(SUM(w.hours), 0) FROM work w WHERE w.shift_id = sh.id) AS hours,
+    (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id) AS people,
+    (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id AND (w.hours IS NULL OR w.hours = 0)) AS no_hours,
+    (SELECT COALESCE(SUM(ss.food_cents + ss.coffee_cents + ss.alcohol_cents), 0)
+       FROM server_sales ss WHERE ss.shift_id = sh.id) AS server_sales,
+    (SELECT COALESCE(SUM(ss.card_tips_cents + ss.cash_tips_cents), 0)
+       FROM server_sales ss WHERE ss.shift_id = sh.id) AS tips,
+    (SELECT COUNT(*) FROM server_sales ss WHERE ss.shift_id = sh.id
+       AND ss.note IS NOT NULL AND TRIM(ss.note) <> '') AS notes,
+    (SELECT COUNT(*) FROM tip_submissions ts WHERE ts.shift_id = sh.id) AS subs
+  FROM shifts sh ORDER BY sh.date DESC, sh.daypart DESC`);
+
+/** Total sales for a shift: what was rung overall, or server sales if not entered. */
+const shiftSales = (x) =>
+  (x.total_food_cents + x.total_coffee_cents + x.total_alcohol_cents + x.total_other_cents) || x.server_sales;
+
+function shiftState(x, today) {
+  if (x.status === 'emailed') return { key: 'sent', label: 'Sent', cls: 's-done' };
+  if (x.date === today) return { key: 'open', label: 'Open', cls: 's-sched' };
+  if (!x.people) return { key: 'empty', label: 'Nobody on it', cls: 's-none' };
+  if (x.no_hours) return { key: 'review', label: 'Needs review', cls: 's-soon' };
+  return { key: 'ready', label: 'Ready to send', cls: 's-ready' };
+}
+
 app.get('/shifts', (req, res) => {
-  const all = s.allShifts.all().map((sh) => {
-    const inp = shiftInputs(sh.id);
-    const r = runShift(inp, policyForShift(sh));
-    const sales = shiftTotalSales(sh) || r.servers.reduce((a, x) => a + x.sales.food + x.sales.coffee + x.sales.alcohol, 0);
-    return { sh, sales, tips: r.reconciliation.totalTipsCollected, staff: inp.servers.length + inp.support.length };
-  });
+  const today = isoDate(startOfToday());
+  const thisMonth = today.slice(0, 7);
+  const all = shiftRollup.all();
+  const st = all.map((x) => ({ x, s: shiftState(x, today) }));
 
-  // Group by month (YYYY-MM), newest first.
-  const groups = [];
-  const byMonth = new Map();
-  for (const x of all) {
-    const key = x.sh.date.slice(0, 7);
-    if (!byMonth.has(key)) { byMonth.set(key, { key, items: [], sales: 0, tips: 0 }); groups.push(byMonth.get(key)); }
-    const g = byMonth.get(key); g.items.push(x); g.sales += x.sales; g.tips += x.tips;
+  const years = [...new Set(all.map((x) => x.date.slice(0, 4)))].sort().reverse();
+  const year = years.includes(req.query.y) ? req.query.y : (years[0] || today.slice(0, 4));
+  const rows = st.filter(({ x }) => x.date.slice(0, 4) === year);
+
+  const monthRows = st.filter(({ x }) => x.date.slice(0, 7) === thisMonth);
+  const sum = (list, f) => list.reduce((a, r) => a + f(r), 0);
+  const monthSales = sum(monthRows, ({ x }) => shiftSales(x));
+  const monthTips = sum(monthRows, ({ x }) => x.tips);
+  const monthHours = sum(monthRows, ({ x }) => x.hours);
+  const openOnes = st.filter(({ s }) => s.key === 'open' || s.key === 'review' || s.key === 'ready');
+
+  const kpi = (tone, ico, label, value, sub) => `
+    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
+      <div class="mcard-body"><div class="mcard-label">${label}</div>
+        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+
+  const cards = `<div class="mcards">
+    ${kpi('blue', 'sales', 'Sales this month', money(monthSales), `${monthRows.length} shift${monthRows.length === 1 ? '' : 's'}`)}
+    ${kpi('green', 'tips', 'Tips this month', money(monthTips), monthRows.length ? `avg ${money(Math.round(monthTips / monthRows.length))} a shift` : 'none yet')}
+    ${kpi('amber', 'payroll', 'Hours this month', String(Math.round(monthHours * 10) / 10), monthSales && monthHours ? `${money(Math.round(monthSales / monthHours))} sales per hour` : 'none logged')}
+    ${kpi(openOnes.length ? 'red' : 'green', openOnes.length ? 'incidents' : 'policy', 'Not sent yet', String(openOnes.length), openOnes.length ? 'waiting on you' : 'all closed out')}
+  </div>`;
+
+  // --- today, and anything still open ------------------------------------
+  const todays = st.filter(({ x }) => x.date === today && x.status !== 'emailed');
+  const todayCards = todays.length ? `
+    <section class="today">
+      ${todays.map(({ x, s }) => `
+        <a class="tcard-open" href="/shifts/${x.id}">
+          <div class="tco-l">
+            <div class="tco-ico">${icon('shifts')}</div>
+            <div>
+              <div class="tco-t">Today · ${esc(dp(x.daypart))}</div>
+              <div class="tco-s">${x.people} on shift · ${x.people - x.no_hours}/${x.people} hours in${x.notes ? ` · ${x.notes} note${x.notes === 1 ? '' : 's'}` : ''}</div>
+            </div>
+          </div>
+          <div class="tco-r">
+            <span class="tstatus ${s.cls}">${esc(s.label)}</span>
+            <span class="tco-go">Continue →</span>
+          </div>
+        </a>`).join('')}
+    </section>` : '';
+
+  // --- attention: only shifts not yet sent, so the engine runs a handful --
+  const attn = [];
+  for (const { x, s } of openOnes.slice(0, 12)) {
+    const when = x.date === today ? `Today ${dp(x.daypart)}` : `${niceDate(x.date)} ${dp(x.daypart)}`;
+    if (!x.people) { attn.push({ id: x.id, txt: `${when} — nobody on it yet`, bad: true }); continue; }
+    if (x.no_hours) attn.push({ id: x.id, txt: `${when} — ${x.no_hours} ${x.no_hours === 1 ? 'person has' : 'people have'} no hours entered`, bad: true });
+    else if (s.key === 'ready') attn.push({ id: x.id, txt: `${when} — everything's in, ready to send`, bad: false });
+    if (x.notes) attn.push({ id: x.id, txt: `${when} — ${x.notes} note${x.notes === 1 ? '' : 's'} from staff`, bad: false });
   }
+  const attention = attn.length ? `
+    <section class="attn${attn.some((a) => a.bad) ? '' : ' attn-soft'}">
+      <div class="attn-h">${icon(attn.some((a) => a.bad) ? 'incidents' : 'expirations')}
+        <span>${attn.filter((a) => a.bad).length ? `${attn.filter((a) => a.bad).length} thing${attn.filter((a) => a.bad).length === 1 ? '' : 's'} to sort out` : 'Worth knowing'}</span></div>
+      <ul class="attn-list">
+        ${attn.map((a) => `<li class="${a.bad ? 'attn-bad' : 'attn-note'}"><a href="/shifts/${a.id}">${esc(a.txt)}</a></li>`).join('')}
+      </ul>
+    </section>`
+    : (all.length ? `<section class="attn attn-ok">
+        <div class="attn-h">${icon('policy')}<span>Everything's closed out</span></div>
+        <p>No open shifts and nothing waiting on you.</p></section>` : '');
 
-  let bodyRows = '';
-  groups.forEach((g, gi) => {
-    const [y, m] = g.key.split('-');
-    const label = `${MONTHS[Number(m) - 1]} ${y}`;
-    bodyRows += `<tr class="group-row" data-month="${g.key}" onclick="toggleMonth('${g.key}')">
-      <td colspan="5"><span class="caret">▾</span> ${label}
-        <span class="g-sum">· ${g.items.length} shift${g.items.length > 1 ? 's' : ''} · ${money(g.sales)} sales · ${money(g.tips)} tips</span></td></tr>`;
-    bodyRows += g.items.map((x) => `<tr class="shift-row" data-month="${g.key}" data-service="${x.sh.daypart}" data-status="${x.sh.status === 'emailed' ? 'emailed' : 'open'}" data-date="${x.sh.date}">
-      <td><a href="/shifts/${x.sh.id}">${x.sh.date}</a></td>
-      <td>${dp(x.sh.daypart)}</td>
-      <td class="num">${money(x.sales)}</td>
-      <td class="num">${money(x.tips)}</td>
-      <td>${x.sh.status === 'emailed' ? '<span class="pill pill-ok">emailed</span>' : '<span class="pill pill-blue">open</span>'}</td>
-    </tr>`).join('');
-  });
+  // --- history by month --------------------------------------------------
+  const byMonth = new Map();
+  for (const r of rows) {
+    const m = r.x.date.slice(0, 7);
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(r);
+  }
+  const months = [...byMonth.keys()].sort().reverse();
+
+  const monthBlocks = months.map((m, idx) => {
+    const list = byMonth.get(m);
+    const sales = sum(list, ({ x }) => shiftSales(x));
+    const tips = sum(list, ({ x }) => x.tips);
+    const hrs = sum(list, ({ x }) => x.hours);
+    const open = list.filter(({ s }) => s.key !== 'sent').length;
+    const label = `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+
+    const items = list.map(({ x, s }) => {
+      const search = [x.date, dp(x.daypart), s.label, label].join(' ').toLowerCase();
+      return `
+      <a class="srow" href="/shifts/${x.id}" data-shift data-status="${s.key}"
+         data-service="${esc(x.daypart)}" data-search="${esc(search)}">
+        <span class="srow-date">
+          <b>${Number(x.date.slice(8, 10))}</b>
+          <i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' })}</i>
+        </span>
+        <span class="srow-svc svc-${esc(x.daypart)}">${esc(dp(x.daypart))}</span>
+        <span class="tstatus ${s.cls} srow-st">${esc(s.label)}</span>
+        <span class="srow-figs">
+          <span><i>Sales</i>${money(shiftSales(x))}</span>
+          <span><i>Tips</i>${money(x.tips)}</span>
+          <span><i>Hours</i>${Math.round(x.hours * 10) / 10}</span>
+          <span><i>Staff</i>${x.people}</span>
+        </span>
+        <span class="srow-go">→</span>
+      </a>`;
+    }).join('');
+
+    return `
+      <details class="mgroup" data-month${idx === 0 ? ' open' : ''}>
+        <summary class="mgroup-h">
+          <span class="mgroup-chev">▸</span>
+          <span class="mgroup-name">${esc(label)}</span>
+          <span class="mgroup-stats">
+            <span>${list.length} shift${list.length === 1 ? '' : 's'}</span>
+            <span class="mg-total">${money(sales)}</span>
+            <span>${money(tips)} tips</span>
+            <span>${Math.round(hrs)} hrs</span>
+            ${open ? `<span class="mg-out">${open} not sent</span>` : '<span class="mg-paid">all sent</span>'}
+          </span>
+        </summary>
+        <div class="srows">${items}</div>
+      </details>`;
+  }).join('');
+
+  const body = all.length ? `
+    <div class="yearbar">
+      ${years.map((y) => `<a class="ytab${y === year ? ' on' : ''}" href="/shifts?y=${y}">${y}</a>`).join('')}
+    </div>
+    <div class="toolbar2">
+      <div class="searchbox">${icon('search')}
+        <input id="ssearch" type="search" placeholder="Search a date, month or service…" autocomplete="off"></div>
+      <div class="fchips">
+        <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
+        <button class="fchip" data-f="service" data-v="cafe" style="--c:#0891b2;--ct:#ecfeff"><i class="fdot"></i>Café</button>
+        <button class="fchip" data-f="service" data-v="dinner" style="--c:#4f46e5;--ct:#eef2ff"><i class="fdot"></i>Dinner</button>
+        <button class="fchip" data-f="status" data-v="open" style="--c:#2563eb;--ct:#eff6ff"><i class="fdot"></i>Open</button>
+        <button class="fchip" data-f="status" data-v="review" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Needs review</button>
+        <button class="fchip" data-f="status" data-v="ready" style="--c:#7c3aed;--ct:#f5f3ff"><i class="fdot"></i>Ready</button>
+        <button class="fchip" data-f="status" data-v="sent" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Sent</button>
+      </div>
+    </div>
+    ${monthBlocks}
+    <div class="empty2" id="snone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>`
+    : `<div class="upload-hero">
+        <div class="uh-ico">${icon('shifts')}</div>
+        <div class="uh-t">No shifts logged yet</div>
+        <div class="uh-s">A shift starts itself the moment a staff member submits their tips — or start one here and enter it yourself.</div>
+        <a class="btn btn-primary btn-lg" href="/shifts/new">＋ Log a shift</a>
+      </div>`;
 
   res.send(layout('Shifts', `
     ${flash(req)}
-    <div class="page-head"><div><h1>Shifts</h1><p class="sub">${all.length} logged. Grouped by month — search or filter to narrow down.</p></div>
-      <a class="btn btn-primary" href="/shifts/new">➕ Log a shift</a></div>
-    <div class="toolbar">
-      <div class="search"><input id="shift-search" type="search" placeholder="Search a date (e.g. 07-16)" oninput="filterShifts()"></div>
-      <div class="chips" data-filter="service">
-        <button class="chip active" data-v="" onclick="chip(this)">All</button>
-        <button class="chip" data-v="cafe" onclick="chip(this)">Café</button>
-        <button class="chip" data-v="dinner" onclick="chip(this)">Dinner</button>
-      </div>
-      <div class="chips" data-filter="status">
-        <button class="chip active" data-v="" onclick="chip(this)">Any status</button>
-        <button class="chip" data-v="open" onclick="chip(this)">Open</button>
-        <button class="chip" data-v="emailed" onclick="chip(this)">Emailed</button>
-      </div>
+    <div class="phead">
+      <div class="phead-t"><h1>Shifts</h1>
+        <p class="phead-s">${all.length ? `${all.length} logged. Staff submissions start a shift on their own.` : 'Where every service gets closed out.'}</p></div>
+      <a class="btn btn-primary" href="/shifts/new">＋ Log a shift</a>
     </div>
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Date</th><th>Service</th><th class="num">Sales</th><th class="num">Tips</th><th>Status</th></tr></thead>
-      <tbody id="shift-body">${bodyRows || '<tr><td colspan="5" class="muted">No shifts yet — tap “Log a shift”.</td></tr>'}</tbody>
-    </table></div>
-    <p class="sub" id="no-match" style="display:none">No shifts match those filters.</p>
+    ${all.length ? cards : ''}
+    ${todayCards}
+    ${attention}
+    ${body}
     <script>
-      var F = { service: '', status: '', q: '' };
-      function chip(btn) {
-        var group = btn.parentElement, key = group.getAttribute('data-filter');
-        group.querySelectorAll('.chip').forEach(function (c) { c.classList.remove('active'); });
-        btn.classList.add('active'); F[key] = btn.getAttribute('data-v'); filterShifts();
-      }
-      function toggleMonth(k) {
-        var g = document.querySelector('.group-row[data-month="' + k + '"]');
-        g.classList.toggle('collapsed');
-        var hide = g.classList.contains('collapsed');
-        document.querySelectorAll('.shift-row[data-month="' + k + '"]').forEach(function (r) { r.dataset.userCollapsed = hide ? '1' : ''; });
-        filterShifts();
-      }
-      function filterShifts() {
-        F.q = (document.getElementById('shift-search').value || '').trim().toLowerCase();
-        var anyShown = false;
-        var monthHas = {};
-        document.querySelectorAll('.shift-row').forEach(function (r) {
-          var ok = (!F.service || r.dataset.service === F.service)
-            && (!F.status || r.dataset.status === F.status)
-            && (!F.q || r.dataset.date.indexOf(F.q) !== -1);
-          var collapsed = r.dataset.userCollapsed === '1' && !F.q && !F.service && !F.status;
-          r.style.display = ok && !collapsed ? '' : 'none';
-          if (ok) { anyShown = true; monthHas[r.dataset.month] = true; }
+      (function () {
+        var q = '', mode = 'all', val = '';
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-month]').forEach(function (g) {
+            var n = 0;
+            g.querySelectorAll('[data-shift]').forEach(function (el) {
+              var ok = mode === 'all' ? true
+                : mode === 'service' ? el.getAttribute('data-service') === val
+                : el.getAttribute('data-status') === val;
+              if (ok && q) ok = el.getAttribute('data-search').indexOf(q) !== -1;
+              el.style.display = ok ? '' : 'none';
+              if (ok) { n++; shown++; }
+            });
+            g.style.display = n ? '' : 'none';
+            if (n && (q || mode !== 'all')) g.open = true;
+          });
+          var none = document.getElementById('snone');
+          if (none) none.style.display = shown ? 'none' : '';
+        }
+        var si = document.getElementById('ssearch');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        document.querySelectorAll('.fchip').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
+          });
         });
-        document.querySelectorAll('.group-row').forEach(function (g) {
-          g.style.display = monthHas[g.dataset.month] ? '' : 'none';
-        });
-        document.getElementById('no-match').style.display = anyShown ? 'none' : '';
-      }
+      })();
     </script>`));
 });
 
