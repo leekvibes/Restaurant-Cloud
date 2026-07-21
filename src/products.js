@@ -53,6 +53,20 @@ CREATE INDEX IF NOT EXISTS idx_pp_product ON product_purchases (product_id, purc
 CREATE INDEX IF NOT EXISTS idx_pp_invoice ON product_purchases (invoice_id);
 CREATE INDEX IF NOT EXISTS idx_pp_date    ON product_purchases (purchased_on);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_products_name ON products (LOWER(name));
+-- What a vendor calls this product. Written on every import, so the second
+-- invoice from a supplier recognises its own item codes and printed
+-- descriptions outright instead of guessing at the wording again.
+CREATE TABLE IF NOT EXISTS product_aliases (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  vendor_id  INTEGER,
+  code       TEXT,
+  alias      TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_alias_product ON product_aliases (product_id);
+CREATE INDEX IF NOT EXISTS idx_alias_code    ON product_aliases (vendor_id, code);
+CREATE INDEX IF NOT EXISTS idx_alias_alias   ON product_aliases (vendor_id, alias);
 -- Declared here too, not just in periods.js. The migration below records that
 -- it has run in this table, and depending on another module having been
 -- required first meant the migration quietly skipped itself on a cold start —
@@ -67,6 +81,9 @@ CREATE TABLE IF NOT EXISTS settings (
 // the invoice rather than written straight into purchases because an import is
 // a decision — matching "TOM RMA 6x6" to "Tomatoes" is a guess until a human
 // agrees with it.
+const prodCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+if (!prodCols.includes('brand')) db.exec('ALTER TABLE products ADD COLUMN brand TEXT');
+
 const invCols = db.prepare('PRAGMA table_info(m_invoices)').all().map((c) => c.name);
 if (!invCols.includes('ai_lines')) db.exec('ALTER TABLE m_invoices ADD COLUMN ai_lines TEXT');
 if (!invCols.includes('lines_imported')) db.exec("ALTER TABLE m_invoices ADD COLUMN lines_imported TEXT");
@@ -146,10 +163,12 @@ const q = {
   one: db.prepare(`${ROLLUP} WHERE p.id = @id`),
   byName: db.prepare('SELECT * FROM products WHERE LOWER(name) = LOWER(?)'),
   plain: db.prepare('SELECT * FROM products ORDER BY name COLLATE NOCASE'),
-  add: db.prepare(`INSERT INTO products (name, category, vendor_id, unit, pack_size, sku, notes)
-    VALUES (@name, @category, @vendor_id, @unit, @pack_size, @sku, @notes)`),
+  add: db.prepare(`INSERT INTO products (name, category, vendor_id, unit, pack_size, sku, brand, notes)
+    VALUES (@name, @category, @vendor_id, @unit, @pack_size, @sku, @brand, @notes)`),
   update: db.prepare(`UPDATE products SET name=@name, category=@category, vendor_id=@vendor_id,
-    unit=@unit, pack_size=@pack_size, sku=@sku, notes=@notes WHERE id=@id`),
+    unit=@unit, pack_size=@pack_size, sku=@sku, brand=@brand, notes=@notes WHERE id=@id`),
+  aliases: db.prepare(`SELECT a.*, v.name AS vendor_name FROM product_aliases a
+    LEFT JOIN m_vendors v ON v.id = a.vendor_id WHERE a.product_id = ? ORDER BY a.id`),
   del: db.prepare('DELETE FROM products WHERE id = ?'),
   history: db.prepare(`SELECT pp.*, v.name AS vendor_name, i.invoice_number, i.file AS invoice_file
     FROM product_purchases pp
@@ -179,29 +198,151 @@ function trendOf(p) {
   return Math.round(((p.last_price - p.prior_price) / p.prior_price) * 100);
 }
 
+// ---------------------------------------------------------------------------
+// MATCHING
+//
+// A name on its own is not enough to recognise a product. "TOMATO 6/6" from
+// two suppliers is two different products at two different prices, and
+// "OLIVE OIL 3L" and "OLIVE OIL 4/3L" are a bottle and a case. So a line is
+// scored across every signal the invoice gives us — vendor item code, learned
+// alias, name, brand, pack size, unit, vendor — and the score decides what
+// happens next rather than a yes/no.
+//
+//   high    (>= HIGH)   matched outright
+//   medium  (>= MED)    offered, but somebody has to say yes
+//   low                 treated as something new
+//
+// The asymmetry is deliberate. A missed match costs a duplicate product,
+// which merge fixes in two clicks. A wrong match writes a price into the
+// history of a product nobody bought, where it is invisible and moves a trend
+// that someone may act on.
+// ---------------------------------------------------------------------------
+const HIGH = 85;
+const MED = 60;
+
+/** "6/#10" and "6 #10" and "6/10" all mean the same shelf. */
+const normPack = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+/** Item codes differ only by punctuation across printings. */
+const normCode = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '');
+const tokens = (s) => norm(s).split(' ').filter((t) => t && t.length > 1);
+
+/** Share of the shorter token set that both descriptions have in common. */
+function tokenOverlap(a, b) {
+  const A = new Set(tokens(a)), B = new Set(tokens(b));
+  if (!A.size || !B.size) return 0;
+  let hit = 0;
+  for (const t of A) if (B.has(t)) hit++;
+  return hit / Math.min(A.size, B.size);
+}
+
 /**
- * Match a printed invoice line to a product we already buy: exact name, then
- * one containing the other. Returns the product row or null.
+ * Score one line against one product, 0-100, with the reasons.
  *
- * Kept deliberately conservative — a wrong match writes a price into the
- * history of a product nobody bought, which is worse than asking.
+ * @param line    {desc, code, brand, pack_size, unit, vendor_id}
+ * @param p       a product row
+ * @param aliases rows from product_aliases for this product
  */
-function matchProduct(desc, products) {
-  const n = norm(desc);
-  if (!n) return null;
-  const list = products || q.plain.all();
-  let best = null;
-  for (const p of list) {
-    const pn = norm(p.name);
-    if (!pn) continue;
-    if (pn === n) return p;
-    if (n.includes(pn) || pn.includes(n)) {
-      // Prefer the longest overlap, so "tomato" doesn't beat "tomato paste"
-      // for a line reading "TOMATO PASTE #10".
-      if (!best || pn.length > norm(best.name).length) best = p;
+function scoreMatch(line, p, aliases = []) {
+  const why = [];
+  const n = norm(line.desc);
+  const pn = norm(p.name);
+  const code = normCode(line.code);
+  const sameVendor = line.vendor_id != null && p.vendor_id != null
+    && Number(line.vendor_id) === Number(p.vendor_id);
+
+  // --- identity signals: this vendor has called this exact thing this before
+  for (const a of aliases) {
+    const aliasVendorMatches = a.vendor_id == null || line.vendor_id == null
+      || Number(a.vendor_id) === Number(line.vendor_id);
+    if (code && normCode(a.code) === code && aliasVendorMatches) {
+      return { score: 100, why: ['same item code as last time'] };
+    }
+    if (n && norm(a.alias) === n && aliasVendorMatches) {
+      return { score: 97, why: ['same line as a previous invoice'] };
     }
   }
-  return best;
+  // A code we recorded on the product itself, from any vendor.
+  if (code && normCode(p.sku) === code) return { score: 92, why: ['matches the SKU on file'] };
+
+  // --- name
+  let base = 0;
+  if (n && pn && n === pn) { base = 88; why.push('name matches exactly'); }
+  else if (n && pn && (n.includes(pn) || pn.includes(n))) {
+    // Longer overlap is stronger: "extra virgin olive oil" inside the line
+    // tells you more than "olive oil" does.
+    base = 62 + Math.min(16, Math.round((pn.length / Math.max(n.length, 1)) * 16));
+    why.push('name appears in the line');
+  } else {
+    const ov = tokenOverlap(line.desc, p.name);
+    if (ov >= 0.5) { base = Math.round(38 + ov * 26); why.push(`${Math.round(ov * 100)}% of the words match`); }
+  }
+  if (!base) return { score: 0, why: [] };
+
+  // --- corroboration
+  let s = base;
+  if (sameVendor) { s += 8; why.push('same vendor'); }
+  else if (line.vendor_id != null && p.vendor_id != null) { s -= 10; why.push('different vendor'); }
+
+  if (line.brand && p.brand) {
+    if (norm(line.brand) === norm(p.brand)) { s += 6; why.push('same brand'); }
+    else { s -= 8; why.push('different brand'); }
+  }
+  if (line.pack_size && p.pack_size) {
+    if (normPack(line.pack_size) === normPack(p.pack_size)) { s += 7; why.push('same pack size'); }
+    else { s -= 14; why.push('different pack size'); }
+  }
+  if (line.unit && p.unit) {
+    if (norm(line.unit) === norm(p.unit)) { s += 5; why.push('same unit'); }
+    // A case is not a pound. Same words, different thing on the shelf.
+    else { s -= 12; why.push('different unit'); }
+  }
+  return { score: Math.max(0, Math.min(100, Math.round(s))), why };
+}
+
+/**
+ * Best product for a line, with how sure we are.
+ * @returns {{product, score, confidence:'high'|'medium'|'low', why:string[]}}
+ */
+function matchLine(line, products, aliasesByProduct) {
+  const list = products || q.plain.all();
+  const aliases = aliasesByProduct || aliasIndex();
+  let best = null;
+  for (const p of list) {
+    const r = scoreMatch(line, p, aliases.get(p.id) || []);
+    if (!best || r.score > best.score) best = { product: p, ...r };
+  }
+  if (!best || best.score < MED) {
+    return { product: null, score: best ? best.score : 0, confidence: 'low', why: best ? best.why : [] };
+  }
+  return { ...best, confidence: best.score >= HIGH ? 'high' : 'medium' };
+}
+
+/** product_id -> alias rows, for scoring a whole invoice in one pass. */
+function aliasIndex() {
+  const m = new Map();
+  for (const a of db.prepare('SELECT * FROM product_aliases').all()) {
+    if (!m.has(a.product_id)) m.set(a.product_id, []);
+    m.get(a.product_id).push(a);
+  }
+  return m;
+}
+
+/** Remember what this vendor calls this product, so next time is definitive. */
+function learnAlias(productId, vendorId, code, desc) {
+  const c = (code || '').trim() || null;
+  const a = norm(desc) || null;
+  if (!c && !a) return;
+  const dupe = db.prepare(`SELECT 1 FROM product_aliases WHERE product_id = ?
+    AND IFNULL(vendor_id, -1) = IFNULL(?, -1) AND IFNULL(code,'') = IFNULL(?,'') AND IFNULL(alias,'') = IFNULL(?,'')`)
+    .get(productId, vendorId ?? null, c, a);
+  if (dupe) return;
+  db.prepare('INSERT INTO product_aliases (product_id, vendor_id, code, alias) VALUES (?, ?, ?, ?)')
+    .run(productId, vendorId ?? null, c, a);
+}
+
+/** Name-only match. Kept for callers that have nothing but a description. */
+function matchProduct(desc, products) {
+  return matchLine({ desc }, products, new Map()).product;
 }
 
 // Charges that ride along on an invoice but are not things you buy. The
@@ -215,22 +356,92 @@ const NOT_A_PRODUCT = /\b(deliver(y|ies)|freight|shipping|fuel|surcharge|charge|
  * Turn the AI's line array into review rows: each carries the raw line, the
  * product we think it is, and whether that's a match or a new product.
  */
-function reviewRows(lines, products) {
+function reviewRows(lines, products, vendorId) {
   const list = products || q.plain.all();
+  const aliases = aliasIndex();
   return (lines || []).map((l, i) => {
     const desc = String(l.description || '').trim();
-    const m = desc ? matchProduct(desc, list) : null;
-    const fee = !m && NOT_A_PRODUCT.test(desc);
+    const code = String(l.code || '').trim();
+    const brand = String(l.brand || '').trim();
+    const pack = String(l.pack_size || '').trim();
+    const unit = String(l.unit || '').trim();
+    const r = desc || code
+      ? matchLine({ desc, code, brand, pack_size: pack, unit, vendor_id: vendorId ?? null }, list, aliases)
+      : { product: null, score: 0, confidence: 'low', why: [] };
+    const fee = !r.product && NOT_A_PRODUCT.test(desc);
     const total = Math.round(Number(l.total || 0) * 100);
     const qty = Number(l.qty) > 0 ? Number(l.qty) : null;
     const unitPrice = Number(l.unit_price) > 0 ? Math.round(Number(l.unit_price) * 100)
       : qty && total ? Math.round(total / qty) : null;
+
+    // High matches outright. Medium is offered with an empty selection, so the
+    // form cannot be submitted until somebody has actually looked at it.
+    const action = r.confidence === 'high' ? 'match'
+      : r.confidence === 'medium' ? ''
+      : fee || !desc ? 'skip' : 'create';
+
     return {
-      i, desc, qty, unit: (l.unit || '').trim() || null,
+      i, desc, code: code || null, brand: brand || null, pack_size: pack || null,
+      qty, unit: unit || null,
       total_cents: total, unit_price_cents: unitPrice,
-      match: m, fee, action: m ? 'match' : fee || !desc ? 'skip' : 'create',
+      match: r.product, score: r.score, confidence: r.confidence, why: r.why,
+      fee, action,
     };
   });
 }
 
-module.exports = { q, CATEGORIES, norm, trendOf, matchProduct, reviewRows };
+// ---------------------------------------------------------------------------
+// MERGE — two records for one product, joined without losing a single line.
+//
+// Duplicates are the expected cost of matching conservatively: when the app
+// isn't sure, it makes a new product rather than guess. This is the other half
+// of that bargain, so being careful never means being stuck with the mess.
+// ---------------------------------------------------------------------------
+const mergeProducts = db.transaction((fromId, intoId) => {
+  if (fromId === intoId) throw new Error('A product cannot be merged into itself.');
+  const from = db.prepare('SELECT * FROM products WHERE id = ?').get(fromId);
+  const into = db.prepare('SELECT * FROM products WHERE id = ?').get(intoId);
+  if (!from || !into) throw new Error('One of those products no longer exists.');
+
+  const moved = db.prepare('UPDATE product_purchases SET product_id = ? WHERE product_id = ?').run(intoId, fromId).changes;
+  db.prepare('UPDATE product_aliases SET product_id = ? WHERE product_id = ?').run(intoId, fromId);
+  // What the loser was called is worth keeping: it's how an invoice printed it,
+  // which is the whole point of the alias table.
+  learnAlias(intoId, from.vendor_id, from.sku, from.name);
+
+  // Fill blanks on the survivor rather than overwrite anything already set.
+  const fill = {};
+  for (const k of ['category', 'vendor_id', 'unit', 'pack_size', 'sku', 'brand', 'notes',
+    'par_level', 'reorder_point', 'on_hand']) {
+    if ((into[k] === null || into[k] === '' || into[k] === undefined) && from[k] != null && from[k] !== '') fill[k] = from[k];
+  }
+  if (Object.keys(fill).length) {
+    db.prepare(`UPDATE products SET ${Object.keys(fill).map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`)
+      .run({ ...fill, id: intoId });
+  }
+  db.prepare('DELETE FROM products WHERE id = ?').run(fromId);
+  return { moved, name: from.name };
+});
+
+/**
+ * Products that look like the same thing, for the merge picker. Scored with
+ * the same engine, so what it suggests is what matching would have done.
+ */
+function likelyDuplicates(p, products) {
+  const list = (products || q.plain.all()).filter((x) => x.id !== p.id);
+  const aliases = aliasIndex();
+  return list
+    .map((x) => ({
+      product: x,
+      ...scoreMatch({ desc: p.name, code: p.sku, brand: p.brand, pack_size: p.pack_size, unit: p.unit, vendor_id: p.vendor_id },
+        x, aliases.get(x.id) || []),
+    }))
+    .filter((r) => r.score >= MED)
+    .sort((a, b) => b.score - a.score);
+}
+
+module.exports = {
+  q, CATEGORIES, norm, trendOf, reviewRows,
+  matchProduct, matchLine, scoreMatch, aliasIndex, learnAlias,
+  mergeProducts, likelyDuplicates, HIGH, MED,
+};

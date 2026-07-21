@@ -22,7 +22,8 @@ const { isoDate, startOfToday, addDays } = require('./dates');
 // requiring it late meant the app booted fine on a database that already had
 // the column and died on startup on one that didn't. Which is every fresh
 // deploy. test/boot.test.js now covers exactly this.
-const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows } = require('./products');
+const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
+  learnAlias, mergeProducts, likelyDuplicates } = require('./products');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -4599,8 +4600,9 @@ function productDrawer(vendors, p) {
         <div class="fld-row3">
           <label class="fld">Unit<input name="unit" value="${esc(v.unit || '')}" placeholder="case, lb, each"></label>
           <label class="fld">Pack size<input name="pack_size" value="${esc(v.pack_size || '')}" placeholder="6/#10"></label>
-          <label class="fld">SKU<input name="sku" value="${esc(v.sku || '')}"></label>
+          <label class="fld">Item code / SKU<input name="sku" value="${esc(v.sku || '')}"></label>
         </div>
+        <label class="fld">Brand<input name="brand" value="${esc(v.brand || '')}" placeholder="optional — helps match invoice lines"></label>
         <label class="fld">Notes<textarea name="notes" rows="2">${esc(v.notes || '')}</textarea></label>
       </div>
       <div class="drawer-f">
@@ -4664,6 +4666,7 @@ app.post('/c/products', (req, res) => {
     unit: (req.body.unit || '').trim() || null,
     pack_size: (req.body.pack_size || '').trim() || null,
     sku: (req.body.sku || '').trim() || null,
+    brand: (req.body.brand || '').trim() || null,
     notes: (req.body.notes || '').trim() || null,
   });
   res.redirect('/c/products?msg=' + encodeURIComponent('Product added.'));
@@ -4675,6 +4678,10 @@ app.get('/c/products/:id', (req, res) => {
   if (!p) return res.status(404).send(layout('Not found', '<div class="empty2"><div class="empty2-t">No such product</div></div>'));
   const history = prodQ.history.all(p.id);
   const vendors = invQ.vendors.all();
+  const aliases = prodQ.aliases.all(p.id);
+  const allProducts = prodQ.plain.all();
+  const others = allProducts.filter((x) => x.id !== p.id);
+  const dupes = likelyDuplicates(p, allProducts);
   const t = trendOf(p);
 
   const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
@@ -4778,6 +4785,34 @@ app.get('/c/products/:id', (req, res) => {
       : `<div class="empty2"><div class="empty2-t">Nothing bought yet</div>
           <div class="empty2-s">Import an invoice's lines, or add a purchase above.</div></div>`}
 
+    <div class="vpanels">
+      <section class="panel">
+        <div class="panel-h"><b>Merge into another product</b></div>
+        <div class="panel-note">Every purchase and invoice line moves across. This one is then removed.
+          ${dupes.length ? 'The suggestions come from the same matching used on invoices.' : ''}</div>
+        <form method="post" action="/c/products/${p.id}/merge" class="mergef"
+          onsubmit="return confirm('Move all ${p.buys} purchase' + (${p.buys} === 1 ? '' : 's') + ' into the chosen product and remove ${esc(p.name)}?')">
+          <select name="into" class="minisel" required>
+            <option value="">Choose a product…</option>
+            ${dupes.length ? `<optgroup label="Looks like the same thing">
+              ${dupes.map((d) => `<option value="${d.product.id}">${esc(d.product.name)} — ${d.score}% match</option>`).join('')}
+            </optgroup>` : ''}
+            <optgroup label="All products">
+              ${others.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}
+            </optgroup>
+          </select>
+          <button class="btn btn-sm" type="submit">Merge</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h"><b>What vendors call it</b></div>
+        ${aliases.length
+          ? aliases.map((a) => `<div class="tfact"><span>${esc(a.vendor_name || 'Any vendor')}</span><b>${a.code ? `#${esc(a.code)} ` : ''}${esc(a.alias || '')}</b></div>`).join('')
+          : '<div class="panel-empty">Nothing learned yet. Importing an invoice line records the code and wording that vendor uses, so the next one matches straight away.</div>'}
+      </section>
+    </div>
+
     <div class="danger-zone">
       <form method="post" action="/c/products/${p.id}/delete" onsubmit="return confirm('Delete ${esc(p.name)} and its purchase history?')">
         <button class="btn btn-danger btn-sm" type="submit">Delete product</button>
@@ -4800,6 +4835,7 @@ app.post('/c/products/:id', (req, res) => {
     unit: (req.body.unit || '').trim() || null,
     pack_size: (req.body.pack_size || '').trim() || null,
     sku: (req.body.sku || '').trim() || null,
+    brand: (req.body.brand || '').trim() || null,
     notes: (req.body.notes || '').trim() || null,
   });
   res.redirect(`/c/products/${p.id}?msg=` + encodeURIComponent('Saved.'));
@@ -4826,6 +4862,24 @@ app.post('/c/products/:id/purchase', (req, res) => {
   res.redirect(`/c/products/${id}?msg=` + encodeURIComponent('Purchase added.'));
 });
 
+// Merging is the other half of matching conservatively: when the app isn't
+// sure it makes a new product, and this is how two records for one thing
+// become one without losing an invoice line.
+app.post('/c/products/:id/merge', (req, res) => {
+  const fromId = Number(req.params.id);
+  const intoId = Number(req.body.into);
+  if (!intoId || intoId === fromId) {
+    return res.redirect(`/c/products/${fromId}?err=1&msg=` + encodeURIComponent('Pick a different product to merge into.'));
+  }
+  try {
+    const { moved, name } = mergeProducts(fromId, intoId);
+    res.redirect(`/c/products/${intoId}?msg=` + encodeURIComponent(
+      `Merged ${name} in — ${moved} purchase${moved === 1 ? '' : 's'} moved across.`));
+  } catch (e) {
+    res.redirect(`/c/products/${fromId}?err=1&msg=` + encodeURIComponent(e.message));
+  }
+});
+
 app.post('/c/products/purchase/:pid/delete', (req, res) => {
   const row = db.prepare('SELECT product_id FROM product_purchases WHERE id = ?').get(Number(req.params.pid));
   prodQ.delPurchase.run(Number(req.params.pid));
@@ -4847,7 +4901,7 @@ app.get('/c/invoices/:id/import', (req, res) => {
   try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { lines = []; }
   const already = prodQ.purchasesForInvoice.all(inv.id);
   const products = prodQ.plain.all();
-  const rows = reviewRows(lines, products);
+  const rows = reviewRows(lines, products, inv.vendor_id ? Number(inv.vendor_id) : null);
   const vendors = invQ.vendors.all();
   const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
 
@@ -4882,16 +4936,28 @@ app.get('/c/invoices/:id/import', (req, res) => {
         <a class="btn" href="/c/products">Go to Products</a></div>`));
   }
 
-  const matched = rows.filter((r) => r.action === 'match').length;
+  const matched = rows.filter((r) => r.confidence === 'high').length;
+  const ask = rows.filter((r) => r.confidence === 'medium').length;
   const skipped = rows.filter((r) => r.action === 'skip').length;
-  const body = rows.map((r) => `
-    <div class="iline">
+  const CONF = {
+    high: { cls: 'ok', label: 'confident' },
+    medium: { cls: 'ask', label: 'not sure' },
+    low: { cls: 'new', label: 'new' },
+  };
+  const body = rows.map((r) => {
+    const c = CONF[r.confidence];
+    const facts = [r.code ? `#${esc(r.code)}` : '', r.brand ? esc(r.brand) : '', r.pack_size ? esc(r.pack_size) : '']
+      .filter(Boolean).join(' · ');
+    return `
+    <div class="iline${r.confidence === 'medium' ? ' iline-ask' : ''}">
       <div class="iline-l">
         <div class="iline-d">${esc(r.desc)}</div>
-        <div class="iline-m">${r.qty ? `${r.qty}${r.unit ? ' ' + esc(r.unit) : ''} · ` : ''}${r.unit_price_cents ? money(r.unit_price_cents) + ' each · ' : ''}<b>${money(r.total_cents)}</b></div>
+        <div class="iline-m">${facts ? facts + ' · ' : ''}${r.qty ? `${r.qty}${r.unit ? ' ' + esc(r.unit) : ''} · ` : ''}${r.unit_price_cents ? money(r.unit_price_cents) + ' each · ' : ''}<b>${money(r.total_cents)}</b></div>
+        ${r.match ? `<div class="iline-why">${r.confidence === 'high' ? 'Matched' : 'Looks like'} <b>${esc(r.match.name)}</b>${r.why.length ? ` — ${esc(r.why.slice(0, 3).join(', '))}` : ''}</div>` : ''}
       </div>
       <div class="iline-r">
-        <select name="action_${r.i}" class="minisel iline-act">
+        <select name="action_${r.i}" class="minisel iline-act"${r.confidence === 'medium' ? ' required' : ''}>
+          ${r.confidence === 'medium' ? '<option value="" selected>Choose…</option>' : ''}
           <option value="match"${r.action === 'match' ? ' selected' : ''}${r.match ? '' : ' disabled'}>Add to existing</option>
           <option value="create"${r.action === 'create' ? ' selected' : ''}>Create new product</option>
           <option value="skip"${r.action === 'skip' ? ' selected' : ''}>Skip</option>
@@ -4900,19 +4966,22 @@ app.get('/c/invoices/:id/import', (req, res) => {
           ${products.map((p) => `<option value="${p.id}"${r.match && r.match.id === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
         </select>
         <input type="hidden" name="desc_${r.i}" value="${esc(r.desc)}">
+        <input type="hidden" name="code_${r.i}" value="${esc(r.code || '')}">
+        <input type="hidden" name="brand_${r.i}" value="${esc(r.brand || '')}">
+        <input type="hidden" name="pack_${r.i}" value="${esc(r.pack_size || '')}">
         <input type="hidden" name="qty_${r.i}" value="${r.qty || ''}">
         <input type="hidden" name="unit_${r.i}" value="${esc(r.unit || '')}">
         <input type="hidden" name="total_${r.i}" value="${r.total_cents}">
         <input type="hidden" name="price_${r.i}" value="${r.unit_price_cents || ''}">
-        ${r.match ? `<span class="iline-tag ok">matched ${esc(r.match.name)}</span>`
-          : r.fee ? '<span class="iline-tag fee">not a product</span>'
-          : '<span class="iline-tag new">new</span>'}
+        ${r.fee && !r.match ? '<span class="iline-tag fee">not a product</span>'
+          : `<span class="iline-tag ${c.cls}">${c.label}</span>`}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   res.send(layout('Import products', `${head}
-    <div class="attn attn-soft"><div class="attn-h">${icon('invoices')} ${rows.length} line${rows.length === 1 ? '' : 's'} read${matched ? `, ${matched} matched to products you already buy` : ''}${skipped ? `, ${skipped} look${skipped === 1 ? 's' : ''} like a charge rather than a product` : ''}</div>
-      <p>Check each one before importing. Nothing is saved until you press Import.</p></div>
+    <div class="attn ${ask ? 'attn-soft' : 'attn-ok'}"><div class="attn-h">${icon('invoices')} ${rows.length} line${rows.length === 1 ? '' : 's'} read${matched ? `, ${matched} matched confidently` : ''}${ask ? `, ${ask} need${ask === 1 ? 's' : ''} a decision` : ''}${skipped ? `, ${skipped} look${skipped === 1 ? 's' : ''} like a charge` : ''}</div>
+      <p>${ask ? `The ${ask === 1 ? 'highlighted line is' : 'highlighted lines are'} a close but uncertain match — pick what to do with ${ask === 1 ? 'it' : 'them'} before importing. ` : ''}Nothing is saved until you press Import.</p></div>
     <form method="post" action="/c/invoices/${inv.id}/import">
       <input type="hidden" name="count" value="${rows.length}">
       <div class="ilines">${body}</div>
@@ -4951,7 +5020,9 @@ app.post('/c/invoices/:id/import', (req, res) => {
         productId = existing ? existing.id : prodQ.add.run({
           name: desc, category: inv.category === 'Food' ? null : inv.category || null,
           vendor_id: vendorId, unit: (req.body[`unit_${i}`] || '').trim() || null,
-          pack_size: null, sku: null, notes: null,
+          pack_size: (req.body[`pack_${i}`] || '').trim() || null,
+          sku: (req.body[`code_${i}`] || '').trim() || null,
+          brand: (req.body[`brand_${i}`] || '').trim() || null, notes: null,
         }).lastInsertRowid;
         if (!existing) created++;
       } else {
@@ -4966,6 +5037,10 @@ app.post('/c/invoices/:id/import', (req, res) => {
         purchased_on: on, qty, unit: (req.body[`unit_${i}`] || '').trim() || null,
         unit_price_cents: price, total_cents: total, raw_text: desc,
       });
+      // Record what this vendor called it. Confirming a match once is what
+      // makes the next invoice from them recognise the line outright instead
+      // of asking the same question again.
+      learnAlias(productId, vendorId, (req.body[`code_${i}`] || '').trim(), desc);
       added++;
     }
     db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(inv.id);

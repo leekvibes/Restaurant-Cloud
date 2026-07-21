@@ -130,6 +130,12 @@ const INVOICE_SCHEMA = {
         type: 'object',
         properties: {
           description: { type: 'string', description: 'The product as printed, e.g. "TOMATO ROMA 25LB"' },
+          // The item code is the strongest signal there is for recognising a
+          // product again: two vendors print the same tomato completely
+          // differently, but each is consistent with itself.
+          code: { type: 'string', description: 'Vendor item code / SKU / product number for the line. "" if not shown.' },
+          brand: { type: 'string', description: 'Brand or label if printed separately from the description. "" if not shown.' },
+          pack_size: { type: 'string', description: 'Pack or size as printed, e.g. "6/#10", "25 LB", "4/3 L". "" if not shown.' },
           qty: { type: 'number', description: 'Quantity billed. 0 if not shown.' },
           unit: { type: 'string', description: 'case, lb, each, gal — as printed. "" if not shown.' },
           unit_price: { type: 'number', description: 'Price for one unit. 0 if not shown.' },
@@ -154,6 +160,7 @@ const INVOICE_PROMPT =
   'If the invoice is mixed, choose the category covering the largest share and say so in notes.\n' +
   'CONFIDENCE: use "low" if the image is blurry or cut off, or if you had to choose between competing totals. Say why in notes.\n' +
   'LINE ITEMS: list every product line, using the description exactly as printed — abbreviations and all. ' +
+  'Capture the vendor item code / SKU column if the invoice has one, and the pack size and brand when they are printed separately. ' +
   'Skip anything that is not a product: delivery charges, fuel surcharges, fees, deposits, subtotal, tax and total rows. ' +
   'If a line is unreadable, leave it out rather than guessing at it. Return an empty list if the table cannot be read.\n' +
   'If several pages are provided they are one invoice — merge them.';
