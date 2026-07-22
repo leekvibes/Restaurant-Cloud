@@ -613,8 +613,9 @@ function head(title, opts = {}) {
     <link rel="stylesheet" href="/static/fonts.css?v=${BUILD}">
     <link rel="stylesheet" href="/static/styles.css?v=${BUILD}">
     <link rel="stylesheet" href="/static/broadsheet.css?v=${BUILD}">
+    ${staff ? `<link rel="stylesheet" href="/static/staff.css?v=${BUILD}">` : ''}
     <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
-    <meta name="theme-color" content="${staff ? '#2563eb' : '#ffffff'}">
+    <meta name="theme-color" content="${staff ? '#f7eee0' : '#ffffff'}">
     <link rel="icon" href="/static/icon-192.png">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -644,7 +645,7 @@ const BUILD = (() => {
   // and fonts.css were missing, so a CSS-only change shipped with an unchanged
   // BUILD and every returning browser kept the old stylesheet.
   const files = ['server.js', 'views.js'].map((f) => path.join(__dirname, f))
-    .concat(['styles.css', 'broadsheet.css', 'fonts.css']
+    .concat(['styles.css', 'broadsheet.css', 'staff.css', 'fonts.css']
       .map((f) => path.join(__dirname, '..', 'public', f)));
   const h = require('crypto').createHash('sha1');
   for (const f of files) {

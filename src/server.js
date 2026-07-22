@@ -2061,152 +2061,455 @@ app.get('/tips', (req, res) => {
   // Success screen after a submit.
   if (req.query.done === '1') {
     const card = String(req.query.card || '');
+    const cash = String(req.query.cash || '0.00');
+    const tot = (Number(cash) || 0) + (card === '' ? 0 : Number(card) || 0);
+    const row = (k, v) => `<div class="tp-tot-r"><span>${k}</span><b>${v}</b></div>`;
+    // Thousands separators, same as everywhere else money is printed. "$1280.50"
+    // is a figure you have to stop and parse; "$1,280.50" you just read.
+    const usd = (v) => '$' + (Number(v) || 0).toLocaleString('en-US',
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const body = `
-      <div class="tips-screen">
-        <div class="tips-card tips-done">
-          <div class="tips-check"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></div>
-          <div class="tips-done-title">Thanks${req.query.name ? ', ' + esc(req.query.name) : ''}</div>
-          <div class="tips-done-sub">Your tips have been recorded.</div>
-          <div class="tips-receipt">
-            <div class="kv"><span>Date</span><b>${esc(req.query.date || '')}${req.query.shift ? ' · ' + esc(req.query.shift) : ''}</b></div>
-            ${req.query.position ? `<div class="kv"><span>Worked as</span><b>${esc(String(req.query.position).replace(/^./, (c) => c.toUpperCase()))}</b></div>` : ''}
-            ${req.query.sales ? `<div class="kv"><span>Total sales</span><b>$${esc(req.query.sales)}</b></div>` : ''}
-            <div class="kv"><span>Cash tips</span><b>$${esc(req.query.cash || '0.00')}</b></div>
-            ${card !== '' ? `<div class="kv"><span>Card tips</span><b>$${esc(card)}</b></div>` : ''}
-          </div>
-          <p class="tips-foot" style="margin-bottom:8px">Wrong? Just submit again with the right details — your manager can correct anything.</p>
-          <p class="tips-foot">You'll get an email with your full breakdown once your manager closes the shift.</p>
-          <a class="tips-submit" href="/tips">Log another shift</a>
+      <div class="tp">
+        <div class="tp-navbar">
+          <span></span>
+          <span class="tp-navt">Recorded</span>
+          <span class="tp-count"><b>3</b> / 3</span>
         </div>
+
+        <div class="tp-body">
+          <div class="tp-prog"><span class="on"></span><span class="on"></span><span class="on"></span></div>
+          <p class="tp-done-k">Sent to your manager</p>
+          <h1 class="tp-h">Thanks${req.query.name ? ', ' + esc(req.query.name) : ''}.</h1>
+          <p class="tp-lead">Your tips are logged. You'll get an email with your full breakdown
+            once your manager closes the shift.</p>
+
+          <div class="tp-receipt">
+            <div class="tp-tot-h">What you sent</div>
+            ${row('Date', esc(req.query.date || '') + (req.query.shift ? ' &middot; ' + esc(req.query.shift) : ''))}
+            ${req.query.position ? row('Worked as', esc(String(req.query.position).replace(/^./, (c) => c.toUpperCase()))) : ''}
+            ${req.query.sales ? row('Sales rung', esc(usd(req.query.sales))) : ''}
+            ${row('Cash tips', esc(usd(cash)))}
+            ${card !== '' ? row('Card tips', esc(usd(card))) : ''}
+            <div class="tp-tot-r sum"><span>Total tips</span><b>${esc(usd(tot))}</b></div>
+          </div>
+
+          <p class="tp-help">Wrong? Submit again with the right details &mdash; the newest one wins,
+            and your manager can correct anything.</p>
+        </div>
+
+        <div class="tp-foot">
+          <a class="tp-go" href="/tips">Log another shift</a>
+        </div>
+        <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
       </div>`;
     return res.send(layout('Recorded', body, { bare: true }));
   }
 
-  // Step 1: just the PIN. Nobody's name is on the page until it's verified, so
-  // an open link no longer publishes the staff roster.
-  const err = req.query.err === '1' ? `<div class="tips-error">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
-  // Version marker: when a staff member reports a problem, this says instantly
-  // whether their phone is running current code or a cached older page.
-  const stamp = `<div class="tips-build">v${esc(BUILD)}</div>`;
+  // Sign in. Nobody's name is on the page until a PIN is verified, so an open
+  // link never publishes the staff roster.
+  const err = req.query.err === '1'
+    ? `<div class="tp-err">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
+
   const body = `
-    <div class="tips-screen">
-      <div class="tips-card">
-        <div class="tips-head">
-          <img src="/static/logo.png" alt="" width="40" height="40">
-          <div><div class="tips-brand">${esc(RESTAURANT)}</div><div class="tips-title">Log your tips</div></div>
+    <div class="tp">
+      <div class="tp-top">
+        <span class="tp-mark">${esc(markOf(RESTAURANT))}</span>
+        <div class="tp-who">
+          <div class="tp-brand">${esc(RESTAURANT)}</div>
+          <div class="tp-name">Staff portal</div>
         </div>
-        <p class="tips-lead">Enter your PIN to start. Ask your manager if you don't have one.</p>
-        ${err}
-        <form method="post" action="/tips/start" class="tips-form">
-          <label class="tips-field">Your PIN
-            <input name="pin" class="tips-in tips-pin" inputmode="numeric" pattern="[0-9]*" maxlength="6"
-              placeholder="••••" autocomplete="off" autofocus required>
-          </label>
-          <button class="tips-submit" type="submit">Continue</button>
-        </form>
-        ${stamp}
       </div>
-    </div>`;
+
+      <div class="tp-body">
+        <h1 class="tp-h">Log your tips.</h1>
+        <p class="tp-lead">Enter your ${PIN_LEN}-digit PIN to start. Ask your manager if you don't have one.</p>
+        ${err}
+
+        <form method="post" action="/tips/start" id="pinform">
+          <div class="tp-sec tp-signin">
+            <div class="tp-seck">Your PIN</div>
+            <div class="tp-pin" id="cells">
+              ${Array.from({ length: PIN_LEN }, (_, i) =>
+                `<div class="tp-cell${i === 0 ? ' at' : ''}" data-i="${i}"></div>`).join('')}
+            </div>
+            <p class="tp-pinmsg" id="pinmsg" hidden>Enter all ${PIN_LEN} digits.</p>
+          </div>
+
+          <!-- The keypad is ours, not the phone's. A system numeric keyboard
+               covers two thirds of the screen, shows a "done" button that does
+               nothing here, and on iOS drags the layout around when it opens.
+               The input stays in the DOM so a desktop keyboard and password
+               managers still work; it is just never focused on a touch device. -->
+          <input type="text" name="pin" id="pin" inputmode="none" autocomplete="off"
+            maxlength="${PIN_LEN}" pattern="[0-9]*" required
+            style="position:absolute;opacity:0;width:1px;height:1px;padding:0;border:0">
+
+          <div class="tp-keys" id="keys">
+            ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) =>
+              `<button type="button" data-k="${n}">${n}</button>`).join('')}
+            <span></span>
+            <button type="button" data-k="0">0</button>
+            <button type="button" class="ghost" data-k="del" aria-label="Delete">&#9003;</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="tp-foot">
+        <button class="tp-go" type="submit" form="pinform" id="go">Continue &rarr;</button>
+      </div>
+      <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
+    </div>
+    ${pinScript()}`;
   res.send(layout('Log your tips', body, { bare: true }));
 });
 
-// Step 2: the actual form, with the person already identified.
+/**
+ * The PIN is four digits everywhere — the staff form says so, and every PIN on
+ * record is four long. The keypad draws exactly this many cells, so the two
+ * cannot drift: /employees refuses to save any other length.
+ */
+const PIN_LEN = 4;
+
+/** Two letters for the round mark in the staff header — "Palm Vintage" → PV. */
+const markOf = (name) => String(name || 'ZWIN')
+  .split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || 'Z';
+
+function pinScript() {
+  return `<script>
+  (function () {
+    var input = document.getElementById('pin');
+    var cells = document.getElementById('cells');
+    var keys = document.getElementById('keys');
+    var go = document.getElementById('go');
+    var form = document.getElementById('pinform');
+    if (!input || !cells || !keys || !go || !form) return;
+    var LEN = ${PIN_LEN};
+
+    function draw() {
+      var v = input.value;
+      var boxes = cells.children;
+      for (var i = 0; i < boxes.length; i++) {
+        boxes[i].className = 'tp-cell' + (i < v.length ? ' filled' : (i === v.length ? ' at' : ''));
+      }
+      if (v.length) document.getElementById('pinmsg').hidden = true;
+    }
+    function push(d) {
+      if (input.value.length >= LEN) return;
+      input.value += d;
+      draw();
+      // Four digits in and there is nothing else to decide, so go. Saves a tap
+      // at the one moment the person is holding a till float in the other hand.
+      if (input.value.length === LEN) setTimeout(function () { form.requestSubmit ? form.requestSubmit() : form.submit(); }, 130);
+    }
+    // Solid from the first paint, the way the design has it — an incomplete
+    // PIN is answered in words rather than by a button that looks broken.
+    // Native validation would point its bubble at an input nobody can see.
+    document.getElementById('pinform').addEventListener('submit', function (e) {
+      if (input.value.length !== LEN) { e.preventDefault(); document.getElementById('pinmsg').hidden = false; }
+    });
+    keys.addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-k]');
+      if (!b) return;
+      if (b.dataset.k === 'del') { input.value = input.value.slice(0, -1); draw(); return; }
+      push(b.dataset.k);
+    });
+    // A real keyboard still works — desktop, and anyone using a bluetooth one.
+    document.addEventListener('keydown', function (e) {
+      if (e.key >= '0' && e.key <= '9') { push(e.key); e.preventDefault(); }
+      else if (e.key === 'Backspace') { input.value = input.value.slice(0, -1); draw(); e.preventDefault(); }
+    });
+    draw();
+  })();
+  </script>`;
+}
+
+/**
+ * The end-of-shift report, in two steps.
+ *
+ * One <form> and one POST — the steps are two panels the page switches
+ * between, not two round trips. That keeps the server contract exactly as it
+ * was, means nothing is half-saved if someone closes the tab on step 2, and
+ * degrades to the old single scroll if the JavaScript never runs: step 2 is
+ * hidden by script, not by markup.
+ *
+ * The progress bar reads "of 3". The third is the confirmation screen, which
+ * is a real step from where the person is standing — they are not finished
+ * until they have seen it.
+ */
 function tipsFormPage(emp, opts = {}) {
   const today = isoDate();
-  const err = opts.err ? `<div class="tips-error">${esc(opts.err)}</div>` : '';
+  const err = opts.err ? `<div class="tp-err">${esc(opts.err)}</div>` : '';
   const token = tipsToken(emp.id);
+  const first = emp.name.split(' ')[0];
 
   // Only the jobs you've given them in Staff. One role each for most people,
   // so it shows as a fixed line rather than a menu they could get wrong.
   const roles = rolesForEmployee(emp);
   const label = (r) => r[0].toUpperCase() + r.slice(1);
   const positionField = roles.length > 1
-    ? `<label class="tips-field">What you worked
-         <select name="position" id="tip-position" class="tips-in" required>
+    ? `<div class="tp-row">
+         <select name="position" id="tip-position" class="tp-sel-role" required>
            ${roles.map((r) => `<option value="${r}"${r === emp.role ? ' selected' : ''}>${label(r)}</option>`).join('')}
          </select>
-         <span class="tips-hint">Pick what you actually did today — it decides how your tips are handled.</span>
-       </label>`
-    : `<div class="tips-field">What you worked
-         <div class="tips-fixed">${label(roles[0])}</div>
-         <input type="hidden" name="position" id="tip-position" value="${roles[0]}">
-         <span class="tips-hint">Worked something different today? Tell your manager.</span>
+         <span class="tp-row-h">pick what you actually did &mdash; it decides how your tips are handled</span>
+       </div>`
+    : `<div class="tp-row">
+         <span class="tp-row-v">${esc(label(roles[0]))}</span>
+         <input type="hidden" name="position" id="tip-position" value="${esc(roles[0])}">
+         <span class="tp-row-h">worked something else? tell your manager</span>
        </div>`;
 
+  const money = (name, extra = '') =>
+    `<div class="tp-money${extra.includes('big') ? ' big' : ''}">
+      <span class="cur">$</span>
+      <input name="${name}" id="f-${name}" type="text" inputmode="decimal"
+        autocomplete="off" placeholder="0.00" data-money>
+      <span class="tp-step2">
+        <button type="button" tabindex="-1" data-bump="${name}" data-by="1" aria-label="Add a dollar">&#9650;</button>
+        <button type="button" tabindex="-1" data-bump="${name}" data-by="-1" aria-label="Take off a dollar">&#9660;</button>
+      </span>
+    </div>`;
+
   const body = `
-    <div class="tips-screen">
-      <div class="tips-card">
-        <div class="tips-head">
-          <img src="/static/logo.png" alt="" width="40" height="40">
-          <div><div class="tips-brand">${esc(RESTAURANT)}</div><div class="tips-title">Hi ${esc(emp.name.split(' ')[0])}</div></div>
+    <div class="tp">
+      <!-- step 1 header: who you are -->
+      <div class="tp-top" data-when="1">
+        <span class="tp-mark">${esc(markOf(RESTAURANT))}</span>
+        <div class="tp-who">
+          <div class="tp-brand">${esc(RESTAURANT)}</div>
+          <div class="tp-name">Hi ${esc(first)}</div>
         </div>
-        <p class="tips-lead">Fill this in at the end of your shift. Your manager only sees the totals.</p>
-        ${err}
-        <form method="post" action="/tips" class="tips-form">
-          <input type="hidden" name="token" value="${token}">
+        <a href="/tips">Not you?</a>
+      </div>
 
-          ${positionField}
+      <!-- step 2 header: back out of it -->
+      <div class="tp-navbar" data-when="2" hidden>
+        <button type="button" class="tp-back" data-goto="1">&larr; Back</button>
+        <span class="tp-navt">Your tips</span>
+        <span class="tp-count"><b>2</b> / 3</span>
+      </div>
 
-          <label class="tips-field">Date you worked
-            <input name="date" class="tips-in" type="date" value="${today}" max="${today}" required>
-          </label>
+      <form method="post" action="/tips" id="report">
+        <input type="hidden" name="token" value="${token}">
 
-          <div class="tips-field">Which shift
-            <div class="seg">
-              <input type="radio" name="daypart" id="dp-cafe" value="cafe" required>
-              <label for="dp-cafe">Café</label>
-              <input type="radio" name="daypart" id="dp-dinner" value="dinner" checked>
-              <label for="dp-dinner">Dinner</label>
+        <div class="tp-body">
+          <div data-when="1">
+            <h1 class="tp-h">End-of-shift report.</h1>
+            <p class="tp-lead">Fill this in when you close out. Your manager only sees the totals.</p>
+            ${err}
+          </div>
+
+          <div class="tp-prog">
+            <span class="on"></span><span data-seg="2"></span><span data-seg="3"></span>
+          </div>
+          <p class="tp-stepk" id="stepk">Step 1 of 3 &middot; who &amp; when</p>
+
+          <!-- ---------------- step 1 ---------------- -->
+          <div id="step1">
+            <div class="tp-sec">
+              <div class="tp-seck">What you worked</div>
+              ${positionField}
+            </div>
+
+            <div class="tp-sec">
+              <div class="tp-seck">Date you worked</div>
+              <div class="tp-row">
+                <span class="tp-date" id="datetext">${esc(usDate(today))}</span>
+                <input type="date" name="date" id="f-date" value="${today}" max="${today}" required hidden>
+                <button type="button" class="tp-link" id="datechange">change</button>
+              </div>
+            </div>
+
+            <div class="tp-sec">
+              <div class="tp-seck">Which shift</div>
+              <!-- Nothing is preselected. A default here is a guess, and a
+                   guess that is wrong files somebody's tips against the wrong
+                   service — which the manager then has to unpick by hand. -->
+              <div class="tp-toggle">
+                <input type="radio" name="daypart" id="dp-cafe" value="cafe" required>
+                <label for="dp-cafe">Caf&eacute; <span class="tick">&#10003;</span></label>
+                <input type="radio" name="daypart" id="dp-dinner" value="dinner" required>
+                <label for="dp-dinner">Dinner <span class="tick">&#10003;</span></label>
+              </div>
+              <p class="tp-pick" id="pickshift" hidden>Choose which shift you worked to carry on.</p>
+            </div>
+
+            <div class="tp-sec" id="server-sales">
+              <div class="tp-seck">Your sales tonight</div>
+              <div class="tp-field">
+                <span class="tp-label">Kitchen / food sales</span>
+                ${money('food')}
+              </div>
+              <div class="tp-field">
+                <span class="tp-label">Coffee &amp; beverage sales</span>
+                ${money('coffee')}
+              </div>
+              <div class="tp-field">
+                <span class="tp-label">Alcohol sales <i>&middot; leave blank if none</i></span>
+                ${money('alcohol')}
+              </div>
             </div>
           </div>
 
-          <div class="tips-group" id="server-sales">
-            <div class="tips-group-t">Your sales tonight</div>
-            <label class="tips-field">Kitchen food sales
-              <div class="tips-money"><span>$</span><input name="food" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
-            </label>
-            <label class="tips-field">Coffee &amp; beverage sales
-              <div class="tips-money"><span>$</span><input name="coffee" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
-            </label>
-            <label class="tips-field" style="margin-bottom:0">Alcohol sales
-              <div class="tips-money"><span>$</span><input name="alcohol" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
-              <span class="tips-hint">Leave blank or enter 0 if none.</span>
-            </label>
+          <!-- ---------------- step 2 ---------------- -->
+          <div id="step2">
+            <div class="tp-field" style="margin-top:0">
+              <span class="tp-label">Cash tips you took home</span>
+              ${money('cash_tips', 'big')}
+            </div>
+
+            <div class="tp-field">
+              <span class="tp-label">Card tips</span>
+              ${money('card_tips')}
+              <p class="tp-help">From your closeout slip. Leave blank if you don't have it.</p>
+            </div>
+
+            <div class="tp-field">
+              <span class="tp-label">Note <i>&middot; optional</i></span>
+              <textarea name="note" class="tp-note" maxlength="500"
+                placeholder="Anything unusual about tonight's numbers, or a message for your manager&hellip;"></textarea>
+            </div>
+
+            <div class="tp-tot">
+              <div class="tp-tot-h">Tonight's totals &mdash; what your manager sees</div>
+              <div class="tp-tot-r" id="row-sales"><span>Sales rung</span><b id="t-sales">$0.00</b></div>
+              <div class="tp-tot-r"><span>Cash tips</span><b id="t-cash">$0.00</b></div>
+              <div class="tp-tot-r"><span>Card tips</span><b id="t-card">$0.00</b></div>
+              <div class="tp-tot-r sum"><span>Total tips</span><b id="t-tips">$0.00</b></div>
+            </div>
           </div>
+        </div>
+      </form>
 
-          <label class="tips-field">Cash tips you took home
-            <div class="tips-money"><span>$</span><input name="cash_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00" required></div>
-          </label>
-
-          <label class="tips-field">Card tips
-            <div class="tips-money"><span>$</span><input name="card_tips" class="tips-in" type="number" step="0.01" min="0" placeholder="0.00"></div>
-            <span class="tips-hint">From your closeout slip. Leave blank if you don't have it.</span>
-          </label>
-
-          <label class="tips-field">Note <span class="tips-opt">optional</span>
-            <textarea name="note" class="tips-in tips-note" rows="2" maxlength="500"
-              placeholder="Anything you want to pass along…"></textarea>
-            <span class="tips-hint">A thought, comment or concern for your manager — or anything unusual about tonight's numbers.</span>
-          </label>
-
-          <button class="tips-submit" type="submit">Submit</button>
-        </form>
-        <a class="tips-signout" href="/tips">Not ${esc(emp.name.split(' ')[0])}? Start over</a>
-        <div class="tips-build">v${esc(BUILD)}</div>
+      <div class="tp-foot">
+        <button class="tp-go" type="button" id="next" data-when="1">Next: your tips &rarr;</button>
+        <button class="tp-go" type="submit" form="report" data-when="2" hidden>Submit report</button>
+        <p class="tp-reassure" data-when="2" hidden>You can edit until your manager sends the shift.</p>
       </div>
+      <div class="tp-build" data-when="1">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
     </div>
-    <script>
-      // Sales only apply to servers — hide them entirely for support roles.
-      (function () {
-        var pos = document.getElementById('tip-position');
-        var sales = document.getElementById('server-sales');
-        if (!pos || !sales) return;
-        function syncSales() { sales.style.display = pos.value === 'server' ? '' : 'none'; }
-        pos.addEventListener('change', syncSales);
-        syncSales();
-      })();
-    </script>`;
+    ${reportScript()}`;
   return layout('Log your tips', body, { bare: true });
+}
+
+/** 2026-07-22 → "07 / 22 / 2026", the way the mock reads a date back. */
+function usDate(iso) {
+  const [y, m, d] = String(iso).split('-');
+  return `${m} / ${d} / ${y}`;
+}
+
+function reportScript() {
+  return `<script>
+  (function () {
+    var form = document.getElementById('report');
+    if (!form) return;
+    var $ = function (id) { return document.getElementById(id); };
+    var at = 1;
+
+    // Step 2 is hidden HERE rather than in the markup: if this script never
+    // runs, the page is the single long form it has always been, and the
+    // submit button at the bottom still posts every field.
+    $('step2').hidden = true;
+    var showFor = function (n) {
+      var all = document.querySelectorAll('[data-when]');
+      for (var i = 0; i < all.length; i++) all[i].hidden = all[i].dataset.when !== String(n);
+    };
+
+    function go(n) {
+      at = n;
+      $('step1').hidden = n !== 1;
+      $('step2').hidden = n !== 2;
+      showFor(n);
+      $('stepk').textContent = n === 1 ? 'Step 1 of 3 · who & when' : 'Step 2 of 3 · your tips';
+      var seg = document.querySelector('[data-seg="2"]');
+      if (seg) seg.className = n >= 2 ? 'on' : '';
+      window.scrollTo(0, 0);
+      total();
+    }
+    go(1);
+
+    // --- step 1 gate -------------------------------------------------------
+    // The shift is deliberately unset, so this is the one thing that can stop
+    // you moving on. Everything else is allowed to be blank.
+    $('next').addEventListener('click', function () {
+      var picked = form.querySelector('input[name="daypart"]:checked');
+      if (!picked) {
+        $('pickshift').hidden = false;
+        $('pickshift').scrollIntoView({ block: 'center' });
+        return;
+      }
+      go(2);
+    });
+    form.addEventListener('change', function (e) {
+      if (e.target.name === 'daypart') $('pickshift').hidden = true;
+    });
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-goto]');
+      if (b) go(Number(b.dataset.goto));
+    });
+
+    // --- the date reads as text until you want to change it ----------------
+    var dc = $('datechange');
+    if (dc) dc.addEventListener('click', function () {
+      var f = $('f-date');
+      f.hidden = false; $('datetext').hidden = true; dc.hidden = true;
+      if (f.showPicker) { try { f.showPicker(); } catch (err) { f.focus(); } } else f.focus();
+    });
+
+    // --- steppers ----------------------------------------------------------
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-bump]');
+      if (!b) return;
+      var f = $('f-' + b.dataset.bump);
+      var v = Math.round((parseFloat(f.value) || 0) * 100) + Number(b.dataset.by) * 100;
+      if (v < 0) v = 0;
+      f.value = (v / 100).toFixed(2);
+      total();
+    });
+
+    // --- sales are a server thing ------------------------------------------
+    var pos = $('tip-position');
+    var sales = $('server-sales');
+    function syncSales() {
+      var isServer = pos.value === 'server';
+      sales.hidden = !isServer;
+      $('row-sales').hidden = !isServer;
+      total();
+    }
+    if (pos && sales) { pos.addEventListener('change', syncSales); syncSales(); }
+
+    // --- running totals ----------------------------------------------------
+    // The trust feature. Someone who can see what their manager will see is
+    // far less likely to submit a number they meant to fix later.
+    function cents(id) { return Math.round((parseFloat(($(id) || {}).value) || 0) * 100); }
+    function usd(c) { return '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    function total() {
+      var isServer = !pos || pos.value === 'server';
+      var s = isServer ? cents('f-food') + cents('f-coffee') + cents('f-alcohol') : 0;
+      var cash = cents('f-cash_tips');
+      var card = cents('f-card_tips');
+      $('t-sales').textContent = usd(s);
+      $('t-cash').textContent = usd(cash);
+      $('t-card').textContent = usd(card);
+      $('t-tips').textContent = usd(cash + card);
+    }
+    form.addEventListener('input', total);
+
+    // Tidy a figure when you leave it: "128" reads back as "128.00", the way
+    // the totals panel below already prints it. Done on blur, never while
+    // typing — reformatting under someone's fingers moves the caret.
+    form.addEventListener('focusout', function (e) {
+      var el = e.target;
+      if (!el.hasAttribute || !el.hasAttribute('data-money')) return;
+      var raw = String(el.value).trim();
+      if (raw === '') return;
+      var n = parseFloat(raw);
+      el.value = isFinite(n) && n >= 0 ? n.toFixed(2) : '';
+      total();
+    });
+    total();
+  })();
+  </script>`;
 }
 
 app.post('/tips/start', (req, res) => {
@@ -2361,7 +2664,7 @@ app.get('/employees', (req, res) => {
       <label>Name <input name="name" required></label>
       <label>Main role <select name="role">${roles.map((r) => `<option value="${r}">${r}</option>`).join('')}</select></label>
       <label>Email <input name="email" type="email" placeholder="for daily summary"></label>
-      <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="6" placeholder="servers only"></label>
+      <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="servers only"></label>
       <label>Pay type <select name="pay_type"><option value="hourly">Hourly</option><option value="salary">Salary</option></select></label>
       <label>Hourly wage <input name="rate" type="number" step="0.01" min="0" placeholder="0.00"></label>
       <label>Benugin ID <input name="pos_id" placeholder="optional"></label>
@@ -2375,6 +2678,22 @@ app.get('/employees', (req, res) => {
 // Staff sign in to the tips page with their PIN alone, so a shared PIN would
 // silently file one person's tips under the other. Caught here, where you can
 // still do something about it, rather than at 1am on a close.
+/**
+ * A PIN is exactly PIN_LEN digits, or nothing at all.
+ *
+ * The staff keypad draws a fixed number of cells and submits the moment they
+ * are full, so a five-digit PIN saved here would lock that person out of the
+ * tips page with no way to tell why. Refused at the door rather than truncated
+ * — silently storing a different PIN than the one that was typed is worse.
+ */
+function badPin(pin) {
+  const clean = String(pin == null ? '' : pin).trim();
+  if (clean === '') return null;
+  return new RegExp(`^\\d{${PIN_LEN}}$`).test(clean)
+    ? null
+    : `A PIN has to be exactly ${PIN_LEN} digits — staff type it on a ${PIN_LEN}-key pad, so nothing else will let them in.`;
+}
+
 function pinTaken(pin, exceptId) {
   const clean = String(pin || '').trim();
   if (!clean) return null;
@@ -2384,6 +2703,8 @@ function pinTaken(pin, exceptId) {
 app.post('/employees', (req, res) => {
   const { name, role, email, pin, rate, pos_id, pay_type } = req.body;
   if (!name || !role) return res.redirect('/employees?err=1&msg=' + encodeURIComponent('Name and role required.'));
+  const pinErr = badPin(pin);
+  if (pinErr) return res.redirect('/employees?err=1&msg=' + encodeURIComponent(pinErr));
   const clash = pinTaken(pin, 0);
   if (clash) {
     return res.redirect('/employees?err=1&msg=' + encodeURIComponent(
@@ -2415,7 +2736,7 @@ app.get('/employees/:id/edit', (req, res) => {
       <label>Name <input name="name" value="${val(e.name)}" required></label>
       <label>Main role <select name="role">${roles.map((r) => `<option value="${r}"${r === e.role ? ' selected' : ''}>${r}</option>`).join('')}</select></label>
       <label>Email <input name="email" type="email" value="${val(e.email)}"></label>
-      <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="6" value="${val(e.pin)}"></label>
+      <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" value="${val(e.pin)}"></label>
       <label>Pay type <select name="pay_type"><option value="hourly"${isSalary ? '' : ' selected'}>Hourly</option><option value="salary"${isSalary ? ' selected' : ''}>Salary</option></select></label>
       <label>Default hourly wage <input name="rate" type="number" step="0.01" min="0" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}"></label>
       <label>Salary (if salaried) <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" placeholder="per pay period"></label>
@@ -2446,6 +2767,8 @@ app.post('/employees/:id', (req, res) => {
   if (!e) return res.status(404).end();
   const { name, role, email, pin, rate, pos_id, pay_type } = req.body;
   if (!name || !role) return res.redirect(`/employees/${e.id}/edit?err=1&msg=` + encodeURIComponent('Name and role required.'));
+  const pinErr = badPin(pin);
+  if (pinErr) return res.redirect(`/employees/${e.id}/edit?err=1&msg=` + encodeURIComponent(pinErr));
   const clash = pinTaken(pin, e.id);
   if (clash) {
     return res.redirect(`/employees/${e.id}/edit?err=1&msg=` + encodeURIComponent(

@@ -1,0 +1,297 @@
+/* ===========================================================================
+   ZWIN — STAFF PORTAL
+   ---------------------------------------------------------------------------
+   The PIN sign-in and end-of-shift report staff fill in on their phones.
+   ~99% of use is a phone, so this is written for 390px first and widens into a
+   centred column; there is no desktop layout to speak of.
+
+   Same broadsheet language as the manager side — cream page, hairline rules,
+   section kickers, radius 0, no shadows, no card floating on a blue field —
+   but its own file and its own class prefix. The manager app is a dense
+   information display; this is one person, standing up, at 10:30pm, with one
+   hand. Everything here is at least 56px tall for that reason.
+
+   Tokens come from broadsheet.css, which is loaded first. The three below are
+   the ones this screen adds.
+   ======================================================================== */
+
+:root, :root[data-theme="day"] {
+  --tp-sel:     #eef2fc;   /* the chosen half of a toggle */
+  --tp-panel:   #efe6d6;   /* the totals panel, a shade darker than the page */
+  --tp-field:   #cabfa4;   /* field borders — warmer than the manager side's */
+}
+:root[data-theme="night"] {
+  --tp-sel:     rgba(143, 168, 255, .13);
+  --tp-panel:   #221f1a;
+  --tp-field:   #46423a;
+}
+
+body.bare {
+  margin: 0;
+  background: var(--paper);
+  color: var(--body);
+  font-family: var(--sans);
+  -webkit-text-size-adjust: 100%;
+}
+
+.tp {
+  max-width: 460px; margin: 0 auto; min-height: 100vh;
+  min-height: 100dvh;               /* iOS: the real height, not the pre-scroll one */
+  display: flex; flex-direction: column;
+  background: var(--paper);
+}
+.tp * { box-sizing: border-box; }
+/* Radius 0 is a rule of this design, and styles.css rounds every textarea to
+   10px for the manager forms. Stated once here rather than per control. */
+.tp input, .tp textarea, .tp select, .tp button { border-radius: 0; }
+/* The step switcher hides things with the `hidden` attribute, and the UA rule
+   for it — [hidden] { display: none } — is a single attribute selector that
+   loses to any class here that sets a display. Without this, hiding step 2
+   hid nothing: both headers and both footer buttons drew at once. */
+.tp [hidden], .tp[hidden] { display: none !important; }
+
+/* --- the bar across the top ---------------------------------------------- */
+.tp-top {
+  display: flex; align-items: center; gap: 13px;
+  padding: 16px 20px 15px;
+  border-bottom: 2px solid var(--ink);
+}
+.tp-mark {
+  width: 40px; height: 40px; flex: none;
+  border: 1px solid var(--ink); border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  letter-spacing: .04em; color: var(--ink);
+}
+.tp-who { min-width: 0; flex: 1; }
+.tp-brand {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tp-name {
+  font-size: 17px; font-weight: 600; color: var(--headline);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tp-top a { color: var(--accent); font-size: 15px; font-weight: 500; text-decoration: none; }
+
+/* Step 2 swaps the identity bar for a back/title/count one. */
+.tp-navbar {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  padding: 14px 20px; border-bottom: 2px solid var(--ink);
+}
+.tp-navbar .tp-back {
+  justify-self: start; background: none; border: 0; padding: 6px 4px; cursor: pointer;
+  font-family: var(--sans); font-size: 16px; font-weight: 500; color: var(--accent);
+}
+.tp-navbar .tp-navt { font-size: 16px; font-weight: 600; color: var(--headline); }
+.tp-navbar .tp-count {
+  justify-self: end; font-family: var(--mono); font-size: 14px; color: var(--faint);
+}
+.tp-navbar .tp-count b { color: var(--ink); font-weight: 500; }
+
+/* --- body ----------------------------------------------------------------- */
+.tp-body { flex: 1; padding: 26px 20px 30px; }
+.tp-h {
+  font-family: var(--serif); font-weight: 500; font-size: 34px; line-height: 1.1;
+  letter-spacing: -.01em; color: var(--headline); margin: 0;
+}
+.tp-lead { font-size: 16px; line-height: 1.5; color: var(--body); margin: 14px 0 0; }
+.tp-lead + .tp-sec, .tp-lead + form .tp-sec:first-child { margin-top: 34px; }
+
+/* --- progress ------------------------------------------------------------- */
+.tp-prog { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 26px 0 12px; }
+.tp-prog span { height: 3px; background: var(--rule-light); }
+.tp-prog span.on { background: var(--accent); }
+.tp-stepk {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  margin: 0 0 22px;
+}
+
+/* --- a section, and a ruled row inside it -------------------------------- */
+.tp-sec { margin-top: 26px; }
+.tp-sec:first-of-type { margin-top: 0; }
+.tp-seck {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  padding-bottom: 9px; border-bottom: 1px solid var(--ink);
+}
+.tp-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  min-height: 56px; padding: 14px 0;
+  border-bottom: 1px solid var(--rule-light);
+}
+.tp-row-v { font-size: 22px; font-weight: 600; color: var(--headline); }
+.tp-row-h { font-size: 15px; color: var(--muted); text-align: right; }
+.tp-row a, .tp-row .tp-link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: var(--sans); font-size: 15px; color: var(--accent); text-decoration: none;
+}
+.tp-date { font-family: var(--mono); font-size: 22px; font-weight: 500; color: var(--headline); }
+/* Most people have one job and see it as plain text. The few with two get a
+   menu, which has to read as the same line — same size, same weight — not as a
+   tiny form control tucked under a heading. */
+.tp-sel-role {
+  min-height: 56px; padding: 0 34px 0 12px; max-width: 62%;
+  border: 1px solid var(--tp-field); background: var(--surface);
+  font-family: var(--sans); font-size: 20px; font-weight: 600; color: var(--headline);
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) calc(50% + 2px), calc(100% - 12px) calc(50% + 2px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+.tp-sel-role:focus { outline: none; border-color: var(--accent); }
+.tp-row input[type="date"] {
+  font-family: var(--mono); font-size: 19px; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--tp-field); padding: 8px 10px;
+  min-height: 44px;
+}
+
+/* --- the shift toggle ----------------------------------------------------- */
+/* Radios, so it works with no JavaScript and a real value posts either way. */
+.tp-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+.tp-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.tp-toggle label {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 64px; padding: 8px;
+  border: 1px solid var(--tp-field); background: var(--surface);
+  font-size: 19px; font-weight: 600; color: var(--headline); cursor: pointer;
+}
+.tp-toggle label .tick { visibility: hidden; }
+.tp-toggle input:checked + label {
+  border: 1.5px solid var(--accent); background: var(--tp-sel); color: var(--accent);
+}
+.tp-toggle input:checked + label .tick { visibility: visible; }
+.tp-toggle input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Nothing is chosen until it is chosen — see the note on the form. */
+.tp-pick {
+  margin: 12px 0 0; font-size: 14px; color: var(--warning);
+}
+
+/* --- money fields --------------------------------------------------------- */
+.tp-field { margin-top: 20px; }
+.tp-label { display: block; font-size: 16px; font-weight: 600; color: var(--headline); margin-bottom: 9px; }
+.tp-label i { font-style: normal; font-weight: 400; color: var(--muted); }
+.tp-money {
+  display: flex; align-items: center; gap: 10px;
+  min-height: 64px; padding: 0 14px;
+  border: 1px solid var(--tp-field); background: var(--surface);
+}
+.tp-money.big { border: 1.5px solid var(--ink); }
+.tp-money:focus-within { border-color: var(--accent); }
+.tp-money > .cur { font-family: var(--mono); font-size: 25px; font-weight: 600; color: var(--ink); }
+.tp-money > input {
+  flex: 1; min-width: 0; border: 0; background: none; padding: 0; outline: none;
+  font-family: var(--mono); font-size: 25px; font-weight: 500; color: var(--ink);
+  -moz-appearance: textfield;
+}
+.tp-money > input::-webkit-outer-spin-button,
+.tp-money > input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.tp-money > input::placeholder { color: var(--faint); }
+/* The steppers. A dollar a tap — the amounts here are whole-dollar most of the
+   time, and it saves opening the keyboard to fix a typo. */
+.tp-step2 { display: grid; flex: none; }
+.tp-step2 button {
+  border: 0; background: none; cursor: pointer; padding: 0 4px;
+  font-size: 13px; line-height: 1.15; color: var(--secondary);
+}
+.tp-step2 button:active { color: var(--accent); }
+.tp-help { margin: 9px 0 0; font-size: 14px; color: var(--muted); line-height: 1.45; }
+.tp-note {
+  width: 100%; min-height: 118px; padding: 14px;
+  border: 1px solid var(--tp-field); background: var(--surface);
+  font-family: var(--sans); font-size: 16px; color: var(--ink); resize: vertical;
+}
+.tp-note:focus { outline: none; border-color: var(--accent); }
+.tp-note::placeholder { color: var(--faint); }
+
+/* --- the totals panel ----------------------------------------------------- */
+/* The trust feature: what the manager will see, updating as they type. */
+.tp-tot { margin-top: 28px; background: var(--tp-panel); }
+.tp-tot-h {
+  padding: 15px 16px 13px;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--secondary); line-height: 1.5;
+}
+.tp-tot-r {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 13px 16px; border-top: 1px solid var(--rule-light);
+  font-size: 16px; color: var(--body);
+}
+.tp-tot-r b { font-family: var(--mono); font-size: 17px; font-weight: 600; color: var(--headline); }
+.tp-tot-r.sum { border-top: 2px solid var(--ink); }
+.tp-tot-r.sum span { font-weight: 600; color: var(--headline); }
+.tp-tot-r.sum b { font-size: 21px; }
+
+/* --- the bar that stays at the bottom ------------------------------------- */
+.tp-foot {
+  position: sticky; bottom: 0; z-index: 5;
+  padding: 14px 20px calc(16px + env(safe-area-inset-bottom));
+  background: var(--paper); border-top: 1px solid var(--rule-light);
+}
+.tp-go {
+  display: block; width: 100%; min-height: 60px; border: 0; cursor: pointer;
+  background: var(--accent); color: #fff;
+  font-family: var(--sans); font-size: 18px; font-weight: 600; text-align: center;
+  text-decoration: none; line-height: 60px;
+}
+.tp-go:active { background: var(--accent-hover); }
+.tp-go[disabled] { opacity: .4; cursor: not-allowed; }
+.tp-pinmsg { margin: 14px 0 0; font-size: 14px; color: var(--warning); }
+.tp-reassure { margin: 12px 0 0; text-align: center; font-size: 14px; color: var(--muted); }
+.tp-build {
+  padding: 18px 20px calc(20px + env(safe-area-inset-bottom));
+  text-align: center;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .1em; color: var(--faint);
+}
+
+/* --- sign in -------------------------------------------------------------- */
+/* "YOUR PIN" is a bare label here — the ruled kicker belongs to the report's
+   sections, and a rule above four ruled boxes is one rule too many. */
+.tp-signin .tp-seck { border-bottom: 0; padding-bottom: 0; }
+.tp-signin { margin-top: 40px; }
+.tp-pin { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; margin-top: 14px; }
+.tp-cell {
+  height: 66px; border: 1px solid var(--tp-field); background: var(--surface);
+  display: flex; align-items: center; justify-content: center;
+}
+.tp-cell.filled { border: 1.5px solid var(--ink); }
+.tp-cell.filled::after {
+  content: ''; width: 11px; height: 11px; border-radius: 50%; background: var(--ink);
+}
+.tp-cell.at { border: 1.5px solid var(--accent); border-bottom: 3px solid var(--accent); }
+
+.tp-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; margin-top: 26px; }
+.tp-keys button {
+  min-height: 70px; cursor: pointer;
+  border: 1px solid var(--tp-field); background: var(--surface);
+  font-family: var(--mono); font-size: 27px; font-weight: 500; color: var(--ink);
+}
+.tp-keys button:active { background: var(--tp-sel); border-color: var(--accent); }
+.tp-keys .ghost { border: 0; background: none; font-size: 22px; color: var(--secondary); }
+.tp-keys .ghost:active { background: none; }
+
+/* --- messages ------------------------------------------------------------- */
+.tp-err {
+  margin-top: 20px; padding: 13px 14px;
+  border-left: 3px solid var(--danger); background: var(--surface);
+  font-size: 15px; line-height: 1.45; color: var(--headline);
+}
+
+/* --- done ----------------------------------------------------------------- */
+.tp-done-k {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--positive);
+  margin-bottom: 12px;
+}
+.tp-receipt { margin-top: 26px; background: var(--tp-panel); }
+
+@media (max-width: 359px) {
+  .tp-h { font-size: 29px; }
+  .tp-keys button { min-height: 62px; font-size: 24px; }
+  .tp-cell { height: 58px; }
+}
