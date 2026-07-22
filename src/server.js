@@ -3896,6 +3896,12 @@ app.get('/sales', (req, res) => {
     : MX.range(key, today, { from: req.query.from, to: req.query.to });
   const svc = ['cafe', 'dinner'].includes(req.query.svc) ? req.query.svc : '';
 
+  // The range travels on every link into a service, so saving comes back here
+  // rather than to a default thirty days.
+  const retQ = [`r=${key}`, svc ? `svc=${svc}` : '', key === 'custom' ? `from=${r.from}&to=${r.to}` : '']
+    .filter(Boolean).join('&');
+  const openSale = (id) => `/sales/${id}?${retQ}`;
+
   const all = MX.period(r.from, r.to);
   const prev = MX.previous(r.from, r.to);
   const rows = svc ? all.rows.filter((x) => x.daypart === svc) : all.rows;
@@ -3973,23 +3979,23 @@ app.get('/sales', (req, res) => {
 
   // --- highlights: only things the data actually supports -------------------
   const hi = [];
-  if (best) hi.push(`🏆 Best day was <b>${weekday(best[0])} ${best[0].slice(5)}</b> at <b>${money(best[1])}</b>.`);
+  if (best) hi.push(`Best day was <b>${weekday(best[0])} ${best[0].slice(5)}</b> at <b>${money(best[1])}</b>.`);
   if (prevSales > 0) {
     const d = ((sales - prevSales) / prevSales) * 100;
-    hi.push(`${d >= 0 ? '📈' : '📉'} Sales are <b>${d >= 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}%</b> on the period before.`);
+    hi.push(`Sales are <b>${d >= 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}%</b> on the period before.`);
   }
   const mixTotal = mixRows.reduce((a, x) => a + x.value, 0);
   if (mixTotal) {
     const top = [...mixRows].sort((a, b) => b.value - a.value)[0];
-    hi.push(`${top.label === 'Coffee' ? '☕' : top.label === 'Alcohol' ? '🍸' : '🍳'} <b>${top.label}</b> was <b>${Math.round((top.value / mixTotal) * 100)}%</b> of revenue.`);
+    hi.push(`<b>${top.label}</b> was <b>${Math.round((top.value / mixTotal) * 100)}%</b> of revenue.`);
   }
   if (services.length > 1) {
     const t = [...services].sort((a, b) => b.sales - a.sales)[0];
-    hi.push(`🔥 <b>${t.label}</b> brought in the most, at <b>${money(t.sales)}</b>.`);
+    hi.push(`<b>${t.label}</b> brought in the most, at <b>${money(t.sales)}</b>.`);
   }
   if (byDay.size >= 7 && avgDaily) {
     const quiet = dayList.filter(([, v]) => v < avgDaily * 0.82);
-    if (quiet.length) hi.push(`🗓️ ${quiet.length} day${quiet.length === 1 ? ' was' : 's were'} more than 18% below the average.`);
+    if (quiet.length) hi.push(`${quiet.length} day${quiet.length === 1 ? ' was' : 's were'} more than 18% below the average.`);
   }
 
   // --- daily rows -----------------------------------------------------------
@@ -4004,7 +4010,7 @@ app.get('/sales', (req, res) => {
   const dayRows = [...rows].sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart)).slice(0, 60).map((x) => {
     const split = x.food + x.coffee + x.alcohol + x.other > 0;
     const none = x.sales === 0;
-    return `<a class="srow2${none ? ' srow2-todo' : ''}" href="/sales/${x.id}">
+    return `<a class="srow2${none ? ' srow2-todo' : ''}" href="${openSale(x.id)}">
       <span class="s2-d"><b>${Number(x.date.slice(8))}</b><i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}</i></span>
       <span class="s2-s">${dp(x.daypart)}${none ? '<span class="s2-tag">no sales yet</span>' : ''}</span>
       <span class="s2-n"><i>Sales</i><b>${none ? '—' : money(x.sales)}</b></span>
@@ -4043,57 +4049,59 @@ app.get('/sales', (req, res) => {
   const ledgerRow = (x) => {
     const split = x.food + x.coffee + x.alcohol + x.other > 0;
     const none = x.sales === 0;
-    // A backfilled day carries what SERVERS rang, which is not the whole
-    // restaurant — counter and to-go revenue is not in it. The figure shown is
-    // a floor, not the total, and the row has to say so or it reads as final.
     const serverOnly = !none && !split && x.server_sales > 0;
     const st = shiftState(x, today);
     const cr = cash.get(`${x.date}|${x.daypart}`);
     const cs = cr ? CASH.status(cr) : null;
-    const parts = [
-      split && x.food ? `Food ${money(x.food)}` : '',
-      split && x.coffee ? `Coffee ${money(x.coffee)}` : '',
-      split && x.alcohol ? `Alcohol ${money(x.alcohol)}` : '',
-      split && x.other ? `Other ${money(x.other)}` : '',
-      x.tips ? `Tips ${money(x.tips)}` : '',
-    ].filter(Boolean);
-    return `<details class="lrow${none ? ' lrow-todo' : ''}">
-      <summary>
-        <span class="lr-d"><b>${Number(x.date.slice(8))}</b><i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' })}</i></span>
-        <span class="lr-m">
-          <span class="lr-t">${dp(x.daypart)}<span class="pill ${st.cls}">${esc(st.label)}</span>${serverOnly ? '<span class="lr-tag">server sales only</span>' : ''}</span>
-          <span class="lr-b">${parts.length ? parts.join(' · ')
-            : none ? 'No sales entered'
-            : serverOnly ? 'What servers rang — the POS total has not been entered'
-            : 'Not split by category'}</span>
-        </span>
-        <span class="lr-v">${none ? '<i>—</i>' : money(x.sales)}</span>
+    const dow = new Date(x.date + 'T00:00:00').getDay();
+    const weekend = dow === 0 || dow === 5 || dow === 6;
+
+    return `<details class="bs-srow bs-dayrow${weekend ? ' wknd' : ''}" id="s${x.id}">
+      <summary class="bs-sr">
+        <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8))}</span>
+        <span class="bs-lr-s">${esc(dp(x.daypart))}${serverOnly ? '<i class="bs-tag">server only</i>' : ''}${none ? '<i class="bs-tag warn">no sales</i>' : ''}</span>
+        <span class="bs-sr-f">${none ? '<span class="bs-em">—</span>' : money(x.sales)}</span>
+        <span class="bs-sr-f muted">${split && x.food ? money(x.food) : '<span class="bs-em">—</span>'}</span>
+        <span class="bs-sr-f muted">${split && x.coffee ? money(x.coffee) : '<span class="bs-em">—</span>'}</span>
+        <span class="bs-sr-f muted">${x.tips ? money(x.tips) : '<span class="bs-em">—</span>'}</span>
+        <span class="bs-sr-e">${canWrite() ? (none ? 'Enter' : 'Edit') : ''}</span>
       </summary>
-      <div class="lr-x">
-        <div class="lr-grid">
-          ${[['Food', x.food], ['Coffee', x.coffee], ['Alcohol', x.alcohol], ['Other', x.other]]
-            .map(([l, v]) => `<div><i>${l}</i><b>${split ? money(v) : '—'}</b></div>`).join('')}
+      <div class="bs-dayx">
+        <div class="bs-daygrid">
+          ${[['Kitchen', x.food], ['Coffee', x.coffee], ['Alcohol', x.alcohol], ['Other', x.other]]
+            .map(([l, val]) => `<div><i>${l}</i><b>${split ? money(val) : '—'}</b></div>`).join('')}
           <div><i>Tips</i><b>${x.tips ? money(x.tips) : '—'}</b></div>
-          <div><i>Hours</i><b>${x.hours ? Math.round(x.hours * 10) / 10 : '—'}</b></div>
+          <div><i>Hours</i><b>${x.hours ? (Math.round(x.hours * 10) / 10).toFixed(1) : '—'}</b></div>
           <div><i>Staff</i><b>${x.people || '—'}</b></div>
-          <div><i>Drawer</i><b class="${cs ? 'c-' + cs.key : ''}">${cs ? esc(cs.label) : '—'}</b></div>
+          <div><i>Status</i><b>${esc(st.label)}</b></div>
+          <div><i>Drawer</i><b>${cs ? esc(cs.label) : '—'}</b></div>
         </div>
-        <div class="lr-acts">
-          ${canWrite() ? `<a class="btn btn-sm btn-primary" href="/sales/${x.id}">${none ? 'Enter sales' : 'Edit sales'}</a>` : ''}
-          ${navAllowed('/shifts') ? `<a class="btn btn-sm" href="/shifts/${x.id}">Open the shift</a>` : ''}
-          ${cr ? `<a class="btn btn-sm" href="/cash/${cr.id}">Drawer</a>` : ''}
+        <div class="bs-dayacts">
+          ${canWrite() ? `<a class="bs-btn-sm" href="${openSale(x.id)}">${none ? 'Enter sales' : 'Edit sales'}</a>` : ''}
+          ${navAllowed('/shifts') ? `<a class="bs-act" href="/shifts/${x.id}">Open the shift →</a>` : ''}
+          ${cr ? `<a class="bs-act" href="/cash/${cr.id}">Drawer →</a>` : ''}
         </div>
       </div>
     </details>`;
   };
 
-  const ledger = months.map((mo, i) => {
+  const ledger = months.map((mo) => {
     const tot = mo.list.reduce((a, x) => a + x.sales, 0);
-    return `<details class="lmonth" ${i === 0 ? 'open' : ''}>
-      <summary><span class="lm-n">${esc(MONTH_LBL(mo.ym))}</span>
-        <span class="lm-c">${mo.list.length} service${mo.list.length === 1 ? '' : 's'}</span>
-        <span class="lm-v">${money(tot)}</span></summary>
-      <div class="lrows">${mo.list.map(ledgerRow).join('')}</div>
+    const tips2 = mo.list.reduce((a, x) => a + x.tips, 0);
+    const todo = mo.list.filter((x) => x.sales === 0).length;
+    return `<details class="bs-month" data-month>
+      <summary class="bs-month-h">
+        <span class="bs-kicker">${esc(MONTH_LBL(mo.ym))}</span>
+        <span class="bs-month-meta">${mo.list.length} service${mo.list.length === 1 ? '' : 's'}
+          ${todo ? `· <b class="warn">${todo} without sales</b>` : '· <b class="ok">all entered</b>'}</span>
+        <span class="bs-month-tot"><b>${money(tot)}</b>${tips2 ? ` + ${money(tips2)} tips` : ''}</span>
+        <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
+      </summary>
+      <div class="bs-shead bs-dayhead">
+        <span>Date</span><span>Service</span>
+        <span class="r">Sales</span><span class="r">Kitchen</span><span class="r">Coffee</span><span class="r">Tips</span><span></span>
+      </div>
+      <div class="bs-srows">${mo.list.map(ledgerRow).join('')}</div>
     </details>`;
   }).join('');
 
@@ -4177,71 +4185,103 @@ app.get('/sales', (req, res) => {
       : null;
   }
 
+  const statCell = (label, value, sub) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const headline = sales
+    ? `${brief(sales)} rung${svc ? ` on ${esc(dp(svc))}` : ''}${prevSales ? `, ${
+        sales >= prevSales ? 'up' : 'down'} ${Math.abs(((sales - prevSales) / prevSales) * 100).toFixed(1)}% on the period before.` : '.'}`
+    : 'Nothing rung in this period.';
+
   res.send(layout('Sales', `
     ${flash(req)}
-    <div class="sp">
-      <div class="sp-head">
-        <div class="sp-title">
-          <h1>Sales</h1>
-          <p>Where the money came from. Costs and margins are on <a class="link" href="/costs">Performance</a>.</p>
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <p class="bs-greet">Sales<span class="bs-greet-d">${esc(r.from)} — ${esc(r.to)}</span></p>
+          <h1 class="bs-headline">${headline}</h1>
+          <p class="bs-subline">Where the money came from. What it cost is on
+            <a class="bs-act" href="/costs">Performance</a>.</p>
         </div>
         <div class="sp-filters">${filterSheet}</div>
       </div>
-      <p class="sp-ctx">${ctxLine}</p>
+
+      <div class="bs-strip">
+        ${statCell('Total sales', brief(sales), `${traded.length} service${traded.length === 1 ? '' : 's'} with figures`)}
+        ${statCell('Average day', avgDaily === null ? '—' : brief(avgDaily), byDay.size ? `over ${byDay.size} day${byDay.size === 1 ? '' : 's'} traded` : 'nothing traded')}
+        ${statCell('Per service', perService === null ? '—' : brief(perService), 'services with figures only')}
+        ${statCell('Best day', best ? brief(best[1]) : '—', best ? esc(whenOf(best[0])) : 'nothing yet')}
+        ${statCell('Tips', tips ? brief(tips) : '—', tips ? 'collected in the period' : 'none reported')}
+      </div>
+
       ${outsideLine}
 
-      ${cards}
-
-      <section class="pcard sp-chart">
-        <div class="pcard-h"><b>Sales trend</b><span class="muted" id="sp-legend">daily${svc ? ` · ${esc(dp(svc))}` : ''}</span></div>
-        ${CH.lineChart([{ label: 'Sales', values: chartVals, area: true }],
-          { height: 250, empty: 'No days with sales in this period.' })}
-        <div class="sp-point" id="sp-point" hidden></div>
-      </section>
-
-      <div class="pgrid2">
-        <section class="pcard">
-          <div class="pcard-h"><b>Where it came from</b><span class="muted">${mixTotal ? money(mixTotal) + ' split' : 'not split'}</span></div>
-          ${CH.shareBars(mixRows, { empty: 'No category totals entered for this period.' })}
-          ${m.unsplit ? `<p class="rangenote" style="margin:12px 0 0">${money(m.unsplit)} came from services entered before category totals existed, so it can't be split.</p>` : ''}
+      <div class="bs-cols2">
+        <section>
+          <div class="bs-sec-h"><span class="bs-kicker">Sales, day by day</span>
+            <span class="bs-sec-note">${svc ? esc(dp(svc)) : 'whole restaurant'}</span></div>
+          <div class="bs-chart">${CH.lineChart([{ label: 'Sales', values: chartVals, area: true }],
+            { height: 240, empty: 'No days with sales in this period.' })}</div>
+          <div class="sp-point" id="sp-point" hidden></div>
         </section>
-        <section class="pcard">
-          <div class="pcard-h"><b>Highlights</b></div>
-          ${hi.length ? `<ul class="hilite">${hi.map((h) => `<li>${h}</li>`).join('')}</ul>`
-            : '<div class="panel-empty">Trade for a few more days and the highlights fill in.</div>'}
+        <section>
+          <div class="bs-sec-h"><span class="bs-kicker">Where it came from</span>
+            <span class="bs-sec-note">${mixTotal ? money(mixTotal) + ' split' : 'not split'}</span></div>
+          ${mixRows.length ? `<div class="bs-share">${mixRows.map((x) => {
+            const pct = (x.value / mixTotal) * 100;
+            return `<div class="bs-share-r">
+              <span class="bs-share-n">${esc(x.label)}</span>
+              <b class="bs-fig">${money(x.value)}</b>
+              <i class="bs-share-p">${pct.toFixed(0)}%</i>
+              <span class="bs-share-t"><span style="width:${pct.toFixed(1)}%"></span></span>
+            </div>`;
+          }).join('')}</div>` : '<p class="bs-clear">No category totals entered for this period.</p>'}
+          ${m.unsplit ? `<p class="bs-note">${money(m.unsplit)} came from services entered before
+            category totals existed, so it cannot be split.</p>` : ''}
+
+          ${services.length > 1 ? `
+            <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">By service</span></div>
+            <div class="bs-share">${services.map((x) => {
+              const t = services.reduce((a, y) => a + y.sales, 0) || 1;
+              const pct = (x.sales / t) * 100;
+              return `<div class="bs-share-r"><span class="bs-share-n">${esc(x.label)}</span>
+                <b class="bs-fig">${money(x.sales)}</b><i class="bs-share-p">${pct.toFixed(0)}%</i>
+                <span class="bs-share-t"><span style="width:${pct.toFixed(1)}%"></span></span></div>`;
+            }).join('')}</div>` : ''}
+
+          ${hi.length ? `
+            <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Worth noting</span></div>
+            <ul class="bs-hilite">${hi.map((h) => `<li>${h}</li>`).join('')}</ul>` : ''}
         </section>
       </div>
 
-      ${services.length > 1 ? `<section class="pcard">
-        <div class="pcard-h"><b>By service</b></div>
-        ${CH.shareBars(services.map((x, i) => ({ label: x.label, value: x.sales, color: ['#0891b2', '#7c3aed'][i % 2] })))}
-      </section>` : ''}
-
-      ${serverOnlyCount ? `<div class="sp-note">
-        <b>${serverOnlyCount} service${serverOnlyCount === 1 ? '' : 's'} show what servers rang, not a POS total.</b>
-        <i>Counter and to-go revenue is not in those figures, so they are a floor. Open any day below to enter the real total — it replaces the estimate everywhere.</i>
-      </div>` : ''}
-
-      ${awaiting.length ? `<section class="sp-todo">
-        <div class="sp-todo-h"><b>Needs sales entry</b><span>${awaiting.length}</span></div>
-        ${awaiting.slice(0, 5).map((x) => `<div class="sp-todo-r">
-          <span class="sp-todo-m"><b>${esc(whenOf(x.date, x.daypart))}</b>
-            <i>${x.tips ? 'Tips were submitted, but sales have not been entered.' : 'The service was logged with no sales.'}</i></span>
-          ${canWrite() ? `<a class="btn btn-sm btn-primary" href="/sales/${x.id}">Enter sales</a>` : ''}
-        </div>`).join('')}
-        ${awaiting.length > 5 ? `<p class="rangenote" style="padding:9px 15px;margin:0">${awaiting.length - 5} more in this period — they are marked in the ledger below.</p>` : ''}
-      </section>` : ''}
-
-      <div class="sp-lhead"><h2>Day by day</h2><span class="muted">${rows.length} service${rows.length === 1 ? '' : 's'}</span></div>
-      ${ledger || '<div class="empty2"><div class="empty2-t">No services in this range</div><div class="empty2-s">Pick a different period, or log a shift to record some.</div></div>'}
-
-      <details class="sp-pos">
-        <summary>With a POS connected<i>8 more measures</i></summary>
-        <div class="futuregrid">
-          ${['Average check', 'Transactions', 'Items sold', 'Peak hours', 'Hourly sales', 'Payment methods', 'Discounts', 'Voids']
-            .map((f) => `<span class="future">${esc(f)}</span>`).join('')}
+      ${awaiting.length ? `
+        <div class="bs-sec-h warn"><span class="bs-kicker">Needs sales entry</span>
+          <span class="bs-sec-note">${awaiting.length}</span></div>
+        <div class="bs-items">
+          ${awaiting.slice(0, 6).map((x) => `<a class="bs-item" href="${openSale(x.id)}">
+            <span class="bs-item-k amber">${esc(whenOf(x.date, x.daypart).toUpperCase())}</span>
+            <span class="bs-item-t">${x.tips ? 'Tips were submitted, no sales entered' : 'Logged with no sales'}</span>
+            <span class="bs-item-s">${x.people ? `${x.people} on · ${Math.round(x.hours)} hrs` : 'nobody on it'}<span class="bs-sep"> · </span><span class="bs-act">Enter →</span></span>
+          </a>`).join('')}
         </div>
-        <p class="rangenote" style="margin:10px 0 0">These need per-transaction data. Nothing here is estimated in the meantime.</p>
+        ${awaiting.length > 6 ? `<p class="bs-note">${awaiting.length - 6} more in this period, marked in the ledger below.</p>` : ''}` : ''}
+
+      ${serverOnlyCount ? `<p class="bs-note bs-note-wide"><b>${serverOnlyCount} service${serverOnlyCount === 1 ? '' : 's'} show what servers rang, not a POS total.</b>
+        Counter and to-go revenue is not in those figures, so they are a floor. Open any day below and the real
+        total replaces the estimate everywhere.</p>` : ''}
+
+      <div class="bs-sec-h"><span class="bs-kicker">The ledger</span>
+        <span class="bs-sec-note">${rows.length} service${rows.length === 1 ? '' : 's'}</span></div>
+      ${ledger || '<p class="bs-clear">No services in this range. Pick a different period, or log a shift.</p>'}
+
+      <details class="bs-pos">
+        <summary>With a POS connected<i>8 more measures</i></summary>
+        <div class="bs-future">
+          ${['Average check', 'Transactions', 'Items sold', 'Peak hours', 'Hourly sales', 'Payment methods', 'Discounts', 'Voids']
+            .map((f) => `<span>${esc(f)}</span>`).join('')}
+        </div>
+        <p class="bs-note">These need per-transaction data. Nothing here is estimated in the meantime.</p>
       </details>
     </div>
     <script>window.SP_DAYS = ${JSON.stringify(dayJson)};</script>
@@ -4250,6 +4290,20 @@ app.get('/sales', (req, res) => {
 
 function salesScript() {
   return `
+  // Coming back from a save lands on #sNN — a row inside a month that is shut,
+  // which the browser cannot scroll to. Open its month first, then go.
+  (function(){
+    var id = location.hash && location.hash.match(/^#s\\d+$/) ? location.hash.slice(1) : null;
+    if(!id) return;
+    var row = document.getElementById(id);
+    if(!row) return;
+    var el = row;
+    while(el){ if(el.tagName === 'DETAILS') el.open = true; el = el.parentElement; }
+    row.scrollIntoView({ block: 'center' });
+    row.classList.add('bs-justsaved');
+    setTimeout(function(){ row.classList.remove('bs-justsaved'); }, 2200);
+  })();
+
   (function(){
     var box=document.getElementById('sp-point');
     if(!box || !window.SP_DAYS) return;
@@ -4281,27 +4335,80 @@ function salesScript() {
   })();`;
 }
 
+/**
+ * Entering what the POS rang for one service.
+ *
+ * The range you were looking at travels with you. Saving used to drop you back
+ * on /sales with the default thirty days, so anyone working through May had to
+ * re-pick "all time" and scroll back down after every single day. The filter
+ * rides in hidden fields and comes back in the redirect, with an anchor on the
+ * row you just saved so the browser returns you to it.
+ */
+function salesReturn(q) {
+  const p = [];
+  if (q.r) p.push(`r=${encodeURIComponent(q.r)}`);
+  if (q.from) p.push(`from=${encodeURIComponent(q.from)}`);
+  if (q.to) p.push(`to=${encodeURIComponent(q.to)}`);
+  if (q.svc) p.push(`svc=${encodeURIComponent(q.svc)}`);
+  return p;
+}
+
 app.get('/sales/:id', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
-  if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
+  if (!sh) return res.status(404).send(layout('Not found',
+    '<div class="bs-page"><h1 class="bs-headline">No such service</h1><p class="bs-clear"><a href="/sales">← Sales</a></p></div>'));
   const inp = shiftInputs(sh.id);
   const rung = inp.servers.reduce((a, p) => a + toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol), 0);
   const v = (c) => (c ? (c / 100).toFixed(2) : '');
+  const back = salesReturn(req.query);
+  const backTo = `/sales${back.length ? '?' + back.join('&') : ''}`;
+
+  const entered = sh.total_food_cents + sh.total_coffee_cents + sh.total_alcohol_cents + sh.total_other_cents;
+  const field = (name, label, val, hint) => `
+    <label class="bs-field">
+      <span class="bs-field-l">${label}</span>
+      <span class="bs-field-w"><i>$</i><input name="${name}" type="text" inputmode="decimal"
+        value="${val}" placeholder="0.00" autocomplete="off"></span>
+      ${hint ? `<span class="bs-field-h">${hint}</span>` : ''}
+    </label>`;
 
   res.send(layout(`Sales · ${sh.date}`, `
     ${flash(req)}
-    <a class="back" href="/sales">← Sales</a>
-    <h1>${sh.date} · ${dp(sh.daypart)}</h1>
-    <p class="sub">Total rung for the whole service. Servers accounted for ${money(rung)} of it${rung ? ' — the rest is counter, to-go and anything without a server' : ''}.</p>
-    <form method="post" action="/sales/${sh.id}" class="card form grid">
-      <label>Food sales <input name="food" type="number" step="0.01" min="0" value="${v(sh.total_food_cents)}" placeholder="0.00"></label>
-      <label>Coffee &amp; beverage <input name="coffee" type="number" step="0.01" min="0" value="${v(sh.total_coffee_cents)}" placeholder="0.00"></label>
-      <label>Alcohol <input name="alcohol" type="number" step="0.01" min="0" value="${v(sh.total_alcohol_cents)}" placeholder="0.00"></label>
-      <label>Other <input name="other" type="number" step="0.01" min="0" value="${v(sh.total_other_cents)}" placeholder="0.00"></label>
-      <label class="wide">Note <input name="note" value="${esc(sh.sales_note || '')}" placeholder="optional — e.g. POS was down for an hour"></label>
-      <button class="btn btn-primary" type="submit">Save sales</button>
-    </form>
-    <p class="muted">These are net sales as your POS reports them — before tips, excluding tax. Leave a category at 0 if you don't sell it.</p>`));
+    <div class="bs-page bs-narrow">
+      <a class="bs-back" href="${backTo}">← Sales</a>
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <p class="bs-greet">${esc(dp(sh.daypart))}<span class="bs-greet-d">${esc(whenOf(sh.date))}</span></p>
+          <h1 class="bs-headline">${entered ? 'What the POS rang' : 'Enter what the POS rang'}</h1>
+        </div>
+      </div>
+      <p class="bs-lede">Net sales for the whole service — before tips, excluding tax.
+        ${rung ? `Servers accounted for <b>${money(rung)}</b> of it; the rest is counter, to-go and anything without a server.`
+        : 'No server sales are recorded against this one.'}</p>
+
+      <form method="post" action="/sales/${sh.id}" class="bs-entry">
+        ${back.map((kv) => { const [k, val] = kv.split('='); return `<input type="hidden" name="${k}" value="${esc(decodeURIComponent(val))}">`; }).join('')}
+        <div class="bs-fields">
+          ${field('food', 'Kitchen', v(sh.total_food_cents))}
+          ${field('coffee', 'Coffee', v(sh.total_coffee_cents))}
+          ${field('alcohol', 'Alcohol', v(sh.total_alcohol_cents))}
+          ${field('other', 'Other', v(sh.total_other_cents))}
+        </div>
+        <label class="bs-field bs-field-wide">
+          <span class="bs-field-l">Note</span>
+          <span class="bs-field-w"><input name="note" value="${esc(sh.sales_note || '')}"
+            placeholder="optional — the POS was down for an hour, say"></span>
+        </label>
+        <div class="bs-entry-act">
+          <button class="bs-btn" type="submit">Save sales</button>
+          <a class="bs-act" href="${backTo}">Cancel</a>
+          ${navAllowed('/shifts') ? `<a class="bs-act bs-entry-alt" href="/shifts/${sh.id}">Open the shift →</a>` : ''}
+        </div>
+      </form>
+
+      <p class="bs-note">Leave a category at zero if you do not sell it. These figures replace the
+        server-sales estimate everywhere they appear.</p>
+    </div>`));
 });
 
 app.post('/sales/:id', (req, res) => {
@@ -4312,7 +4419,10 @@ app.post('/sales/:id', (req, res) => {
     alcohol: toCents(req.body.alcohol), other: toCents(req.body.other),
     note: (req.body.note || '').trim() || null,
   });
-  res.redirect('/sales?msg=' + encodeURIComponent(`Sales saved for ${sh.date} ${dp(sh.daypart)}.`));
+  // Back to the range you were in, at the row you just saved.
+  const back = salesReturn(req.body);
+  back.push('msg=' + encodeURIComponent(`Saved — ${whenOf(sh.date, sh.daypart)}.`));
+  res.redirect(`/sales?${back.join('&')}#s${sh.id}`);
 });
 
 // ---------------------------------------------------------------------------

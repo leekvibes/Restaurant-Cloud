@@ -281,7 +281,8 @@ test('the sales page links to the form for entering what the POS rang', async ()
   const owner = await login({ password: 'dash-owner-pw' });
   const html = await (await as(owner, '/sales?r=30')).text();
   // Every service in the ledger can reach the form that records its figures.
-  assert.match(html, /href="\/sales\/\d+">(Enter|Edit) sales</, 'services link to the entry form');
+  assert.match(html, /href="\/sales\/\d+\?r=[^"]*">(Enter|Edit) sales</,
+    'services link to the entry form, carrying the range you were in');
 });
 
 test('a service with no sales entered is listed, not hidden', async () => {
@@ -294,8 +295,8 @@ test('a service with no sales entered is listed, not hidden', async () => {
     const html = await (await as(owner, '/sales?r=30')).text();
     // The whole point of the page is entering these. Listing only services
     // that already have figures hid the one row worth clicking.
-    assert.ok(html.includes(`href="/sales/${id}"`), 'the empty service is on the page');
-    assert.match(html, /lrow-todo/, 'and is marked in the ledger');
+    assert.match(html, new RegExp(`href="/sales/${id}\\?`), 'the empty service is on the page');
+    assert.match(html, /bs-tag warn">no sales</, 'and is marked in the ledger');
     assert.match(html, /Needs sales entry/, 'and called out above it');
 
   } finally {
@@ -358,7 +359,7 @@ test('a day with no service is a gap in the trend, not a zero', async () => {
   // The seed has no service today, so today is a day the chart must not claim
   // took $0. A closed Monday drawn at the axis reads as a catastrophic Monday.
   const html = await (await as(owner, '/sales?r=7')).text();
-  const svg = html.slice(html.indexOf('sp-chart'), html.indexOf('id="sp-point"'));
+  const svg = html.slice(html.indexOf('bs-chart'), html.indexOf('id="sp-point"'));
   assert.match(svg, /viewBox=/, 'the chart rendered');
   const zero = zeroLineOf(svg);
   const onAxis = plottedYs(svg).filter((y) => Math.abs(y - zero) < 0.6);
@@ -384,7 +385,7 @@ test('an unentered service is a gap too, and is not counted as a $0 day', async 
     const days = JSON.parse(html.match(/window\.SP_DAYS = (\{[\s\S]*?\});<\/script>/)[1]);
     // It is in the day map (the ledger and the todo list need it) but the
     // service has no sales, so the trend has nothing to draw for it.
-    const svg = html.slice(html.indexOf('sp-chart'), html.indexOf('id="sp-point"'));
+    const svg = html.slice(html.indexOf('bs-chart'), html.indexOf('id="sp-point"'));
     const zero = zeroLineOf(svg);
     const onAxis = plottedYs(svg).filter((y) => Math.abs(y - zero) < 0.6);
     assert.strictEqual(onAxis.length, 0,
@@ -426,22 +427,21 @@ test('the ledger groups by month and every service can be reached', async () => 
   w.close();
   try {
   const html = await (await as(owner, '/sales?r=90')).text();
-  const months = [...html.matchAll(/class="lm-n">([^<]+)</g)].map((m) => m[1]);
+  const months = [...html.matchAll(/bs-month-h">\s*<span class="bs-kicker">([^<]+)</g)].map((m) => m[1]);
   assert.ok(months.length >= 3, `grouped by month, got ${months.length}`);
   // Compared as dates, not as strings — "July" sorts before "June".
   const asDate = months.map((m) => new Date(m + ' 1').getTime());
   assert.deepStrictEqual(asDate, [...asDate].sort((a, b) => b - a), `newest month first, got ${months.join(', ')}`);
   // Only the first month is expanded; the rest are one tap away. Ninety days
   // of services rendered flat is the thing this replaced.
-  assert.strictEqual((html.match(/class="lmonth" open/g) || []).length, 1,
-    'only the newest month is expanded — ninety days rendered flat is what this replaced');
-  // `class="lrow` also matches the `lrows` container, which is one more than
-  // there are rows.
-  const rows = (html.match(/class="lrow[" ]/g) || []).length;
+  // Every month starts shut here as well, matching Shifts.
+  assert.strictEqual((html.match(/class="bs-month" data-month open/g) || []).length, 0,
+    'no month opens by default');
+  const rows = (html.match(/class="bs-srow bs-dayrow/g) || []).length;
   const links = (html.match(/href="\/shifts\/\d+">Open the shift/g) || []).length;
   assert.ok(rows > 0, 'the ledger has rows');
   assert.strictEqual(links, rows, 'every row keeps its link to the shift');
-  assert.ok((html.match(/href="\/sales\/\d+">(Enter|Edit) sales</g) || []).length >= rows,
+  assert.ok((html.match(/>(Enter|Edit) sales</g) || []).length >= rows,
     'and its link to the sales form');
   } finally {
     const w2 = new Database(DB);
@@ -465,7 +465,7 @@ test('history older than the range is offered, not silently hidden', async () =>
     assert.match(html, /services? outside this range/, 'and says how many');
     const link = html.match(/class="sp-more" href="([^"]+)"/)[1];
     const wide = await (await as(owner, link.replace(/&amp;/g, '&'))).text();
-    assert.ok(wide.includes(`href="/sales/${old}"`), 'and following it reaches the old service');
+    assert.match(wide, new RegExp(`href="/sales/${old}[?"]`), 'and following it reaches the old service');
     assert.ok(!/class="sp-more"/.test(wide), 'with nothing left outside');
   } finally {
     const w2 = new Database(DB);
@@ -488,10 +488,10 @@ test('a day standing on server sales says so, rather than looking final', async 
   w.close();
   try {
     const html = await (await as(owner, '/sales?r=30')).text();
-    assert.match(html, /class="sp-note"/, 'the page says how many are estimates');
+    assert.match(html, /bs-note-wide/, 'the page says how many are estimates');
     assert.match(html, /show what servers rang, not a POS total/);
-    assert.match(html, /server sales only/, 'and the row is tagged');
-    assert.ok(html.includes(`href="/sales/${id}"`), 'and can be opened to fix');
+    assert.match(html, /bs-tag">server only</, 'and the row is tagged');
+    assert.match(html, new RegExp(`href="/sales/${id}\\?`), 'and can be opened to fix');
   } finally {
     const w2 = new Database(DB);
     w2.prepare('DELETE FROM server_sales WHERE shift_id = ?').run(id);
@@ -745,4 +745,66 @@ test('a phone gets one door to the account, and the day it is', async () => {
   // thing had nothing on it saying what day it is.
   assert.match(html, /class="bs-greet-d">[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}</,
     'the greeting carries the day and date');
+});
+
+// --- entering sales without losing your place -----------------------------------
+
+test('the range you were looking at survives a save', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const w = new Database(DB);
+  const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(back(6)).lastInsertRowid;
+  w.close();
+  try {
+    // Working through a wide range, day by day: the link into a service has to
+    // carry the range, or saving drops you back on the default thirty days and
+    // you re-pick and re-scroll for every single day.
+    const list = await (await as(owner, '/sales?r=custom&from=2026-01-01&to=2026-12-31')).text();
+    const link = (list.match(new RegExp(`href="/sales/${id}[^"]*"`)) || [])[0];
+    assert.ok(link, `the service is in the ledger: ${link}`);
+    for (const bit of ['r=custom', 'from=2026-01-01', 'to=2026-12-31']) {
+      assert.ok(link.includes(bit), `the ledger link carries ${bit}, got ${link}`);
+    }
+
+    const form = await (await as(owner, `/sales/${id}?r=custom&from=2026-01-01&to=2026-12-31`)).text();
+    for (const [k, v] of [['r', 'custom'], ['from', '2026-01-01'], ['to', '2026-12-31']]) {
+      assert.match(form, new RegExp(`<input type="hidden" name="${k}" value="${v}"`), `${k} rides on the form`);
+    }
+    assert.match(form, /href="\/sales\?r=custom&from=2026-01-01&to=2026-12-31"/, 'and Cancel goes back to it');
+
+    const res = await post(`/sales/${id}`, {
+      food: '900', coffee: '250', alcohol: '0', other: '0',
+      r: 'custom', from: '2026-01-01', to: '2026-12-31',
+    }, owner);
+    const where = res.headers.get('location');
+    assert.match(where, /r=custom/, 'saving comes back to the same range');
+    assert.match(where, /from=2026-01-01&to=2026-12-31/);
+    assert.match(where, new RegExp(`#s${id}$`), 'at the row you just saved');
+
+    // The row lives inside a month that is shut, which the browser cannot
+    // scroll to — so the page opens its ancestors first.
+    const after = await (await as(owner, where.replace(/^https?:\/\/[^/]+/, '').split('#')[0])).text();
+    assert.match(after, /while\(el\)\{ if\(el\.tagName === 'DETAILS'\) el\.open = true;/,
+      'the month containing it is opened on arrival');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
+});
+
+test('a service filter survives a save too', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const w = new Database(DB);
+  const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(back(7)).lastInsertRowid;
+  w.close();
+  try {
+    const res = await post(`/sales/${id}`, { food: '100', r: '90', svc: 'cafe' }, owner);
+    const where = res.headers.get('location');
+    assert.match(where, /r=90/);
+    assert.match(where, /svc=cafe/, 'the service filter comes back as well');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
 });

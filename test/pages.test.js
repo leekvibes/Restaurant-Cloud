@@ -127,3 +127,35 @@ test('a record opens as well as a list', async () => {
   }
   assert.deepStrictEqual(broken, []);
 });
+
+test('no two things share a class name and fight over it', async () => {
+  // .bs-form belonged to the shift sheet's add-staff forms — a multi-column
+  // grid — and the sales entry form reused the name. It silently became a grid
+  // too and its rows drew on top of each other. Same shape as .bs-bottom a
+  // reaching the Index, and .prow before that.
+  //
+  // This does not catch every collision. It catches the one that matters: a
+  // block-level layout declared twice for two different things.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const layouts = new Map();
+  for (const m of css.matchAll(/(^|\n)(\.[a-z0-9-]+)\s*\{([^}]*)\}/g)) {
+    const [, , sel, body] = m;
+    const disp = body.match(/display:\s*(grid|flex)/);
+    if (!disp) continue;
+    if (!layouts.has(sel)) layouts.set(sel, []);
+    layouts.get(sel).push(disp[1]);
+  }
+  const conflicting = [...layouts.entries()]
+    .filter(([, kinds]) => new Set(kinds).size > 1)
+    .map(([sel, kinds]) => `${sel} declared ${kinds.join(' and ')}`);
+  assert.deepStrictEqual(conflicting, [], 'one class, one layout');
+});
+
+test('the sales entry form is not the shift sheet form', async () => {
+  const res = await fetch(`${BASE}/sales/1`, { redirect: 'manual' });
+  if (res.status !== 200) return;                     // no shift 1 in this fixture
+  const html = await res.text();
+  assert.match(html, /class="bs-entry"/, 'it has its own class');
+  assert.ok(!/<form[^>]*class="bs-form"[^>]*action="\/sales/.test(html),
+    'and does not borrow the one that lays out in columns');
+});
