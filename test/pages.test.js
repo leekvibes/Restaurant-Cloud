@@ -359,3 +359,63 @@ test('saving a row sends you back to that row', async () => {
   assert.match(loc, new RegExp(`#s${sh.id}$`), 'back to the day you entered');
   assert.match(loc, /r=30/, 'and to the range you were filtering by');
 });
+
+test('nothing outranks the headline for the headline font', () => {
+  // `.bs h1` scores a class AND an element, which beats the single class of
+  // `.bs-headline` — so the one line per page the design reserves for
+  // Newsreader came out in Geist on every page, for as long as the shell has
+  // existed. The fix is :where(), which contributes no specificity.
+  //
+  // So: inside .bs, a bare element selector may not set a font. If it wants to
+  // be the default for that element it has to say so with :where().
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const offenders = [];
+  for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const [, sel, body] = rule;
+    if (!/font-family/.test(body)) continue;
+    for (const one of sel.split(',').map((x) => x.trim())) {
+      // `.bs h1` — a class, whitespace, then a bare element with no class of
+      // its own. `:where(.bs) h1` is the same thing declawed, and fine.
+      if (/(^|\s)\.bs\s+[a-z][a-z0-9]*\s*$/.test(one) && !one.includes(':where')) {
+        offenders.push(one);
+      }
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    'wrap it in :where() so a component class can still win');
+});
+
+test('every page opens with a title in the headline treatment', async () => {
+  // Three treatments were in play: a serif headline on the redesigned pages, a
+  // 23px sans <h1> on the ones still to be rebuilt, and on two pages the page
+  // name only appeared in an 11px kicker. Whatever a page emits, it has to be
+  // something the stylesheet gives the headline treatment to.
+  const titled = /<h1[^>]*class="[^"]*bs-headline/;
+  const aliased = /class="(?:page-head|phead-t)"[\s\S]{0,400}?<h1/;
+  const missing = [];
+  for (const p of ['/', '/shifts', '/sales', '/costs', '/cash', '/payroll',
+    '/c/invoices', '/c/vendors', '/c/products', '/menu', '/employees', '/positions']) {
+    const res = await fetch(`${BASE}${p}`, { redirect: 'manual' });
+    if (res.status !== 200) continue;
+    const html = await res.text();
+    if (!titled.test(html) && !aliased.test(html)) missing.push(p);
+  }
+  assert.deepStrictEqual(missing, []);
+});
+
+test('page titles carry no emoji', async () => {
+  // Colour and shape carry meaning on these pages; a graduation cap does not.
+  // ☀ ☾ ✕ ✓ ★ → are design glyphs and stay.
+  const EMOJI = /[\u{1F300}-\u{1FAFF}]/u;
+  const found = [];
+  for (const p of ['/shifts', '/sales', '/costs', '/cash', '/payroll',
+    '/c/invoices', '/c/vendors', '/c/products', '/menu', '/employees', '/positions']) {
+    const res = await fetch(`${BASE}${p}`, { redirect: 'manual' });
+    if (res.status !== 200) continue;
+    const html = await res.text();
+    for (const [, inner] of html.matchAll(/<h1[^>]*>([\s\S]*?)<\/h1>/g)) {
+      if (EMOJI.test(inner)) found.push(`${p}: ${inner.replace(/<[^>]+>/g, '').trim().slice(0, 40)}`);
+    }
+  }
+  assert.deepStrictEqual(found, []);
+});

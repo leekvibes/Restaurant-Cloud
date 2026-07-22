@@ -91,7 +91,12 @@ body {
    it in forty places and a single survivor reads as a mistake. */
 .bs *, .bs *::before, .bs *::after { border-radius: 0 !important; box-shadow: none !important; }
 
-.bs h1, .bs h2, .bs h3 { font-family: var(--sans); color: var(--headline); }
+/* :where() so this contributes no specificity. Written as `.bs h1` it scores a
+   class and an element, which beats the single class of .bs-headline — so the
+   one line on every page that the design reserves for Newsreader has been
+   coming out in Geist since the shell shipped. Same trap as the link colour
+   below, same fix. */
+:where(.bs) h1, :where(.bs) h2, :where(.bs) h3 { font-family: var(--sans); color: var(--headline); }
 
 /* The one serif: a headline that states the day's verdict. */
 .bs-headline {
@@ -1408,4 +1413,36 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-rhead > :nth-child(6), .bs-rrow > :nth-child(6) { display: none; }
   .bs-checks li { flex-wrap: wrap; gap: 3px 12px; }
   .bs-check-k { flex-basis: 100%; width: auto; }
+}
+
+/* ===========================================================================
+   PAGE TITLES — one voice, including on the pages not yet rebuilt.
+   ---------------------------------------------------------------------------
+   Performance, Cash, Invoices, Vendors, Products and Menu costing still emit
+   the old page-head markup, so their titles came out 23px Geist bold while
+   every redesigned page opened with a 32px Newsreader line. Same app, two
+   different mastheads depending which tab you were on.
+   Until each of those pages is rebuilt, alias its title into the headline
+   treatment. Delete a selector from this list as its page moves over to
+   .bs-headline properly — this is scaffolding, not the destination.
+   ======================================================================== */
+.bs .page-head h1, .bs .phead-t h1 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 32px;
+  line-height: 1.16;
+  letter-spacing: -.005em;
+  color: var(--headline);
+  margin: 0;
+}
+/* Their subtitles line up with .bs-subline for the same reason. */
+.bs .page-head .sub, .bs .phead-t .phead-s {
+  margin: 6px 0 0; font-size: 13.5px; color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .bs .page-head h1, .bs .phead-t h1 { font-size: 25px; }
+}
+@media (max-width: 560px) {
+  .bs .page-head h1, .bs .phead-t h1 { font-size: 22px; }
 }

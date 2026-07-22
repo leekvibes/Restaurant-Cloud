@@ -1921,7 +1921,7 @@ app.get('/shifts/:id/results', (req, res) => {
     ${flash(req)}
     <a class="back" href="/shifts/${sh.id}">← Back to entry</a>
     <div class="page-head"><div><h1>${sh.date} · ${dp(sh.daypart)}</h1><p class="sub">Tip-out results — review, then send everyone their email.</p></div>
-      <form method="post" action="/shifts/${sh.id}/send" style="margin:0"><button class="btn btn-primary" type="submit">${mailReady ? '✉ Send emails to all' : '✉ Generate previews'}</button></form></div>
+      <form method="post" action="/shifts/${sh.id}/send" style="margin:0"><button class="btn btn-primary" type="submit">${mailReady ? 'Send emails to all' : 'Generate previews'}</button></form></div>
     ${warn.length ? `<div class="flash flash-warn"><div><b>Before you send:</b><ul>${warn.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
     ${notes.length ? `<div class="flash flash-info"><div><ul>${notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
     <div class="stats">
@@ -2349,7 +2349,7 @@ app.get('/employees', (req, res) => {
     : '';
   const body = `
     ${flash(req)}
-    <div class="page-head"><div><h1>🧑‍🍳 Staff</h1><p class="sub">${staff.length} on the team · ${counts.server || 0} servers · open anyone to set roles &amp; wages.</p></div>
+    <div class="page-head"><div><h1>Staff</h1><p class="sub">${staff.length} on the team · ${counts.server || 0} servers · open anyone to set roles &amp; wages.</p></div>
       <a class="btn btn-primary" href="#add">＋ Add staff</a></div>
     ${pinBanner}
     ${staff.length > 8 ? '<div class="toolbar"><div class="search"><input type="search" id="mod-search" placeholder="Search staff…" oninput="modFilter()"></div></div>' : ''}
@@ -2778,16 +2778,16 @@ app.get('/payroll', (req, res) => {
   // nav already says Payroll, and a masthead that repeats itself wastes the
   // one line the reader actually reads.
   const verdict = !shiftCount
-    ? { t: 'Nothing logged in this range', k: 'warn' }
+    ? { t: 'nothing logged in this range.', k: 'warn' }
     : to > today
-      ? { t: 'This period is still running', k: '' }
+      ? { t: 'this period is still running.', k: '' }
       : sent
-        ? { t: `Sent to ${sent.sent_count} ${sent.sent_count === 1 ? 'person' : 'people'}`, k: 'ok' }
+        ? { t: `sent to ${sent.sent_count} ${sent.sent_count === 1 ? 'person' : 'people'}.`, k: 'ok' }
         : !period
-          ? { t: `${paid.length} ${paid.length === 1 ? 'person' : 'people'}, ${totals.hours} hours`, k: '' }
+          ? { t: `${paid.length} ${paid.length === 1 ? 'person' : 'people'}, ${totals.hours} hours.`, k: '' }
           : blocking
-            ? { t: `${blocking} thing${blocking === 1 ? '' : 's'} to check before you send`, k: 'warn' }
-            : { t: 'Ready to send', k: 'ok' };
+            ? { t: `${blocking} thing${blocking === 1 ? '' : 's'} to check before you send.`, k: 'warn' }
+            : { t: 'ready to send.', k: 'ok' };
 
   const statCell = (label, value, sub) =>
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
@@ -2810,9 +2810,9 @@ app.get('/payroll', (req, res) => {
     <div class="bs-page">
       <div class="bs-head">
         <div class="bs-headwrap">
-          <p class="bs-greet">Pay period<span class="bs-greet-d">${esc(period ? labelFor({ start: from, end: to }) : `${from} → ${to}`)}</span>
-            <span class="bs-greet-d">${shiftCount} shift${shiftCount === 1 ? '' : 's'}</span></p>
-          <h1 class="bs-headline"><span class="${verdict.k}">${esc(verdict.t)}</span></h1>
+          <h1 class="bs-headline">Payroll — <span class="${verdict.k}">${esc(verdict.t)}</span></h1>
+          <p class="bs-subline">${esc(period ? labelFor({ start: from, end: to }) : `${from} to ${to}`)} ·
+            ${shiftCount} shift${shiftCount === 1 ? '' : 's'}. Hours and card tip payout are what Gusto asks for.</p>
         </div>
         <a class="bs-btn-sm" href="/payroll/export?from=${from}&to=${to}">Export to Excel</a>
       </div>
@@ -4307,19 +4307,22 @@ app.get('/sales', (req, res) => {
   const statCell = (label, value, sub) =>
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
+  // The page's name leads the headline, the way Shifts does it — "Sales — …",
+  // not a bare verdict under an 11px kicker. A reader landing here should be
+  // told which page they are on in the largest thing on it.
   const headline = sales
-    ? `${brief(sales)} rung${svc ? ` on ${esc(dp(svc))}` : ''}${prevSales ? `, ${
+    ? `Sales — ${brief(sales)} rung${svc ? ` on ${esc(dp(svc))}` : ''}${prevSales ? `, ${
         sales >= prevSales ? 'up' : 'down'} ${Math.abs(((sales - prevSales) / prevSales) * 100).toFixed(1)}% on the period before.` : '.'}`
-    : 'Nothing rung in this period.';
+    : 'Sales — nothing rung in this period.';
 
   res.send(layout('Sales', `
     ${flash(req)}
     <div class="bs-page">
       <div class="bs-head">
         <div class="bs-headwrap">
-          <p class="bs-greet">Sales<span class="bs-greet-d">${esc(r.from)} — ${esc(r.to)}</span></p>
           <h1 class="bs-headline">${headline}</h1>
-          <p class="bs-subline">Where the money came from. What it cost is on
+          <p class="bs-subline">${esc(whenOf(r.from))} to ${esc(whenOf(r.to))}${svc ? ` · ${esc(dp(svc))}` : ''}.
+            Where the money came from — what it cost is on
             <a class="bs-act" href="/costs">Performance</a>.</p>
         </div>
         <div class="sp-filters">${filterSheet}</div>
@@ -4624,7 +4627,7 @@ app.get('/positions', (req, res) => {
 
   res.send(layout('Positions', `
     ${flash(req)}
-    <div class="page-head"><div><h1>🎓 Positions</h1><p class="sub">The jobs someone can be put on a shift as.</p></div>
+    <div class="page-head"><div><h1>Positions</h1><p class="sub">The jobs someone can be put on a shift as.</p></div>
       <a class="btn btn-primary" href="#add" onclick="document.getElementById('add-panel').open=true">＋ Add position</a></div>
     <div class="table-wrap"><table class="table">
       <thead><tr><th>Position</th><th>Tips</th><th>What that means</th><th class="num">Shifts used</th><th></th></tr></thead>
@@ -5618,7 +5621,7 @@ app.get('/c/invoices', (req, res) => {
           ? 'Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.'
           : 'Once the owner uploads invoices, they show up here.'}</div>
         ${canWrite() ? `<button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>` : ''}
-        ${canWrite() ? `<div class="uh-ways"><span>📷 Take a photo</span><span>📄 Upload a PDF</span><span>📁 Drag &amp; drop</span></div>` : ''}
+        ${canWrite() ? `<div class="uh-ways"><span>Take a photo</span><span>Upload a PDF</span><span>Drag &amp; drop</span></div>` : ''}
       </div>`);
 
   res.send(layout('Invoices', `
@@ -5735,9 +5738,9 @@ function invoiceDrawer(vendors, today) {
           <div class="dz-t">Drag an invoice here</div>
           <div class="dz-s">Photo or PDF · several pages of one invoice is fine</div>
           <div class="dz-btns">
-            <label class="btn btn-primary">📷 Take photo
+            <label class="btn btn-primary">Take photo
               <input type="file" accept="image/*" capture="environment" hidden onchange="invPick(this.files)"></label>
-            <label class="btn">📄 Choose file
+            <label class="btn">Choose file
               <input type="file" accept="image/*,application/pdf" multiple hidden onchange="invPick(this.files)"></label>
           </div>
           ${process.env.ANTHROPIC_API_KEY ? '' : '<div class="dz-warn">Reading needs an ANTHROPIC_API_KEY in .env. You can still enter one by hand below.</div>'}
