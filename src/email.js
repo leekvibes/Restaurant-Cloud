@@ -20,53 +20,107 @@ function wageCents(hours, hourlyRateDollars) {
   return Math.round(toCents(hourlyRateDollars) * (Number(hours) || 0)) / 1;
 }
 
-function shell(title, bodyRows, hero) {
-  const heroBlock = hero ? `<div style="padding:22px 22px 6px;text-align:center">
-      <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.05em">${hero.label}</div>
-      <div style="font-size:42px;font-weight:800;color:#2563eb;letter-spacing:-.02em;margin-top:2px;line-height:1">${hero.value}</div>
-    </div>` : '';
+// ---------------------------------------------------------------------------
+// The broadsheet, in email.
+//
+// Ported from the approved templates in emails-redesigned/. Three constraints
+// come with the medium and none of them are negotiable:
+//
+//   · Every row is its own two-cell <table>. Gmail and Outlook strip
+//     display:flex, which once collapsed every row into "Date2026-07-16".
+//   · No web fonts. Newsreader and Geist do not render in most clients, so the
+//     app's three faces fall back to Georgia / system sans / SFMono.
+//   · Everything inline. No stylesheet survives the trip.
+//
+// Colour still means what it means everywhere else: green is money coming to
+// you, red is money leaving or a delivery that failed. There is no blue.
+// ---------------------------------------------------------------------------
+
+const MONO = "'SFMono-Regular',Consolas,Menlo,monospace";
+const SANS = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+const SERIF = "Georgia,'Times New Roman',serif";
+
+const INK = '#1f1d1a';
+const LABEL = '#5c5647';
+const MUTED = '#77705f';
+const FAINT = '#a89f8a';
+const HAIR = '#e5dac2';
+const EDGE = '#ddd0b8';
+const GREEN = '#1a7a3c';
+const RED = '#9a2c1d';
+
+/**
+ * @param title    serif headline
+ * @param bodyRows the sections
+ * @param opts     { subline, hero: { label, value, color, sub } }
+ */
+function shell(title, bodyRows, opts = {}) {
+  const { subline, hero } = opts;
+  const heroBlock = hero ? `<tr><td style="padding:22px 26px 18px;border-bottom:1px solid ${EDGE}">
+      <div style="font:600 11px/1 ${MONO};letter-spacing:.12em;color:${MUTED};text-transform:uppercase">${hero.label}</div>
+      <div style="font:${hero.serif ? `400 40px/1 ${SERIF}` : `700 44px/1 ${MONO}`};color:${hero.color || INK};letter-spacing:${hero.serif ? '-.01em' : '-.02em'};margin-top:8px">${hero.value}${
+        hero.sub ? `<span style="font-size:26px;color:${FAINT}"> ${hero.sub}</span>` : ''}</div>
+    </td></tr>` : '';
+
   // The charset is declared in the document, not only in the MIME headers.
   // Nodemailer sets the header, so a normal send has always been fine — but
   // anything that renders this HTML on its own (a client's "view in browser",
   // a forward that drops the headers, the preview files written to previews/)
   // falls back to latin-1 and turns every · into Â· and every — into â€".
   return `<!doctype html><html><head><meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${title}</title></head>
-  <body style="margin:0;background:#f4f7fc;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a">
-  <div style="max-width:520px;margin:0 auto;padding:24px 16px">
-    <div style="background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e6ecf4;box-shadow:0 6px 24px rgba(15,23,42,.06)">
-      <div style="background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%);color:#fff;padding:20px 22px">
-        <div style="font-size:12px;opacity:.85;letter-spacing:.06em;text-transform:uppercase;font-weight:600">${RESTAURANT}</div>
-        <div style="font-size:20px;font-weight:800;margin-top:3px;letter-spacing:-.01em">${title}</div>
-      </div>
-      ${heroBlock}
-      <div style="padding:10px 22px 20px">${bodyRows}</div>
-    </div>
-  </div></body></html>`;
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title></head>
+<body style="margin:0;background:#f4ead9;font-family:${SANS};color:${INK}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4ead9">
+<tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="520" cellpadding="0" cellspacing="0" border="0" style="width:520px;max-width:100%;background:#f7eee0;border:1px solid ${EDGE}">
+  <tr><td style="padding:18px 26px;border-bottom:2px solid ${INK}">
+    <div style="font:600 11px/1 ${MONO};letter-spacing:.16em;color:${MUTED};text-transform:uppercase">${RESTAURANT}</div>
+    <div style="font:400 26px/1.1 ${SERIF};color:${INK};margin-top:6px">${title}</div>
+    ${subline ? `<div style="font:400 13px/1.4 ${SANS};color:${MUTED};margin-top:4px">${subline}</div>` : ''}
+  </td></tr>
+  ${heroBlock}
+  <tr><td style="padding:16px 26px 24px">${bodyRows}</td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
 }
 
-// Gmail (and Outlook, and most of the rest) strip `display:flex`, which
-// collapsed every row into "Date2026-07-16". Two-cell tables are the only
-// layout email clients agree on, so every row is its own table.
+/**
+ * One label/value row. Its own table, deliberately — see the note above.
+ * `border: false` on the first row of a section, since the kicker's rule is
+ * already sitting directly above it.
+ */
 function line(label, value, opts = {}) {
-  const strong = opts.strong ? 'font-weight:700;font-size:16px' : 'font-weight:600';
-  const color = opts.color || '#0f172a';
-  const border = opts.border === false ? '' : 'border-top:1px solid #eef2f7';
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;${border}">
-    <tr>
-      <td align="left" style="padding:10px 10px 10px 0;color:#64748b;font-size:14px;line-height:1.4">${label}</td>
-      <td align="right" style="padding:10px 0;font-size:14px;line-height:1.4;white-space:nowrap;${strong};color:${color}">${value}</td>
+  const strong = opts.strong;
+  const zero = /^\$?0(\.00)?$/.test(String(value).trim());
+  const color = opts.color || (zero && !strong ? FAINT : INK);
+  const border = opts.border === false ? '' : ` style="border-top:1px solid ${HAIR}"`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"${border}><tr>
+      <td align="left" style="padding:${strong ? 10 : 9}px 0;color:${strong ? INK : LABEL};font-size:14px${strong ? ';font-weight:600' : ''}">${label}</td>
+      <td align="right" style="padding:${strong ? 10 : 9}px 0;font-size:${strong ? 16 : 14}px;font-weight:${strong ? 700 : 600};color:${color};white-space:nowrap;font-family:${MONO}">${value}</td>
     </tr></table>`;
 }
 
-/** Small grey caption under a row, for the "where this comes from" detail. */
-function hint(text) {
-  return `<div style="margin:-4px 0 2px;font-size:12px;color:#94a3b8;line-height:1.5">${text}</div>`;
+/** A full-width row with no figure — the "who didn't get one" list. */
+function noteRow(html) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td align="left" style="padding:9px 0;color:${INK};font-size:14px;font-weight:600">${html}</td>
+    </tr></table>`;
 }
 
-function section(title) {
-  return `<div style="margin:20px 0 4px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8">${title}</div>`;
+/** Muted caption under a row. */
+function hint(text) {
+  return `<div style="margin:2px 0 0;font-size:12px;color:${MUTED};line-height:1.5">${text}</div>`;
+}
+
+/** Section kicker: mono, uppercase, with a rule under it. */
+function section(title, opts = {}) {
+  const c = opts.color || INK;
+  // `first` when the section opens the body — the shell's own padding is
+  // already above it, and 22px more pushes it away from the hero rule.
+  const margin = opts.first ? '0 0 8px' : '22px 0 8px';
+  return `<div style="margin:${margin};font:600 11px/1 ${MONO};letter-spacing:.12em;text-transform:uppercase;color:${c};border-bottom:1px solid ${c};padding-bottom:7px">${title}</div>`;
 }
 
 /** Build the email for one server. `p` is a server payout object from the engine. */
@@ -74,9 +128,10 @@ function serverEmail(p, ctx) {
   const wage = wageCents(p.hours, ctx.hourlyRate);
   const paycheckAdj = p.tipsKept - p.cashTips; // + owed on paycheck, - taken home in excess
 
+  // The who / role / date rows moved into the masthead subline. Same values,
+  // one line instead of three, which is what buys the room for the hero.
   let body = '';
-  body += line('Date', `${ctx.date} · ${ctx.daypart === 'cafe' ? 'Café' : 'Dinner'}`, { border: false });
-  body += line('Hours worked', `${p.hours}`);
+  body += line('Hours worked', `${p.hours}`, { border: false });
   if (ctx.salaried) body += line('Pay', 'Salaried');
   else if (wage > 0) body += line('Estimated wage', fmt(wage));
 
@@ -94,9 +149,9 @@ function serverEmail(p, ctx) {
   const tipoutRoles = Object.keys(p.tipouts).filter((r) => p.tipouts[r]);
   if (tipoutRoles.length === 0) body += line('No tip-out', fmt(0), { border: false });
   tipoutRoles.forEach((role, i) => {
-    body += line(ROLE_LABEL[role] || role, '-' + fmt(p.tipouts[role]), { border: i === 0 ? false : true, color: '#dc2626' });
+    body += line(ROLE_LABEL[role] || role, '-' + fmt(p.tipouts[role]), { border: i !== 0, color: RED });
   });
-  if (p.tipoutTotal > 0) body += line('Total tip-out', '-' + fmt(p.tipoutTotal), { color: '#dc2626' });
+  if (p.tipoutTotal > 0) body += line('Total tip-out', '-' + fmt(p.tipoutTotal), { color: RED });
   // Explain the roles that DIDN'T take a cut, so a short-staffed night doesn't
   // read as a missing line the server has to wonder about.
   const skipped = (ctx.skipped || []).map((sk) => ROLE_LABEL[sk.role] || sk.role);
@@ -105,29 +160,30 @@ function serverEmail(p, ctx) {
       : skipped.slice(0, -1).join(', ') + ' or ' + skipped[skipped.length - 1];
     body += hint(`No ${list.toLowerCase()} worked this shift, so no tip-out went to them — you keep it.`);
   }
-  body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: '#059669' });
+  body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: GREEN });
 
   // The clarity line: you already took the cash home; here's how it nets out.
   body += section('How this reaches you');
   body += line('Cash you took home tonight', fmt(p.cashTips), { border: false });
   if (paycheckAdj >= 0) {
-    body += line('Added to your next paycheck', '+' + fmt(paycheckAdj), { color: '#059669' });
+    body += line('Added to your next paycheck', '+' + fmt(paycheckAdj), { color: GREEN });
   } else {
-    body += line('Adjusted from your next paycheck', '-' + fmt(-paycheckAdj), { color: '#dc2626' });
-    body += `<div style="margin-top:8px;font-size:12px;color:#94a3b8;line-height:1.5">You took home more cash than your net tips (because part funds the kitchen/busser tip-out), so your paycheck is reduced by that difference. Your total is still ${fmt(p.tipsKept)}${wage > 0 ? ' in tips, plus your wage' : ''}.</div>`;
+    body += line('Adjusted from your next paycheck', '-' + fmt(-paycheckAdj), { color: RED });
+    body += `<div style="margin-top:8px;font-size:12px;color:${MUTED};line-height:1.5">You took home more cash than your net tips (because part funds the kitchen/busser tip-out), so your paycheck is reduced by that difference. Your total is still ${fmt(p.tipsKept)}${wage > 0 ? ' in tips, plus your wage' : ''}.</div>`;
   }
 
   const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(p.tipsKept)} in tips`;
-  return { to: ctx.email, subject, html: shell(`${ROLE_LABEL.server} summary`, body, { label: 'Tips you keep', value: fmt(p.tipsKept) }) };
+  return { to: ctx.email, subject, html: shell('Your shift summary', body, {
+    subline: [p.name, ROLE_LABEL.server, ctx.date, ctx.daypart === 'cafe' ? 'Café' : 'Dinner'].filter(Boolean).join(' · '),
+    hero: { label: 'Tips you keep', value: fmt(p.tipsKept), color: GREEN },
+  }) };
 }
 
 /** Build the email for a support-role employee (kitchen/busser/barista/bartender). */
 function supportEmail(p, ctx) {
   const wage = wageCents(p.hours, ctx.hourlyRate);
   let body = '';
-  body += line('Date', `${ctx.date} · ${ctx.daypart === 'cafe' ? 'Café' : 'Dinner'}`, { border: false });
-  body += line('Role', ROLE_LABEL[p.role] || p.role);
-  body += line('Hours worked', `${p.hours}`);
+  body += line('Hours worked', `${p.hours}`, { border: false });
   if (ctx.salaried) body += line('Pay', 'Salaried');
   else if (wage > 0) body += line('Estimated wage', fmt(wage));
 
@@ -142,10 +198,13 @@ function supportEmail(p, ctx) {
   body += line('Cash tips', fmt(cashTips), { border: false });
   body += line('To-go card tips', fmt(togoCard));
   body += line('Server tip-out (card)', fmt(serverTipout));
-  body += line('Total tips', fmt(total), { strong: true, color: '#059669' });
+  body += line('Total tips', fmt(total), { strong: true, color: GREEN });
 
   const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(total)} in tips`;
-  return { to: ctx.email, subject, html: shell(`${ROLE_LABEL[p.role] || p.role} summary`, body, { label: 'Total tips', value: fmt(total) }) };
+  return { to: ctx.email, subject, html: shell('Your shift summary', body, {
+    subline: [p.name, ROLE_LABEL[p.role] || p.role, ctx.date, ctx.daypart === 'cafe' ? 'Café' : 'Dinner'].filter(Boolean).join(' · '),
+    hero: { label: 'Total tips', value: fmt(total), color: GREEN },
+  }) };
 }
 
 /**
@@ -166,15 +225,19 @@ function managerShiftEmail(results, meta, delivery) {
   const ok = delivery.recipients || [];
   const preview = !delivery.sent && delivery.previewed;
 
+  // The shift and the delivery count are the hero and the subline now, so the
+  // body opens on whatever actually went wrong.
   let body = '';
-  body += line('Shift', `${meta.date} · ${dayLabel}`, { border: false });
-  body += line(preview ? 'Previews written' : 'Emails delivered',
-    preview ? String(delivery.previewed) : `${delivery.sent} of ${ok.length + failed.length}`,
-    { strong: true, color: failed.length ? '#dc2626' : '#059669' });
-
   if (failed.length) {
-    body += section('Did not go out');
-    failed.forEach((e, i) => { body += line(String(e), '', { border: i !== 0, color: '#dc2626' }); });
+    body += section('Did not go out', { color: RED, first: true });
+    // A name and its reason, not a figure — the split is "Joseph — no email
+    // on file", so the name carries weight and the reason does not.
+    failed.forEach((e) => {
+      const t = String(e);
+      const cut = t.indexOf('—');
+      body += noteRow(cut === -1 ? t
+        : `${t.slice(0, cut).trim()} <span style="font-weight:400;color:${MUTED}">— ${t.slice(cut + 1).trim()}</span>`);
+    });
     body += hint('These people have no summary for tonight — fix and send again from the shift page.');
   }
 
@@ -185,7 +248,7 @@ function managerShiftEmail(results, meta, delivery) {
   body += line('Tipped out to support', fmt(potsTotal));
   body += line('Shared pool', fmt(results.pool.cash + results.pool.togoCard));
   if (!results.reconciliation.balanced) {
-    body += line('Reconciles', 'NO — check the shift', { strong: true, color: '#dc2626' });
+    body += line('Reconciles', 'NO — check the shift', { strong: true, color: RED });
   }
 
   if (results.servers.length) {
@@ -205,7 +268,7 @@ function managerShiftEmail(results, meta, delivery) {
   // Things that were true at send time and are easy to miss on the screen.
   if ((meta.warnings || []).length) {
     body += section('Worth checking');
-    meta.warnings.forEach((w, i) => { body += line(String(w), '', { border: i !== 0, color: '#b45309' }); });
+    meta.warnings.forEach((w) => { body += noteRow(String(w)); });
   }
 
   const headline = preview ? `${delivery.previewed} previews` : `${delivery.sent} sent`;
@@ -213,7 +276,15 @@ function managerShiftEmail(results, meta, delivery) {
   return {
     to: meta.managerEmail,
     subject,
-    html: shell('Shift sent', body, { label: preview ? 'Previews' : 'Emails sent', value: preview ? String(delivery.previewed) : String(delivery.sent) }),
+    // "6 of 7" — the total is the quiet half, so it rides as the hero's sub
+    // rather than as a second figure. Red the moment one did not land.
+    html: shell('Shift sent', body, {
+      subline: `${meta.date} · ${dayLabel}`,
+      hero: preview
+        ? { label: 'Previews written', value: String(delivery.previewed) }
+        : { label: 'Emails delivered', value: String(delivery.sent),
+            sub: `of ${ok.length + failed.length}`, color: failed.length ? RED : GREEN },
+    }),
   };
 }
 
@@ -227,15 +298,14 @@ function shortDate(iso) {
 function periodEmail(r, ctx) {
   const range = `${shortDate(ctx.from)} – ${shortDate(ctx.to)}`;
   let body = '';
-  body += line('Pay period', range, { border: false });
-  body += line('Shifts worked', String(r.shifts));
+  body += line('Shifts worked', String(r.shifts), { border: false });
   body += line('Total hours', String(r.hours));
   if (r.wk1Hours || r.wk2Hours) body += hint(`Week 1: ${r.wk1Hours} hrs · Week 2: ${r.wk2Hours} hrs`);
 
   body += section('On your paycheck');
   body += line('Wages', fmt(r.wage), { border: false });
   body += line('Card tips', fmt(r.paycheckTips));
-  body += line('Total on this check', fmt(r.takeHome), { strong: true, color: '#059669' });
+  body += line('Total on this check', fmt(r.takeHome), { strong: true, color: GREEN });
 
   if (r.cashTips) {
     body += section('Already paid to you');
@@ -246,10 +316,13 @@ function periodEmail(r, ctx) {
   // The one point staff would otherwise get wrong: this is not additional
   // money. It used to lean on a shell footer that also said "not a pay stub";
   // that footer is gone, so this line now carries the whole job.
-  body += `<div style="margin-top:12px;font-size:12px;color:#94a3b8;line-height:1.5">This adds up the shift emails you already received — it isn't extra pay.</div>`;
+  body += `<div style="margin:16px 0 0;padding-top:14px;border-top:1px solid ${EDGE};font-size:12px;color:${MUTED};line-height:1.5">This adds up the shift emails you already received — it isn't extra pay.</div>`;
 
   const subject = `${RESTAURANT}: pay period ${range} — ${fmt(r.takeHome)} on this check`;
-  return { to: ctx.email, subject, html: shell('Pay period summary', body, { label: 'On this check', value: fmt(r.takeHome) }) };
+  return { to: ctx.email, subject, html: shell('Pay period summary', body, {
+    subline: [r.name, range].filter(Boolean).join(' · '),
+    hero: { label: 'On this check', value: fmt(r.takeHome), color: GREEN },
+  }) };
 }
 
 /** One email per person with anything to report in the period. */
@@ -363,9 +436,12 @@ async function sendTest(to) {
       from: fromAddress(),
       to,
       subject: `${RESTAURANT}: test email`,
-      html: shell('Test email', line('Status', 'Working', { border: false })
-        + `<div style="margin-top:10px;font-size:13px;color:#64748b;line-height:1.5">If you can read this, ${RESTAURANT} can send nightly tip summaries to your staff.</div>`,
-      { label: 'Mail', value: 'Connected' }),
+      html: shell('Test email',
+        line('Status', 'Working', { border: false, color: GREEN })
+        + `<div style="margin:12px 0 0;font-size:13px;color:${LABEL};line-height:1.5">If you can read this, ${RESTAURANT} can send nightly tip summaries to your staff.</div>`,
+        // Serif, not mono: "Connected." is a word, and the mono face is for
+        // figures. The one hero on any of these that is not a number.
+        { hero: { label: 'Mail', value: 'Connected.', color: GREEN, serif: true } }),
     });
   } catch (err) {
     throw new Error(friendlyMailError(err));
