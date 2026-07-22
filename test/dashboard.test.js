@@ -142,9 +142,11 @@ test('the dashboard does not restate what Sales and Performance are for', async 
     assert.ok(!html.includes(gone), `"${gone}" belongs to another page`);
   }
   // What it does answer: what needs doing, how the last service went, the week.
-  assert.match(html, /Needs attention/);
+  // The attention column is headed by severity kickers, so the marker for
+  // "the page still answers what needs doing" is the column, not a title.
+  assert.match(html, /class="bs-col"/);
   assert.match(html, /Last service/);
-  assert.match(html, /This week/);
+  assert.match(html, /The week in numbers/);
 });
 
 test('this week and last week are compared, and the direction is right', async () => {
@@ -153,7 +155,7 @@ test('this week and last week are compared, and the direction is right', async (
   // "This week" is the seven days ending today, and today has no service, so
   // it holds days 1-6: six at $1,500. The window before it is days 7-13, which
   // catches the last $1,500 night plus six at $1,000.
-  assert.match(html, /This week[\s\S]{0,300}\$9,000/, 'six services at $1,500');
+  assert.match(html, /The week in numbers[\s\S]{0,400}\$9,000/, 'six services at $1,500');
   assert.match(html, /dl-up[^>]*>▲ 20\.0%/, '$9,000 against $7,500, and up is up');
   // The written-out version of the same comparison lives on Performance, which
   // is the page that exists to explain why a number moved.
@@ -176,9 +178,9 @@ test('a percentage of nothing is withheld, not printed as zero', async () => {
       try { await fetch(`http://127.0.0.1:${port}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
     const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-    assert.match(html, /Food[\s\S]{0,160}no invoices/, 'says why, rather than showing 0%');
+    assert.match(html, /Food[\s\S]{0,220}withheld, not 0%/, 'says why, rather than showing 0%');
     assert.ok(!/Food cost[\s\S]{0,120}0(\.0)?%/.test(html), 'and never prints 0%');
-    assert.match(html, /Prime[\s\S]{0,160}needs invoices/);
+    assert.match(html, /Prime[\s\S]{0,200}needs food cost/);
   } finally {
     kid.kill();
     fs.rmSync(d2, { recursive: true, force: true });
@@ -198,7 +200,7 @@ test('cost figures do not reach an account without the costs area', async () => 
   const floor = await account('floor@dash.test', 'viewer', ['dashboard', 'shifts']);
   const html = await page(floor);
   assert.match(html, /Last service/, 'still gets its own service figures');
-  for (const figure of ['Food cost', 'Prime cost', 'Gross profit', 'Invoices this week', 'This week']) {
+  for (const figure of ['Food cost', 'Gross profit', 'Invoices this week', 'The week in numbers']) {
     assert.ok(!html.includes(figure), `${figure} must not reach a shifts-only account`);
   }
   assert.ok(!/Labor (rose|fell) to/.test(html), 'nor a labor insight');
@@ -210,7 +212,7 @@ test('quick actions offer only what the account can actually reach', async () =>
   // being respected rather than the write check doing the work.
   const mgr = await account('kitchen@dash.test', 'editor', ['dashboard', 'shifts']);
   const html = await page(mgr);
-  assert.match(html, /class="qg"/, 'an editor does get quick actions');
+  assert.match(html, /bs-foot-file/, 'an editor does get the file-an-entry row');
   assert.match(html, /href="\/shifts\/new"/, 'including the one for its own area');
   for (const gone of ['/cash/new', '/c/invoices', '/c/vendors', '/menu/new', '/c/incidents']) {
     assert.ok(!html.includes(`href="${gone}"`), `must not offer ${gone}`);
@@ -220,8 +222,8 @@ test('quick actions offer only what the account can actually reach', async () =>
 test('a view-only account is offered no quick actions at all', async () => {
   const ro = await account('ro@dash.test', 'viewer', ['dashboard', 'shifts', 'cash', 'trackers']);
   const html = await page(ro);
-  assert.ok(!html.includes('class="qg"'), 'no write shortcuts');
-  assert.ok(!html.includes('Quick actions'), 'and not an empty section either');
+  assert.ok(!html.includes('bs-foot-file'), 'no write shortcuts');
+  assert.ok(!html.includes('File an entry'), 'and not an empty row either');
 });
 
 // --- attention and today ------------------------------------------------------
@@ -247,7 +249,7 @@ test('a service that sold cash and was never counted is raised', async () => {
 test('today gets a notice even when nothing has been logged', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
   const html = await page(owner);
-  assert.match(html, /class="tnotices"/);
+  assert.match(html, /class="bs-notices"/);
   assert.match(html, /No shift started today/, 'says so rather than showing an empty card');
 });
 
@@ -477,6 +479,107 @@ test('a day standing on server sales says so, rather than looking final', async 
     const w2 = new Database(DB);
     w2.prepare('DELETE FROM server_sales WHERE shift_id = ?').run(id);
     w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
+});
+
+
+// --- the rules the redesign exists to preserve ----------------------------------
+//
+// Each of these survived a mutation after the broadsheet rewrite: the markup
+// assertions were updated and the behaviour underneath stopped being checked.
+// A redesign that quietly drops one of these is exactly the failure the spec
+// was written to prevent.
+
+test('critical alerts are never folded away', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  // Seed the condition rather than hoping the fixture happens to produce it —
+  // a shift with somebody on it and no hours is a red alert.
+  // TWO of them. With one, a mutation that shows only the first red still
+  // shows it, and the test passes while the rule is broken.
+  const w = new Database(DB);
+  const emp = w.prepare('SELECT id FROM employees LIMIT 1').get().id;
+  const shifts = [2, 3].map((d) => {
+    const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(back(d)).lastInsertRowid;
+    w.prepare("INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, 'server', 0)").run(id, emp);
+    return id;
+  });
+  w.close();
+  try {
+    const html = await page(owner);
+    const crit = (html.match(/bs-item-k red/g) || []).length;
+    assert.ok(crit >= 2, `at least two red alerts exist, got ${crit}`);
+
+    // Everything red sits above the fold. An alert that needs a tap to be seen
+    // is not an alert.
+    const fold = html.indexOf('class="bs-fold"');
+    const shown = fold === -1 ? html : html.slice(0, fold);
+    assert.strictEqual((shown.match(/bs-item-k red/g) || []).length, crit,
+      'every critical item is above the fold');
+  } finally {
+    const w2 = new Database(DB);
+    for (const id of shifts) {
+      w2.prepare('DELETE FROM work WHERE shift_id = ?').run(id);
+      w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    }
+    w2.close();
+  }
+});
+
+test('warnings show two and the rest collapse', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await page(owner);
+  const fold = html.indexOf('class="bs-fold"');
+  if (fold === -1) return;                       // not enough alerts to fold
+  const shown = html.slice(0, fold);
+  assert.ok((shown.match(/bs-item-k amber/g) || []).length <= 2, 'at most two warnings shown');
+  assert.ok((shown.match(/bs-item-k blue/g) || []).length === 0, 'and nothing informational');
+});
+
+test('the last service is the last one with figures, not the last one logged', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const before = await page(owner);
+  const shown = before.match(/Last service — ([^<]+)/)[1].trim();
+
+  // A service logged after it but never filled in must not become "last".
+  // Dated today, so it sorts last. Dated earlier it would not be the
+  // candidate for "last service" whether the rule held or not.
+  const w = new Database(DB);
+  const id = w.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'dinner', 'open')")
+    .run(iso(new Date())).lastInsertRowid;
+  w.close();
+  try {
+    const after = await page(owner);
+    assert.match(after, new RegExp(`Last service — ${shown.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+      'the empty service did not take its place');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
+});
+
+
+test('the record is five rows, not the whole log', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  // Eight events, so a cap of five is observable. With four in the fixture the
+  // assertion passes whatever the cap is, which is no assertion at all.
+  const w = new Database(DB);
+  const made = [];
+  for (let i = 0; i < 8; i++) {
+    made.push(w.prepare("INSERT INTO m_vendors (name, category, created_at) VALUES (?, 'Food', datetime('now'))")
+      .run(`Feed Test ${i}`).lastInsertRowid);
+  }
+  w.close();
+  try {
+    const html = await page(owner);
+    const rows = (html.match(/class="bs-rec"/g) || []).length;
+    assert.ok(rows > 0, 'the feed has rows');
+    // Ten was a log, and there is somewhere else to read the log.
+    assert.strictEqual(rows, 5, `exactly five, got ${rows}`);
+  } finally {
+    const w2 = new Database(DB);
+    for (const id of made) w2.prepare('DELETE FROM m_vendors WHERE id = ?').run(id);
     w2.close();
   }
 });

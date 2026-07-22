@@ -588,20 +588,6 @@ app.get('/', (req, res) => {
       'Review lines', waiting.length === 1 ? `/c/invoices/${waiting[0].id}/import` : '/c/invoices');
   }
 
-  const noticeCard = (n) => `
-    <div class="tn tn-${n.tone}">
-      <span class="tn-ico">${icon(n.ico)}</span>
-      <div class="tn-body">
-        <div class="tn-t">${esc(n.title)}</div>
-        <div class="tn-s">${esc(n.sub)}</div>
-        ${n.pct != null ? `<div class="bar tn-bar"><span style="width:${n.pct}%"></span></div>` : ''}
-        ${n.warn ? `<div class="tn-warn">${esc(n.warn)}</div>` : ''}
-      </div>
-      ${n.cta ? `<a class="tn-go" href="${n.href}">${esc(n.cta)} →</a>` : ''}
-    </div>`;
-  const todayBlock = notices.length
-    ? `<div class="tnotices">${notices.map(noticeCard).join('')}</div>`
-    : '';
 
   // --- rendering: the shift KPI band ---------------------------------------
   // Averages divide by shifts that HAVE figures. Counting a shift that was
@@ -612,33 +598,6 @@ app.get('/', (req, res) => {
   const shiftSeries = withSales.slice(-12);
   const avgWage = withSales.length ? Math.round(p30.wages / withSales.length) : null;
 
-  // Three of the four cards here were "average per service", "wage cost per
-  // service" and "sales per labor hour" — which are the questions the Sales
-  // and Performance pages exist to answer. On a dashboard they were 262px of
-  // numbers nobody acts on before breakfast. What survives is the one thing
-  // that IS a dashboard question: how did the last service go.
-  // Four figures across a 375px phone gives each about 73px, and $6,176.25
-  // wants 78. Rather than shrink the type until a five-figure day breaks it,
-  // summary figures drop the cents above $1,000 — the convention every finance
-  // app uses for a glance view — and carry the exact number in the title.
-  // Nothing that reconciles uses this; it is display only.
-  const brief = (cents) => (Math.abs(cents) >= 100000
-    ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
-  const cell = (label, value, exact, sub) => `<div class="dstrip-c"><i>${label}</i>
-    <b${exact ? ` title="${esc(exact)}"` : ''}>${value}</b>${sub ? `<u>${sub}</u>` : ''}</div>`;
-  const lastCell = (label, cents) => cell(label, cents ? brief(cents) : '—', cents ? money(cents) : '');
-  const lastBand = lastShift ? `
-    <section class="dstrip">
-      <div class="dstrip-h"><h2>Last service</h2>
-        ${may('shifts') ? `<a class="link" href="/shifts/${lastShift.id}">${esc(whenOf(lastShift.date, lastShift.daypart))} →</a>`
-          : `<span class="muted">${esc(whenOf(lastShift.date, lastShift.daypart))}</span>`}</div>
-      <div class="dstrip-r">
-        ${lastCell('Sales', lastShift.sales)}
-        ${lastCell('Tips', lastShift.tips)}
-        ${cell('Hours', lastShift.hours ? Math.round(lastShift.hours) : '—')}
-        ${cell('Staff', lastShift.people || '—')}
-      </div>
-    </section>` : '';
 
   // --- rendering: the business snapshot ------------------------------------
   const pct1 = (v) => (v === null || v === undefined ? '—' : (Math.round(v * 10) / 10) + '%');
@@ -646,73 +605,8 @@ app.get('/', (req, res) => {
   // logged", not "the food was free". Printing 0% food cost, and a prime cost
   // that is really just labor, would read as good news.
   const hasCogs = p7 && p7.cogs > 0;
-  // Six 60px cards down the page became one row. The sparkline that mattered
-  // — the week's sales shape — stays; five more of them were decoration.
 
-  const weekBand = p7 && seeCosts ? `
-    <section class="dstrip">
-      <div class="dstrip-h"><h2>This week</h2>
-        ${may('costs') ? '<a class="link" href="/costs">Performance →</a>' : ''}</div>
-      <div class="dstrip-r">
-        ${cell('Sales', brief(p7.sales), money(p7.sales), CH.delta(p7.sales, prev7.sales))}
-        ${cell('Labor', pct1(p7.laborPct), '', p7.laborPct === null ? 'no sales' : 'of sales')}
-        ${cell('Food', hasCogs ? pct1(p7.foodPct) : '—', '', hasCogs ? 'of sales' : 'no invoices')}
-        ${cell('Prime', hasCogs ? pct1(p7.primePct) : '—', '', hasCogs ? 'labor + goods' : 'needs invoices')}
-      </div>
-      ${sparkOf((w) => w.sales).length >= 3 ? `<div class="dstrip-spark">${CH.lineChart(
-        [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v, i) => ({ x: '', y: v })), area: true }],
-        { height: 54, empty: '' })}</div>` : ''}
-    </section>` : '';
-
-  // --- rendering: what needs doing -----------------------------------------
-  // The heart of the page. Grouped by how much it matters, and the only pile
-  // that collapses is the informational one — a critical item that needs a
-  // click to be seen is not an alert.
-  const nitem = (a) => `
-    <a class="nitem" href="${a.href}">
-      <span class="nitem-ico ${a.tone}">${icon(a.ico)}</span>
-      <span class="nitem-main"><span class="nitem-t">${esc(a.title)}</span><span class="nitem-s">${esc(a.sub)}</span></span>
-      <span class="nitem-go">›</span>
-    </a>`;
-  const GROUPS = [['red', 'Critical'], ['amber', 'Warning'], ['blue', 'For information']];
-  const attnBlock = attn.length
-    ? GROUPS.map(([tone, label]) => {
-      const list = attn.filter((a) => a.tone === tone);
-      if (!list.length) return '';
-      const head = `<div class="ngrp"><span class="ngrp-dot ${tone}"></span>${label}<span class="ngrp-n">${list.length}</span></div>`;
-      // Critical is never folded — an alert that needs a tap to be seen is not
-      // an alert. Everything below it opens on request, which is the
-      // difference between a page you scan and a page you scroll.
-      if (tone === 'red') return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
-      const shown = tone === 'amber' ? 2 : 0;
-      if (list.length <= shown) return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
-      return `${head}${shown ? `<div class="nlist">${list.slice(0, shown).map(nitem).join('')}</div>` : ''}
-        <details class="nrest"><summary>${list.length - shown} more</summary>
-          <div class="nlist">${list.slice(shown).map(nitem).join('')}</div></details>`;
-    }).join('')
-    : `<div class="all-clear">✓ Nothing needs your attention right now.</div>`;
-
-  // Recent services, the sales/labor chart, the invoice chart and the insights
-  // panel all came off this page. Not deleted — every one of them is the whole
-  // point of a page that already exists:
-  //
-  //   recent services   -> /shifts, which lists them with more detail
-  //   sales and labor   -> /costs, same two series on one money axis
-  //   invoice spend     -> /costs and /c/invoices
-  //   insights          -> /costs "What's driving performance" computes the
-  //                        same labour, prime and sales comparisons; product
-  //                        movers are on /c/products, menu margin on /menu
-  //
-  // Together they were roughly 1,400px of a 3,800px page restating other
-  // pages. A dashboard that repeats every page is not a dashboard.
-
-  // --- rendering: upcoming --------------------------------------------------
-  const soonBlock = soon.length
-    ? `<div class="ups">${soon.slice(0, 6).map((u) => `<a class="up" href="${u.href}">
-        <span class="up-ico">${icon(u.ico)}</span>
-        <span class="up-m"><b>${esc(u.title)}</b><i>${esc(u.sub)}</i></span></a>`).join('')}</div>`
-    : '<div class="all-clear">Nothing due in the next week.</div>';
-
+  // --- quick actions --------------------------------------------------------
   // --- rendering: quick actions --------------------------------------------
   const ACTIONS = [
     { href: '/shifts/new', ico: 'shifts', label: 'Log a shift', blurb: 'Hours, sales and tips for a service', feat: 'shifts' },
@@ -722,13 +616,6 @@ app.get('/', (req, res) => {
     { href: '/c/vendors', ico: 'vendors', label: 'Add a vendor', blurb: 'Contacts, terms and where the login lives', feat: 'trackers' },
     { href: '/c/incidents', ico: 'incidents', label: 'Log an incident', blurb: 'Write it down while it is fresh', feat: 'trackers' },
   ].filter((a) => may(a.feat));
-  // A grid of targets rather than a list of paragraphs. The blurb explained
-  // what "Log a shift" means to somebody who has logged four hundred of them,
-  // and cost 70px a row to do it. It survives as the tooltip.
-  const actions = canWrite && ACTIONS.length
-    ? `<div class="qgrid">${ACTIONS.map((a) => `<a class="qg" href="${a.href}" title="${esc(a.blurb)}">
-        <span class="qg-ico">${icon(a.ico)}</span><b>${esc(a.label)}</b></a>`).join('')}</div>`
-    : '';
 
   // --- rendering: activity --------------------------------------------------
   const FEED = {
@@ -766,49 +653,173 @@ app.get('/', (req, res) => {
     }
     if (events.length >= 24) break;   // room to group before trimming
   }
-  // Five. Ten was a log, and the page already has somewhere to read the log.
+
+  // =========================================================================
+  // BROADSHEET RENDER
+  // -------------------------------------------------------------------------
+  // The front page of a newspaper. A headline that states the day, a notices
+  // band across the top, then three columns: what needs doing, what the
+  // numbers say, and what has happened.
+  //
+  // Every figure and every rule above this line is unchanged — this is the
+  // rendering only. The annotations on the mockup ("NEVER FOLDED", "COMPLETED
+  // SHIFTS ONLY", "withheld, not 0%") describe behaviour that already existed
+  // and still does.
+  // =========================================================================
+
+  const M = (c) => `<span class="bs-fig">${money(c)}</span>`;
+
+  // --- the headline ---------------------------------------------------------
+  // A verdict, not a greeting. It states the day, then names the biggest
+  // outstanding thing — "Two drawers still uncounted" rather than "3 items",
+  // because a count is something you have to go and interpret.
+  const THEME = {
+    cash: (n) => `${n === 1 ? 'One drawer' : n === 2 ? 'Two drawers' : `${n} drawers`} still uncounted.`,
+    shifts: (n) => `${n === 1 ? 'One service' : `${n} services`} still to close out.`,
+    recurring: (n) => `${n === 1 ? 'A task is' : `${n} tasks are`} overdue.`,
+    invoices: (n) => `${n === 1 ? 'An invoice needs' : `${n} invoices need`} looking at.`,
+    expirations: (n) => `${n === 1 ? 'Something expires' : `${n} things expire`} soon.`,
+    equipment: (n) => `${n === 1 ? 'A warranty is' : `${n} warranties are`} running out.`,
+    payroll: () => 'Payroll is ready to send.',
+    notes: (n) => `${n === 1 ? 'A note' : `${n} notes`} from staff to read.`,
+  };
+  const headline = (() => {
+    const day = openToday.length
+      ? `${esc(openToday.map(svc).join(' and '))} ${openToday.length === 1 ? 'is' : 'are'} open.`
+      : todays.length ? 'Day closed out.'
+      : 'Nothing logged today.';
+
+    // The loudest theme among things that actually matter.
+    const urgent = attn.filter((a) => a.tone === 'red' || a.tone === 'amber');
+    const byTheme = new Map();
+    for (const a of urgent) byTheme.set(a.ico, (byTheme.get(a.ico) || 0) + 1);
+    const top = [...byTheme.entries()].sort((a, b) => b[1] - a[1])[0];
+
+    const tail = top && THEME[top[0]]
+      ? `<span class="warn">${esc(THEME[top[0]](top[1]))}</span>`
+      : urgent.length ? `<span class="warn">${urgent.length} thing${urgent.length === 1 ? '' : 's'} need${urgent.length === 1 ? 's' : ''} your attention.</span>`
+      : attn.length ? '' : '<span class="ok">Everything is counted.</span>';
+    return `${day} ${tail}`;
+  })();
+
+  const headMeta = attn.length
+    ? `${attn.length} item${attn.length === 1 ? '' : 's'} · ${bad ? `${bad} urgent` : 'nothing urgent'}`
+    : 'nothing outstanding';
+
+  // --- the notices band -----------------------------------------------------
+  // Only what is true right now: a service running, a drawer waiting. When the
+  // day is closed out there is nothing here and the band does not draw.
+  const noticeCard = (n) => `
+    <div class="bs-notice">
+      <div class="bs-notice-t">
+        <b>${esc(n.title)}</b> <span>${esc(n.sub)}</span>
+        ${n.href && n.cta ? `<a class="bs-act" href="${n.href}">${esc(n.cta)} →</a>` : ''}
+      </div>
+      ${n.pct != null ? `<div class="bs-prog"><span style="width:${n.pct}%"></span></div>` : ''}
+      ${n.warn ? `<div class="bs-notice-w">${esc(n.warn)}</div>` : ''}
+    </div>`;
+  const todayBlock = notices.length
+    ? `<div class="bs-notices">${notices.map(noticeCard).join('')}</div>` : '';
+
+  // --- column 1: needs attention -------------------------------------------
+  // One list, ordered worst first, with the severity in each item's kicker
+  // rather than in three separate headed sections. The fold rule is unchanged:
+  // everything critical shows, two warnings show, the rest collapses.
+  const TONE_WORD = { red: 'Critical', amber: 'Warning', blue: 'Info' };
+  // Alerts carry their date inside the title — "Jul 19 Dinner — hours missing".
+  // The kicker wants the date and the title wants the rest, so the two are
+  // split for display only. Nothing that builds an alert changes, and a title
+  // that does not match this shape is simply shown whole.
+  const splitTitle = (t) => {
+    const m = String(t).match(/^([A-Z][a-z]{2} \d{1,2}(?:\s+\S+)?)\s+—\s+(.+)$/);
+    return m ? { when: m[1], rest: m[2] } : { when: null, rest: t };
+  };
+  const nitem = (a) => {
+    const { when, rest } = splitTitle(a.title);
+    return `<a class="bs-item" href="${a.href}">
+      <span class="bs-item-k ${a.tone}">${when ? esc(when.toUpperCase()) + ' · ' : ''}${TONE_WORD[a.tone].toUpperCase()}</span>
+      <span class="bs-item-t">${esc(rest)}</span>
+      <span class="bs-item-s">${esc(a.sub)}<span class="bs-sep" aria-hidden="true"> · </span><span class="bs-act">Open →</span></span>
+    </a>`;
+  };
+
+  const reds = attn.filter((a) => a.tone === 'red');
+  const ambers = attn.filter((a) => a.tone === 'amber');
+  const blues = attn.filter((a) => a.tone === 'blue');
+  // Critical never folds. Two warnings show. Everything else is behind the fold.
+  const shown = [...reds, ...ambers.slice(0, 2)];
+  const folded = [...ambers.slice(2), ...blues];
+
+  const attnBlock = attn.length ? `
+    <div class="bs-sec-h warn"><span class="bs-kicker">Needs attention</span></div>
+    <div class="bs-items">${shown.map(nitem).join('')}</div>
+    ${folded.length ? `<details class="bs-fold">
+      <summary>${folded.length} more item${folded.length === 1 ? '' : 's'} <span aria-hidden="true">▾</span></summary>
+      <div class="bs-items">${folded.map(nitem).join('')}</div></details>` : ''}`
+    : `<div class="bs-sec-h"><span class="bs-kicker">Needs attention</span></div>
+       <p class="bs-clear">Nothing needs your attention right now.</p>`;
+
+  // --- column 2: the week in numbers ---------------------------------------
+  const figCell = (label, value, sub) =>
+    `<div class="bs-figcell"><span class="bs-figlabel">${label}</span><span class="bs-stat">${value}</span>${sub ? `<span class="bs-figsub">${sub}</span>` : ''}</div>`;
+
+  const weekBand = p7 && seeCosts ? `
+    <div class="bs-sec-h"><span class="bs-kicker">The week in numbers</span>
+      ${may('costs') ? '<a class="bs-act" href="/costs">Performance →</a>' : ''}</div>
+    <div class="bs-grid2">
+      ${figCell('Sales', money(p7.sales), CH.delta(p7.sales, prev7.sales))}
+      ${figCell('Labor', pct1(p7.laborPct), p7.laborPct === null ? 'no sales' : 'of sales')}
+      ${figCell('Food', hasCogs ? pct1(p7.foodPct) : '—', hasCogs ? 'of sales' : 'no invoices — withheld, not 0%')}
+      ${figCell('Prime cost', hasCogs ? pct1(p7.primePct) : '—', hasCogs ? 'labor + goods' : 'needs food cost')}
+    </div>
+    ${sparkOf((w) => w.sales).length >= 3 ? `
+      <p class="bs-sparklabel">Sales, trailing 8 weeks</p>
+      <div class="bs-spark">${CH.lineChart(
+        [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v) => ({ x: '', y: v })), area: true }],
+        { height: 96, empty: '' })}</div>` : ''}
+    ${soon.length ? `
+      <div class="bs-sec-h bs-soon-h"><span class="bs-kicker">Coming up</span></div>
+      <div class="bs-soon">
+        ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
+          <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
+      </div>` : ''}` : '';
+
+  // --- column 3: last service, and the record ------------------------------
+  const row = (label, value) => `<div class="bs-lrow"><span>${label}</span><b class="bs-fig">${value}</b></div>`;
+  const lastBand = lastShift ? `
+    <div class="bs-sec-h"><span class="bs-kicker">Last service — ${esc(whenOf(lastShift.date, lastShift.daypart))}</span>
+      ${may('shifts') ? `<a class="bs-act" href="/shifts/${lastShift.id}">Open →</a>` : ''}</div>
+    <div class="bs-lrows">
+      ${row('Sales', money(lastShift.sales))}
+      ${row('Tips', lastShift.tips ? money(lastShift.tips) : '—')}
+      ${row('Hours', lastShift.hours ? (Math.round(lastShift.hours * 10) / 10).toFixed(1) : '—')}
+      ${row('Staff', lastShift.people || '—')}
+    </div>` : '';
+
   const feedRows = events.slice(0, 5).map((r) => {
     const f = FEED[r.kind](r);
-    const inner = `<span class="fd-ico">${icon(f.ico)}</span><span class="fd-t">${f.text}</span><span class="fd-w">${ago(r.at, now)}</span>`;
-    return f.href ? `<a class="fd" href="${f.href}">${inner}</a>` : `<div class="fd">${inner}</div>`;
+    const inner = `<span class="bs-rec-t">${f.text}</span> <span class="bs-rec-w">— ${ago(r.at, now)}</span>`;
+    return f.href ? `<a class="bs-rec" href="${f.href}">${inner}</a>` : `<div class="bs-rec">${inner}</div>`;
   }).join('');
-  const feed = feedRows || '<div class="all-clear">Nothing has happened yet.</div>';
-
-  // --- the one-line status under the greeting ------------------------------
-  const status = openToday.length
-    ? `Your ${openToday.map(svc).join(' and ')} shift${openToday.length === 1 ? ' is' : 's are'} open.${attn.length ? ` ${attn.length} thing${attn.length === 1 ? '' : 's'} need${attn.length === 1 ? 's' : ''} your attention.` : ''}`
-    : bad
-      ? `${bad} thing${bad === 1 ? '' : 's'} need${bad === 1 ? 's' : ''} sorting out${attn.length > bad ? `, ${attn.length - bad} more can wait` : ''}.`
-      : attn.length
-        ? `${attn.length} thing${attn.length === 1 ? '' : 's'} to look at, nothing urgent.`
-        : 'Everything is running smoothly today.';
-
-  const sec = (title, body, link, cls) => !body ? '' : `
-    <section class="dsec${cls ? ' ' + cls : ''}">
-      <div class="dsec-h"><h2>${title}</h2>${link || ''}</div>
-      ${body}
-    </section>`;
+  const record = `
+    <div class="bs-sec-h bs-rec-h"><span class="bs-kicker">The record</span></div>
+    ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}`;
 
   const bodyHtml = `
     ${flash(req)}
-    <header class="dhead">
-      <div class="dhead-l">
-        <h1>${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</h1>
-        <p class="dhead-d">${now.toLocaleDateString('en-US', DASH_DATE)}</p>
+    <div class="bs-page">
+      <div class="bs-head">
+        <h1 class="bs-headline">${headline}</h1>
+        <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>
-      <div class="dhead-st ${openToday.length ? 'live' : bad ? 'warn' : 'calm'}">
-        <span class="dot"></span>${esc(status)}
+      ${todayBlock}
+      <div class="bs-cols3">
+        <div class="bs-col">${attnBlock}</div>
+        <div class="bs-col">${weekBand}</div>
+        <div class="bs-col">${lastBand}${record}</div>
       </div>
-    </header>
-    ${todayBlock}
-    <div class="dash">
-      ${sec(`Needs attention${attn.length ? ` <span class="cnt">${attn.length}</span>` : ''}`, attnBlock)}
-      ${lastBand}
-      ${weekBand}
-      ${soon.length ? sec('Coming up', soonBlock) : ''}
-      ${sec('Quick actions', actions)}
-      ${sec('Recent activity', feed, '<a class="link" href="/activity">View all →</a>')}
     </div>`;
+
   res.send(layout('Dashboard', bodyHtml));
 });
 

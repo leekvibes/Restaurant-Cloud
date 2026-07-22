@@ -477,3 +477,110 @@ body {
   font-style: normal; font-family: var(--mono); font-size: 9.5px;
   letter-spacing: .08em; color: var(--faint);
 }
+
+/* ===========================================================================
+   DASHBOARD — the front page
+   ---------------------------------------------------------------------------
+   A verdict headline, then three ruled columns: what needs doing, what the
+   week says, what the last service was and what has happened since.
+   ======================================================================== */
+.bs-page { padding-top: 26px; }
+.bs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 30px; }
+.bs-headline { max-width: 22ch; flex: 1; }
+.bs-headmeta { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.bs-headline .ok { color: var(--positive); }
+
+/* --- the notices band ----------------------------------------------------- */
+.bs-notices {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px;
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule);
+}
+.bs-notice { padding: 10px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-notice-t { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.bs-notice-t b { font-size: 15px; font-weight: 600; color: var(--headline); }
+.bs-notice-t > span { font-size: 13px; color: var(--muted); }
+.bs-notice-t .bs-act { margin-left: auto; }
+/* The submission bar has had markup and no CSS since it shipped. */
+.bs-prog { height: 3px; background: var(--rule-light); margin-top: 8px; max-width: 340px; }
+.bs-prog span { display: block; height: 100%; background: var(--positive); }
+.bs-notice-w { margin-top: 5px; font-size: 12.5px; color: var(--warning); }
+
+/* --- three columns -------------------------------------------------------- */
+.bs-cols3 { display: grid; grid-template-columns: 340px 1fr 300px; margin-top: 22px; }
+.bs-col { padding: 0 28px; min-width: 0; }
+.bs-col:first-child { padding-left: 0; border-right: 1px solid var(--field-border); }
+.bs-col:last-child { padding-right: 0; border-left: 1px solid var(--field-border); }
+
+/* --- attention: one list, severity in the kicker -------------------------- */
+.bs-item { display: block; padding: 13px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-item:hover { background: var(--row-hover); }
+.bs-item-k {
+  display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+}
+.bs-item-k.red { color: var(--danger); }
+.bs-item-k.amber { color: var(--warning); }
+.bs-item-k.blue { color: var(--accent); }
+.bs-item-t { display: block; margin-top: 3px; font-size: 15px; font-weight: 500; color: var(--headline); }
+.bs-item-s { display: block; margin-top: 2px; font-size: 13px; color: var(--muted); }
+.bs-fold > summary {
+  list-style: none; cursor: pointer; padding: 12px 0;
+  font-size: 13px; color: var(--muted);
+}
+.bs-fold > summary::-webkit-details-marker { display: none; }
+.bs-fold > summary:hover { color: var(--ink); }
+.bs-clear { font-size: 13px; color: var(--muted); padding: 14px 0; margin: 0; }
+
+/* --- the week in numbers -------------------------------------------------- */
+.bs-grid2 { display: grid; grid-template-columns: 1fr 1fr; }
+.bs-figcell { display: grid; gap: 3px; align-content: start; min-width: 0;
+  padding: 18px 20px 20px 0; border-bottom: 1px solid var(--rule); }
+.bs-figcell:nth-child(even) { padding-left: 20px; border-left: 1px solid var(--rule); }
+.bs-figcell:nth-last-child(-n+2) { border-bottom: 0; }
+.bs-figlabel { font-size: 13px; color: var(--secondary); }
+.bs-figcell .bs-stat { font-size: 30px; }
+.bs-figsub { font-size: 12.5px; color: var(--muted); }
+.bs-figsub .dl { background: none; padding: 0; font-size: 12.5px; }
+.bs-sparklabel { margin: 22px 0 4px; font-size: 12.5px; color: var(--secondary); }
+.bs-spark { margin: 0; }
+.bs-spark .chart-empty { display: none; }
+.bs-soon-h { margin-top: 26px; }
+.bs-soon-r {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 10px 0; border-bottom: 1px dotted var(--rule-dotted);
+  font-size: 13.5px; color: var(--body);
+}
+.bs-soon-r:hover { background: var(--row-hover); color: var(--ink); }
+.bs-soon-r b { font-size: 12px; color: var(--warning); white-space: nowrap; }
+
+/* --- last service, and the record ----------------------------------------- */
+.bs-lrows { padding-top: 4px; }
+.bs-lrow {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 11px 0; border-bottom: 1px dotted var(--rule-dotted);
+}
+.bs-lrow span { font-size: 13.5px; color: var(--body); }
+.bs-lrow b { font-size: 15px; font-weight: 500; color: var(--headline); }
+.bs-rec-h { margin-top: 28px; }
+.bs-recs { padding-top: 4px; }
+.bs-rec {
+  display: block; padding: 10px 0; border-bottom: 1px dotted var(--rule-dotted);
+  font-size: 12.5px; color: var(--body); line-height: 1.5;
+}
+.bs-rec:hover { background: var(--row-hover); color: var(--ink); }
+.bs-rec b { font-weight: 600; color: var(--headline); }
+.bs-rec-w { color: var(--faint); white-space: nowrap; }
+
+@media (max-width: 1180px) {
+  .bs-cols3 { grid-template-columns: 1fr; }
+  .bs-col { padding: 0; border: 0 !important; }
+  .bs-col + .bs-col { border-top: 1px solid var(--field-border) !important; margin-top: 28px; padding-top: 6px; }
+  .bs-headline { max-width: none; }
+}
+@media (max-width: 760px) {
+  .bs-notices { grid-template-columns: 1fr; gap: 0; }
+  .bs-head { flex-direction: column; gap: 6px; }
+  .bs-figcell .bs-stat { font-size: 24px; }
+  .bs-notice-t .bs-act { margin-left: 0; flex-basis: 100%; }
+}
+.bs-sep { color: var(--faint); }

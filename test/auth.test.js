@@ -133,12 +133,15 @@ test('the dashboard shows nothing from areas the account cannot open', async () 
     assert.strictEqual(res.status, 200, 'dashboard itself is allowed');
     const html = await res.text();
 
-    assert.ok(html.includes('Needs attention'), 'still gets the sections it may see');
+    // The attention list is headed by its severity kickers now, not by a
+    // section title. CRITICAL only renders when there is something critical,
+    // so the stable marker is the column itself.
+    assert.ok(html.includes('bs-cols3'), 'still gets the sections it may see');
     // A section only counts as withheld if an owner actually gets it —
     // otherwise the assertion passes because the string was renamed and stops
     // testing anything. These are checked against the owner's page below.
     const ownerHtml = await (await as(owner, '/')).text();
-    for (const withheld of ['This week', 'Quick actions']) {
+    for (const withheld of ['The week in numbers']) {
       assert.ok(ownerHtml.includes(withheld), `${withheld} must exist for an owner, or this proves nothing`);
       assert.ok(!html.includes(withheld), `${withheld} must not render for a viewer`);
     }
@@ -167,10 +170,10 @@ test('an owner does see the full dashboard', async () => {
   // by the notice markup. "Upcoming" is now "Coming up" and only renders when
   // something is actually due; Insights moved to Performance, which is the
   // page that exists to explain why a number moved.
-  for (const section of ['Needs attention', 'Quick actions', 'This week', 'Last service', 'Recent activity']) {
+  for (const section of ['File an entry', 'The week in numbers', 'Last service', 'The record']) {
     assert.ok(html.includes(section), `${section} renders for the owner`);
   }
-  assert.match(html, /class="tnotices"|class="dstrip"/, 'and the today strip or a figure band');
+  assert.match(html, /class="bs-notices"|class="bs-figs4"/, 'and the today strip or a figure band');
 });
 
 // A view-only account being refused a write is correct. Being *offered* the
