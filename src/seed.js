@@ -39,8 +39,9 @@ function server(name, hours, food, coffee, card, cash) {
   w.upsertWork.run({ shift_id: sh.id, employee_id: ids[name], role: 'server', hours });
   w.upsertSales.run({
     shift_id: sh.id, employee_id: ids[name],
-    food_cents: toCents(food), coffee_cents: toCents(coffee), alcohol_cents: 0, card_tips_cents: toCents(card),
+    food_cents: toCents(food), coffee_cents: toCents(coffee), alcohol_cents: 0,
   });
+  w.setCardTips.run({ shift_id: sh.id, employee_id: ids[name], card_tips_cents: toCents(card) });
   w.setCashTips.run({ shift_id: sh.id, employee_id: ids[name], cash_tips_cents: toCents(cash), by: 'staff' });
 }
 function support(name, role, hours) {

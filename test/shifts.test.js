@@ -337,3 +337,62 @@ test('every month starts closed, and opening one shows all of its days', async (
   // a second click to reach what the first one asked for.
   assert.ok(!/earlier day/.test(h), 'no fold inside a month');
 });
+
+test('a manager can correct both tip figures, for everyone on the shift', async () => {
+  // The summary row has always shown card + cash together, the POST has always
+  // accepted both, and the prefill has always carried both — but the form only
+  // ever rendered card, and only for servers. So a cash figure a staff member
+  // typed wrong was visible on the sheet and impossible to correct from it.
+  // This is not a redesign regression; it has never been there.
+  const { sent, people } = module.exports;
+  const page = await html(`/shifts/${sent}`);
+
+  const rows = [...page.matchAll(/<details class="bs-srow" id="edit-(\d+)">([\s\S]*?)<\/details>/g)];
+  assert.ok(rows.length >= 2, `the sheet lists staff, got ${rows.length}`);
+  for (const [, id, body] of rows) {
+    assert.match(body, /name="card_tips"/, `employee ${id} can have card tips corrected`);
+    assert.match(body, /name="cash_tips"/, `employee ${id} can have cash tips corrected`);
+  }
+
+  // A server keeps their own tips; a support person's go into the shared pool
+  // and are split by hours. Entering a figure against a name that does not
+  // keep it needs saying, or the sheet reads as assigning them money.
+  const server = rows.find(([, id]) => Number(id) === people.sandra);
+  const support = rows.find(([, id]) => Number(id) === people.kevin);
+  assert.ok(server && support, 'both roles are on this shift');
+  assert.ok(!/bs-inline-note/.test(server[2]), 'a server keeps their own tips, no note needed');
+  assert.match(support[2], /shared pool/, 'support tips say they are pooled');
+});
+
+test('saving those figures actually writes them, for both roles', async () => {
+  const { ready, people } = module.exports;
+  const post = (url, body) => fetch(BASE + url, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body).toString(),
+  });
+
+  const a = await post(`/shifts/${ready}/server`, {
+    employee_id: String(people.sandra), food: '900', coffee: '0', alcohol: '',
+    card_tips: '77.50', cash_tips: '41.25', hours: '8', wage: '10',
+  });
+  assert.strictEqual(a.status, 302);
+  const b = await post(`/shifts/${ready}/support`, {
+    employee_id: String(people.joseph), role: 'busser',
+    card_tips: '12.00', cash_tips: '33.00', hours: '6', wage: '13',
+  });
+  assert.strictEqual(b.status, 302);
+
+  const row = (e) => db.prepare(
+    'SELECT cash_tips_cents c, card_tips_cents d FROM server_sales WHERE shift_id=? AND employee_id=?').get(ready, e);
+  assert.deepStrictEqual(row(people.sandra), { c: 4125, d: 7750 }, 'the server figures landed');
+  assert.deepStrictEqual(row(people.joseph), { c: 3300, d: 1200 }, 'and the support ones');
+
+  // Blank leaves a figure alone rather than zeroing it — a half-filled form
+  // must not wipe what somebody already reported. Typing 0 still clears it.
+  const c = await post(`/shifts/${ready}/server`, {
+    employee_id: String(people.sandra), hours: '8', card_tips: '', cash_tips: '',
+  });
+  assert.strictEqual(c.status, 302);
+  assert.deepStrictEqual(row(people.sandra), { c: 4125, d: 7750 }, 'blank did not wipe them');
+});

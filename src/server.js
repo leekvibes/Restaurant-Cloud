@@ -1483,13 +1483,21 @@ app.get('/shifts/:id', (req, res) => {
           ${num('Kitchen', e.food)}
           ${num('Coffee', e.coffee)}
           ${num('Alcohol', e.alcohol)}
-          <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
         ` : `<label class="bs-pill"><span>Role</span><select name="role">${roleOpts(p.role)}</select></label>`}
+        <!-- Both tip figures, for everyone. The summary row above has always
+             shown card + cash together, the POST has always accepted both, and
+             the prefill has always carried both — but the form only ever
+             offered card, and only to servers. So a cash figure a staff member
+             got wrong could be seen and never corrected. -->
+        <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
+        <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>
         <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="decimal" value="${e.hours || ''}" placeholder="0.00"></label>
         <label class="bs-pill"><span>Wage/hr</span><input name="wage" type="text" inputmode="decimal" value="${e.wage || ''}" placeholder="default"></label>
         <button class="bs-btn" type="submit">Save</button>
         <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
       </form>
+      ${isServer ? '' : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
+        across support by hours — they are not kept by ${esc(p.name.split(' ')[0])}.</p>`}
       <form class="bs-inline-rm" method="post" action="/shifts/${sh.id}/remove"
             onsubmit="return confirm('Take ${esc(p.name).replace(/'/g, "\\'")} off this shift?')">
         <input type="hidden" name="employee_id" value="${p.employeeId}">
@@ -1756,7 +1764,7 @@ app.post('/shifts/:id/server', (req, res) => {
   w.upsertSales.run({
     shift_id: sh.id, employee_id: empId,
     food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee),
-    alcohol_cents: toCents(req.body.alcohol), card_tips_cents: toCents(req.body.card_tips),
+    alcohol_cents: toCents(req.body.alcohol),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, 'server', req.body);
@@ -1814,8 +1822,13 @@ app.post('/shifts/:id/read-report', reportUpload.array('photos', 12), async (req
     w.upsertSales.run({
       shift_id: sh.id, employee_id: emp.id,
       food_cents: toCents(row.food), coffee_cents: toCents(row.coffee),
-      alcohol_cents: toCents(row.alcohol), card_tips_cents: toCents(row.card_tips),
+      alcohol_cents: toCents(row.alcohol),
     });
+    // Card tips are written separately now — upsertSales no longer owns them,
+    // so a blank field cannot zero a figure somebody already reported.
+    if (row.card_tips != null && String(row.card_tips).trim() !== '') {
+      w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(row.card_tips) });
+    }
     matched.push(emp.name);
   }
   let msg = matched.length
@@ -5370,8 +5383,13 @@ app.post('/webhook/benugin', (req, res) => {
     w.upsertSales.run({
       shift_id: sh.id, employee_id: emp.id,
       food_cents: toCents(row.food), coffee_cents: toCents(row.coffee),
-      alcohol_cents: toCents(row.alcohol), card_tips_cents: toCents(row.card_tips),
+      alcohol_cents: toCents(row.alcohol),
     });
+    // Card tips are written separately now — upsertSales no longer owns them,
+    // so a blank field cannot zero a figure somebody already reported.
+    if (row.card_tips != null && String(row.card_tips).trim() !== '') {
+      w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(row.card_tips) });
+    }
     if (row.cash_tips != null) {
       w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: toCents(row.cash_tips), by: 'pos' });
     }

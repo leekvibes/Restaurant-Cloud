@@ -1722,3 +1722,4 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-chip-n { font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .bs-chip-c { font-size: 9px; color: var(--faint); }
 .bs-acct[open] .bs-chip { border-color: var(--ink); }
+.bs-inline-note { margin: -6px 0 12px; font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 62ch; }

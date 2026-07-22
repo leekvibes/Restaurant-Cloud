@@ -324,12 +324,20 @@ const w = {
             e.name, e.email, e.hourly_rate_cents AS default_rate_cents, e.pay_type
      FROM work w JOIN employees e ON e.id = w.employee_id WHERE w.shift_id = ?`
   ),
+  // Sales only. Card tips used to ride along here and were written on every
+  // save, so an empty card field cleared a figure to zero while an empty cash
+  // field — which goes through setCardTips/setCashTips, and those only write
+  // when a value was actually supplied — left its figure alone. Two tip fields
+  // side by side in the same form, behaving oppositely.
+  //
+  // COALESCE keeps whatever is already there when nothing is passed, so the
+  // one place that owns tips is writeTipsIfGiven.
   upsertSales: db.prepare(
-    `INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents, card_tips_cents)
-     VALUES (@shift_id, @employee_id, @food_cents, @coffee_cents, @alcohol_cents, @card_tips_cents)
+    `INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents)
+     VALUES (@shift_id, @employee_id, @food_cents, @coffee_cents, @alcohol_cents)
      ON CONFLICT(shift_id, employee_id) DO UPDATE SET
        food_cents = excluded.food_cents, coffee_cents = excluded.coffee_cents,
-       alcohol_cents = excluded.alcohol_cents, card_tips_cents = excluded.card_tips_cents`
+       alcohol_cents = excluded.alcohol_cents`
   ),
   setCashTips: db.prepare(
     `INSERT INTO server_sales (shift_id, employee_id, cash_tips_cents, cash_entered_by)
