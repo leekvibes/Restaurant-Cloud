@@ -950,3 +950,52 @@ body {
 @media (max-width: 900px) {
   .bs-month-h, .bs-month-old > summary, .bs-lhead { position: static; }
 }
+
+/* ===========================================================================
+   NOTICE BARS — the app talking to you
+   ---------------------------------------------------------------------------
+   One shape for every one of them: a mono kicker naming what kind of message
+   it is, then the message. A rule across the top in the colour that carries
+   the meaning; no tinted panel, no emoji, no rounded box. The old ones were
+   pink and yellow blocks from a different design and read as somebody else's
+   software wedged into the page.
+   ======================================================================== */
+.bs-notice-bar {
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 11px var(--gutter);
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+  font-size: 13px; color: var(--body);
+}
+.bs-notice-bar.crit { border-top-color: var(--danger); }
+.bs-notice-bar.ok { border-top-color: var(--positive); }
+.bs-notice-k {
+  flex-shrink: 0;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+}
+.bs-notice-bar.crit .bs-notice-k { color: var(--danger); }
+.bs-notice-bar.ok .bs-notice-k { color: var(--positive); }
+.bs-notice-t { flex: 1; min-width: 0; }
+.bs-notice-t b { font-weight: 600; color: var(--headline); }
+.bs-notice-t code {
+  font-family: var(--mono); font-size: 12px;
+  border-bottom: 1px solid var(--rule); padding-bottom: 1px;
+}
+.bs-notice-undo button {
+  border: 0; background: none; cursor: pointer; padding: 0;
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent);
+}
+.bs-notice-undo button:hover { color: var(--accent-hover); }
+
+/* The old ones, in case a page still emits them. */
+.bs .open-warn, .bs .viewer-warn, .bs .flash { display: none; }
+
+@media (max-width: 640px) {
+  .bs-notice-bar { flex-wrap: wrap; gap: 3px 12px; padding: 10px var(--gutter); }
+  .bs-notice-k { flex-basis: 100%; }
+}
+/* A flash renders inside the page body, which already has the gutter, while
+   the two standing banners sit at page level and need it. */
+.bs-main .bs-notice-bar { margin: 0 calc(var(--gutter) * -1); }

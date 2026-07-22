@@ -203,7 +203,9 @@ test('a view-only account is not offered writes it cannot perform', async () => 
         'rcDrawer(true)', 'class="add-panel"', 'Save invoice', 'Mark done']) {
         assert.ok(!html.includes(trap), `${path} still offers "${trap}" to a viewer`);
       }
-      assert.ok(html.includes('viewer-warn'), `${path} says the account is view-only`);
+      // The standing notice is a bs-notice-bar now, same job, one shape for
+      // every message the app puts in front of you.
+      assert.match(html, /bs-notice-k">View only</, `${path} says the account is view-only`);
     }
 
     // And the upload endpoint refuses in a way the page can explain, rather
@@ -221,7 +223,7 @@ test('the owner still gets every write control', async () => {
   const owner = await login({ password: 'test-manager-password' });
   const html = await (await as(owner, '/c/invoices')).text();
   assert.ok(html.includes('invDrawer(true)'), 'upload is offered');
-  assert.ok(!html.includes('viewer-warn'), 'and no view-only notice');
+  assert.ok(!/bs-notice-k">View only</.test(html), 'and no view-only notice');
 });
 
 test('disabling an account revokes it immediately, not at cookie expiry', async () => {

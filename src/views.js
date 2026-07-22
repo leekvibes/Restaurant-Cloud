@@ -521,11 +521,18 @@ function sidebar() {
 
 /** Loud warning when the app is reachable with no password set. */
 const openWarning = () => (process.env.APP_PASSWORD ? '' :
-  `<div class="open-warn">⚠️ <b>No password set.</b> Anyone with this link can see payroll and staff data. Set <code>APP_PASSWORD</code> to lock it down.</div>`);
+  `<div class="bs-notice-bar crit">
+    <span class="bs-notice-k">Unlocked</span>
+    <span class="bs-notice-t"><b>No password set.</b> Anyone with this link can see payroll and staff data.
+      Set <code>APP_PASSWORD</code> to lock it down.</span>
+  </div>`);
 
 /** Standing notice for a view-only account, so nothing it can't do is a shock. */
 const viewerNote = () => (canWrite() ? '' :
-  `<div class="viewer-warn">${icon('users')}<span><b>View only.</b> You can see everything here and change nothing. Ask the owner if you need to edit.</span></div>`);
+  `<div class="bs-notice-bar">
+    <span class="bs-notice-k">View only</span>
+    <span class="bs-notice-t">You can see everything here and change nothing. Ask the owner if you need to edit.</span>
+  </div>`);
 
 /** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
 function head(title, opts = {}) {
@@ -562,8 +569,12 @@ const swScript = `<script>if('serviceWorker' in navigator){window.addEventListen
 const BUILD = (() => {
   const fs = require('fs');
   const path = require('path');
+  // Every file whose contents the browser caches behind ?v=. broadsheet.css
+  // and fonts.css were missing, so a CSS-only change shipped with an unchanged
+  // BUILD and every returning browser kept the old stylesheet.
   const files = ['server.js', 'views.js'].map((f) => path.join(__dirname, f))
-    .concat([path.join(__dirname, '..', 'public', 'styles.css')]);
+    .concat(['styles.css', 'broadsheet.css', 'fonts.css']
+      .map((f) => path.join(__dirname, '..', 'public', f)));
   const h = require('crypto').createHash('sha1');
   for (const f of files) {
     try { h.update(fs.readFileSync(f)); } catch { /* missing file — ignore */ }
@@ -759,9 +770,12 @@ function flash(req) {
   const undo = String(req.query.undo || '');
   const safeUndo = /^\/[A-Za-z0-9/_?=&.%-]*$/.test(undo) ? undo : '';
   const undoBtn = safeUndo
-    ? `<form method="post" action="${esc(safeUndo)}" class="flash-undo"><button class="link" type="submit">Undo</button></form>`
+    ? `<form method="post" action="${esc(safeUndo)}" class="bs-notice-undo"><button type="submit">Undo</button></form>`
     : '';
-  return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
+  return `<div class="bs-notice-bar ${err ? 'crit' : 'ok'}">
+    <span class="bs-notice-k">${err ? 'Refused' : 'Saved'}</span>
+    <span class="bs-notice-t">${esc(m)}</span>${undoBtn}
+  </div>`;
 }
 
 // navAllowed is the one gate the sidebar and the routes both read, so it is
