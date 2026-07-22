@@ -665,3 +665,91 @@ test('columns pad once, not twice', () => {
   const gap = rules.find((m) => m[1].trim() === '.bs-cols3' && /gap:/.test(m[2]));
   assert.ok(gap, '.bs-cols3 sets a gap instead');
 });
+
+// ---------------------------------------------------------------------------
+// The two nav strips.
+//
+// The band grows and shrinks in flow, which is the whole reason it is safe:
+// floating it would put whatever you were reaching for underneath a panel
+// that appeared *because* you reached for it. And hover is enhancement — the
+// collapsed row has to be usable on its own, because a phone has no hover and
+// a keyboard has no cursor.
+// ---------------------------------------------------------------------------
+
+test('the nav band carries both states, and the collapsed one is complete', async () => {
+  const html = await (await fetch(`${BASE}/`, { redirect: 'manual' })).text();
+  assert.match(html, /<nav class="bs-band"/, 'the band exists');
+
+  const band = html.slice(html.indexOf('<nav class="bs-band"'));
+  const collapsed = band.slice(band.indexOf('class="bs-band-c"'), band.indexOf('class="bs-band-x"'));
+  const expanded = band.slice(band.indexOf('class="bs-band-x"'), band.indexOf('</nav>'));
+
+  // Every GROUP the expanded state shows must have a way in from the
+  // collapsed row — not every link. A named group is one tab there, and its
+  // other pages appear in the sub-nav once you are inside it, which is how
+  // Team has reached Positions and Tip-out policy since long before the band.
+  // Asserting link-for-link would just be asserting that design away.
+  const hrefs = (str) => new Set([...str.matchAll(/href="([^"]+)"/g)].map((m) => m[1]));
+  const inRow = hrefs(collapsed);
+  // Split on the class rather than trying to regex balanced tags — the group
+  // block closes with one </div>, and a non-greedy match for two ran straight
+  // across every group into a single blob.
+  const groups = expanded.split('class="bs-bandg"').slice(1).map((chunk) => [...hrefs(chunk)]);
+  assert.ok(groups.length >= 4, `found ${groups.length} groups`);
+  const stranded = groups.filter((g) => g.length && !g.some((h) => inRow.has(h)));
+  assert.deepStrictEqual(stranded, [], 'every group has an entry point in the collapsed row');
+
+  // Group labels only appear in the expanded half.
+  assert.ok(/bs-bandg-t/.test(expanded), 'the expanded state names its groups');
+  assert.ok(!/bs-bandg-t/.test(collapsed), 'the collapsed row does not');
+});
+
+test('the band pushes content rather than floating over it', () => {
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  let band = null;
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === '.bs-band') band = m[2];
+  assert.ok(band, '.bs-band exists');
+  assert.ok(!/position:\s*(absolute|fixed)/.test(band),
+    'the band stays in flow — an overlay would cover the thing you reached for');
+
+  // The lift is behind a real-hover query; a tap latches :hover on a phone.
+  const hoverBlocks = [...css.matchAll(/@media([^{]*)\{([\s\S]*?)\n\}/g)]
+    .filter((m) => /\.bs-band:hover \.bs-band-x/.test(m[2]));
+  assert.strictEqual(hoverBlocks.length, 1, 'one place expands on hover');
+  assert.match(hoverBlocks[0][1], /hover:\s*hover/, 'gated on a hover device');
+
+  // And a class-based path exists for keyboard and touch.
+  assert.match(css, /\.bs-band\.open \.bs-band-x/, 'focus and tap can open it without a cursor');
+});
+
+test('the band is not a third copy of the nav on a phone', () => {
+  // Below 900px every section is on the bottom bar and in the Index. The old
+  // rule named .bs-nav, which the rebuild replaced, so the strip came back.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
+  assert.match(mob, /\.bs-band\s*\{[^}]*display:\s*none|\.bs-nav,\s*\.bs-band \{[^}]*display:\s*none/,
+    'the band is hidden on a phone');
+});
+
+test('the active tab is a filled chip, and there is exactly one', async () => {
+  for (const p of ['/', '/shifts', '/payroll']) {
+    const html = await (await fetch(`${BASE}${p}`, { redirect: 'manual' })).text();
+    const band = html.slice(html.indexOf('<nav class="bs-band"'));
+    const collapsed = band.slice(band.indexOf('class="bs-band-c"'), band.indexOf('class="bs-band-x"'));
+    const on = (collapsed.match(/class="on"/g) || []).length;
+    assert.strictEqual(on, 1, `${p}: one tab is active in the collapsed row, got ${on}`);
+  }
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  let chip = null;
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === '.bs-band a.on') chip = m[2];
+  assert.ok(chip && /background:\s*var\(--ink\)/.test(chip), 'the active tab is filled, not underlined');
+});
+
+test('the shift button is gone from the bar, not just hidden', async () => {
+  // It lived in the masthead as a global action for one page's verb. The
+  // handoff removes it; the Shifts page and ⌘K still have it.
+  const html = await (await fetch(`${BASE}/shifts`, { redirect: 'manual' })).text();
+  const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
+  assert.ok(!/Log a shift/.test(bar), 'not in the top bar');
+  assert.match(html, /Log a shift/, 'still on the page it belongs to');
+});

@@ -342,8 +342,12 @@ function masthead(path) {
   const now = new Date();
   const stamp = now.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase();
   const part = now.getHours() < 12 ? 'MORNING' : now.getHours() < 17 ? 'AFTERNOON' : 'EVENING';
-  // The primary action is whatever this page is for.
-  const primary = path.startsWith('/shifts') ? ['+ Log a shift', '/shifts/new'] : ['+ New', '/shifts/new'];
+  const name = (u && u.name) || 'Owner';
+  const first = name.split(/\s+/)[0];
+  const role = u && u.role === 'viewer' ? 'View only' : (u && u.master ? 'Owner' : 'Manager');
+  // The "+ Log a shift" button is gone from the bar entirely. That action
+  // lives on the Shifts page and in the ⌘K menu; a global button for one
+  // page's verb is what made this row crowded.
 
   return `
     <header class="bs-masthead">
@@ -362,19 +366,23 @@ function masthead(path) {
         <div class="tsearch-pop" id="rc-out" hidden></div>
       </div>
       <span class="bs-date" id="bs-date">${esc(stamp)} — <span id="bs-part">${part}</span></span>
-      ${canWrite() ? `<a class="bs-btn" href="${primary[1]}">${primary[0]}</a>` : ''}
+      <button type="button" class="bs-theme" id="bs-theme" aria-label="Switch theme" title="Switch day / night">☾</button>
       <details class="bs-acct">
-        <summary class="bs-avatar" title="${esc(u && u.name ? u.name : 'Account')}">${esc(initials(u && u.name ? u.name : 'M'))}</summary>
+        <summary class="bs-chip" title="${esc(name)}">
+          <span class="bs-chip-av">${esc(initials(name))}</span>
+          <span class="bs-chip-n">${esc(first)}</span>
+          <span class="bs-chip-c" aria-hidden="true">▾</span>
+        </summary>
         <div class="bs-pop">
-          <div class="bs-pop-h"><b>${esc(u && u.name ? u.name : 'Owner')}</b>
-            <i>${esc(u && u.email ? u.email : 'signed in')}${u && u.role === 'viewer' ? ' · view only' : ''}</i></div>
-          ${navAllowed('/settings') ? '<a href="/settings">Settings <span>→</span></a>' : ''}
-          ${navAllowed('/users') ? '<a href="/users">Users &amp; access <span>→</span></a>' : ''}
-          <div class="bs-pop-div"></div>
+          <div class="bs-pop-h"><b>${esc(name)}</b>
+            <i>${esc(role)}${u && u.email ? ` · ${esc(u.email)}` : ''}</i></div>
+          ${navAllowed('/settings') ? '<a href="/settings">Settings</a>' : ''}
+          ${navAllowed('/users') ? '<a href="/users">Users &amp; access</a>' : ''}
+          ${navAllowed('/settings') ? '<a href="/settings#billing">Billing &amp; usage</a>' : ''}
+          ${navAllowed('/email') ? '<a href="/email">Email settings</a>' : ''}
           <a class="bs-out" href="/logout">Sign out</a>
         </div>
       </details>
-      <button type="button" class="bs-theme" id="bs-theme" aria-label="Switch theme" title="Switch day / night">☾</button>
     </header>`;
 }
 
@@ -411,7 +419,34 @@ function navRow(path) {
       </div>
     </details>` : '';
 
-  return `<nav class="bs-nav"><div class="bs-nav-scroll">${frontHtml}</div>${overflow}</nav>`;
+  // ---- the expanded state -------------------------------------------------
+  // The same tabs, reflowed under their group names. Everything is visible
+  // once open, so there is no "More" here.
+  const GROUPS = [
+    ['Overview', home ? home.links.map(([href, , label]) => [href, label === 'Dashboard' ? 'Front page' : label]) : []],
+    ...[...front, ...named, ...rest].map((g) => [g.title, g.links.map(([href, , label, , , tag]) => [href, label, tag])]),
+  ].filter(([, links]) => links.length);
+
+  const groupHtml = GROUPS.map(([title, links]) => `
+    <div class="bs-bandg">
+      <span class="bs-bandg-t">${esc(title)}</span>
+      <span class="bs-bandg-l">${links.map(([href, label, tag]) =>
+        `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${
+          tag ? ` <span class="bs-colhead">${esc(tag)}</span>` : ''}</a>`).join('')}</span>
+    </div>`).join('');
+
+  // One hover container holding both layouts. The band grows and shrinks in
+  // flow — it never floats over the page, so nothing underneath moves out of
+  // reach while it is open.
+  return `
+    <nav class="bs-band" id="bs-band" aria-label="Sections">
+      <button type="button" class="bs-band-tap" id="bs-band-tap" aria-expanded="false"
+        aria-controls="bs-band-x" aria-label="Show section groups"></button>
+      <div class="bs-band-c">
+        <div class="bs-nav-scroll">${frontHtml}</div>${overflow}
+      </div>
+      <div class="bs-band-x" id="bs-band-x">${groupHtml}</div>
+    </nav>`;
 }
 
 /**
@@ -631,6 +666,35 @@ function head(title, opts = {}) {
     </script>`;
 }
 
+const bandScript = `<script>
+(function () {
+  var band = document.getElementById('bs-band');
+  if (!band) return;
+  var tap = document.getElementById('bs-band-tap');
+  // Touch has no hover, so a tap opens the groups and a tap outside shuts
+  // them. The collapsed row stays fully usable on its own either way.
+  if (tap) tap.addEventListener('click', function () {
+    var open = band.classList.toggle('open');
+    tap.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  document.addEventListener('click', function (e) {
+    if (!band.contains(e.target)) {
+      band.classList.remove('open');
+      if (tap) tap.setAttribute('aria-expanded', 'false');
+    }
+  });
+  // Tabbing into the collapsed row opens the groups, so a keyboard reaches
+  // every section without a pointer.
+  band.addEventListener('focusin', function () { band.classList.add('open'); });
+  band.addEventListener('focusout', function () {
+    setTimeout(function () { if (!band.contains(document.activeElement)) band.classList.remove('open'); }, 0);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') band.classList.remove('open');
+  });
+})();
+</script>`;
+
 const swScript = `<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>`;
 
 // A build stamp that changes whenever the code does. Staff keep the tips page
@@ -829,7 +893,7 @@ function layout(title, body, opts = {}) {
           });
         })();
       </script>
-      ${swScript}${freshScript}
+      ${bandScript}${swScript}${freshScript}
     </body></html>`;
 }
 

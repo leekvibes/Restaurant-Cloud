@@ -634,7 +634,11 @@ test('a phone gets one navigation, not three', async () => {
   // Below 900px every section is reachable from the bottom bar and the Index,
   // so a scrolling row of tabs above the content is the same list a third time.
   const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
-  assert.match(mob, /\.bs-nav \{[^}]*display:\s*none/, 'the nav row is hidden on a phone');
+  // .bs-band is the banded nav that replaced .bs-nav. Matching either name,
+  // in a shared selector or alone, so the assertion survives the rename
+  // without stopping checking anything.
+  assert.match(mob, /\.bs-band[^{]*\{[^}]*display:\s*none|\.bs-nav,\s*\.bs-band \{[^}]*display:\s*none/,
+    'the tab strip is hidden on a phone');
 
   // The bottom bar's own links stack a glyph over a label. That rule must not
   // reach the Index sheet inside the same <nav>, or every row there stacks its
@@ -703,9 +707,14 @@ test('the phone masthead shows the restaurant, and the search is a glyph until a
   assert.match(html, /class="bs-search-ico"[\s\S]{0,200}<svg/, 'the magnifier is an svg');
   assert.ok(!/>⌕</.test(html), 'not the ⌕ character');
 
-  // The theme toggle is the last control on the bar.
+  // The account chip is the last control on the bar, with the theme toggle to
+  // its left. This is the reverse of what it used to be — the topbar handoff
+  // orders the utility bar date · theme · account, and the chip is now a
+  // name-and-avatar block rather than a 28px circle, so it anchors the end of
+  // the row where a bare glyph could not.
   const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
-  assert.ok(bar.indexOf('bs-theme') > bar.indexOf('bs-acct'), 'night mode sits to the right of the account');
+  assert.ok(bar.indexOf('bs-acct') > bar.indexOf('bs-theme'), 'the account chip closes the bar');
+  assert.ok(!/class="bs-btn"/.test(bar), 'and "+ Log a shift" is gone from the bar entirely');
 });
 
 test('the index keeps its account block in view while the sections scroll', async () => {

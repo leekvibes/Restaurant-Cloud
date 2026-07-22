@@ -50,6 +50,16 @@
   --panel-up:     #fffdf8;
   --panel-up-line:#c7ba9e;
   --panel-lift:   0 4px 16px rgba(31, 29, 26, .09);
+
+  /* --- the two nav strips ------------------------------------------------ */
+  --util-bg:      #f9f1e4;
+  --band-bg:      #efe4d1;
+  --band-line:    #ddd0b8;
+  --band-hover:   #e6d9c2;
+  --band-div:     #cdbfa2;
+  --chip-line:    #cabfa4;
+  --chip-fill:    #fffdf9;
+  --band-label:   #b0a58c;
   --pop-shadow:   4px 4px 0 rgba(23, 23, 26, .12);
 }
 
@@ -88,6 +98,15 @@
   --panel-up:     #26241d;
   --panel-up-line:#4a4636;
   --panel-lift:   0 4px 16px rgba(0, 0, 0, .35);
+
+  --util-bg:      #211e17;
+  --band-bg:      #26241d;
+  --band-line:    #3d392d;
+  --band-hover:   #2f2c22;
+  --band-div:     #46422f;
+  --chip-line:    #46422f;
+  --chip-fill:    #26241d;
+  --band-label:   #7d7867;
   --pop-shadow:   4px 4px 0 rgba(0, 0, 0, .35);
 }
 
@@ -1110,7 +1129,10 @@ body {
    so a scrolling row of tabs above the content is the same list a third time.
    ======================================================================== */
 @media (max-width: 900px) {
-  .bs-nav { display: none; }
+  /* .bs-band is the banded nav that replaced .bs-nav — the old selector was
+     left behind by the rebuild and the tab strip came back on every phone,
+     which is the third copy of the same list. */
+  .bs-nav, .bs-band { display: none; }
   .bs-sub { border-top: 0; }
 }
 
@@ -1608,3 +1630,107 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 @media (max-width: 1000px) {
   .bs-cols3.bs-dash2 { grid-template-columns: 1fr; gap: 24px 0; }
 }
+
+/* ===========================================================================
+   THE TWO NAV STRIPS
+   ---------------------------------------------------------------------------
+   A utility bar over a tab band, so navigation reads as one object rather
+   than as more page furniture. The band has two states: a tidy single row at
+   rest, and labelled groups when the cursor is on it.
+
+   It grows and shrinks IN FLOW. Floating it over the page would put the thing
+   you were reaching for underneath a panel that appeared because you reached
+   for it.
+   ======================================================================== */
+
+.bs-masthead { background: var(--util-bg); border-bottom: 1px solid var(--band-line); }
+
+/* --- the band ------------------------------------------------------------ */
+.bs-band {
+  position: relative;
+  background: var(--band-bg);
+  border-bottom: 1px solid var(--band-line);
+}
+.bs-band-c { display: flex; align-items: center; padding: 8px var(--gutter); }
+.bs-band .bs-nav-scroll { display: flex; align-items: center; flex: 1; min-width: 0;
+  overflow-x: auto; scrollbar-width: none; gap: 2px; }
+.bs-band .bs-nav-scroll::-webkit-scrollbar { display: none; }
+.bs-band a {
+  padding: 6px 12px; font-size: 13px; font-weight: 500; color: var(--secondary);
+  white-space: nowrap; border-bottom: 0;
+}
+.bs-band a:hover { background: var(--band-hover); color: var(--ink); }
+/* The active tab is a filled chip — in both states, so moving between them
+   never loses your place. No underline; the fill IS the state. */
+.bs-band a.on { background: var(--ink); color: var(--paper); font-weight: 600; }
+.bs-band a.on:hover { background: var(--ink); color: var(--paper); }
+.bs-band .bs-nav-sep { width: 1px; height: 14px; background: var(--band-div); margin: 0 9px; flex-shrink: 0; }
+
+/* --- expand / collapse --------------------------------------------------- */
+/* Delays live in the transition, not in JavaScript: 120ms before it opens so
+   a cursor crossing the band does not flick it open, 200ms before it closes
+   so a diagonal move to a far group does not snap it shut. */
+.bs-band-x {
+  max-height: 0; opacity: 0; overflow: hidden;
+  padding: 0 var(--gutter);
+  transition: max-height .28s ease .2s, opacity .18s ease .2s, padding .28s ease .2s;
+}
+.bs-band-c {
+  max-height: 60px; opacity: 1; overflow: hidden;
+  transition: max-height .28s ease .2s, opacity .18s ease .2s;
+}
+@media (hover: hover) and (pointer: fine) {
+  .bs-band:hover .bs-band-x, .bs-band:focus-within .bs-band-x {
+    max-height: 220px; opacity: 1; padding: 12px var(--gutter) 16px;
+    transition-delay: .12s;
+  }
+  .bs-band:hover .bs-band-c, .bs-band:focus-within .bs-band-c {
+    max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0;
+    transition-delay: .12s;
+  }
+}
+/* Tabbing in holds it open even without a pointer. */
+.bs-band.open .bs-band-x { max-height: 220px; opacity: 1; padding: 12px var(--gutter) 16px; }
+.bs-band.open .bs-band-c { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bs-band-x, .bs-band-c { transition: none; }
+}
+
+/* --- the groups ---------------------------------------------------------- */
+.bs-band-x { display: flex; gap: 40px; flex-wrap: wrap; }
+.bs-bandg { display: grid; gap: 6px; align-content: start; }
+.bs-bandg-t {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--band-label);
+}
+.bs-bandg-l { display: flex; gap: 2px; flex-wrap: wrap; }
+.bs-bandg-l a { padding: 5px 11px; }
+
+/* No hover on a touch screen, so a tap on the band toggles it. The button
+   covers the strip only while collapsed; once open the tabs need the clicks. */
+.bs-band-tap { display: none; }
+@media (hover: none) {
+  .bs-band-tap {
+    display: block; position: absolute; inset: 0; z-index: 2;
+    border: 0; background: none; cursor: pointer; padding: 0;
+  }
+  .bs-band.open .bs-band-tap { inset: auto; height: 0; }
+}
+
+/* --- the account chip ---------------------------------------------------- */
+.bs-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 10px 5px 6px; cursor: pointer; list-style: none;
+  border: 1px solid var(--chip-line); background: var(--chip-fill);
+}
+.bs-chip::-webkit-details-marker { display: none; }
+.bs-chip-av {
+  width: 24px; height: 24px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--ink); color: var(--paper);
+  font-family: var(--sans); font-size: 11px; font-weight: 600;
+}
+.bs-chip-n { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.bs-chip-c { font-size: 9px; color: var(--faint); }
+.bs-acct[open] .bs-chip { border-color: var(--ink); }
