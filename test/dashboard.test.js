@@ -249,8 +249,25 @@ test('a service that sold cash and was never counted is raised', async () => {
 test('today gets a notice even when nothing has been logged', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
   const html = await page(owner);
-  assert.match(html, /class="bs-notices"/);
-  assert.match(html, /No shift started today/, 'says so rather than showing an empty card');
+  // The notices ride in the masthead billboard now. What matters is unchanged:
+  // the notice is on the page, and it is actionable.
+  const bb = html.slice(html.indexOf('id="bs-bb"'), html.indexOf('bs-headmeta'));
+  assert.match(bb, /No shift started today/, 'says so rather than showing an empty card');
+  assert.match(bb, /href="\/shifts\/new"/, 'and links to the thing it is asking for');
+});
+
+test('every notice is in the billboard, and the verdict is first', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await page(owner);
+  const bb = html.slice(html.indexOf('id="bs-bb"'), html.indexOf('bs-headmeta'));
+  const msgs = (bb.match(/class="bs-headline bs-bb-i/g) || []).length;
+  assert.ok(msgs >= 2, `the verdict plus at least one notice, got ${msgs}`);
+  // Only the first is visible without JavaScript, so it has to be the verdict
+  // rather than whichever notice happened to be built first.
+  assert.match(bb, /bs-bb-i on">/, 'exactly one starts visible');
+  assert.strictEqual((bb.match(/bs-bb-i on">/g) || []).length, 1);
+  const first = bb.slice(bb.indexOf('bs-bb-i on">'), bb.indexOf('</h1>'));
+  assert.ok(!/No shift started today/.test(first), 'and it is the verdict, not a notice');
 });
 
 // --- sales entry --------------------------------------------------------------

@@ -706,6 +706,16 @@ app.get('/', (req, res) => {
     ? `${attn.length} item${attn.length === 1 ? '' : 's'} · ${bad ? `${bad} urgent` : 'nothing urgent'}`
     : 'nothing outstanding';
 
+  // The masthead line is a billboard: the verdict, then whatever else is true
+  // right now, each sliding through in turn. Every message is in the DOM from
+  // the start — the rotation is presentation, so a screen reader gets the lot
+  // and a browser with JS off shows the first one, which is the verdict.
+  const billboard = [
+    headline,
+    ...notices.map((n) => `${esc(n.title)} <span class="bs-bb-s">${esc(n.sub)}</span>`
+      + (n.href && n.cta ? ` <a class="bs-act" href="${n.href}">${esc(n.cta)} →</a>` : '')),
+  ];
+
   // --- the notices band -----------------------------------------------------
   // Only what is true right now: a service running, a drawer waiting. When the
   // day is closed out there is nothing here and the band does not draw.
@@ -809,10 +819,11 @@ app.get('/', (req, res) => {
     ${flash(req)}
     <div class="bs-page">
       <div class="bs-head">
-        <h1 class="bs-headline">${headline}</h1>
+        <div class="bs-bb" id="bs-bb" data-n="${billboard.length}">
+          ${billboard.map((m, i) => `<h1 class="bs-headline bs-bb-i${i === 0 ? ' on' : ''}">${m}</h1>`).join('')}
+        </div>
         <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>
-      ${todayBlock}
       <div class="bs-cols3">
         <div class="bs-col">${attnBlock}</div>
         <div class="bs-col">${weekBand}</div>
@@ -972,13 +983,13 @@ app.get('/shifts', (req, res) => {
     // you expand. Ninety days of services rendered flat is what this replaces.
     if (idx === 0) {
       const first = list.slice(0, 6), rest = list.slice(6);
-      return `<section class="bs-month" data-month>
-        <div class="bs-month-h">
+      return `<details class="bs-month" data-month open>
+        <summary class="bs-month-h">
           <span class="bs-kicker">${esc(label)}</span>
           <span class="bs-month-meta">${list.length} shift${list.length === 1 ? '' : 's'} · ${Math.round(hrs).toLocaleString('en-US')} hrs ·
             ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
           <span class="bs-month-tot"><b>${money(sales)}</b> + ${money(tips)} tips</span>
-        </div>
+        </summary>
         <div class="bs-lhead">
           <span>Date</span><span>Service</span><span>Status</span>
           <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
@@ -986,7 +997,7 @@ app.get('/shifts', (req, res) => {
         <div class="bs-lrows">${first.map(row).join('')}</div>
         ${rest.length ? `<details class="bs-fold"><summary>${rest.length} earlier day${rest.length === 1 ? '' : 's'} <span aria-hidden="true">show ▾</span></summary>
           <div class="bs-lrows">${rest.map(row).join('')}</div></details>` : ''}
-      </section>`;
+      </details>`;
     }
     return `<details class="bs-month bs-month-old" data-month>
       <summary>
@@ -1412,6 +1423,20 @@ app.get('/shifts/:id', (req, res) => {
     <div class="bs-lrow"><span>${esc(p.name)} <i class="bs-em">${(Math.round(p.hours * 100) / 100).toFixed(2)}h</i></span>
       <b class="bs-fig">${money(p.poolShare || 0)}</b></div>`).join('') : '';
 
+  const toolScript = `
+    <script>
+      // One pane at a time. Opening a second closes the first, so the tools
+      // never push the table off the screen between them.
+      function bsTool(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var open = !el.open;
+        document.querySelectorAll('.bs-toolpanes details').forEach(function (d) { d.open = false; });
+        el.open = open;
+        if (open) el.scrollIntoView({ block: 'nearest' });
+      }
+    </script>`;
+
   const body = `
     ${flash(req)}
     <div class="bs-page bs-sheet">
@@ -1433,29 +1458,14 @@ app.get('/shifts/:id', (req, res) => {
 
       ${attention}
 
-      <div class="bs-cols2">
-        <div class="bs-col">
-          <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span>
-            ${canWrite() ? `<span class="bs-sheet-acts">
-              <a class="bs-act" href="#add-staff" onclick="document.getElementById('add-staff').open=true">+ Add staff</a>
-              <span class="bs-sep"> · </span>
-              <a class="bs-act" href="#read-photo" onclick="document.getElementById('read-photo').open=true">Read from a report photo</a>
-            </span>` : ''}</div>
-
-          ${people.length ? `
-            <div class="bs-shead">
-              <span>Name</span><span>Role</span><span class="r">Sales</span>
-              <span class="r">Tips</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
-            </div>
-            <div class="bs-srows">
-              ${serverStates.map((x) => staffRow(x, true)).join('')}
-              ${supportStates.map((x) => staffRow(x, false)).join('')}
-            </div>`
-            : '<p class="bs-clear">Nobody on this shift yet. They appear here when they submit, or add them below.</p>'}
-
-          <p class="bs-sheet-note">${subCount(sh.id)} · <a href="#the-record" onclick="document.getElementById('the-record').open=true">Read the record ▸</a></p>
-
-          ${canWrite() ? `
+      ${canWrite() ? `<div class="bs-tools">
+        <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add a server or edit their numbers</button>
+        <button type="button" class="bs-tool" onclick="bsTool('read-photo')">Read from a report photo</button>
+        <button type="button" class="bs-tool" onclick="bsTool('the-record')">The record</button>
+        <button type="button" class="bs-tool bs-tool-danger" onclick="bsTool('danger')">Delete this shift</button>
+      </div>` : ''}
+      <div class="bs-toolpanes">
+        ${canWrite() ? `
           <details class="bs-x" id="read-photo">
             <summary>Read from a report photo</summary>
             <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="bs-form">
@@ -1489,7 +1499,7 @@ app.get('/shifts/:id', (req, res) => {
           <details class="bs-x" id="the-record"><summary>The record</summary>${submissionsPanel(sh.id)}</details>
           ${notesSection}
 
-          ${canWrite() ? `<details class="bs-x bs-x-danger">
+        ${canWrite() ? `<details class="bs-x bs-x-danger" id="danger">
             <summary>Delete this shift</summary>
             <p class="bs-clear">Removes the shift and everyone's hours, sales and tips on it. Emails already sent cannot be recalled.</p>
             <form method="post" action="/shifts/${sh.id}/delete"
@@ -1497,6 +1507,25 @@ app.get('/shifts/:id', (req, res) => {
               <button class="bs-btn-quiet bs-danger" type="submit">Delete shift</button>
             </form>
           </details>` : ''}
+      </div>
+
+      <div class="bs-cols2">
+        <div class="bs-col">
+          <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span></div>
+
+          ${people.length ? `
+            <div class="bs-shead">
+              <span>Name</span><span>Role</span><span class="r">Sales</span>
+              <span class="r">Tips</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
+            </div>
+            <div class="bs-srows">
+              ${serverStates.map((x) => staffRow(x, true)).join('')}
+              ${supportStates.map((x) => staffRow(x, false)).join('')}
+            </div>`
+            : '<p class="bs-clear">Nobody on this shift yet. They appear here when they submit, or add them below.</p>'}
+
+          <p class="bs-sheet-note">${subCount(sh.id)} · <a href="#the-record" onclick="document.getElementById('the-record').open=true">Read the record ▸</a></p>
+
         </div>
 
         <div class="bs-col">
@@ -1523,6 +1552,7 @@ app.get('/shifts/:id', (req, res) => {
         </div>
       </div>
     </div>
+    ${toolScript}
 
     <div class="stickybar">
       <div class="sticky-in">

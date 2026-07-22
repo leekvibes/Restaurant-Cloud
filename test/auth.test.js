@@ -173,7 +173,7 @@ test('an owner does see the full dashboard', async () => {
   for (const section of ['File an entry', 'The week in numbers', 'Last service', 'The record']) {
     assert.ok(html.includes(section), `${section} renders for the owner`);
   }
-  assert.match(html, /class="bs-notices"|class="bs-figs4"/, 'and the today strip or a figure band');
+  assert.match(html, /id="bs-bb"/, 'and the billboard');
 });
 
 // A view-only account being refused a write is correct. Being *offered* the

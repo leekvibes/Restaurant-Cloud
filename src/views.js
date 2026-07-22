@@ -645,6 +645,30 @@ function layout(title, body, opts = {}) {
           });
         })();
       </script>
+      <script>
+        // The billboard. Pauses on hover and on focus inside it, so a link in
+        // a message can actually be clicked before it slides away.
+        (function () {
+          var bb = document.getElementById('bs-bb');
+          if (!bb) return;
+          var items = bb.querySelectorAll('.bs-bb-i');
+          if (items.length < 2) return;
+          if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+          var i = 0, hold = false;
+          bb.addEventListener('mouseenter', function () { hold = true; });
+          bb.addEventListener('mouseleave', function () { hold = false; });
+          bb.addEventListener('focusin', function () { hold = true; });
+          setInterval(function () {
+            if (hold || document.hidden) return;
+            var cur = items[i];
+            i = (i + 1) % items.length;
+            cur.classList.remove('on');
+            cur.classList.add('out');
+            items[i].classList.add('on');
+            setTimeout(function () { cur.classList.remove('out'); }, 460);
+          }, 6000);
+        })();
+      </script>
       <script>${searchScript()}</script>
       <script>
         // Pin / unpin the rail, remembered between sessions.
