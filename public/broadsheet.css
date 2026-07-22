@@ -1,0 +1,1001 @@
+/* ===========================================================================
+   BROADSHEET — the token layer and the shared chrome.
+   ---------------------------------------------------------------------------
+   A newspaper, not a dashboard. Hairline rules instead of cards, one accent,
+   serif headlines, monospace for every figure. No radius, no shadows, no
+   decorative colour — colour carries meaning or it is not used.
+   ...........................................................................
+   Day and night are ONE token set swapped by [data-theme] on the root, so the
+   change is a single attribute and nothing re-renders. Every rule below reads
+   variables; none of them names a colour.
+   ======================================================================== */
+
+:root,
+:root[data-theme="day"] {
+  --paper:        #f7eee0;
+  --surface:      #fffdf8;
+  --ink:          #1f1d1a;
+  --body:         #443f33;
+  --secondary:    #5c5647;
+  --muted:        #77705f;
+  --faint:        #a89f8a;
+
+  --rule-heavy:   #1f1d1a;
+  --rule:         #ddd0b8;
+  --rule-light:   #e5dac2;
+  --rule-dotted:  #cfc2a6;
+  --field-border: #d8d5cb;
+
+  --accent:       #2451c9;
+  --accent-hover: #173a9e;
+  --accent-fill:  rgba(36, 81, 201, .12);
+  --warning:      #9a5b12;
+  --positive:     #1a7a3c;
+  --danger:       #9a2c1d;
+
+  --btn-bg:       #1f1d1a;
+  --btn-ink:      #f7eee0;
+  --row-hover:    #f6f4ee;
+  --pop-shadow:   4px 4px 0 rgba(23, 23, 26, .12);
+}
+
+:root[data-theme="night"] {
+  --paper:        #191815;
+  --surface:      #211f1b;
+  --ink:          #eae6d9;
+  --headline:     #f3f0e6;
+  --body:         #c8c2b0;
+  --secondary:    #b3ad9c;
+  --muted:        #8f8a7a;
+  --faint:        #6f6a5c;
+
+  --rule-heavy:   #eae6d9;
+  --rule:         #35332c;
+  --rule-light:   #2e2c25;
+  --rule-dotted:  #403d33;
+  --field-border: #35332c;
+
+  --accent:       #8fa8ff;
+  --accent-hover: #b3c4ff;
+  --accent-fill:  rgba(143, 168, 255, .10);
+  --warning:      #d9a05b;
+  --positive:     #5fc389;
+  --danger:       #e08573;
+
+  /* The primary button inverts: cream ground, dark text. */
+  --btn-bg:       #eae6d9;
+  --btn-ink:      #191815;
+  --row-hover:    #22201c;
+  --pop-shadow:   4px 4px 0 rgba(0, 0, 0, .35);
+}
+
+:root { --headline: var(--ink); }
+
+/* --- type ---------------------------------------------------------------- */
+:root {
+  --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --gutter: 40px;
+}
+
+html, body { background: var(--paper); }
+body {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  color: var(--body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Radius is zero everywhere. Stated once, loudly, because the old sheet sets
+   it in forty places and a single survivor reads as a mistake. */
+.bs *, .bs *::before, .bs *::after { border-radius: 0 !important; box-shadow: none !important; }
+
+.bs h1, .bs h2, .bs h3 { font-family: var(--sans); color: var(--headline); }
+
+/* The one serif: a headline that states the day's verdict. */
+.bs-headline {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 32px;
+  line-height: 1.16;
+  letter-spacing: -.005em;
+  color: var(--headline);
+  margin: 0;
+}
+.bs-headline .warn { color: var(--warning); }
+.bs-headline .ok { color: var(--positive); }
+
+/* Every figure is monospace, so columns of money line up without a table. */
+.bs-fig { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.bs-stat {
+  font-family: var(--mono); font-weight: 600; font-size: 26px;
+  letter-spacing: -.02em; color: var(--headline);
+  font-variant-numeric: tabular-nums;
+}
+.bs-kicker {
+  font-family: var(--mono); font-weight: 600; font-size: 11px;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--ink);
+}
+.bs-colhead {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-meta { font-size: 12px; color: var(--muted); }
+
+/* --- rules --------------------------------------------------------------- */
+.bs-rule-heavy { border-bottom: 2px solid var(--rule-heavy); }
+.bs-rule { border-bottom: 1px solid var(--rule); }
+.bs-rule-dot { border-bottom: 1px dotted var(--rule-dotted); }
+
+/* A section rule takes its section's semantic colour. Colour is never
+   decorative — amber means money is at risk, and nothing else is amber. */
+.bs-sec { padding-top: 22px; }
+.bs-sec-h {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+  padding-bottom: 7px; border-bottom: 1px solid var(--ink);
+}
+.bs-sec-h.warn { border-bottom-color: var(--warning); }
+.bs-sec-h.warn .bs-kicker { color: var(--warning); }
+.bs-sec-h.crit { border-bottom-color: var(--danger); }
+.bs-sec-h.crit .bs-kicker { color: var(--danger); }
+.bs-sec-h.info { border-bottom-color: var(--accent); }
+.bs-sec-h.info .bs-kicker { color: var(--accent); }
+
+/* --- links and buttons --------------------------------------------------- */
+/* :where() so this contributes no specificity — it is the DEFAULT for a link,
+   and any component that names its own colour has to win without a fight.
+   Written as `.bs a` it beat .bs-wordmark and .bs-btn, and the masthead came
+   out accent-blue. */
+:where(.bs) a { color: var(--accent); text-decoration: none; }
+:where(.bs) a:hover { color: var(--accent-hover); text-decoration: none; }
+.bs-act { font-weight: 500; white-space: nowrap; }
+
+.bs-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--btn-bg); color: var(--btn-ink);
+  border: 0; padding: 9px 14px; cursor: pointer;
+  font-family: var(--sans); font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.bs-btn:hover { color: var(--btn-ink); opacity: .88; }
+.bs-btn-quiet {
+  background: none; color: var(--ink); border: 1px solid var(--ink);
+  padding: 8px 13px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.bs-btn-quiet:hover { background: var(--row-hover); color: var(--ink); }
+
+/* ===========================================================================
+   MASTHEAD
+   ======================================================================== */
+.bs-masthead {
+  display: flex; align-items: center; gap: 18px;
+  padding: 13px var(--gutter);
+  border-bottom: 2px solid var(--rule-heavy);
+  background: var(--paper);
+  position: sticky; top: 0; z-index: 60;
+}
+.bs-wordmark {
+  font-family: var(--sans); font-weight: 700; font-size: 17px;
+  letter-spacing: .16em; color: var(--ink); flex-shrink: 0;
+}
+.bs-wordmark:hover { color: var(--ink); }
+.bs-loc {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+  color: var(--secondary); text-transform: uppercase; white-space: nowrap;
+}
+.bs-search {
+  flex: 1; max-width: 620px; position: relative;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface); border: 1px solid var(--field-border);
+  padding: 0 10px; height: 34px;
+}
+.bs-search input {
+  flex: 1; min-width: 0; border: 0; background: none; outline: none;
+  font-family: var(--sans); font-size: 13px; color: var(--ink);
+}
+.bs-search .bs-kbd {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--field-border); padding: 2px 5px; flex-shrink: 0;
+}
+.bs-date {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .06em;
+  color: var(--secondary); text-transform: uppercase; white-space: nowrap;
+  margin-left: auto;
+}
+.bs-theme, .bs-avatar {
+  width: 28px; height: 28px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--ink); background: var(--surface);
+  color: var(--ink); font-family: var(--sans); font-size: 13px; font-weight: 600;
+  cursor: pointer; padding: 0;
+}
+.bs-theme { font-size: 14px; }
+.bs-theme:hover, .bs-avatar:hover { background: var(--row-hover); color: var(--ink); }
+
+/* Account popover */
+.bs-acct { position: relative; }
+.bs-acct > summary { list-style: none; cursor: pointer; }
+.bs-acct > summary::-webkit-details-marker { display: none; }
+.bs-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 80;
+  width: 230px; background: var(--surface); border: 1px solid var(--ink);
+  box-shadow: var(--pop-shadow) !important;
+}
+.bs-pop-h { padding: 11px 13px; border-bottom: 1px solid var(--rule); }
+.bs-pop-h b { display: block; font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.bs-pop-h i { font-style: normal; font-size: 12px; color: var(--muted); }
+.bs-pop a {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 13px; font-size: 13px; color: var(--body);
+}
+.bs-pop a:hover { background: var(--row-hover); color: var(--ink); }
+.bs-pop a span { color: var(--faint); }
+.bs-pop-div { border-top: 1px solid var(--rule); }
+.bs-pop a.bs-out { color: var(--danger); }
+
+/* ===========================================================================
+   NAV ROW — every section on one line, groups split by hairlines.
+   ======================================================================== */
+.bs-nav {
+  display: flex; align-items: center; gap: 0;
+  padding: 0 var(--gutter);
+  border-bottom: 1px solid var(--field-border);
+  background: var(--paper);
+  position: sticky; top: 61px; z-index: 55;
+}
+.bs-nav-scroll { display: flex; align-items: center; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.bs-nav-scroll::-webkit-scrollbar { display: none; }
+.bs-nav a {
+  padding: 11px 11px; font-size: 12.5px; font-weight: 500;
+  color: var(--secondary); white-space: nowrap;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.bs-nav a:hover { color: var(--ink); }
+.bs-nav a.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+.bs-nav-sep { width: 1px; height: 14px; background: var(--field-border); margin: 0 9px; flex-shrink: 0; }
+
+/* The overflow. Everything that does not belong on the front row lives here
+   rather than being dropped — nothing is unreachable. */
+.bs-more { position: relative; flex-shrink: 0; }
+.bs-more > summary {
+  list-style: none; cursor: pointer; padding: 11px 12px;
+  font-size: 12.5px; color: var(--secondary);
+}
+.bs-more > summary::-webkit-details-marker { display: none; }
+.bs-more > summary:hover { color: var(--ink); }
+.bs-more[open] > summary { color: var(--ink); font-weight: 600; }
+.bs-more-pop {
+  position: absolute; right: 0; top: 100%; z-index: 80; min-width: 220px;
+  background: var(--surface); border: 1px solid var(--ink);
+  box-shadow: var(--pop-shadow) !important; padding: 4px 0;
+}
+.bs-more-pop .bs-more-grp {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint);
+  padding: 9px 13px 4px;
+}
+.bs-more-pop a { display: block; padding: 8px 13px; font-size: 13px; color: var(--body); border: 0; }
+.bs-more-pop a:hover { background: var(--row-hover); color: var(--ink); }
+.bs-more-pop a.on { color: var(--ink); font-weight: 600; }
+
+/* ===========================================================================
+   SUB-NAV — the group you are inside, and its siblings.
+   Same hairline treatment, group name at the left, so moving between Staff,
+   Positions and Tip-out policy never means going back up to the top row.
+   ======================================================================== */
+.bs-subnav {
+  display: flex; align-items: center; gap: 16px;
+  padding: 9px var(--gutter);
+  border-bottom: 1px solid var(--field-border);
+  background: var(--paper);
+  overflow-x: auto; scrollbar-width: none;
+}
+.bs-subnav::-webkit-scrollbar { display: none; }
+.bs-subnav-name {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--faint); flex-shrink: 0;
+}
+.bs-subnav-links { display: flex; align-items: center; gap: 2px; }
+.bs-subnav a { padding: 4px 9px; font-size: 12.5px; color: var(--secondary); white-space: nowrap; }
+.bs-subnav a:hover { color: var(--ink); }
+.bs-subnav a.on { color: var(--ink); font-weight: 600; }
+
+/* ===========================================================================
+   PAGE SHELL
+   ======================================================================== */
+.bs-main { padding: 0 var(--gutter) 60px; }
+.bs-foot {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+  margin: 40px var(--gutter) 0; padding: 14px 0 30px;
+  border-top: 2px solid var(--rule-heavy);
+  font-size: 12px; color: var(--muted); flex-wrap: wrap;
+}
+.bs-foot-file { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+/* Banners the shell owns: no password, view-only, flash. */
+.bs-banner {
+  padding: 9px var(--gutter); font-size: 12.5px;
+  border-bottom: 1px solid var(--rule);
+}
+.bs-banner-warn { color: var(--danger); }
+.bs-banner-ok { color: var(--positive); }
+
+/* ===========================================================================
+   MOBILE — a bottom bar, and the nav row scrolls.
+   ======================================================================== */
+.bs-bottom { display: none; }
+
+@media (max-width: 900px) {
+  :root { --gutter: 16px; }
+  .bs-masthead { gap: 11px; padding: 10px var(--gutter); position: static; }
+  .bs-date, .bs-loc { display: none; }
+  .bs-search { max-width: none; }
+  .bs-nav { position: static; }
+  .bs-headline { font-size: 25px; }
+  .bs-bb-i { font-size: 27px; }
+  .bs-stat { font-size: 22px; }
+  .bs-main { padding-bottom: 92px; }   /* clear of the bottom bar */
+  .bs-foot { margin-bottom: 70px; }
+
+  /* The five places a phone actually goes. Everything else is one tap further
+     in, under Index — nothing is unreachable, it is just not underfoot. */
+  .bs-bottom {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
+    background: var(--paper); border-top: 2px solid var(--rule-heavy);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bs-bottom a {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 9px 2px 8px; min-height: 54px;
+    font-size: 11px; color: var(--muted); font-weight: 500;
+  }
+  .bs-bottom a.on { color: var(--ink); font-weight: 600; }
+  .bs-bottom .bs-bottom-g { font-size: 16px; line-height: 1; }
+}
+
+@media (max-width: 560px) {
+  .bs-masthead .bs-search { order: 3; flex-basis: 100%; }
+  .bs-masthead { flex-wrap: wrap; }
+  .bs-headline { font-size: 22px; }
+  .bs-bb-i { font-size: 23px; }
+}
+
+/* Someone who asked for less motion gets none of it. Nothing here animates
+   beyond a popover, which is the whole budget. */
+@media (prefers-reduced-motion: no-preference) {
+  .bs-pop, .bs-more-pop { animation: bs-in 120ms ease-out; }
+  @keyframes bs-in { from { opacity: 0; transform: translateY(-3px); } }
+}
+
+/* ===========================================================================
+   BRIDGE — pages not yet redesigned
+   ---------------------------------------------------------------------------
+   The chrome changes on every page the moment the masthead lands, but the
+   bodies arrive one slice at a time. Without this, an untouched page sits on
+   cool blue-grey under a warm masthead, and in night mode it is white cards on
+   a black ground — unreadable, on fifteen pages.
+   ...........................................................................
+   styles.css is fully tokenised, so remapping its variables is enough. This is
+   scaffolding: every line here can go once its page has been redesigned.
+   ======================================================================== */
+:root[data-theme="day"] {
+  --bg:        #f7eee0;
+  --surface:   #fffdf8;
+  --surface-2: #f4ead9;
+  --surface-3: #efe4d0;
+  --ink:       #1f1d1a;
+  --ink-2:     #443f33;
+  --muted:     #77705f;
+  --faint:     #a89f8a;
+  --line:      #e5dac2;
+  --line-2:    #ddd0b8;
+  --primary:   #2451c9;
+  --primary-hover: #173a9e;
+  --primary-700:   #173a9e;
+  --primary-50:  #edf0fb;
+  --primary-100: #dde4f7;
+  --primary-200: #c3cff0;
+  --ok:   #1a7a3c;  --ok-bg:   #e4f0e6;
+  --warn: #9a5b12;  --warn-bg: #f6ead6;
+  --amber:#9a5b12;  --amber-bg:#f6ead6;
+  --danger:#9a2c1d; --danger-bg:#f7e3df;
+  --ring: 0 0 0 3px rgba(36, 81, 201, .15);
+}
+
+:root[data-theme="night"] {
+  --bg:        #191815;
+  --surface:   #211f1b;
+  --surface-2: #1f1d1a;
+  --surface-3: #262420;
+  --ink:       #f3f0e6;
+  --ink-2:     #c8c2b0;
+  --muted:     #8f8a7a;
+  --faint:     #6f6a5c;
+  --line:      #2e2c25;
+  --line-2:    #35332c;
+  --primary:   #8fa8ff;
+  --primary-hover: #b3c4ff;
+  --primary-700:   #b3c4ff;
+  --primary-50:  #21242e;
+  --primary-100: #262a36;
+  --primary-200: #2f3543;
+  --ok:   #5fc389;  --ok-bg:   #1c2a22;
+  --warn: #d9a05b;  --warn-bg: #2b2419;
+  --amber:#d9a05b;  --amber-bg:#2b2419;
+  --danger:#e08573; --danger-bg:#2e1f1c;
+  --ring: 0 0 0 3px rgba(143, 168, 255, .18);
+}
+
+/* A few places in the old sheet name a colour outright rather than reading a
+   token. In night mode those are the ones that come out white-on-white. */
+:root[data-theme="night"] .bs input,
+:root[data-theme="night"] .bs select,
+:root[data-theme="night"] .bs textarea {
+  background: var(--surface); color: var(--ink); border-color: var(--line-2);
+}
+:root[data-theme="night"] .bs .card,
+:root[data-theme="night"] .bs .panel,
+:root[data-theme="night"] .bs .pcard { background: var(--surface); }
+
+/* The old shell assumed a rail on the left and a topbar above. Both are gone. */
+.bs .app { display: block; }
+.bs .sidebar, .bs .topbar, .bs .scrim { display: none !important; }
+.bs .content { margin-left: 0 !important; }
+.bs .wrap { max-width: none; padding: 0; margin: 0; }
+
+/* --- the Index sheet ------------------------------------------------------ */
+/* Every section, one tap from the bottom bar. Without it the nav row scrolling
+   off a phone would put two thirds of the app out of reach. */
+.bs-index { flex: 1; }
+.bs-index > summary {
+  list-style: none; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 9px 2px 8px; min-height: 54px;
+  font-size: 11px; color: var(--muted); font-weight: 500;
+}
+.bs-index > summary::-webkit-details-marker { display: none; }
+.bs-index[open] > summary { color: var(--ink); font-weight: 600; }
+.bs-index-body { position: fixed; inset: 0; z-index: 90; }
+.bs-index-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .38); }
+.bs-index-sheet {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  max-height: 82vh; overflow-y: auto;
+  background: var(--paper); border-top: 2px solid var(--rule-heavy);
+  padding: 14px 16px calc(70px + env(safe-area-inset-bottom));
+}
+.bs-index-h { padding-bottom: 8px; border-bottom: 1px solid var(--ink); margin-bottom: 4px; }
+.bs-index-grp {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint); padding: 14px 0 6px;
+}
+.bs-index-links { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 12px; }
+.bs-index-links a {
+  padding: 11px 2px; font-size: 13.5px; color: var(--body); text-align: left;
+  border-bottom: 1px dotted var(--rule-dotted); min-height: 44px;
+  display: flex; align-items: center; gap: 6px;
+}
+.bs-index-links a.on { color: var(--ink); font-weight: 600; }
+.bs-index-links a i {
+  font-style: normal; font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: .08em; color: var(--faint);
+}
+
+/* ===========================================================================
+   DASHBOARD — the front page
+   ---------------------------------------------------------------------------
+   A verdict headline, then three ruled columns: what needs doing, what the
+   week says, what the last service was and what has happened since.
+   ======================================================================== */
+.bs-page { padding-top: 26px; }
+.bs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 30px; }
+.bs-headline { max-width: 22ch; flex: 1; }
+.bs-headmeta { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.bs-headline .ok { color: var(--positive); }
+
+/* --- the notices band ----------------------------------------------------- */
+.bs-notices {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px;
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule);
+}
+.bs-notice { padding: 10px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-notice-t { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.bs-notice-t b { font-size: 15px; font-weight: 600; color: var(--headline); }
+.bs-notice-t > span { font-size: 13px; color: var(--muted); }
+.bs-notice-t .bs-act { margin-left: auto; }
+/* The submission bar has had markup and no CSS since it shipped. */
+.bs-prog { height: 3px; background: var(--rule-light); margin-top: 8px; max-width: 340px; }
+.bs-prog span { display: block; height: 100%; background: var(--positive); }
+.bs-notice-w { margin-top: 5px; font-size: 12.5px; color: var(--warning); }
+
+/* --- three columns -------------------------------------------------------- */
+.bs-cols3 { display: grid; grid-template-columns: 340px 1fr 300px; margin-top: 22px; }
+.bs-col { padding: 0 28px; min-width: 0; }
+.bs-col:first-child { padding-left: 0; border-right: 1px solid var(--field-border); }
+.bs-col:last-child { padding-right: 0; border-left: 1px solid var(--field-border); }
+
+/* --- attention: one list, severity in the kicker -------------------------- */
+.bs-item { display: block; padding: 13px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-item:hover { background: var(--row-hover); }
+.bs-item-k {
+  display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+}
+.bs-item-k.red { color: var(--danger); }
+.bs-item-k.amber { color: var(--warning); }
+.bs-item-k.blue { color: var(--accent); }
+.bs-item-t { display: block; margin-top: 3px; font-size: 15px; font-weight: 500; color: var(--headline); }
+.bs-item-s { display: block; margin-top: 2px; font-size: 13px; color: var(--muted); }
+.bs-fold > summary {
+  list-style: none; cursor: pointer; padding: 12px 0;
+  font-size: 13px; color: var(--muted);
+}
+.bs-fold > summary::-webkit-details-marker { display: none; }
+.bs-fold > summary:hover { color: var(--ink); }
+.bs-clear { font-size: 13px; color: var(--muted); padding: 14px 0; margin: 0; }
+
+/* --- the week in numbers -------------------------------------------------- */
+.bs-grid2 { display: grid; grid-template-columns: 1fr 1fr; }
+.bs-figcell { display: grid; gap: 3px; align-content: start; min-width: 0;
+  padding: 18px 20px 20px 0; border-bottom: 1px solid var(--rule); }
+.bs-figcell:nth-child(even) { padding-left: 20px; border-left: 1px solid var(--rule); }
+.bs-figcell:nth-last-child(-n+2) { border-bottom: 0; }
+.bs-figlabel { font-size: 13px; color: var(--secondary); }
+.bs-figcell .bs-stat { font-size: 30px; }
+.bs-figsub { font-size: 12.5px; color: var(--muted); }
+.bs-figsub .dl { background: none; padding: 0; font-size: 12.5px; }
+.bs-sparklabel { margin: 22px 0 4px; font-size: 12.5px; color: var(--secondary); }
+.bs-spark { margin: 0; }
+.bs-spark .chart-empty { display: none; }
+.bs-soon-h { margin-top: 26px; }
+.bs-soon-r {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 10px 0; border-bottom: 1px dotted var(--rule-dotted);
+  font-size: 13.5px; color: var(--body);
+}
+.bs-soon-r:hover { background: var(--row-hover); color: var(--ink); }
+.bs-soon-r b { font-size: 12px; color: var(--warning); white-space: nowrap; }
+
+/* --- last service, and the record ----------------------------------------- */
+.bs-lrows { padding-top: 4px; }
+.bs-lrow {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 11px 0; border-bottom: 1px dotted var(--rule-dotted);
+}
+.bs-lrow span { font-size: 13.5px; color: var(--body); }
+.bs-lrow b { font-size: 15px; font-weight: 500; color: var(--headline); }
+.bs-rec-h { margin-top: 28px; }
+.bs-recs { padding-top: 4px; }
+.bs-rec {
+  display: block; padding: 10px 0; border-bottom: 1px dotted var(--rule-dotted);
+  font-size: 12.5px; color: var(--body); line-height: 1.5;
+}
+.bs-rec:hover { background: var(--row-hover); color: var(--ink); }
+.bs-rec b { font-weight: 600; color: var(--headline); }
+.bs-rec-w { color: var(--faint); white-space: nowrap; }
+
+@media (max-width: 1180px) {
+  .bs-cols3 { grid-template-columns: 1fr; }
+  .bs-col { padding: 0; border: 0 !important; }
+  .bs-col + .bs-col { border-top: 1px solid var(--field-border) !important; margin-top: 28px; padding-top: 6px; }
+  .bs-headline { max-width: none; }
+}
+@media (max-width: 760px) {
+  .bs-notices { grid-template-columns: 1fr; gap: 0; }
+  .bs-head { flex-direction: column; gap: 6px; }
+  .bs-figcell .bs-stat { font-size: 24px; }
+  .bs-notice-t .bs-act { margin-left: 0; flex-basis: 100%; }
+}
+.bs-sep { color: var(--faint); }
+
+/* ===========================================================================
+   SHIFTS — the ledger
+   ======================================================================== */
+.bs-subline { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
+
+/* --- stat strip ----------------------------------------------------------- */
+.bs-strip {
+  display: flex; align-items: flex-start; gap: 0;
+  margin-top: 22px; padding: 20px 0;
+  border-top: 1px solid var(--field-border); border-bottom: 1px solid var(--field-border);
+}
+.bs-strip-c { flex: 1; display: grid; gap: 3px; padding: 0 26px; min-width: 0; }
+.bs-strip-c:first-child { padding-left: 0; }
+.bs-strip-c + .bs-strip-c { border-left: 1px solid var(--rule); }
+.bs-strip-l { font-size: 13px; color: var(--secondary); }
+.bs-strip-c .bs-stat { font-size: 26px; }
+.bs-strip-s { font-size: 12.5px; color: var(--muted); }
+.bs-strip-note {
+  align-self: center; text-align: right; padding-left: 26px;
+  font-size: 12px; color: var(--faint); white-space: nowrap;
+}
+
+/* --- open right now ------------------------------------------------------- */
+.bs-open { display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px;
+  padding: 4px 0; border-bottom: 1px solid var(--field-border); }
+.bs-open-r {
+  display: flex; align-items: baseline; gap: 9px; padding: 13px 0;
+  font-size: 13px; color: var(--muted);
+}
+.bs-open-r b { font-size: 14.5px; font-weight: 600; color: var(--headline); }
+.bs-open-r .bs-act { margin-left: auto; }
+.bs-open-d { width: 8px; height: 8px; border-radius: 50% !important; background: var(--positive); flex-shrink: 0; }
+.bs-open-d.review { background: var(--warning); }
+
+/* --- filter line ---------------------------------------------------------- */
+.bs-filter {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 16px 0 6px;
+}
+.bs-filter-l { font-size: 13px; color: var(--muted); margin-right: 5px; }
+.bs-fchip {
+  border: 0; background: none; cursor: pointer; padding: 5px 9px;
+  font-family: var(--sans); font-size: 13px; color: var(--secondary);
+}
+.bs-fchip:hover { color: var(--ink); }
+.bs-fchip.on { color: var(--ink); font-weight: 600; }
+.bs-filter-sp { flex: 1; }
+.bs-ytab { padding: 5px 8px; font-size: 12.5px; color: var(--muted); }
+.bs-ytab.on { color: var(--ink); font-weight: 600; border-bottom: 2px solid var(--ink); }
+.bs-search-inline {
+  border: 1px solid var(--field-border); background: var(--surface);
+  padding: 6px 10px; font-family: var(--sans); font-size: 12.5px;
+  color: var(--ink); min-width: 210px;
+}
+
+/* --- the month ledger ----------------------------------------------------- */
+.bs-month { margin-top: 26px; }
+.bs-month-h, .bs-month-old > summary {
+  display: flex; align-items: baseline; gap: 14px;
+  padding-bottom: 9px; border-bottom: 1px solid var(--ink);
+}
+.bs-month-old > summary { list-style: none; cursor: pointer; padding-top: 4px; }
+.bs-month-old > summary::-webkit-details-marker { display: none; }
+.bs-month-meta { font-size: 13px; color: var(--muted); }
+.bs-month-meta b { font-weight: 500; }
+.bs-month-meta .ok { color: var(--positive); }
+.bs-month-meta .warn { color: var(--warning); }
+.bs-month-tot {
+  margin-left: auto; font-family: var(--mono); font-size: 14px;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.bs-month-tot b { font-weight: 600; color: var(--headline); }
+.bs-month-old > summary .bs-act { margin-left: 0; }
+
+.bs-lhead, .bs-lr {
+  display: grid;
+  grid-template-columns: 74px 1fr 116px 118px 104px 78px 60px 24px;
+  align-items: baseline; gap: 0 12px;
+}
+.bs-lhead {
+  padding: 11px 0 8px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-lhead .r, .bs-lr-n { text-align: right; }
+.bs-lr { padding: 11px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-lr:hover { background: var(--row-hover); }
+.bs-lr-d { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.bs-lr-s { font-size: 14px; font-weight: 600; color: var(--headline); }
+.bs-lr-st { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: var(--muted); }
+.bs-lr-st.sent { color: var(--positive); }
+.bs-lr-st.review { color: var(--danger); }
+.bs-lr-st.ready { color: var(--accent); }
+.bs-lr-st.open { color: var(--positive); }
+.bs-lr-st.empty { color: var(--faint); }
+.bs-lr-n {
+  font-family: var(--mono); font-size: 13px; color: var(--headline);
+  font-variant-numeric: tabular-nums;
+}
+.bs-lr-n.muted { color: var(--muted); }
+.bs-lr-miss { display: block; font-style: normal; font-size: 11px; color: var(--danger); }
+.bs-lr-go { color: var(--faint); text-align: right; }
+.bs-lr:hover .bs-lr-go { color: var(--accent); }
+
+@media (max-width: 1100px) {
+  .bs-strip { flex-wrap: wrap; gap: 18px 0; }
+  .bs-strip-c { flex: 1 1 44%; }
+  .bs-strip-c:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .bs-strip-note { flex-basis: 100%; text-align: left; padding-left: 0; }
+  .bs-open { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  /* The ledger keeps its shape but sheds the columns a phone cannot carry.
+     Nothing is lost — hours and staff are on the shift itself. */
+  .bs-lhead, .bs-lr { grid-template-columns: 62px 1fr 92px 100px 20px; }
+  .bs-lhead span:nth-child(5), .bs-lhead span:nth-child(6), .bs-lhead span:nth-child(7),
+  .bs-lr span:nth-child(5), .bs-lr span:nth-child(6), .bs-lr span:nth-child(7) { display: none; }
+  .bs-month-tot { flex-basis: 100%; margin-left: 0; }
+  .bs-month-h, .bs-month-old > summary { flex-wrap: wrap; gap: 4px 12px; }
+  .bs-strip-c { flex-basis: 100%; }
+  .bs-strip-c + .bs-strip-c { border-left: 0; border-top: 1px solid var(--rule); padding-top: 14px; }
+}
+
+/* ===========================================================================
+   SHIFT SHEET
+   ======================================================================== */
+.bs-back { display: inline-block; margin-bottom: 6px; font-size: 13px; }
+.bs-sheet .bs-headline { max-width: none; }
+.bs-status { margin: 8px 0 0; font-size: 13.5px; color: var(--muted); }
+.bs-status-w {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; margin-right: 7px;
+}
+.bs-status-w.ok { color: var(--positive); }
+.bs-status-w.warn { color: var(--warning); }
+.bs-status-w.ready { color: var(--accent); }
+.bs-stat.ok { color: var(--positive); }
+.bs-stat.bad { color: var(--danger); }
+.bs-em { font-style: normal; color: var(--faint); }
+
+.bs-cols2 { display: grid; grid-template-columns: 1fr 330px; margin-top: 4px; }
+.bs-cols2 > .bs-col:first-child { padding-left: 0; padding-right: 30px; border-right: 1px solid var(--field-border); }
+.bs-cols2 > .bs-col:last-child { padding-right: 0; padding-left: 30px; border-left: 0; }
+.bs-sheet-acts { font-size: 13px; }
+.bs-split-h { margin-top: 26px; }
+.bs-sheet-note { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+
+/* --- who was on ----------------------------------------------------------- */
+.bs-shead, .bs-sr {
+  display: grid;
+  grid-template-columns: 1fr 78px 96px 92px 88px 60px 72px 52px;
+  align-items: baseline; gap: 0 12px;
+}
+.bs-shead.has-alc, .has-alc .bs-sr {
+  grid-template-columns: 1fr 74px 88px 84px 80px 82px 56px 68px 50px;
+}
+.bs-shead {
+  padding: 12px 0 8px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-shead .r, .bs-sr-f { text-align: right; }
+
+.bs-srow { border-bottom: 1px dotted var(--rule-dotted); }
+.bs-sr { padding: 12px 0; cursor: pointer; list-style: none; }
+.bs-sr::-webkit-details-marker { display: none; }
+.bs-sr:hover { background: var(--row-hover); }
+.bs-srow[open] > .bs-sr { background: var(--row-hover); }
+.bs-sr-n { font-size: 14px; font-weight: 600; color: var(--headline); }
+.bs-sr-r { font-size: 13px; color: var(--muted); }
+.bs-sr-f {
+  font-family: var(--mono); font-size: 13px; color: var(--headline);
+  font-variant-numeric: tabular-nums;
+}
+.bs-sr-f.miss { color: var(--warning); }
+.bs-sr-e { text-align: right; font-size: 13px; font-weight: 500; color: var(--accent); }
+.bs-srow[open] .bs-sr-e { color: var(--muted); }
+.bs-srow[open] .bs-sr-e::after { content: ''; }
+
+/* --- editing, on the row itself ------------------------------------------- */
+.bs-inline {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px;
+  padding: 4px 0 14px;
+}
+/* A pill you type into. No spinners — the arrows on a number input are a
+   pixel-hunt on a laptop and useless on a phone, and every value here is money
+   or hours typed in full. */
+.bs-pill { display: grid; gap: 4px; }
+.bs-pill > span {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-pill input, .bs-pill select {
+  width: 104px; padding: 8px 12px;
+  border: 1px solid var(--field-border); background: var(--surface);
+  border-radius: 999px !important;
+  font-family: var(--mono); font-size: 13px; color: var(--ink);
+  -moz-appearance: textfield; appearance: none;
+}
+.bs-pill select { width: 128px; font-family: var(--sans); }
+.bs-pill input::-webkit-outer-spin-button,
+.bs-pill input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.bs-pill input:focus, .bs-pill select:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-fill) !important;
+}
+.bs-inline .bs-btn { border-radius: 999px !important; padding: 9px 20px; }
+.bs-inline-x {
+  border: 0; background: none; cursor: pointer; padding: 9px 4px;
+  font-family: var(--sans); font-size: 13px; color: var(--muted);
+}
+.bs-inline-x:hover { color: var(--ink); }
+.bs-inline-rm { padding: 0 0 14px; }
+.bs-inline-rm button {
+  border: 0; background: none; cursor: pointer; padding: 0;
+  font-family: var(--sans); font-size: 12.5px; color: var(--danger);
+}
+.bs-inline-rm button:hover { text-decoration: underline; }
+
+/* --- the disclosures that hold every form the old workspace had ----------- */
+.bs-x { border-top: 1px solid var(--rule); margin-top: 2px; }
+.bs-x > summary {
+  list-style: none; cursor: pointer; padding: 13px 0;
+  font-size: 13px; font-weight: 500; color: var(--secondary);
+}
+.bs-x > summary::-webkit-details-marker { display: none; }
+.bs-x > summary::before { content: '▸ '; color: var(--faint); font-size: 10px; }
+.bs-x[open] > summary::before { content: '▾ '; }
+.bs-x > summary:hover { color: var(--ink); }
+.bs-x-danger > summary { color: var(--danger); }
+.bs-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px; padding: 4px 0 20px; align-items: end;
+}
+.bs-form label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.bs-form input, .bs-form select {
+  border: 1px solid var(--field-border); background: var(--surface);
+  padding: 8px 10px; font-family: var(--sans); font-size: 13px; color: var(--ink);
+}
+.bs-form > p { grid-column: 1 / -1; margin: 0; }
+.bs-danger { border-color: var(--danger); color: var(--danger); }
+.bs-danger:hover { background: var(--danger); color: var(--paper); }
+
+@media (max-width: 1100px) {
+  .bs-cols2 { grid-template-columns: 1fr; }
+  .bs-cols2 > .bs-col:first-child { padding-right: 0; border-right: 0; }
+  .bs-cols2 > .bs-col:last-child {
+    padding-left: 0; margin-top: 28px; padding-top: 6px;
+    border-top: 1px solid var(--field-border);
+  }
+}
+@media (max-width: 760px) {
+  /* Wage and role fold away; both are on the person's own record. */
+  .bs-shead, .bs-sr { grid-template-columns: 1fr 84px 74px 56px 50px; }
+  .bs-shead span:nth-child(2), .bs-sr .bs-sr-r,
+  .bs-shead span:nth-child(6), .bs-sr .bs-sr-f:nth-of-type(4) { display: none; }
+}
+
+/* The sheet has Preview & send in its header; the old sticky bar repeated it
+   at the foot in the previous shell. One is enough. */
+.bs .stickybar { display: none; }
+
+/* ===========================================================================
+   BILLBOARD — the masthead line, rotating
+   ---------------------------------------------------------------------------
+   Every message is in the DOM. Only one is visible; the rotation slides the
+   old one up and the new one in from below. With JavaScript off, or with
+   reduced motion asked for, the first message simply stays — and the first
+   message is the verdict, which is the one that matters.
+   ======================================================================== */
+.bs-bb { position: relative; flex: 1; min-width: 0; }
+.bs-bb-i {
+  margin: 0;
+  font-size: 40px;
+  /* The exit is slower than the entrance on purpose — you should see the line
+     leave, not find it already gone. */
+  transition: transform .62s cubic-bezier(.32,.72,0,1), opacity .5s ease-out;
+}
+/* Stacked, so the block keeps the height of the tallest message and nothing
+   below it jumps as they cycle. */
+.bs-bb-i:not(.on) {
+  position: absolute; inset: 0;
+  transform: translateY(22px); opacity: 0; pointer-events: none;
+  transition: transform .5s cubic-bezier(.32,.72,0,1), opacity .34s ease-out;
+}
+.bs-bb-i.on { transform: none; opacity: 1; }
+.bs-bb-i.out { transform: translateY(-26px); opacity: 0; pointer-events: none; }
+.bs-bb-s { color: var(--muted); font-family: var(--sans); font-size: .42em; font-weight: 400; }
+.bs-bb-i .bs-act { font-family: var(--sans); font-size: .36em; vertical-align: middle; }
+
+/* A headline runs the width it has. It only wraps when it genuinely needs to —
+   a 22ch clamp was breaking two-word tails onto a line of their own. */
+.bs-headline { max-width: none; text-wrap: balance; }
+.bs-head { align-items: flex-start; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bs-bb-i { transition: none; }
+}
+
+/* --- shift sheet: the tools, above the data ------------------------------- */
+/* Text actions on a ruled line, not a row of boxes. The page has no other
+   containers in it; four white rectangles read as a different product. */
+.bs-tools {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0;
+  margin: 22px 0 0; padding: 11px 0;
+  border-top: 1px solid var(--field-border); border-bottom: 1px solid var(--field-border);
+}
+.bs-tool {
+  border: 0; background: none; cursor: pointer; padding: 4px 16px 4px 0;
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent);
+}
+.bs-tool + .bs-tool { padding-left: 16px; border-left: 1px solid var(--rule); }
+.bs-tool:hover { color: var(--accent-hover); }
+.bs-tool-danger { color: var(--danger); margin-left: auto; }
+.bs-tool-danger:hover { color: var(--danger); text-decoration: underline; }
+.bs-toolpanes:not(:empty) { margin-bottom: 4px; }
+.bs-toolpanes .bs-x { border-top: 0; }
+.bs-toolpanes .bs-x > summary { display: none; }   /* the buttons above are the summary */
+.bs-toolpanes .bs-x[open] { border-bottom: 1px solid var(--field-border); padding-bottom: 6px; }
+
+@media (max-width: 900px) {
+  /* Kitchen and coffee are the point of this table, so role and wage go
+     before they do — both are on the person's own record. */
+  .bs-shead, .bs-sr, .bs-shead.has-alc, .has-alc .bs-sr {
+    grid-template-columns: 1fr 76px 74px 62px 52px 48px;
+  }
+  .bs-shead span:nth-child(2), .bs-sr .bs-sr-r { display: none; }
+  .bs-shead.has-alc span:nth-child(5), .has-alc .bs-sr .bs-sr-f:nth-of-type(3) { display: none; }
+  .bs-shead span:nth-last-child(2), .bs-sr .bs-sr-f:last-of-type { display: none; }
+  .bs-pill input, .bs-pill select { width: 100%; }
+  .bs-pill { flex: 1 1 132px; }
+  .bs-inline { gap: 10px 8px; }
+  .bs-tool-danger { margin-left: 0; }
+}
+
+/* --- the ledger, made scannable ------------------------------------------- */
+/* Sticky month header: scroll into a month and its name stays with you, so
+   "which month am I in" never needs a scroll back up. */
+.bs-month-h, .bs-month-old > summary {
+  position: sticky; top: 96px; z-index: 20; background: var(--paper);
+}
+.bs-lhead { position: sticky; top: 137px; z-index: 19; background: var(--paper); }
+
+/* Weeks, each closed by its own subtotal. */
+.bs-week + .bs-week { margin-top: 2px; }
+.bs-week-f {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 7px 0 9px; border-bottom: 1px solid var(--rule);
+  font-size: 11.5px; color: var(--faint);
+}
+.bs-week-f b { margin-left: auto; font-size: 12px; color: var(--muted); font-weight: 600; }
+.bs-week-f i { font-style: normal; font-size: 11.5px; color: var(--faint); min-width: 88px; text-align: right; }
+.bs-week:last-child .bs-week-f { border-bottom: 0; }
+
+/* Friday, Saturday and Sunday are the big days; a shade more ink gives the
+   column a rhythm instead of twenty-one identical lines. */
+.bs-lr.wknd .bs-lr-d { color: var(--secondary); }
+.bs-lr.wknd .bs-lr-s { color: var(--headline); }
+.bs-lr.wknd .bs-lr-n { color: var(--headline); }
+
+@media (max-width: 900px) {
+  .bs-month-h, .bs-month-old > summary, .bs-lhead { position: static; }
+}
+
+/* ===========================================================================
+   NOTICE BARS — the app talking to you
+   ---------------------------------------------------------------------------
+   One shape for every one of them: a mono kicker naming what kind of message
+   it is, then the message. A rule across the top in the colour that carries
+   the meaning; no tinted panel, no emoji, no rounded box. The old ones were
+   pink and yellow blocks from a different design and read as somebody else's
+   software wedged into the page.
+   ======================================================================== */
+.bs-notice-bar {
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 11px var(--gutter);
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+  font-size: 13px; color: var(--body);
+}
+.bs-notice-bar.crit { border-top-color: var(--danger); }
+.bs-notice-bar.ok { border-top-color: var(--positive); }
+.bs-notice-k {
+  flex-shrink: 0;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+}
+.bs-notice-bar.crit .bs-notice-k { color: var(--danger); }
+.bs-notice-bar.ok .bs-notice-k { color: var(--positive); }
+.bs-notice-t { flex: 1; min-width: 0; }
+.bs-notice-t b { font-weight: 600; color: var(--headline); }
+.bs-notice-t code {
+  font-family: var(--mono); font-size: 12px;
+  border-bottom: 1px solid var(--rule); padding-bottom: 1px;
+}
+.bs-notice-undo button {
+  border: 0; background: none; cursor: pointer; padding: 0;
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent);
+}
+.bs-notice-undo button:hover { color: var(--accent-hover); }
+
+/* The old ones, in case a page still emits them. */
+.bs .open-warn, .bs .viewer-warn, .bs .flash { display: none; }
+
+@media (max-width: 640px) {
+  .bs-notice-bar { flex-wrap: wrap; gap: 3px 12px; padding: 10px var(--gutter); }
+  .bs-notice-k { flex-basis: 100%; }
+}
+/* A flash renders inside the page body, which already has the gutter, while
+   the two standing banners sit at page level and need it. */
+.bs-main .bs-notice-bar { margin: 0 calc(var(--gutter) * -1); }

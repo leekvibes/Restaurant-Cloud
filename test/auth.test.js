@@ -133,12 +133,15 @@ test('the dashboard shows nothing from areas the account cannot open', async () 
     assert.strictEqual(res.status, 200, 'dashboard itself is allowed');
     const html = await res.text();
 
-    assert.ok(html.includes('Needs attention'), 'still gets the sections it may see');
+    // The attention list is headed by its severity kickers now, not by a
+    // section title. CRITICAL only renders when there is something critical,
+    // so the stable marker is the column itself.
+    assert.ok(html.includes('bs-cols3'), 'still gets the sections it may see');
     // A section only counts as withheld if an owner actually gets it —
     // otherwise the assertion passes because the string was renamed and stops
     // testing anything. These are checked against the owner's page below.
     const ownerHtml = await (await as(owner, '/')).text();
-    for (const withheld of ['This week', 'Quick actions']) {
+    for (const withheld of ['The week in numbers']) {
       assert.ok(ownerHtml.includes(withheld), `${withheld} must exist for an owner, or this proves nothing`);
       assert.ok(!html.includes(withheld), `${withheld} must not render for a viewer`);
     }
@@ -167,10 +170,10 @@ test('an owner does see the full dashboard', async () => {
   // by the notice markup. "Upcoming" is now "Coming up" and only renders when
   // something is actually due; Insights moved to Performance, which is the
   // page that exists to explain why a number moved.
-  for (const section of ['Needs attention', 'Quick actions', 'This week', 'Last service', 'Recent activity']) {
+  for (const section of ['File an entry', 'The week in numbers', 'Last service', 'The record']) {
     assert.ok(html.includes(section), `${section} renders for the owner`);
   }
-  assert.match(html, /class="tnotices"|class="dstrip"/, 'and the today strip or a figure band');
+  assert.match(html, /id="bs-bb"/, 'and the billboard');
 });
 
 // A view-only account being refused a write is correct. Being *offered* the
@@ -200,7 +203,9 @@ test('a view-only account is not offered writes it cannot perform', async () => 
         'rcDrawer(true)', 'class="add-panel"', 'Save invoice', 'Mark done']) {
         assert.ok(!html.includes(trap), `${path} still offers "${trap}" to a viewer`);
       }
-      assert.ok(html.includes('viewer-warn'), `${path} says the account is view-only`);
+      // The standing notice is a bs-notice-bar now, same job, one shape for
+      // every message the app puts in front of you.
+      assert.match(html, /bs-notice-k">View only</, `${path} says the account is view-only`);
     }
 
     // And the upload endpoint refuses in a way the page can explain, rather
@@ -218,7 +223,7 @@ test('the owner still gets every write control', async () => {
   const owner = await login({ password: 'test-manager-password' });
   const html = await (await as(owner, '/c/invoices')).text();
   assert.ok(html.includes('invDrawer(true)'), 'upload is offered');
-  assert.ok(!html.includes('viewer-warn'), 'and no view-only notice');
+  assert.ok(!/bs-notice-k">View only</.test(html), 'and no view-only notice');
 });
 
 test('disabling an account revokes it immediately, not at cookie expiry', async () => {

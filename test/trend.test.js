@@ -99,3 +99,29 @@ test('a day with no service is marked as such, not as a zero-sales day', () => {
     assert.strictEqual(x.sales, 0, 'sales read zero, but `had` is what says whether that means anything');
   }
 });
+
+// --- the withheld percentage ----------------------------------------------------
+//
+// The dashboard has a `hasCogs` guard, but the rule is enforced one level
+// down in metrics: a mutation to the guard is unobservable because this is
+// what actually holds the line. So this is where it gets tested.
+
+test('a percentage of nothing is null, never zero', () => {
+  const p = MX.period('2026-07-01', '2026-07-07');   // empty database
+  assert.strictEqual(p.sales, 0, 'no sales in this fixture');
+  assert.strictEqual(p.cogs, 0, 'and no invoices');
+  // 0/0 is not 0%. It is unanswerable, and printing 0% food cost reads as
+  // extraordinarily good news.
+  assert.strictEqual(p.laborPct, null, 'labor is withheld');
+  assert.strictEqual(p.foodPct, null, 'food is withheld');
+  assert.strictEqual(p.primePct, null, 'prime is withheld');
+});
+
+test('a real zero is still a zero — the rule is about missing data', () => {
+  // Sales with no invoices: food cost is unknown, not free. Labor IS knowable.
+  const rows = [{ sales: 100000, wages: 20000, hours: 10, tips: 0, food: 100000, coffee: 0, alcohol: 0, other: 0, server_sales: 0, date: '2026-07-02', daypart: 'cafe' }];
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null);
+  assert.strictEqual(pct(20000, 100000), 20, 'labor computes when sales exist');
+  assert.strictEqual(pct(0, 0), null, 'and withholds when they do not');
+  assert.ok(rows.length);
+});

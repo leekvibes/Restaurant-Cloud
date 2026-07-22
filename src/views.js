@@ -61,6 +61,7 @@ const dp = (d) => (d === 'cafe' ? 'Café' : 'Dinner');
 let viewCtx = null;
 const setViewContext = (als) => { viewCtx = als; };
 const currentViewUser = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().user : null);
+const currentPath = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().path : '') || '/';
 
 /**
  * Whether the signed-in account may change anything. A null user means auth is
@@ -295,6 +296,198 @@ function searchScript() {
   })();`;
 }
 
+// ===========================================================================
+// BROADSHEET CHROME
+// ---------------------------------------------------------------------------
+// A masthead and one nav row, replacing the icon rail. Built from the same
+// SECTIONS list as the sidebar was, so a link cannot exist in one and not the
+// other, and navAllowed still decides what is even drawn.
+//
+// The front row carries what a restaurant opens daily. Everything else goes
+// under the overflow arrow — pushed down the page, never removed, because a
+// page you cannot reach is a page you do not have.
+// ===========================================================================
+
+// The front row, in order. A group listed in FRONT_ROW shows every one of its
+// links; a group in FRONT_ROW_NAMED shows only its name and lands you on its
+// first page, where the sub-nav takes over. Anything named in neither falls
+// through to the overflow — so adding a section to nav.js can never silently
+// vanish from the UI, it just starts one tap further in.
+const FRONT_ROW = ['Operations', 'Purchasing', 'Restaurant'];
+const FRONT_ROW_NAMED = ['Team'];
+
+/** The group a path belongs to, for the sub-nav. */
+function groupFor(path) {
+  for (const g of SECTIONS) {
+    if (!g.title) continue;
+    for (const [href] of g.links) {
+      if (href === '/' ? path === '/' : path === href || path.startsWith(href + '/')) return g;
+    }
+  }
+  return null;
+}
+
+/** Is this link the one we are on? Longest match wins, as with areaFor. */
+function navOn(href, path) {
+  if (href === '/') return path === '/';
+  return path === href || path.startsWith(href + '/');
+}
+
+function masthead(path) {
+  const u = currentViewUser();
+  const initials = (n) => String(n || '').split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || 'M';
+  const now = new Date();
+  const stamp = now.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase();
+  const part = now.getHours() < 12 ? 'MORNING' : now.getHours() < 17 ? 'AFTERNOON' : 'EVENING';
+  // The primary action is whatever this page is for.
+  const primary = path.startsWith('/shifts') ? ['+ Log a shift', '/shifts/new'] : ['+ New', '/shifts/new'];
+
+  return `
+    <header class="bs-masthead">
+      <a class="bs-wordmark" href="/">ZWIN</a>
+      <span class="bs-loc">${esc(RESTAURANT)} <span aria-hidden="true">▾</span></span>
+      <div class="bs-search" id="rc-search">
+        <button type="button" class="bs-search-ico" id="rc-sbtn" aria-label="Search"
+          aria-expanded="false" aria-controls="rc-q" style="border:0;background:none;padding:0;cursor:pointer;color:var(--muted)">⌕</button>
+        <input id="rc-q" type="search" autocomplete="off" spellcheck="false"
+          placeholder="Search products, invoices, vendors, staff…" aria-label="Search">
+        <button type="button" class="bs-search-x" id="rc-sx" aria-label="Clear search" hidden
+          style="border:0;background:none;cursor:pointer;color:var(--muted)">×</button>
+        <span class="bs-kbd">⌘K</span>
+        <div class="tsearch-pop" id="rc-out" hidden></div>
+      </div>
+      <span class="bs-date" id="bs-date">${esc(stamp)} — <span id="bs-part">${part}</span></span>
+      ${canWrite() ? `<a class="bs-btn" href="${primary[1]}">${primary[0]}</a>` : ''}
+      <button type="button" class="bs-theme" id="bs-theme" aria-label="Switch theme" title="Switch day / night">☾</button>
+      <details class="bs-acct">
+        <summary class="bs-avatar" title="${esc(u && u.name ? u.name : 'Account')}">${esc(initials(u && u.name ? u.name : 'M'))}</summary>
+        <div class="bs-pop">
+          <div class="bs-pop-h"><b>${esc(u && u.name ? u.name : 'Owner')}</b>
+            <i>${esc(u && u.email ? u.email : 'signed in')}${u && u.role === 'viewer' ? ' · view only' : ''}</i></div>
+          ${navAllowed('/settings') ? '<a href="/settings">Settings <span>→</span></a>' : ''}
+          ${navAllowed('/users') ? '<a href="/users">Users &amp; access <span>→</span></a>' : ''}
+          <div class="bs-pop-div"></div>
+          <a class="bs-out" href="/logout">Sign out</a>
+        </div>
+      </details>
+    </header>`;
+}
+
+function navRow(path) {
+  const allowed = (g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) });
+  const groups = SECTIONS.map(allowed).filter((g) => g.links.length);
+
+  const home = groups.find((g) => !g.title);
+  const front = FRONT_ROW.map((t) => groups.find((g) => g.title === t)).filter(Boolean);
+  const named = FRONT_ROW_NAMED.map((t) => groups.find((g) => g.title === t)).filter(Boolean);
+  const onFront = new Set([...FRONT_ROW, ...FRONT_ROW_NAMED]);
+  const rest = groups.filter((g) => g.title && !onFront.has(g.title));
+
+  const link = ([href, , label, , , tag]) =>
+    `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${tag ? ` <span class="bs-colhead">${esc(tag)}</span>` : ''}</a>`;
+
+  const sep = '<span class="bs-nav-sep"></span>';
+  const frontHtml = [
+    home ? home.links.map(([href, , label]) => `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label === 'Dashboard' ? 'Front page' : label)}</a>`).join('') : '',
+    ...front.map((g) => g.links.map(link).join('')),
+    // A named group is one tab. Its pages are reachable through the sub-nav
+    // that appears once you are inside it.
+    ...named.map((g) => {
+      const inside = g.links.some(([href]) => navOn(href, path));
+      return `<a href="${g.links[0][0]}"${inside ? ' class="on"' : ''}>${esc(g.title)}</a>`;
+    }),
+  ].filter(Boolean).join(sep);
+
+  const overflow = rest.length ? `
+    <details class="bs-more">
+      <summary aria-label="More sections">More <span aria-hidden="true">▾</span></summary>
+      <div class="bs-more-pop">
+        ${rest.map((g) => `<div class="bs-more-grp">${esc(g.title)}</div>${g.links.map(link).join('')}`).join('')}
+      </div>
+    </details>` : '';
+
+  return `<nav class="bs-nav"><div class="bs-nav-scroll">${frontHtml}</div>${overflow}</nav>`;
+}
+
+/**
+ * The group you are inside, and its siblings. Only drawn for a group that has
+ * more than one page — a sub-nav with one tab is a rule with nothing under it.
+ */
+function subNav(path) {
+  const g = groupFor(path);
+  if (!g || !g.title) return '';
+  const links = g.links.filter(([href]) => navAllowed(href));
+  if (links.length < 2) return '';
+  return `
+    <div class="bs-subnav">
+      <span class="bs-subnav-name">${esc(g.title)}</span>
+      <span class="bs-subnav-links">
+        ${links.map(([href, , label, , , tag]) =>
+          `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${tag ? ` <span class="bs-colhead">${esc(tag)}</span>` : ''}</a>`).join('')}
+      </span>
+    </div>`;
+}
+
+/**
+ * The four places a phone goes, plus Index.
+ *
+ * Index is not decoration: with the nav row scrolled off a small screen it is
+ * the only route to two thirds of the app, so it opens a sheet listing every
+ * section. Built on <details>, so it works with JavaScript off like the rest
+ * of the chrome.
+ */
+const BOTTOM = [
+  ['/', '▤', 'Today'],
+  ['/shifts', '≡', 'Shifts'],
+  ['/sales', '$', 'Sales'],
+  ['/c/invoices', '▦', 'Invoices'],
+];
+
+function bottomBar(path) {
+  const tabs = BOTTOM.filter(([href]) => navAllowed(href)).map(([href, glyph, label]) =>
+    `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}><span class="bs-bottom-g" aria-hidden="true">${glyph}</span>${label}</a>`).join('');
+
+  const groups = SECTIONS
+    .map((g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) }))
+    .filter((g) => g.links.length);
+
+  return `
+    <nav class="bs-bottom">
+      ${tabs}
+      <details class="bs-index">
+        <summary><span class="bs-bottom-g" aria-hidden="true">⋯</span>Index</summary>
+        <div class="bs-index-body">
+          <label class="bs-index-scrim" for="bs-index-close" aria-hidden="true"></label>
+          <div class="bs-index-sheet">
+            <div class="bs-index-h"><span class="bs-kicker">Everything</span></div>
+            ${groups.map((g) => `
+              <div class="bs-index-grp">${esc(g.title || 'Front page')}</div>
+              <div class="bs-index-links">
+                ${g.links.map(([href, , label, , , tag]) =>
+                  `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${tag ? ` <i>${esc(tag)}</i>` : ''}</a>`).join('')}
+              </div>`).join('')}
+          </div>
+        </div>
+      </details>
+    </nav>`;
+}
+
+/** "File an entry" plus the dateline. The dashboard's foot, on every page. */
+function bsFooter() {
+  const file = [
+    ['/shifts/new', 'shift'], ['/cash/new', 'drawer count'],
+    ['/c/invoices', 'invoice'], ['/c/vendors', 'vendor'], ['/c/incidents', 'incident'],
+  ].filter(([href]) => navAllowed(href));
+  const when = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  return `
+    <footer class="bs-foot">
+      ${canWrite() && file.length ? `<span class="bs-foot-file">File an entry:
+        ${file.map(([href, label], i) => `${i ? '<span aria-hidden="true">·</span>' : ''}<a href="${href}">${label}</a>`).join(' ')}
+      </span>` : '<span></span>'}
+      <span>${esc(APP_NAME)} · ${esc(RESTAURANT)} — ${esc(when)}</span>
+    </footer>`;
+}
+
 function sidebar() {
   const who = currentViewUser();
   // The first section is Dashboard alone. It gets rendered as the sidebar's
@@ -328,20 +521,27 @@ function sidebar() {
 
 /** Loud warning when the app is reachable with no password set. */
 const openWarning = () => (process.env.APP_PASSWORD ? '' :
-  `<div class="open-warn">⚠️ <b>No password set.</b> Anyone with this link can see payroll and staff data. Set <code>APP_PASSWORD</code> to lock it down.</div>`);
+  `<div class="bs-notice-bar crit">
+    <span class="bs-notice-k">Unlocked</span>
+    <span class="bs-notice-t"><b>No password set.</b> Anyone with this link can see payroll and staff data.
+      Set <code>APP_PASSWORD</code> to lock it down.</span>
+  </div>`);
 
 /** Standing notice for a view-only account, so nothing it can't do is a shock. */
 const viewerNote = () => (canWrite() ? '' :
-  `<div class="viewer-warn">${icon('users')}<span><b>View only.</b> You can see everything here and change nothing. Ask the owner if you need to edit.</span></div>`);
+  `<div class="bs-notice-bar">
+    <span class="bs-notice-k">View only</span>
+    <span class="bs-notice-t">You can see everything here and change nothing. Ask the owner if you need to edit.</span>
+  </div>`);
 
 /** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
 function head(title, opts = {}) {
   const staff = !!opts.bare;
   return `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
     <title>${esc(title)} · ${esc(staff ? RESTAURANT : APP_NAME)}</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/fonts.css?v=${BUILD}">
     <link rel="stylesheet" href="/static/styles.css?v=${BUILD}">
+    <link rel="stylesheet" href="/static/broadsheet.css?v=${BUILD}">
     <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
     <meta name="theme-color" content="${staff ? '#2563eb' : '#ffffff'}">
     <link rel="icon" href="/static/icon-192.png">
@@ -351,8 +551,11 @@ function head(title, opts = {}) {
     <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : APP_NAME}">
     <meta name="mobile-web-app-capable" content="yes">
     <script>
-      // Runs before first paint so a pinned sidebar never flashes collapsed.
-      try { if (localStorage.getItem('rc_side') === 'pinned') document.documentElement.classList.add('side-pinned'); } catch (e) {}
+      // Before first paint, or the page flashes the wrong theme on every load.
+      try {
+        var t = localStorage.getItem('zwin_theme');
+        document.documentElement.setAttribute('data-theme', t === 'night' ? 'night' : 'day');
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'day'); }
     </script>`;
 }
 
@@ -366,8 +569,12 @@ const swScript = `<script>if('serviceWorker' in navigator){window.addEventListen
 const BUILD = (() => {
   const fs = require('fs');
   const path = require('path');
+  // Every file whose contents the browser caches behind ?v=. broadsheet.css
+  // and fonts.css were missing, so a CSS-only change shipped with an unchanged
+  // BUILD and every returning browser kept the old stylesheet.
   const files = ['server.js', 'views.js'].map((f) => path.join(__dirname, f))
-    .concat([path.join(__dirname, '..', 'public', 'styles.css')]);
+    .concat(['styles.css', 'broadsheet.css', 'fonts.css']
+      .map((f) => path.join(__dirname, '..', 'public', f)));
   const h = require('crypto').createHash('sha1');
   for (const f of files) {
     try { h.update(fs.readFileSync(f)); } catch { /* missing file — ignore */ }
@@ -417,14 +624,64 @@ function layout(title, body, opts = {}) {
     return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
       <body class="bare">${body}${swScript}${freshScript}</body></html>`;
   }
+  const path = currentPath();
   return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
-    <body>
-      ${topbar()}
-      <div class="app">
-        ${sidebar()}
-        <div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>
-        <main class="content">${openWarning()}${viewerNote()}<div class="wrap">${body}</div></main>
-      </div>
+    <body class="bs">
+      ${masthead(path)}
+      ${navRow(path)}
+      ${subNav(path)}
+      ${openWarning()}${viewerNote()}
+      <main class="bs-main">${body}</main>
+      ${bsFooter()}
+      ${bottomBar(path)}
+      <script>
+        (function () {
+          var btn = document.getElementById('bs-theme');
+          var root = document.documentElement;
+          var paint = function () {
+            var night = root.getAttribute('data-theme') === 'night';
+            if (btn) btn.textContent = night ? '☀' : '☾';
+            var part = document.getElementById('bs-part');
+            // The masthead says NIGHT in night mode, which is the only place
+            // the theme names itself.
+            if (part && part.dataset.was === undefined) part.dataset.was = part.textContent;
+            if (part) part.textContent = night ? 'NIGHT' : part.dataset.was;
+          };
+          paint();
+          if (btn) btn.addEventListener('click', function () {
+            var next = root.getAttribute('data-theme') === 'night' ? 'day' : 'night';
+            root.setAttribute('data-theme', next);
+            try { localStorage.setItem('zwin_theme', next); } catch (e) {}
+            paint();
+          });
+        })();
+      </script>
+      <script>
+        // The billboard. Pauses on hover and on focus inside it, so a link in
+        // a message can actually be clicked before it slides away.
+        (function () {
+          var bb = document.getElementById('bs-bb');
+          if (!bb) return;
+          var items = bb.querySelectorAll('.bs-bb-i');
+          if (items.length < 2) return;
+          if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+          var i = 0, hold = false;
+          bb.addEventListener('mouseenter', function () { hold = true; });
+          bb.addEventListener('mouseleave', function () { hold = false; });
+          bb.addEventListener('focusin', function () { hold = true; });
+          setInterval(function () {
+            if (hold || document.hidden) return;
+            var cur = items[i];
+            i = (i + 1) % items.length;
+            cur.classList.remove('on');
+            cur.classList.add('out');
+            // The incoming one waits until the outgoing has cleared, so you
+            // watch the change happen instead of seeing two lines cross.
+            setTimeout(function () { items[i].classList.add('on'); }, 260);
+            setTimeout(function () { cur.classList.remove('out'); }, 900);
+          }, 3000);
+        })();
+      </script>
       <script>${searchScript()}</script>
       <script>
         // Pin / unpin the rail, remembered between sessions.
@@ -513,9 +770,12 @@ function flash(req) {
   const undo = String(req.query.undo || '');
   const safeUndo = /^\/[A-Za-z0-9/_?=&.%-]*$/.test(undo) ? undo : '';
   const undoBtn = safeUndo
-    ? `<form method="post" action="${esc(safeUndo)}" class="flash-undo"><button class="link" type="submit">Undo</button></form>`
+    ? `<form method="post" action="${esc(safeUndo)}" class="bs-notice-undo"><button type="submit">Undo</button></form>`
     : '';
-  return `<div class="flash ${err ? 'flash-err' : 'flash-ok'}"><span>${esc(m)}</span>${undoBtn}</div>`;
+  return `<div class="bs-notice-bar ${err ? 'crit' : 'ok'}">
+    <span class="bs-notice-k">${err ? 'Refused' : 'Saved'}</span>
+    <span class="bs-notice-t">${esc(m)}</span>${undoBtn}
+  </div>`;
 }
 
 // navAllowed is the one gate the sidebar and the routes both read, so it is

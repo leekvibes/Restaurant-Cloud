@@ -14,3 +14,6 @@ previews/
 
 # os junk
 .DS_Store
+
+# design handoff — reference material, not source
+design_handoff_zwin_broadsheet*/

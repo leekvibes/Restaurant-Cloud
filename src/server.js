@@ -153,7 +153,9 @@ const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips(\/|$)/, /^\/version$/,
 app.use((req, res, next) => {
   const user = currentUser(req);
   req.user = user;
-  reqCtx.run({ user }, () => {
+  // The path rides along so the nav can mark itself active without every
+  // route remembering to pass it down.
+  reqCtx.run({ user, path: req.path }, () => {
     if (!APP_PASSWORD) return next();                               // not configured → open (banner warns)
     if (OPEN_PATHS.some((re) => re.test(req.path))) return next();
     if (!user) {
@@ -586,20 +588,6 @@ app.get('/', (req, res) => {
       'Review lines', waiting.length === 1 ? `/c/invoices/${waiting[0].id}/import` : '/c/invoices');
   }
 
-  const noticeCard = (n) => `
-    <div class="tn tn-${n.tone}">
-      <span class="tn-ico">${icon(n.ico)}</span>
-      <div class="tn-body">
-        <div class="tn-t">${esc(n.title)}</div>
-        <div class="tn-s">${esc(n.sub)}</div>
-        ${n.pct != null ? `<div class="bar tn-bar"><span style="width:${n.pct}%"></span></div>` : ''}
-        ${n.warn ? `<div class="tn-warn">${esc(n.warn)}</div>` : ''}
-      </div>
-      ${n.cta ? `<a class="tn-go" href="${n.href}">${esc(n.cta)} →</a>` : ''}
-    </div>`;
-  const todayBlock = notices.length
-    ? `<div class="tnotices">${notices.map(noticeCard).join('')}</div>`
-    : '';
 
   // --- rendering: the shift KPI band ---------------------------------------
   // Averages divide by shifts that HAVE figures. Counting a shift that was
@@ -610,33 +598,6 @@ app.get('/', (req, res) => {
   const shiftSeries = withSales.slice(-12);
   const avgWage = withSales.length ? Math.round(p30.wages / withSales.length) : null;
 
-  // Three of the four cards here were "average per service", "wage cost per
-  // service" and "sales per labor hour" — which are the questions the Sales
-  // and Performance pages exist to answer. On a dashboard they were 262px of
-  // numbers nobody acts on before breakfast. What survives is the one thing
-  // that IS a dashboard question: how did the last service go.
-  // Four figures across a 375px phone gives each about 73px, and $6,176.25
-  // wants 78. Rather than shrink the type until a five-figure day breaks it,
-  // summary figures drop the cents above $1,000 — the convention every finance
-  // app uses for a glance view — and carry the exact number in the title.
-  // Nothing that reconciles uses this; it is display only.
-  const brief = (cents) => (Math.abs(cents) >= 100000
-    ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
-  const cell = (label, value, exact, sub) => `<div class="dstrip-c"><i>${label}</i>
-    <b${exact ? ` title="${esc(exact)}"` : ''}>${value}</b>${sub ? `<u>${sub}</u>` : ''}</div>`;
-  const lastCell = (label, cents) => cell(label, cents ? brief(cents) : '—', cents ? money(cents) : '');
-  const lastBand = lastShift ? `
-    <section class="dstrip">
-      <div class="dstrip-h"><h2>Last service</h2>
-        ${may('shifts') ? `<a class="link" href="/shifts/${lastShift.id}">${esc(whenOf(lastShift.date, lastShift.daypart))} →</a>`
-          : `<span class="muted">${esc(whenOf(lastShift.date, lastShift.daypart))}</span>`}</div>
-      <div class="dstrip-r">
-        ${lastCell('Sales', lastShift.sales)}
-        ${lastCell('Tips', lastShift.tips)}
-        ${cell('Hours', lastShift.hours ? Math.round(lastShift.hours) : '—')}
-        ${cell('Staff', lastShift.people || '—')}
-      </div>
-    </section>` : '';
 
   // --- rendering: the business snapshot ------------------------------------
   const pct1 = (v) => (v === null || v === undefined ? '—' : (Math.round(v * 10) / 10) + '%');
@@ -644,73 +605,8 @@ app.get('/', (req, res) => {
   // logged", not "the food was free". Printing 0% food cost, and a prime cost
   // that is really just labor, would read as good news.
   const hasCogs = p7 && p7.cogs > 0;
-  // Six 60px cards down the page became one row. The sparkline that mattered
-  // — the week's sales shape — stays; five more of them were decoration.
 
-  const weekBand = p7 && seeCosts ? `
-    <section class="dstrip">
-      <div class="dstrip-h"><h2>This week</h2>
-        ${may('costs') ? '<a class="link" href="/costs">Performance →</a>' : ''}</div>
-      <div class="dstrip-r">
-        ${cell('Sales', brief(p7.sales), money(p7.sales), CH.delta(p7.sales, prev7.sales))}
-        ${cell('Labor', pct1(p7.laborPct), '', p7.laborPct === null ? 'no sales' : 'of sales')}
-        ${cell('Food', hasCogs ? pct1(p7.foodPct) : '—', '', hasCogs ? 'of sales' : 'no invoices')}
-        ${cell('Prime', hasCogs ? pct1(p7.primePct) : '—', '', hasCogs ? 'labor + goods' : 'needs invoices')}
-      </div>
-      ${sparkOf((w) => w.sales).length >= 3 ? `<div class="dstrip-spark">${CH.lineChart(
-        [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v, i) => ({ x: '', y: v })), area: true }],
-        { height: 54, empty: '' })}</div>` : ''}
-    </section>` : '';
-
-  // --- rendering: what needs doing -----------------------------------------
-  // The heart of the page. Grouped by how much it matters, and the only pile
-  // that collapses is the informational one — a critical item that needs a
-  // click to be seen is not an alert.
-  const nitem = (a) => `
-    <a class="nitem" href="${a.href}">
-      <span class="nitem-ico ${a.tone}">${icon(a.ico)}</span>
-      <span class="nitem-main"><span class="nitem-t">${esc(a.title)}</span><span class="nitem-s">${esc(a.sub)}</span></span>
-      <span class="nitem-go">›</span>
-    </a>`;
-  const GROUPS = [['red', 'Critical'], ['amber', 'Warning'], ['blue', 'For information']];
-  const attnBlock = attn.length
-    ? GROUPS.map(([tone, label]) => {
-      const list = attn.filter((a) => a.tone === tone);
-      if (!list.length) return '';
-      const head = `<div class="ngrp"><span class="ngrp-dot ${tone}"></span>${label}<span class="ngrp-n">${list.length}</span></div>`;
-      // Critical is never folded — an alert that needs a tap to be seen is not
-      // an alert. Everything below it opens on request, which is the
-      // difference between a page you scan and a page you scroll.
-      if (tone === 'red') return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
-      const shown = tone === 'amber' ? 2 : 0;
-      if (list.length <= shown) return `${head}<div class="nlist">${list.map(nitem).join('')}</div>`;
-      return `${head}${shown ? `<div class="nlist">${list.slice(0, shown).map(nitem).join('')}</div>` : ''}
-        <details class="nrest"><summary>${list.length - shown} more</summary>
-          <div class="nlist">${list.slice(shown).map(nitem).join('')}</div></details>`;
-    }).join('')
-    : `<div class="all-clear">✓ Nothing needs your attention right now.</div>`;
-
-  // Recent services, the sales/labor chart, the invoice chart and the insights
-  // panel all came off this page. Not deleted — every one of them is the whole
-  // point of a page that already exists:
-  //
-  //   recent services   -> /shifts, which lists them with more detail
-  //   sales and labor   -> /costs, same two series on one money axis
-  //   invoice spend     -> /costs and /c/invoices
-  //   insights          -> /costs "What's driving performance" computes the
-  //                        same labour, prime and sales comparisons; product
-  //                        movers are on /c/products, menu margin on /menu
-  //
-  // Together they were roughly 1,400px of a 3,800px page restating other
-  // pages. A dashboard that repeats every page is not a dashboard.
-
-  // --- rendering: upcoming --------------------------------------------------
-  const soonBlock = soon.length
-    ? `<div class="ups">${soon.slice(0, 6).map((u) => `<a class="up" href="${u.href}">
-        <span class="up-ico">${icon(u.ico)}</span>
-        <span class="up-m"><b>${esc(u.title)}</b><i>${esc(u.sub)}</i></span></a>`).join('')}</div>`
-    : '<div class="all-clear">Nothing due in the next week.</div>';
-
+  // --- quick actions --------------------------------------------------------
   // --- rendering: quick actions --------------------------------------------
   const ACTIONS = [
     { href: '/shifts/new', ico: 'shifts', label: 'Log a shift', blurb: 'Hours, sales and tips for a service', feat: 'shifts' },
@@ -720,13 +616,6 @@ app.get('/', (req, res) => {
     { href: '/c/vendors', ico: 'vendors', label: 'Add a vendor', blurb: 'Contacts, terms and where the login lives', feat: 'trackers' },
     { href: '/c/incidents', ico: 'incidents', label: 'Log an incident', blurb: 'Write it down while it is fresh', feat: 'trackers' },
   ].filter((a) => may(a.feat));
-  // A grid of targets rather than a list of paragraphs. The blurb explained
-  // what "Log a shift" means to somebody who has logged four hundred of them,
-  // and cost 70px a row to do it. It survives as the tooltip.
-  const actions = canWrite && ACTIONS.length
-    ? `<div class="qgrid">${ACTIONS.map((a) => `<a class="qg" href="${a.href}" title="${esc(a.blurb)}">
-        <span class="qg-ico">${icon(a.ico)}</span><b>${esc(a.label)}</b></a>`).join('')}</div>`
-    : '';
 
   // --- rendering: activity --------------------------------------------------
   const FEED = {
@@ -764,49 +653,184 @@ app.get('/', (req, res) => {
     }
     if (events.length >= 24) break;   // room to group before trimming
   }
-  // Five. Ten was a log, and the page already has somewhere to read the log.
+
+  // =========================================================================
+  // BROADSHEET RENDER
+  // -------------------------------------------------------------------------
+  // The front page of a newspaper. A headline that states the day, a notices
+  // band across the top, then three columns: what needs doing, what the
+  // numbers say, and what has happened.
+  //
+  // Every figure and every rule above this line is unchanged — this is the
+  // rendering only. The annotations on the mockup ("NEVER FOLDED", "COMPLETED
+  // SHIFTS ONLY", "withheld, not 0%") describe behaviour that already existed
+  // and still does.
+  // =========================================================================
+
+  const M = (c) => `<span class="bs-fig">${money(c)}</span>`;
+
+  // --- the headline ---------------------------------------------------------
+  // A verdict, not a greeting. It states the day, then names the biggest
+  // outstanding thing — "Two drawers still uncounted" rather than "3 items",
+  // because a count is something you have to go and interpret.
+  const THEME = {
+    cash: (n) => `${n === 1 ? 'One drawer' : n === 2 ? 'Two drawers' : `${n} drawers`} still uncounted.`,
+    shifts: (n) => `${n === 1 ? 'One service' : `${n} services`} still to close out.`,
+    recurring: (n) => `${n === 1 ? 'A task is' : `${n} tasks are`} overdue.`,
+    invoices: (n) => `${n === 1 ? 'An invoice needs' : `${n} invoices need`} looking at.`,
+    expirations: (n) => `${n === 1 ? 'Something expires' : `${n} things expire`} soon.`,
+    equipment: (n) => `${n === 1 ? 'A warranty is' : `${n} warranties are`} running out.`,
+    payroll: () => 'Payroll is ready to send.',
+    notes: (n) => `${n === 1 ? 'A note' : `${n} notes`} from staff to read.`,
+  };
+  const headline = (() => {
+    const day = openToday.length
+      ? `${esc(openToday.map(svc).join(' and '))} ${openToday.length === 1 ? 'is' : 'are'} open.`
+      : todays.length ? 'Day closed out.'
+      : 'Nothing logged today.';
+
+    // The loudest theme among things that actually matter.
+    const urgent = attn.filter((a) => a.tone === 'red' || a.tone === 'amber');
+    const byTheme = new Map();
+    for (const a of urgent) byTheme.set(a.ico, (byTheme.get(a.ico) || 0) + 1);
+    const top = [...byTheme.entries()].sort((a, b) => b[1] - a[1])[0];
+
+    const tail = top && THEME[top[0]]
+      ? `<span class="warn">${esc(THEME[top[0]](top[1]))}</span>`
+      : urgent.length ? `<span class="warn">${urgent.length} thing${urgent.length === 1 ? '' : 's'} need${urgent.length === 1 ? 's' : ''} your attention.</span>`
+      : attn.length ? '' : '<span class="ok">Everything is counted.</span>';
+    return `${day} ${tail}`;
+  })();
+
+  const headMeta = attn.length
+    ? `${attn.length} item${attn.length === 1 ? '' : 's'} · ${bad ? `${bad} urgent` : 'nothing urgent'}`
+    : 'nothing outstanding';
+
+  // The masthead line is a billboard: the verdict, then whatever else is true
+  // right now, each sliding through in turn. Every message is in the DOM from
+  // the start — the rotation is presentation, so a screen reader gets the lot
+  // and a browser with JS off shows the first one, which is the verdict.
+  const billboard = [
+    headline,
+    ...notices.map((n) => `${esc(n.title)} <span class="bs-bb-s">${esc(n.sub)}</span>`
+      + (n.href && n.cta ? ` <a class="bs-act" href="${n.href}">${esc(n.cta)} →</a>` : '')),
+  ];
+
+  // --- the notices band -----------------------------------------------------
+  // Only what is true right now: a service running, a drawer waiting. When the
+  // day is closed out there is nothing here and the band does not draw.
+  const noticeCard = (n) => `
+    <div class="bs-notice">
+      <div class="bs-notice-t">
+        <b>${esc(n.title)}</b> <span>${esc(n.sub)}</span>
+        ${n.href && n.cta ? `<a class="bs-act" href="${n.href}">${esc(n.cta)} →</a>` : ''}
+      </div>
+      ${n.pct != null ? `<div class="bs-prog"><span style="width:${n.pct}%"></span></div>` : ''}
+      ${n.warn ? `<div class="bs-notice-w">${esc(n.warn)}</div>` : ''}
+    </div>`;
+  const todayBlock = notices.length
+    ? `<div class="bs-notices">${notices.map(noticeCard).join('')}</div>` : '';
+
+  // --- column 1: needs attention -------------------------------------------
+  // One list, ordered worst first, with the severity in each item's kicker
+  // rather than in three separate headed sections. The fold rule is unchanged:
+  // everything critical shows, two warnings show, the rest collapses.
+  const TONE_WORD = { red: 'Critical', amber: 'Warning', blue: 'Info' };
+  // Alerts carry their date inside the title — "Jul 19 Dinner — hours missing".
+  // The kicker wants the date and the title wants the rest, so the two are
+  // split for display only. Nothing that builds an alert changes, and a title
+  // that does not match this shape is simply shown whole.
+  const splitTitle = (t) => {
+    const m = String(t).match(/^([A-Z][a-z]{2} \d{1,2}(?:\s+\S+)?)\s+—\s+(.+)$/);
+    return m ? { when: m[1], rest: m[2] } : { when: null, rest: t };
+  };
+  const nitem = (a) => {
+    const { when, rest } = splitTitle(a.title);
+    return `<a class="bs-item" href="${a.href}">
+      <span class="bs-item-k ${a.tone}">${when ? esc(when.toUpperCase()) + ' · ' : ''}${TONE_WORD[a.tone].toUpperCase()}</span>
+      <span class="bs-item-t">${esc(rest)}</span>
+      <span class="bs-item-s">${esc(a.sub)}<span class="bs-sep" aria-hidden="true"> · </span><span class="bs-act">Open →</span></span>
+    </a>`;
+  };
+
+  const reds = attn.filter((a) => a.tone === 'red');
+  const ambers = attn.filter((a) => a.tone === 'amber');
+  const blues = attn.filter((a) => a.tone === 'blue');
+  // Critical never folds. Two warnings show. Everything else is behind the fold.
+  const shown = [...reds, ...ambers.slice(0, 2)];
+  const folded = [...ambers.slice(2), ...blues];
+
+  const attnBlock = attn.length ? `
+    <div class="bs-sec-h warn"><span class="bs-kicker">Needs attention</span></div>
+    <div class="bs-items">${shown.map(nitem).join('')}</div>
+    ${folded.length ? `<details class="bs-fold">
+      <summary>${folded.length} more item${folded.length === 1 ? '' : 's'} <span aria-hidden="true">▾</span></summary>
+      <div class="bs-items">${folded.map(nitem).join('')}</div></details>` : ''}`
+    : `<div class="bs-sec-h"><span class="bs-kicker">Needs attention</span></div>
+       <p class="bs-clear">Nothing needs your attention right now.</p>`;
+
+  // --- column 2: the week in numbers ---------------------------------------
+  const figCell = (label, value, sub) =>
+    `<div class="bs-figcell"><span class="bs-figlabel">${label}</span><span class="bs-stat">${value}</span>${sub ? `<span class="bs-figsub">${sub}</span>` : ''}</div>`;
+
+  const weekBand = p7 && seeCosts ? `
+    <div class="bs-sec-h"><span class="bs-kicker">The week in numbers</span>
+      ${may('costs') ? '<a class="bs-act" href="/costs">Performance →</a>' : ''}</div>
+    <div class="bs-grid2">
+      ${figCell('Sales', money(p7.sales), CH.delta(p7.sales, prev7.sales))}
+      ${figCell('Labor', pct1(p7.laborPct), p7.laborPct === null ? 'no sales' : 'of sales')}
+      ${figCell('Food', hasCogs ? pct1(p7.foodPct) : '—', hasCogs ? 'of sales' : 'no invoices — withheld, not 0%')}
+      ${figCell('Prime cost', hasCogs ? pct1(p7.primePct) : '—', hasCogs ? 'labor + goods' : 'needs food cost')}
+    </div>
+    ${sparkOf((w) => w.sales).length >= 3 ? `
+      <p class="bs-sparklabel">Sales, trailing 8 weeks</p>
+      <div class="bs-spark">${CH.lineChart(
+        [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v) => ({ x: '', y: v })), area: true }],
+        { height: 96, empty: '' })}</div>` : ''}
+    ${soon.length ? `
+      <div class="bs-sec-h bs-soon-h"><span class="bs-kicker">Coming up</span></div>
+      <div class="bs-soon">
+        ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
+          <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
+      </div>` : ''}` : '';
+
+  // --- column 3: last service, and the record ------------------------------
+  const row = (label, value) => `<div class="bs-lrow"><span>${label}</span><b class="bs-fig">${value}</b></div>`;
+  const lastBand = lastShift ? `
+    <div class="bs-sec-h"><span class="bs-kicker">Last service — ${esc(whenOf(lastShift.date, lastShift.daypart))}</span>
+      ${may('shifts') ? `<a class="bs-act" href="/shifts/${lastShift.id}">Open →</a>` : ''}</div>
+    <div class="bs-lrows">
+      ${row('Sales', money(lastShift.sales))}
+      ${row('Tips', lastShift.tips ? money(lastShift.tips) : '—')}
+      ${row('Hours', lastShift.hours ? (Math.round(lastShift.hours * 10) / 10).toFixed(1) : '—')}
+      ${row('Staff', lastShift.people || '—')}
+    </div>` : '';
+
   const feedRows = events.slice(0, 5).map((r) => {
     const f = FEED[r.kind](r);
-    const inner = `<span class="fd-ico">${icon(f.ico)}</span><span class="fd-t">${f.text}</span><span class="fd-w">${ago(r.at, now)}</span>`;
-    return f.href ? `<a class="fd" href="${f.href}">${inner}</a>` : `<div class="fd">${inner}</div>`;
+    const inner = `<span class="bs-rec-t">${f.text}</span> <span class="bs-rec-w">— ${ago(r.at, now)}</span>`;
+    return f.href ? `<a class="bs-rec" href="${f.href}">${inner}</a>` : `<div class="bs-rec">${inner}</div>`;
   }).join('');
-  const feed = feedRows || '<div class="all-clear">Nothing has happened yet.</div>';
-
-  // --- the one-line status under the greeting ------------------------------
-  const status = openToday.length
-    ? `Your ${openToday.map(svc).join(' and ')} shift${openToday.length === 1 ? ' is' : 's are'} open.${attn.length ? ` ${attn.length} thing${attn.length === 1 ? '' : 's'} need${attn.length === 1 ? 's' : ''} your attention.` : ''}`
-    : bad
-      ? `${bad} thing${bad === 1 ? '' : 's'} need${bad === 1 ? 's' : ''} sorting out${attn.length > bad ? `, ${attn.length - bad} more can wait` : ''}.`
-      : attn.length
-        ? `${attn.length} thing${attn.length === 1 ? '' : 's'} to look at, nothing urgent.`
-        : 'Everything is running smoothly today.';
-
-  const sec = (title, body, link, cls) => !body ? '' : `
-    <section class="dsec${cls ? ' ' + cls : ''}">
-      <div class="dsec-h"><h2>${title}</h2>${link || ''}</div>
-      ${body}
-    </section>`;
+  const record = `
+    <div class="bs-sec-h bs-rec-h"><span class="bs-kicker">The record</span></div>
+    ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}`;
 
   const bodyHtml = `
     ${flash(req)}
-    <header class="dhead">
-      <div class="dhead-l">
-        <h1>${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</h1>
-        <p class="dhead-d">${now.toLocaleDateString('en-US', DASH_DATE)}</p>
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-bb" id="bs-bb" data-n="${billboard.length}">
+          ${billboard.map((m, i) => `<h1 class="bs-headline bs-bb-i${i === 0 ? ' on' : ''}">${m}</h1>`).join('')}
+        </div>
+        <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>
-      <div class="dhead-st ${openToday.length ? 'live' : bad ? 'warn' : 'calm'}">
-        <span class="dot"></span>${esc(status)}
+      <div class="bs-cols3">
+        <div class="bs-col">${attnBlock}</div>
+        <div class="bs-col">${weekBand}</div>
+        <div class="bs-col">${lastBand}${record}</div>
       </div>
-    </header>
-    ${todayBlock}
-    <div class="dash">
-      ${sec(`Needs attention${attn.length ? ` <span class="cnt">${attn.length}</span>` : ''}`, attnBlock)}
-      ${lastBand}
-      ${weekBand}
-      ${soon.length ? sec('Coming up', soonBlock) : ''}
-      ${sec('Quick actions', actions)}
-      ${sec('Recent activity', feed, '<a class="link" href="/activity">View all →</a>')}
     </div>`;
+
   res.send(layout('Dashboard', bodyHtml));
 });
 
@@ -889,55 +913,9 @@ app.get('/shifts', (req, res) => {
   // How each shift performed, not just what it took in. The count of unsent
   // shifts used to sit here; it moved out because the attention panel right
   // below names them individually, which is the more useful form of it.
-  const cards = `<div class="mcards mcards-4">
-    ${kpi('blue', 'sales', 'Sales this month', money(monthSales), n ? `across ${n} shift${n === 1 ? '' : 's'}` : 'nothing logged yet')}
-    ${kpi('green', 'cash', 'Avg sales a shift', per(monthSales, k), salesSub)}
-    ${kpi('amber', 'payroll', 'Avg wage cost a shift', per(monthWages, k), wageSub)}
-    ${kpi('violet', 'costs', 'Sales per labor hour', per(monthSales, monthHours), monthHours ? `sales ÷ ${Math.round(monthHours * 10) / 10} hrs worked` : 'no hours logged')}
-  </div>`;
-
-  // --- today, and anything still open ------------------------------------
   const todays = st.filter(({ x }) => x.date === today && x.status !== 'emailed');
-  const todayCards = todays.length ? `
-    <section class="today">
-      ${todays.map(({ x, s }) => `
-        <a class="tcard-open" href="/shifts/${x.id}">
-          <div class="tco-l">
-            <div class="tco-ico">${icon('shifts')}</div>
-            <div>
-              <div class="tco-t">Today · ${esc(dp(x.daypart))}</div>
-              <div class="tco-s">${x.people} on shift · ${x.people - x.no_hours}/${x.people} hours in${x.notes ? ` · ${x.notes} note${x.notes === 1 ? '' : 's'}` : ''}</div>
-            </div>
-          </div>
-          <div class="tco-r">
-            <span class="tstatus ${s.cls}">${esc(s.label)}</span>
-            <span class="tco-go">Continue →</span>
-          </div>
-        </a>`).join('')}
-    </section>` : '';
 
-  // --- attention: only shifts not yet sent, so the engine runs a handful --
-  const attn = [];
-  for (const { x, s } of openOnes.slice(0, 12)) {
-    const when = x.date === today ? `Today ${dp(x.daypart)}` : `${niceDate(x.date)} ${dp(x.daypart)}`;
-    if (!x.people) { attn.push({ id: x.id, txt: `${when} — nobody on it yet`, bad: true }); continue; }
-    if (x.no_hours) attn.push({ id: x.id, txt: `${when} — ${x.no_hours} ${x.no_hours === 1 ? 'person has' : 'people have'} no hours entered`, bad: true });
-    else if (s.key === 'ready') attn.push({ id: x.id, txt: `${when} — everything's in, ready to send`, bad: false });
-    if (x.notes) attn.push({ id: x.id, txt: `${when} — ${x.notes} note${x.notes === 1 ? '' : 's'} from staff`, bad: false });
-  }
-  const attention = attn.length ? `
-    <section class="attn${attn.some((a) => a.bad) ? '' : ' attn-soft'}">
-      <div class="attn-h">${icon(attn.some((a) => a.bad) ? 'incidents' : 'expirations')}
-        <span>${attn.filter((a) => a.bad).length ? `${attn.filter((a) => a.bad).length} thing${attn.filter((a) => a.bad).length === 1 ? '' : 's'} to sort out` : 'Worth knowing'}</span></div>
-      <ul class="attn-list">
-        ${attn.map((a) => `<li class="${a.bad ? 'attn-bad' : 'attn-note'}"><a href="/shifts/${a.id}">${esc(a.txt)}</a></li>`).join('')}
-      </ul>
-    </section>`
-    : (all.length ? `<section class="attn attn-ok">
-        <div class="attn-h">${icon('policy')}<span>Everything's closed out</span></div>
-        <p>No open shifts and nothing waiting on you.</p></section>` : '');
-
-  // --- history by month --------------------------------------------------
+  // --- history by month ------------------------------------------------------
   const byMonth = new Map();
   for (const r of rows) {
     const m = r.x.date.slice(0, 7);
@@ -946,89 +924,168 @@ app.get('/shifts', (req, res) => {
   }
   const months = [...byMonth.keys()].sort().reverse();
 
+  // =========================================================================
+  // BROADSHEET — the shifts ledger
+  // -------------------------------------------------------------------------
+  // A stat strip that excludes open shifts (today is never a measurement),
+  // then months as ruled ledgers. Every figure and every state is unchanged.
+  // =========================================================================
+
+  const statCell = (label, value, sub) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const statStrip = `
+    <div class="bs-strip">
+      ${statCell('Sales this month', money(monthSales), `${k} completed shift${k === 1 ? '' : 's'}`)}
+      ${statCell('Avg sales a shift', per(monthSales, k), esc(salesSub))}
+      ${statCell('Avg wage cost a shift', per(monthWages, k), esc(wageSub))}
+      ${statCell('Sales per labor hour', monthHours ? money(Math.round(monthSales / monthHours)) : '—',
+        monthHours ? `÷ ${(Math.round(monthHours * 10) / 10).toLocaleString('en-US')} hrs worked` : 'no hours yet')}
+      <span class="bs-strip-note">open shifts excluded —<br>today is never a measurement</span>
+    </div>`;
+
+  // Open right now, across the top of the ledger.
+  const openBlock = todays.length ? `
+    <div class="bs-open">
+      ${todays.map(({ x, s }) => `<a class="bs-open-r" href="/shifts/${x.id}">
+        <span class="bs-open-d ${s.key}"></span>
+        <b>${esc(dp(x.daypart))} · ${esc(s.label.toLowerCase())}</b>
+        <span>${x.people} on · ${Math.min(x.submitters, x.people)} of ${x.people} submitted${x.tips ? ` · ${money(x.tips)} tips so far` : ''}</span>
+        <span class="bs-act">Open →</span>
+      </a>`).join('')}
+    </div>` : '';
+
   const monthBlocks = months.map((m, idx) => {
     const list = byMonth.get(m);
     const sales = sum(list, ({ x }) => shiftSales(x));
     const tips = sum(list, ({ x }) => x.tips);
     const hrs = sum(list, ({ x }) => x.hours);
     const open = list.filter(({ s }) => s.key !== 'sent').length;
-    const label = `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+    const label = `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
 
-    const items = list.map(({ x, s }) => {
-      const search = [x.date, dp(x.daypart), s.label, label].join(' ').toLowerCase();
-      return `
-      <a class="srow" href="/shifts/${x.id}" data-shift data-status="${s.key}"
-         data-service="${esc(x.daypart)}" data-search="${esc(search)}">
-        <span class="srow-date">
-          <b>${Number(x.date.slice(8, 10))}</b>
-          <i>${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' })}</i>
-        </span>
-        <span class="srow-svc svc-${esc(x.daypart)}">${esc(dp(x.daypart))}</span>
-        <span class="tstatus ${s.cls} srow-st">${esc(s.label)}</span>
-        <span class="srow-figs">
-          <span><i>Sales</i>${money(shiftSales(x))}</span>
-          <span><i>Tips</i>${money(x.tips)}</span>
-          <span><i>Hours</i>${Math.round(x.hours * 10) / 10}</span>
-          <span><i>Staff</i>${x.people}</span>
-        </span>
-        <span class="srow-go">→</span>
-      </a>`;
+    // Weeks, so twenty-one identical rows become three groups your eye can
+    // hold — and a week subtotal is a question the page could not answer
+    // before. Monday starts the week, matching the payroll period.
+    const weekOf = (d) => {
+      const dt = new Date(d + 'T00:00:00');
+      return addDays(d, -((dt.getDay() + 6) % 7));
+    };
+    const inWeeks = (items) => {
+      const out = [];
+      for (const it of items) {
+        const wk = weekOf(it.x.date);
+        if (!out.length || out[out.length - 1].wk !== wk) out.push({ wk, list: [] });
+        out[out.length - 1].list.push(it);
+      }
+      return out;
+    };
+    const weekBlock = (items) => inWeeks(items).map(({ wk, list: wl }) => {
+      const wSales = sum(wl, ({ x }) => shiftSales(x));
+      const wTips = sum(wl, ({ x }) => x.tips);
+      return `<div class="bs-week">
+        ${wl.map(row).join('')}
+        <div class="bs-week-f"><span>week of ${esc(whenOf(wk))}</span>
+          <b class="bs-fig">${money(wSales)}</b>
+          <i class="bs-fig">${wTips ? money(wTips) + ' tips' : ''}</i></div>
+      </div>`;
     }).join('');
 
-    return `
-      <details class="mgroup" data-month${idx === 0 ? ' open' : ''}>
-        <summary class="mgroup-h">
-          <span class="mgroup-chev">▸</span>
-          <span class="mgroup-name">${esc(label)}</span>
-          <span class="mgroup-stats">
-            <span>${list.length} shift${list.length === 1 ? '' : 's'}</span>
-            <span class="mg-total">${money(sales)}</span>
-            <span>${money(tips)} tips</span>
-            <span>${Math.round(hrs)} hrs</span>
-            ${open ? `<span class="mg-out">${open} not sent</span>` : '<span class="mg-paid">all sent</span>'}
-          </span>
+    const row = ({ x, s }) => {
+      const search = [x.date, dp(x.daypart), s.label, label].join(' ').toLowerCase();
+      const none = shiftSales(x) === 0;
+      const dow = new Date(x.date + 'T00:00:00').getDay();
+      const weekend = dow === 0 || dow === 5 || dow === 6;
+      return `<a class="bs-lr${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
+         data-service="${esc(x.daypart)}" data-search="${esc(search)}">
+        <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8, 10))}</span>
+        <span class="bs-lr-s">${esc(dp(x.daypart))}</span>
+        <span class="bs-lr-st ${s.key}">${esc(s.label.toUpperCase())}</span>
+        <span class="bs-lr-n">${none ? '—' : money(shiftSales(x))}</span>
+        <span class="bs-lr-n muted">${x.tips ? money(x.tips) : '—'}</span>
+        <span class="bs-lr-n muted">${x.hours ? (Math.round(x.hours * 10) / 10).toFixed(1) : '—'}${x.no_hours ? `<i class="bs-lr-miss">${x.no_hours} missing</i>` : ''}</span>
+        <span class="bs-lr-n muted">${x.people || 0}</span>
+        <span class="bs-lr-go">→</span>
+      </a>`;
+    };
+
+    // The newest month opens as a ledger; earlier ones are a single ruled line
+    // you expand. Ninety days of services rendered flat is what this replaces.
+    if (idx === 0) {
+      const first = list.slice(0, 6), rest = list.slice(6);
+      return `<details class="bs-month" data-month open>
+        <summary class="bs-month-h">
+          <span class="bs-kicker">${esc(label)}</span>
+          <span class="bs-month-meta">${list.length} shift${list.length === 1 ? '' : 's'} · ${Math.round(hrs).toLocaleString('en-US')} hrs ·
+            ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
+          <span class="bs-month-tot"><b>${money(sales)}</b> + ${money(tips)} tips</span>
         </summary>
-        <div class="srows">${items}</div>
+        <div class="bs-lhead">
+          <span>Date</span><span>Service</span><span>Status</span>
+          <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
+        </div>
+        <div class="bs-lrows">${weekBlock(first)}</div>
+        ${rest.length ? `<details class="bs-fold"><summary>${rest.length} earlier day${rest.length === 1 ? '' : 's'} <span aria-hidden="true">show ▾</span></summary>
+          <div class="bs-lrows">${weekBlock(rest)}</div></details>` : ''}
       </details>`;
+    }
+    return `<details class="bs-month bs-month-old" data-month>
+      <summary>
+        <span class="bs-kicker">${esc(label)}</span>
+        <span class="bs-month-meta">${list.length} shift${list.length === 1 ? '' : 's'} · ${Math.round(hrs).toLocaleString('en-US')} hrs ·
+          ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
+        <span class="bs-month-tot"><b>${money(sales)}</b></span>
+        <span class="bs-act">open ▸</span>
+      </summary>
+      <div class="bs-lhead">
+        <span>Date</span><span>Service</span><span>Status</span>
+        <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
+      </div>
+      <div class="bs-lrows">${weekBlock(list)}</div>
+    </details>`;
   }).join('');
 
+  const notSent = st.filter(({ s }) => s.key !== 'sent' && s.key !== 'open').length;
+  const headline = all.length
+    ? `Shifts — ${all.length} logged, ${notSent ? `${notSent} still to send.` : 'all sent.'}`
+    : 'No shifts logged yet.';
+  const subline = all.length
+    ? (todays.length ? `${todays.length} open now. Staff submissions start a shift on their own.`
+       : notSent ? 'Staff submissions start a shift on their own.'
+       : 'Nothing open, nothing waiting on you.')
+    : 'A shift starts itself the moment a staff member submits their tips.';
+
   const body = all.length ? `
-    <div class="yearbar">
-      ${years.map((y) => `<a class="ytab${y === year ? ' on' : ''}" href="/shifts?y=${y}">${y}</a>`).join('')}
-    </div>
-    <div class="toolbar2">
-      <div class="searchbox">${icon('search')}
-        <input id="ssearch" type="search" placeholder="Search a date, month or service…" autocomplete="off"></div>
-      <div class="fchips">
-        <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
-        <button class="fchip" data-f="service" data-v="cafe" style="--c:#0891b2;--ct:#ecfeff"><i class="fdot"></i>Café</button>
-        <button class="fchip" data-f="service" data-v="dinner" style="--c:#4f46e5;--ct:#eef2ff"><i class="fdot"></i>Dinner</button>
-        <button class="fchip" data-f="status" data-v="open" style="--c:#2563eb;--ct:#eff6ff"><i class="fdot"></i>Open</button>
-        <button class="fchip" data-f="status" data-v="review" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Needs review</button>
-        <button class="fchip" data-f="status" data-v="ready" style="--c:#7c3aed;--ct:#f5f3ff"><i class="fdot"></i>Ready</button>
-        <button class="fchip" data-f="status" data-v="sent" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Sent</button>
-      </div>
+    ${statStrip}
+    ${openBlock}
+    <div class="bs-filter">
+      <span class="bs-filter-l">Filter:</span>
+      <button class="bs-fchip on" data-f="all" data-v="">All ${rows.length}</button>
+      <button class="bs-fchip" data-f="service" data-v="cafe">Café</button>
+      <button class="bs-fchip" data-f="service" data-v="dinner">Dinner</button>
+      <button class="bs-fchip" data-f="status" data-v="open">Open</button>
+      <button class="bs-fchip" data-f="status" data-v="review">Needs review</button>
+      <button class="bs-fchip" data-f="status" data-v="ready">Ready</button>
+      <button class="bs-fchip" data-f="status" data-v="sent">Sent</button>
+      <span class="bs-filter-sp"></span>
+      ${years.length > 1 ? years.map((y) => `<a class="bs-ytab${y === year ? ' on' : ''}" href="/shifts?y=${y}">${y}</a>`).join('') : ''}
+      <input id="ssearch" class="bs-search-inline" type="search" placeholder="Search a date, month or service…" autocomplete="off">
     </div>
     ${monthBlocks}
-    <div class="empty2" id="snone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>`
-    : `<div class="upload-hero">
-        <div class="uh-ico">${icon('shifts')}</div>
-        <div class="uh-t">No shifts logged yet</div>
-        <div class="uh-s">A shift starts itself the moment a staff member submits their tips — or start one here and enter it yourself.</div>
-        <a class="btn btn-primary btn-lg" href="/shifts/new">＋ Log a shift</a>
-      </div>`;
+    <div class="bs-clear" id="snone" style="display:none">Nothing matches. Try a different search or filter.</div>`
+    : `<p class="bs-clear">Nothing yet. ${canWrite() ? '<a href="/shifts/new">Log a shift →</a>' : ''}</p>`;
 
   res.send(layout('Shifts', `
     ${flash(req)}
-    <div class="phead">
-      <div class="phead-t"><h1>Shifts</h1>
-        <p class="phead-s">${all.length ? `${all.length} logged. Staff submissions start a shift on their own.` : 'Where every service gets closed out.'}</p></div>
-      ${canWrite() ? `<a class="btn btn-primary" href="/shifts/new">＋ Log a shift</a>` : ''}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div>
+          <h1 class="bs-headline">${esc(headline)}</h1>
+          <p class="bs-subline">${esc(subline)}</p>
+        </div>
+        ${canWrite() ? '<a class="bs-btn" href="/shifts/new">+ Log a shift</a>' : ''}
+      </div>
+      ${body}
     </div>
-    ${all.length ? cards : ''}
-    ${todayCards}
-    ${attention}
-    ${body}
     <script>
       (function () {
         var q = '', mode = 'all', val = '';
@@ -1111,6 +1168,16 @@ function notesBlock(notes) {
  * the point of keeping them is seeing what someone said BEFORE they corrected
  * it — and whether the correction was theirs or yours.
  */
+/** "6 submissions filed, 3 later replaced" — the sheet's one-line summary. */
+function subCount(shiftId) {
+  const rows = submissions.forShift.all(shiftId);
+  const real = rows.filter((r) => r.source !== 'imported');
+  const dupes = real.length - new Set(real.map((r) => r.employee_id)).size;
+  if (!rows.length) return 'No submissions filed';
+  return `${rows.length} submission${rows.length === 1 ? '' : 's'} filed`
+    + (dupes ? `, ${dupes} later replaced` : '');
+}
+
 function submissionsPanel(shiftId) {
   const rows = submissions.forShift.all(shiftId);
   if (!rows.length) {
@@ -1343,93 +1410,212 @@ app.get('/shifts/:id', (req, res) => {
       </div>
     </section>`;
 
+  // =========================================================================
+  // BROADSHEET — the shift sheet
+  // -------------------------------------------------------------------------
+  // A verdict, a stat strip, and a table of who was on. Every form the old
+  // workspace had is still here — the person cards became rows, and Edit
+  // drives the same startEdit() the cards did, posting to the same endpoint.
+  // =========================================================================
+
+  const todayStr = isoDate(startOfToday());
+  const verdict = warn.length
+    ? `${esc(sh.date === todayStr ? 'Today' : cashDayLabel(sh.date))} · ${esc(dp(sh.daypart))} — <span class="warn">${warn.length === 1 ? 'one thing to sort out' : `${warn.length} things to sort out`}.</span>`
+    : `${esc(sh.date === todayStr ? 'Today' : cashDayLabel(sh.date))} · ${esc(dp(sh.daypart))} — <span class="ok">everything checks out.</span>`;
+
+  const statusWord = sh.status === 'emailed' ? 'Emails sent'
+    : withHours < people.length ? 'Needs review'
+    : people.length ? 'Ready to send' : 'Nobody on it';
+  const statusCls = sh.status === 'emailed' ? 'ok' : withHours < people.length ? 'warn' : 'ready';
+  const statusLine = `${people.length} on shift · ${ready} of ${people.length} ready · ${withHours}/${people.length} hours in`
+    + (warn.length ? ` — ${esc(warn[0])}` : ' — tips reconcile, nobody missing an email');
+
+  const sCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const money0 = (c) => (c ? money(c) : '<span class="bs-em">—</span>');
+
+  // Alcohol is $0 on every service so far. The column only appears if somebody
+  // actually rang some — a permanently empty column is a column that teaches
+  // you to stop reading the row.
+  const anyAlcohol = inp.servers.some((p) => toCents(p.alcohol) > 0);
+
+  const num = (name, val) =>
+    `<label class="bs-pill"><span>${name}</span><input name="${name === 'Kitchen' ? 'food' : name.toLowerCase()}" type="text" inputmode="decimal" value="${val || ''}" placeholder="0.00"></label>`;
+
+  const staffRow = ({ p, st: st2 }, isServer) => {
+    const tips = toCents(p.cardTips) + toCents(p.cashTips);
+    const e = entries[p.employeeId] || {};
+    const id = `edit-${p.employeeId}`;
+    return `<details class="bs-srow" id="${id}">
+      <summary class="bs-sr${st2.key === 'ok' ? '' : ' warn'}">
+        <span class="bs-sr-n">${esc(p.name)}</span>
+        <span class="bs-sr-r">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</span>
+        <span class="bs-sr-f">${isServer ? money0(toCents(p.food)) : '<span class="bs-em">—</span>'}</span>
+        <span class="bs-sr-f">${isServer ? money0(toCents(p.coffee)) : '<span class="bs-em">—</span>'}</span>
+        ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
+        <span class="bs-sr-f">${money0(tips)}</span>
+        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? (Math.round(p.hours * 100) / 100).toFixed(2) : 'missing'}</span>
+        <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
+        ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
+      </summary>
+      ${canWrite() ? `
+      <form class="bs-inline" method="post" action="/shifts/${sh.id}/${isServer ? 'server' : 'support'}">
+        <input type="hidden" name="employee_id" value="${p.employeeId}">
+        ${isServer ? `
+          ${num('Kitchen', e.food)}
+          ${num('Coffee', e.coffee)}
+          ${num('Alcohol', e.alcohol)}
+          <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
+        ` : `<label class="bs-pill"><span>Role</span><select name="role">${roleOpts(p.role)}</select></label>`}
+        <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="decimal" value="${e.hours || ''}" placeholder="0.00"></label>
+        <label class="bs-pill"><span>Wage/hr</span><input name="wage" type="text" inputmode="decimal" value="${e.wage || ''}" placeholder="default"></label>
+        <button class="bs-btn" type="submit">Save</button>
+        <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
+      </form>
+      <form class="bs-inline-rm" method="post" action="/shifts/${sh.id}/remove"
+            onsubmit="return confirm('Take ${esc(p.name).replace(/'/g, "\\'")} off this shift?')">
+        <input type="hidden" name="employee_id" value="${p.employeeId}">
+        <button type="submit">Take off this shift</button>
+      </form>` : ''}
+    </details>`;
+  };
+
+  const splitRows = eligible.length ? eligible.map((p) => `
+    <div class="bs-lrow"><span>${esc(p.name)} <i class="bs-em">${(Math.round(p.hours * 100) / 100).toFixed(2)}h</i></span>
+      <b class="bs-fig">${money(p.poolShare || 0)}</b></div>`).join('') : '';
+
+  const toolScript = `
+    <script>
+      // One pane at a time. Opening a second closes the first, so the tools
+      // never push the table off the screen between them.
+      function bsTool(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var open = !el.open;
+        document.querySelectorAll('.bs-toolpanes details').forEach(function (d) { d.open = false; });
+        el.open = open;
+        if (open) el.scrollIntoView({ block: 'nearest' });
+      }
+    </script>`;
+
   const body = `
     ${flash(req)}
-    <a class="back" href="/shifts">← Shifts</a>
-
-    <div class="shead">
-      <div class="shead-main">
-        <div class="shead-day">${icon('shifts')}</div>
+    <div class="bs-page bs-sheet">
+      <a class="bs-back" href="/shifts">← Shifts</a>
+      <div class="bs-head">
         <div>
-          <h1>${sh.date} · ${dp(sh.daypart)}</h1>
-          <div class="shead-s">${statusPill}<span>${people.length} on shift</span><span>${ready} of ${people.length} ready</span></div>
+          <h1 class="bs-headline">${verdict}</h1>
+          <p class="bs-status"><span class="bs-status-w ${statusCls}">${esc(statusWord.toUpperCase())}</span> ${esc(statusLine)}</p>
+        </div>
+        ${canWrite() ? `<a class="bs-btn" href="/shifts/${sh.id}/results">Preview &amp; send →</a>` : ''}
+      </div>
+
+      <div class="bs-strip">
+        ${sCell('Server sales', money(totalSales), `${inp.servers.length} server${inp.servers.length === 1 ? '' : 's'}`)}
+        ${sCell('Tips collected', money(totalTips), 'card + cash')}
+        ${sCell('Shared pool', money(poolCash + poolCard), `${money(poolCash)} cash · ${money(poolCard)} card`)}
+        ${sCell('To sort out', String(warn.length), warn.length ? 'see the rows below' : 'nothing outstanding', warn.length ? 'bad' : 'ok')}
+      </div>
+
+      ${attention}
+
+      ${canWrite() ? `<div class="bs-tools">
+        <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add a server or edit their numbers</button>
+        <button type="button" class="bs-tool" onclick="bsTool('read-photo')">Read from a report photo</button>
+        <button type="button" class="bs-tool" onclick="bsTool('the-record')">The record</button>
+        <button type="button" class="bs-tool bs-tool-danger" onclick="bsTool('danger')">Delete this shift</button>
+      </div>` : ''}
+      <div class="bs-toolpanes">
+        ${canWrite() ? `
+          <details class="bs-x" id="read-photo">
+            <summary>Read from a report photo</summary>
+            <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="bs-form">
+              <p class="bs-clear">Snap the end-of-day report (several photos OK). It fills in each server's sales and card tips for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p>
+              <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
+              <button class="bs-btn-quiet" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
+            </form>
+          </details>
+
+          <details class="bs-x" id="add-staff">
+            <summary>Add a server, or edit their numbers</summary>
+            <form method="post" action="/shifts/${sh.id}/server" class="bs-form" id="server-form">
+              <label>Server <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
+              <label>Food sales <input name="food" type="number" step="0.01" min="0" placeholder="0.00"></label>
+              <label>Coffee sales <input name="coffee" type="number" step="0.01" min="0" placeholder="0.00"></label>
+              <label>Alcohol sales <input name="alcohol" type="number" step="0.01" min="0" placeholder="0.00"></label>
+              <label>Card tips <input name="card_tips" type="number" step="0.01" min="0" placeholder="0.00"></label>
+              <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
+              <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
+              <button class="bs-btn-quiet" type="submit">Save server</button>
+            </form>
+            <form method="post" action="/shifts/${sh.id}/support" class="bs-form" id="support-form">
+              <label>Support <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
+              <label>Role <select name="role" id="support-role">${roleOpts('kitchen')}</select></label>
+              <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
+              <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
+              <button class="bs-btn-quiet" type="submit">Save support</button>
+            </form>
+          </details>` : ''}
+
+          <details class="bs-x" id="the-record"><summary>The record</summary>${submissionsPanel(sh.id)}</details>
+          ${notesSection}
+
+        ${canWrite() ? `<details class="bs-x bs-x-danger" id="danger">
+            <summary>Delete this shift</summary>
+            <p class="bs-clear">Removes the shift and everyone's hours, sales and tips on it. Emails already sent cannot be recalled.</p>
+            <form method="post" action="/shifts/${sh.id}/delete"
+                  onsubmit="return confirm('Delete the ${sh.date} ${dp(sh.daypart)} shift and all ${Object.keys(entries).length} entries on it? This cannot be undone.')">
+              <button class="bs-btn-quiet bs-danger" type="submit">Delete shift</button>
+            </form>
+          </details>` : ''}
+      </div>
+
+      <div class="bs-cols2">
+        <div class="bs-col">
+          <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span></div>
+
+          ${people.length ? `
+            <div class="bs-shead${anyAlcohol ? ' has-alc' : ''}">
+              <span>Name</span><span>Role</span><span class="r">Kitchen</span><span class="r">Coffee</span>
+              ${anyAlcohol ? '<span class="r">Alcohol</span>' : ''}
+              <span class="r">Tips</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
+            </div>
+            <div class="bs-srows${anyAlcohol ? ' has-alc' : ''}">
+              ${serverStates.map((x) => staffRow(x, true)).join('')}
+              ${supportStates.map((x) => staffRow(x, false)).join('')}
+            </div>`
+            : '<p class="bs-clear">Nobody on this shift yet. They appear here when they submit, or add them below.</p>'}
+
+          <p class="bs-sheet-note">${subCount(sh.id)} · <a href="#the-record" onclick="document.getElementById('the-record').open=true">Read the record ▸</a></p>
+
+        </div>
+
+        <div class="bs-col">
+          <div class="bs-sec-h"><span class="bs-kicker">Shared tip pool</span></div>
+          <div class="bs-lrows">
+            <div class="bs-lrow"><span>Cash pool</span><b class="bs-fig">${money(poolCash)}</b></div>
+            <div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>
+          </div>
+          ${eligible.length ? `
+            <div class="bs-sec-h bs-split-h"><span class="bs-kicker">Split by hours · ${eligible.length}</span></div>
+            <div class="bs-lrows">${splitRows}</div>`
+            : `<p class="bs-clear">Nobody eligible yet — add support staff and the pool will split across them.</p>`}
+          ${(poolCash + poolCard) > 0 && !eligible.length
+            ? `<p class="bs-clear warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</p>` : ''}
+          <p class="bs-sheet-note">Tips staff logged go to the shared pool and split by hours — not kept by whoever reported them.</p>
+          ${canWrite() ? `<details class="bs-x">
+            <summary>Edit what you counted</summary>
+            <form method="post" action="/shifts/${sh.id}/pool" class="bs-form">
+              <label>Cash you counted <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
+              <label>To-go card you counted <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
+              <button class="bs-btn-quiet" type="submit">Save pool</button>
+            </form>
+          </details>` : ''}
         </div>
       </div>
-      <div class="shead-prog" title="${withHours} of ${people.length} have hours entered">
-        <div class="prog"><div class="prog-fill" style="width:${pct}%"></div></div>
-        <span>${withHours}/${people.length} hours in</span>
-      </div>
     </div>
-
-    ${attention}
-
-    <div class="mcards">
-      ${kpi('blue', 'sales', 'Server sales', money(totalSales), `${inp.servers.length} server${inp.servers.length === 1 ? '' : 's'}`)}
-      ${kpi('green', 'tips', 'Tips collected', money(totalTips), 'card + cash')}
-      ${kpi('amber', 'cash', 'Shared pool', money(poolCash + poolCard), `${money(poolCash)} cash · ${money(poolCard)} card`)}
-      ${kpi(warn.length ? 'red' : 'green', warn.length ? 'incidents' : 'policy', 'To sort out', String(warn.length), warn.length ? 'see above' : 'nothing outstanding')}
-    </div>
-
-    <section class="sect">
-      <div class="sect-h"><h2>${icon('staff')} Servers</h2><span class="sect-n">${inp.servers.length}</span></div>
-      <details class="add-panel">
-        <summary>📸 Read from a report photo</summary>
-        <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="card form photo-form">
-          <div><p class="muted" style="margin:0">Snap the end-of-day report (several photos OK). It fills in each server's sales + card tips below for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p></div>
-          <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
-          <button class="btn" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
-        </form>
-      </details>
-      ${serverStates.length ? `<div class="pgrid">${serverStates.map((x) => personCard(x, 'server')).join('')}</div>`
-        : '<div class="panel-empty">No servers on this shift yet. They appear here when they submit, or add one below.</div>'}
-      <details class="add-panel">
-        <summary>＋ Add a server / edit their numbers</summary>
-        <form method="post" action="/shifts/${sh.id}/server" class="card form grid" id="server-form">
-          <label>Server <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
-          <label>Food sales <input name="food" type="number" step="0.01" min="0" placeholder="0.00"></label>
-          <label>Coffee sales <input name="coffee" type="number" step="0.01" min="0" placeholder="0.00"></label>
-          <label>Alcohol sales <input name="alcohol" type="number" step="0.01" min="0" placeholder="0.00"></label>
-          <label>Card tips <input name="card_tips" type="number" step="0.01" min="0" placeholder="0.00"></label>
-          <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
-          <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
-          <button class="btn" type="submit">Save server</button>
-        </form>
-      </details>
-    </section>
-
-    <section class="sect">
-      <div class="sect-h"><h2>${icon('positions')} Support</h2><span class="sect-n">${inp.support.length}</span></div>
-      <p class="sect-s">Tips they logged go into the shared pool and split by hours — not kept by whoever reported them.</p>
-      ${supportStates.length ? `<div class="pgrid">${supportStates.map((x) => personCard(x, 'support')).join('')}</div>`
-        : '<div class="panel-empty">Nobody yet. Kitchen, baristas and bussers appear here when they submit, or add them below.</div>'}
-      <details class="add-panel">
-        <summary>＋ Add support staff / edit their numbers</summary>
-        <form method="post" action="/shifts/${sh.id}/support" class="card form grid" id="support-form">
-          <label>Employee <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
-          <label>Role <select name="role" id="support-role">${roleOpts()}</select></label>
-          <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0" required></label>
-          <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
-          <button class="btn" type="submit">Save support</button>
-        </form>
-      </details>
-    </section>
-
-    ${notesSection}
-    ${poolSection}
-
-    <section class="sect">
-      <div class="sect-h"><h2>${icon('recurring')} Submissions</h2></div>
-      ${submissionsPanel(sh.id)}
-    </section>
-
-    <div class="danger-zone">
-      <div><b>Delete this shift</b>
-        <p class="muted">Removes the shift and everyone's hours, sales and tips on it. Emails already sent can't be recalled.</p></div>
-      <form method="post" action="/shifts/${sh.id}/delete" style="margin:0"
-            onsubmit="return confirm('Delete the ${sh.date} ${dp(sh.daypart)} shift and all ${Object.keys(entries).length} entries on it? This cannot be undone.')">
-        <button class="btn btn-danger" type="submit">Delete shift</button>
-      </form>
-    </div>
+    ${toolScript}
 
     <div class="stickybar">
       <div class="sticky-in">
@@ -4981,7 +5167,7 @@ app.get('/c/invoices', (req, res) => {
     const over = sts.filter((s) => s.key === 'overdue').length;
     const out = list.length - paid;
     const total = list.reduce((a, r) => a + (r.amount_cents || 0), 0);
-    const label = m === 'undated' ? 'No date' : `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+    const label = m === 'undated' ? 'No date' : `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
 
     const items = list.map((r) => {
       const s = invStatus(r);
