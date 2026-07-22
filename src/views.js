@@ -178,8 +178,8 @@ function searchScript() {
   // account — not everyone gets "+ New" — so a hard-coded width is wrong for
   // somebody. Measured once per open, written as one custom property, and the
   // transition is the browser's from there.
-  function rcMobile(){ return window.matchMedia('(max-width: 820px)').matches; }
-  function rcBar(){ return document.querySelector('.topbar'); }
+  function rcMobile(){ return window.matchMedia('(max-width: 900px)').matches; }
+  function rcBar(){ return document.querySelector('.bs-masthead') || document.querySelector('.topbar'); }
 
   function rcExpand(focus){
     var bar=rcBar(), box=document.getElementById('rc-search'), btn=document.getElementById('rc-sbtn');
@@ -351,7 +351,9 @@ function masthead(path) {
       <span class="bs-loc">${esc(RESTAURANT)} <span aria-hidden="true">▾</span></span>
       <div class="bs-search" id="rc-search">
         <button type="button" class="bs-search-ico" id="rc-sbtn" aria-label="Search"
-          aria-expanded="false" aria-controls="rc-q" style="border:0;background:none;padding:0;cursor:pointer;color:var(--muted)">⌕</button>
+          aria-expanded="false" aria-controls="rc-q">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.6"/><path d="M10.4 10.4 L14 14"/></svg>
+        </button>
         <input id="rc-q" type="search" autocomplete="off" spellcheck="false"
           placeholder="Search products, invoices, vendors, staff…" aria-label="Search">
         <button type="button" class="bs-search-x" id="rc-sx" aria-label="Clear search" hidden
@@ -361,7 +363,6 @@ function masthead(path) {
       </div>
       <span class="bs-date" id="bs-date">${esc(stamp)} — <span id="bs-part">${part}</span></span>
       ${canWrite() ? `<a class="bs-btn" href="${primary[1]}">${primary[0]}</a>` : ''}
-      <button type="button" class="bs-theme" id="bs-theme" aria-label="Switch theme" title="Switch day / night">☾</button>
       <details class="bs-acct">
         <summary class="bs-avatar" title="${esc(u && u.name ? u.name : 'Account')}">${esc(initials(u && u.name ? u.name : 'M'))}</summary>
         <div class="bs-pop">
@@ -373,6 +374,7 @@ function masthead(path) {
           <a class="bs-out" href="/logout">Sign out</a>
         </div>
       </details>
+      <button type="button" class="bs-theme" id="bs-theme" aria-label="Switch theme" title="Switch day / night">☾</button>
     </header>`;
 }
 
@@ -502,11 +504,13 @@ function bottomBar(path) {
         <summary><span class="bs-bottom-g" aria-hidden="true">⋯</span>Index</summary>
         <div class="bs-index-body">
           <div class="bs-index-sheet">
-            <div class="bs-index-top">
-              <h1 class="bs-index-title">Index</h1>
+            <div class="bs-index-mast">
+              <span class="bs-index-brand"><b>ZWIN</b><i>${esc(RESTAURANT)}</i></span>
               <button type="button" class="bs-index-x" aria-label="Close"
                 onclick="this.closest('details').open=false">✕</button>
             </div>
+            <div class="bs-index-scroll">
+              <h1 class="bs-index-title">Index</h1>
             ${groups.map((g) => `
               <div class="bs-index-grp">${esc(g.title || 'Front page')}</div>
               <div class="bs-index-links">
@@ -519,6 +523,7 @@ function bottomBar(path) {
                 }).join('')}
               </div>`).join('')}
 
+            </div>
             <div class="bs-index-me">
               <span class="bs-index-av">${esc(initialsOf(u))}</span>
               <span class="bs-index-who">

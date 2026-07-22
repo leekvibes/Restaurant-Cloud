@@ -682,3 +682,44 @@ test('the bottom bar says Dashboard, and Sales rather than Cash', async () => {
   assert.match(bar, /href="\/sales"/);
   assert.ok(!/href="\/cash"/.test(bar), 'cash is in the index, not the bar');
 });
+
+test('the phone masthead shows the restaurant, and the search is a glyph until asked', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/')).text();
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
+
+  // The restaurant's name is the one thing on the bar that says which place
+  // this is. It was hidden on the width where that matters most.
+  assert.ok(!/\.bs-date, \.bs-loc \{[^}]*display:\s*none/.test(mob), 'the location is not hidden on a phone');
+  assert.match(mob, /\.bs-loc \{[^}]*display:\s*inline-flex/);
+
+  // Search collapses to its glyph; "+ New" goes entirely — the bottom bar and
+  // the footer both reach the same things.
+  assert.match(mob, /\.bs-search \{[^}]*width:\s*34px/, 'search starts collapsed');
+  assert.match(mob, /\.bs-masthead \.bs-btn \{[^}]*display:\s*none/, 'no + New on a phone');
+
+  // And the glyph is drawn, not typed — ⌕ renders as a nought at this size.
+  assert.match(html, /class="bs-search-ico"[\s\S]{0,200}<svg/, 'the magnifier is an svg');
+  assert.ok(!/>⌕</.test(html), 'not the ⌕ character');
+
+  // The theme toggle is the last control on the bar.
+  const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
+  assert.ok(bar.indexOf('bs-theme') > bar.indexOf('bs-acct'), 'night mode sits to the right of the account');
+});
+
+test('the index keeps its account block in view while the sections scroll', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const sheet = css.match(/\.bs-index-sheet \{[^}]*\}/g).pop();
+  assert.match(sheet, /grid-template-rows:\s*auto 1fr auto/,
+    `masthead, scroller, foot: ${sheet}`);
+  assert.match(css, /\.bs-index-scroll \{[^}]*overflow-y:\s*auto/, 'only the sections scroll');
+
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/')).text();
+  const from = html.indexOf('bs-index-sheet');
+  const idx = html.slice(from, html.indexOf('</nav>', from));
+  assert.match(idx, /class="bs-index-brand"><b>ZWIN<\/b>/, 'the wordmark is on it');
+  // The account block is outside the scroller.
+  assert.ok(idx.indexOf('bs-index-me') > idx.indexOf('</div>'), 'the account block follows the scroller');
+});
