@@ -822,14 +822,21 @@ app.get('/', (req, res) => {
       <div class="bs-spark">${CH.lineChart(
         [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v) => ({ x: '', y: v })), area: true }],
         { height: 96, empty: '' })}</div>` : ''}
-    </section>
-    ${soon.length ? `
-      <section class="bs-panel bs-soon-panel">
-      <div class="bs-sec-h"><span class="bs-kicker">Coming up</span></div>
+    </section>` : '';
+
+  // Its own block now: it belongs beside the last service in the narrow
+  // column, not tacked under the week's figures. It also no longer depends on
+  // `seeCosts` — an expiry is not a cost figure, and a viewer who cannot see
+  // margins should still be told the liquor licence is about to lapse.
+  const soonBand = soon.length ? `
+    <section class="bs-panel bs-soon-panel">
+      <div class="bs-sec-h"><span class="bs-kicker">Coming up</span>
+        <span class="bs-sec-note">${soon.length}</span></div>
       <div class="bs-soon">
         ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
           <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
-      </div></section>` : ''}` : '';
+      </div>
+    </section>` : '';
 
   // --- column 3: last service, and the record ------------------------------
   const row = (label, value) => `<div class="bs-lrow"><span>${label}</span><b class="bs-fig">${value}</b></div>`;
@@ -867,10 +874,13 @@ app.get('/', (req, res) => {
         </div>
         <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>
-      <div class="bs-cols3">
-        <div class="bs-col">${attnBlock}</div>
-        <div class="bs-col">${weekBand}</div>
-        <div class="bs-col">${lastBand}${record}</div>
+      <!-- Two columns, as the handoff draws it. Three made the middle twice
+           the width of its neighbours, so the framed blocks either side read
+           as slight next to a very wide chart. Wide column: what happened and
+           what needs doing. Narrow: the last service and what is coming. -->
+      <div class="bs-cols3 bs-dash2">
+        <div class="bs-col">${attnBlock}${weekBand}${record}</div>
+        <div class="bs-col">${lastBand}${soonBand}</div>
       </div>
     </div>`;
 

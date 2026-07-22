@@ -1599,3 +1599,12 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
     border-left: 1px solid var(--panel-line); border-top: 1px solid var(--panel-line);
   }
 }
+
+/* The dashboard runs two columns, not three. Three made the middle twice the
+   width of the others, so the framed blocks either side read as slight beside
+   a very wide chart. Wide left carries what happened and what needs doing;
+   narrow right carries the last service and what is coming. */
+.bs-cols3.bs-dash2 { grid-template-columns: 1fr 340px; gap: 0 24px; }
+@media (max-width: 1000px) {
+  .bs-cols3.bs-dash2 { grid-template-columns: 1fr; gap: 24px 0; }
+}
