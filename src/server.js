@@ -819,8 +819,11 @@ app.get('/', (req, res) => {
     ${flash(req)}
     <div class="bs-page">
       <div class="bs-head">
-        <div class="bs-bb" id="bs-bb" data-n="${billboard.length}">
-          ${billboard.map((m, i) => `<h1 class="bs-headline bs-bb-i${i === 0 ? ' on' : ''}">${m}</h1>`).join('')}
+        <div class="bs-headwrap">
+          <p class="bs-greet">${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</p>
+          <div class="bs-bb" id="bs-bb" data-n="${billboard.length}">
+            ${billboard.map((m, i) => `<h1 class="bs-headline bs-bb-i${i === 0 ? ' on' : ''}">${m}</h1>`).join('')}
+          </div>
         </div>
         <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>

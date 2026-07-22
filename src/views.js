@@ -677,9 +677,9 @@ function layout(title, body, opts = {}) {
             cur.classList.add('out');
             // The incoming one waits until the outgoing has cleared, so you
             // watch the change happen instead of seeing two lines cross.
-            setTimeout(function () { items[i].classList.add('on'); }, 260);
-            setTimeout(function () { cur.classList.remove('out'); }, 900);
-          }, 3000);
+            setTimeout(function () { items[i].classList.add('on'); }, 420);
+            setTimeout(function () { cur.classList.remove('out'); }, 1400);
+          }, 7000);
         })();
       </script>
       <script>${searchScript()}</script>

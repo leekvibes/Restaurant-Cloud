@@ -600,3 +600,31 @@ test('the record is five rows, not the whole log', async () => {
     w2.close();
   }
 });
+
+test('the billboard reserves one height and never moves the page', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await page(owner);
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+
+  // Every message shares one grid cell, so the block is as tall as the tallest
+  // from first paint and never changes again. Absolutely positioning the
+  // inactive ones sized it to whichever message was showing — a two-line
+  // verdict followed by a one-line notice shortened the page mid-read and
+  // shoved everything under it upwards.
+  const block = css.match(/\.bs-bb \{[^}]*\}/);
+  assert.ok(block, 'the billboard has a rule');
+  assert.match(block[0], /display:\s*grid/, `all messages stack in one cell, got: ${block[0]}`);
+  // `.bs-bb-i` is declared more than once — the base rule plus responsive
+  // overrides — so this looks at all of them rather than whichever comes first.
+  const items = [...css.matchAll(/\.bs-bb-i \{[^}]*\}/g)].map((m) => m[0]);
+  assert.ok(items.some((r) => /grid-area:\s*1\s*\/\s*1/.test(r)),
+    `each message occupies that same cell, got: ${items.join(' | ')}`);
+  assert.ok(!/\.bs-bb-i:not\(\.on\) \{[^}]*position:\s*absolute/.test(css),
+    'and none is taken out of flow, which is what let the height follow the message');
+
+  // Every message is in the DOM from the start, so a reader without JS gets
+  // the verdict and a screen reader gets all of them.
+  assert.ok((html.match(/class="bs-headline bs-bb-i/g) || []).length >= 1);
+  assert.match(html, /class="bs-headline bs-bb-i on"/, 'the verdict shows first');
+  assert.match(html, /class="bs-greet"/, 'and the greeting sits above it');
+});

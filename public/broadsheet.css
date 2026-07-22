@@ -488,6 +488,11 @@ body {
    ======================================================================== */
 .bs-page { padding-top: 26px; }
 .bs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 30px; }
+.bs-greet {
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  margin: 0 0 6px;
+}
 .bs-headline { max-width: 22ch; flex: 1; }
 .bs-headmeta { font-size: 13px; color: var(--muted); white-space: nowrap; }
 .bs-headline .ok { color: var(--positive); }
@@ -857,23 +862,26 @@ body {
    reduced motion asked for, the first message simply stays — and the first
    message is the verdict, which is the one that matters.
    ======================================================================== */
-.bs-bb { position: relative; flex: 1; min-width: 0; }
+/* Every message occupies the same grid cell, so the block is as tall as the
+   TALLEST of them from the first paint and never changes height again.
+   Absolutely positioning the inactive ones sized the block to whichever
+   message was showing — so a two-line verdict followed by a one-line notice
+   shortened the page mid-read and shoved everything under it upwards. */
+.bs-bb { display: grid; flex: 1; min-width: 0; }
 .bs-bb-i {
+  grid-area: 1 / 1;
   margin: 0;
   font-size: 40px;
-  /* The exit is slower than the entrance on purpose — you should see the line
-     leave, not find it already gone. */
-  transition: transform .62s cubic-bezier(.32,.72,0,1), opacity .5s ease-out;
+  /* Slow, and the exit slower than the entrance — you should watch the line
+     leave rather than find it already gone. */
+  transition: transform .9s cubic-bezier(.32,.72,0,1), opacity .75s ease-out;
 }
-/* Stacked, so the block keeps the height of the tallest message and nothing
-   below it jumps as they cycle. */
 .bs-bb-i:not(.on) {
-  position: absolute; inset: 0;
-  transform: translateY(22px); opacity: 0; pointer-events: none;
-  transition: transform .5s cubic-bezier(.32,.72,0,1), opacity .34s ease-out;
+  transform: translateY(26px); opacity: 0; pointer-events: none;
+  transition: transform .8s cubic-bezier(.32,.72,0,1), opacity .55s ease-out;
 }
 .bs-bb-i.on { transform: none; opacity: 1; }
-.bs-bb-i.out { transform: translateY(-26px); opacity: 0; pointer-events: none; }
+.bs-bb-i.out { transform: translateY(-30px); opacity: 0; pointer-events: none; }
 .bs-bb-s { color: var(--muted); font-family: var(--sans); font-size: .42em; font-weight: 400; }
 .bs-bb-i .bs-act { font-family: var(--sans); font-size: .36em; vertical-align: middle; }
 
@@ -999,3 +1007,16 @@ body {
 /* A flash renders inside the page body, which already has the gutter, while
    the two standing banners sit at page level and need it. */
 .bs-main .bs-notice-bar { margin: 0 calc(var(--gutter) * -1); }
+.bs-headwrap { flex: 1; min-width: 0; }
+
+/* The billboard's base size is declared after the responsive block above it,
+   so the smaller sizes have to come last or source order hands every width
+   the 40px desktop setting. */
+@media (max-width: 900px) {
+  .bs-bb-i { font-size: 27px; }
+}
+@media (max-width: 560px) {
+  .bs-bb-i { font-size: 23px; }
+  .bs-bb-s { font-size: .5em; }
+  .bs-bb-i .bs-act { font-size: .46em; }
+}
