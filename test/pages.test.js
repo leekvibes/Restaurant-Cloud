@@ -473,3 +473,142 @@ test('both themes give the stripe its own colour', () => {
   const val = (block) => (block.match(/--stripe:\s*([^;]+);/) || [])[1].trim();
   assert.notStrictEqual(val(day[0]), val(night[0]), 'and they are not the same colour');
 });
+
+// ---------------------------------------------------------------------------
+// Section framing.
+//
+// The rules the handoff is explicit about are the ones easy to erode later:
+// one panel per section, urgency as a hairline rather than a fill, and hover
+// as an enhancement the layout does not depend on.
+// ---------------------------------------------------------------------------
+
+const PANEL_PAGES = ['/', '/shifts', '/sales', '/payroll'];
+
+/** Outermost-first list of panel fragments on a page, with nesting depth. */
+function panelsWithDepth(html) {
+  const out = [];
+  const open = /<section[^>]*class="[^"]*\bbs-panel\b[^"]*"[^>]*>/g;
+  // Walk section tags, tracking depth, so a panel inside a panel is visible.
+  const tags = [...html.matchAll(/<section\b[^>]*>|<\/section>/g)];
+  let depth = 0;
+  const stack = [];
+  for (const t of tags) {
+    if (t[0].startsWith('</')) { const s = stack.pop(); if (s) out.push(s); depth--; continue; }
+    const isPanel = /class="[^"]*\bbs-panel\b/.test(t[0]);
+    depth++;
+    if (isPanel) stack.push({ depth, start: t.index, tag: t[0] });
+    else stack.push(null);
+  }
+  void open;
+  return out.filter(Boolean);
+}
+
+test('every framed page has panels, and none of them nest', async () => {
+  // "Don't nest panels. If a section contains sub-groups, separate them with
+  // dotted rules inside the one panel."
+  const bad = [];
+  let total = 0;
+  for (const p of PANEL_PAGES) {
+    const res = await fetch(`${BASE}${p}`, { redirect: 'manual' });
+    assert.strictEqual(res.status, 200, `${p} renders`);
+    const html = await res.text();
+    const panels = panelsWithDepth(html);
+    assert.ok(panels.length > 0, `${p} has at least one framed section`);
+    total += panels.length;
+
+    // A panel whose opening tag appears inside another panel's span is nested.
+    const spans = [];
+    for (const m of html.matchAll(/<section[^>]*class="[^"]*\bbs-panel\b[^"]*"[^>]*>/g)) spans.push(m.index);
+    for (const start of spans) {
+      const before = html.slice(0, start);
+      const opens = (before.match(/<section\b/g) || []).length;
+      const closes = (before.match(/<\/section>/g) || []).length;
+      // depth > 0 means this <section> opens while another is still open.
+      // Only a panel inside a panel is a problem, so check the enclosing one.
+      if (opens - closes > 0) {
+        const enclosing = before.lastIndexOf('<section');
+        if (/class="[^"]*\bbs-panel\b/.test(html.slice(enclosing, enclosing + 200))) {
+          bad.push(`${p}: a panel opens inside another panel`);
+        }
+      }
+    }
+  }
+  assert.ok(total >= 10, `found ${total} panels across the four pages`);
+  assert.deepStrictEqual(bad, []);
+});
+
+test('a panel carries at most one section heading', async () => {
+  // One panel per section. Two section headings inside one frame means two
+  // sections were wrapped together.
+  //
+  // A SECTION heading is a .bs-kicker inside a .bs-sec-h. The class is also
+  // used for sub-group labels — the month bars inside the sales ledger — and
+  // those are explicitly fine: "if a section contains sub-groups, separate
+  // them with dotted rules inside the one panel". Counting every .bs-kicker
+  // flags the ledger, which is one section with twelve months in it.
+  const bad = [];
+  let checked = 0;
+  for (const p of PANEL_PAGES) {
+    const html = await (await fetch(`${BASE}${p}`, { redirect: 'manual' })).text();
+    for (const m of html.matchAll(/<section[^>]*class="[^"]*\bbs-panel\b[^"]*"[^>]*>([\s\S]*?)<\/section>/g)) {
+      checked++;
+      const headings = (m[1].match(/class="bs-sec-h[^"]*"/g) || []).length;
+      if (headings > 1) bad.push(`${p}: one panel holds ${headings} section headings`);
+    }
+  }
+  assert.ok(checked >= 10, `inspected ${checked} panels`);
+  assert.deepStrictEqual(bad, []);
+});
+
+test('urgency is a hairline, never a fill', () => {
+  // "A section that needs attention gets a single 3px left border in the
+  // meaning colour — and nothing else changes. The panel plane stays the
+  // same tint." A background on the warn variant is the failure this catches.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  for (const cls of ['bs-panel-warn', 'bs-panel-crit']) {
+    let body = null;
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (m[1].includes('.' + cls)) body = m[2];
+    }
+    assert.ok(body, `.${cls} exists`);
+    assert.match(body, /border-left:\s*3px solid/, `.${cls} is a 3px left hairline`);
+    assert.ok(!/background/.test(body), `.${cls} must not fill — urgency is a line, not a plane`);
+  }
+});
+
+test('the panel rests flat and only lifts where hover is real', () => {
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+
+  // Resting state: no shadow, radius 0. The frame alone has to carry the
+  // separation on touch and in print.
+  // EVERY rule whose selector is exactly .bs-panel, joined — there is more
+  // than one (the second re-anchors --stripe for ledgers inside a frame), and
+  // keeping only the last checked the wrong block: a resting shadow added to
+  // the first one sailed straight through.
+  const rest = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter((m) => m[1].trim() === '.bs-panel').map((m) => m[2]).join(';');
+  assert.ok(rest.length, '.bs-panel exists');
+  // Drop the transition value before looking: it names box-shadow so the lift
+  // animates, which is not the same as having one at rest.
+  const decls = rest.replace(/transition\s*:[^;]*;?/g, '');
+  assert.ok(!/box-shadow\s*:/.test(decls), 'no shadow at rest');
+  assert.ok(!/border-radius:\s*[1-9]/.test(rest), 'radius stays 0');
+
+  // The lift lives behind a hover query, or a tap latches it on a phone.
+  // translateY, not just `transform` — the reduced-motion block also names
+  // .bs-panel:hover, to switch the movement off.
+  const hoverBlocks = [...css.matchAll(/@media([^{]*)\{([\s\S]*?)\n\}/g)]
+    .filter((m) => m[2].includes('.bs-panel:hover') && /translateY/.test(m[2]));
+  assert.strictEqual(hoverBlocks.length, 1, 'exactly one place lifts the panel');
+  assert.match(hoverBlocks[0][1], /hover:\s*hover/, 'gated on a real hover device');
+});
+
+test('both themes define every panel token', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const day = css.match(/:root,\s*:root\[data-theme="day"\][\s\S]*?\n\}/)[0];
+  const night = css.match(/:root\[data-theme="night"\][\s\S]*?\n\}/)[0];
+  for (const t of ['--panel', '--panel-line', '--panel-up', '--panel-up-line', '--panel-lift']) {
+    assert.ok(day.includes(t + ':'), `day defines ${t}`);
+    assert.ok(night.includes(t + ':'), `night defines ${t}`);
+  }
+});

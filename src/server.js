@@ -781,20 +781,30 @@ app.get('/', (req, res) => {
   const shown = [...reds, ...ambers.slice(0, 2)];
   const folded = [...ambers.slice(2), ...blues];
 
+  // The panel takes the meaning colour on its left edge when there is anything
+  // to answer for — red if any of it is critical, amber otherwise. A hairline,
+  // never a fill: the plane keeps the same tint as every other section.
+  const attnEdge = reds.length ? ' bs-panel-crit' : (attn.length ? ' bs-panel-warn' : '');
   const attnBlock = attn.length ? `
-    <div class="bs-sec-h warn"><span class="bs-kicker">Needs attention</span></div>
-    <div class="bs-items">${shown.map(nitem).join('')}</div>
-    ${folded.length ? `<details class="bs-fold">
-      <summary>${folded.length} more item${folded.length === 1 ? '' : 's'} <span aria-hidden="true">▾</span></summary>
-      <div class="bs-items">${folded.map(nitem).join('')}</div></details>` : ''}`
-    : `<div class="bs-sec-h"><span class="bs-kicker">Needs attention</span></div>
-       <p class="bs-clear">Nothing needs your attention right now.</p>`;
+    <section class="bs-panel${attnEdge}">
+      <div class="bs-sec-h warn"><span class="bs-kicker">Needs attention</span>
+        <span class="bs-sec-note">${attn.length}</span></div>
+      <div class="bs-items">${shown.map(nitem).join('')}</div>
+      ${folded.length ? `<details class="bs-fold">
+        <summary>${folded.length} more item${folded.length === 1 ? '' : 's'} <span aria-hidden="true">▾</span></summary>
+        <div class="bs-items">${folded.map(nitem).join('')}</div></details>` : ''}
+    </section>`
+    : `<section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">Needs attention</span></div>
+        <p class="bs-clear">Nothing needs your attention right now.</p>
+       </section>`;
 
   // --- column 2: the week in numbers ---------------------------------------
   const figCell = (label, value, sub) =>
     `<div class="bs-figcell"><span class="bs-figlabel">${label}</span><span class="bs-stat">${value}</span>${sub ? `<span class="bs-figsub">${sub}</span>` : ''}</div>`;
 
   const weekBand = p7 && seeCosts ? `
+    <section class="bs-panel">
     <div class="bs-sec-h"><span class="bs-kicker">The week in numbers</span>
       ${may('costs') ? '<a class="bs-act" href="/costs">Performance →</a>' : ''}</div>
     <div class="bs-grid2">
@@ -808,16 +818,19 @@ app.get('/', (req, res) => {
       <div class="bs-spark">${CH.lineChart(
         [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v) => ({ x: '', y: v })), area: true }],
         { height: 96, empty: '' })}</div>` : ''}
+    </section>
     ${soon.length ? `
-      <div class="bs-sec-h bs-soon-h"><span class="bs-kicker">Coming up</span></div>
+      <section class="bs-panel">
+      <div class="bs-sec-h"><span class="bs-kicker">Coming up</span></div>
       <div class="bs-soon">
         ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
           <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
-      </div>` : ''}` : '';
+      </div></section>` : ''}` : '';
 
   // --- column 3: last service, and the record ------------------------------
   const row = (label, value) => `<div class="bs-lrow"><span>${label}</span><b class="bs-fig">${value}</b></div>`;
   const lastBand = lastShift ? `
+    <section class="bs-panel">
     <div class="bs-sec-h"><span class="bs-kicker">Last service — ${esc(whenOf(lastShift.date, lastShift.daypart))}</span>
       ${may('shifts') ? `<a class="bs-act" href="/shifts/${lastShift.id}">Open →</a>` : ''}</div>
     <div class="bs-lrows">
@@ -825,7 +838,7 @@ app.get('/', (req, res) => {
       ${row('Tips', lastShift.tips ? money(lastShift.tips) : '—')}
       ${row('Hours', lastShift.hours ? (Math.round(lastShift.hours * 10) / 10).toFixed(1) : '—')}
       ${row('Staff', lastShift.people || '—')}
-    </div>` : '';
+    </div></section>` : '';
 
   const feedRows = events.slice(0, 5).map((r) => {
     const f = FEED[r.kind](r);
@@ -833,8 +846,10 @@ app.get('/', (req, res) => {
     return f.href ? `<a class="bs-rec" href="${f.href}">${inner}</a>` : `<div class="bs-rec">${inner}</div>`;
   }).join('');
   const record = `
-    <div class="bs-sec-h bs-rec-h"><span class="bs-kicker">The record</span></div>
-    ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}`;
+    <section class="bs-panel">
+      <div class="bs-sec-h"><span class="bs-kicker">The record</span></div>
+      ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}
+    </section>`;
 
   const bodyHtml = `
     ${flash(req)}
@@ -959,25 +974,29 @@ app.get('/shifts', (req, res) => {
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
   const statStrip = `
-    <div class="bs-strip">
+    <section class="bs-panel bs-strip">
       ${statCell('Sales this month', money(monthSales), `${k} completed shift${k === 1 ? '' : 's'}`)}
       ${statCell('Avg sales a shift', per(monthSales, k), esc(salesSub))}
       ${statCell('Avg wage cost a shift', per(monthWages, k), esc(wageSub))}
       ${statCell('Sales per labor hour', monthHours ? money(Math.round(monthSales / monthHours)) : '—',
         monthHours ? `÷ ${(Math.round(monthHours * 10) / 10).toLocaleString('en-US')} hrs worked` : 'no hours yet')}
       <span class="bs-strip-note">open shifts excluded —<br>today is never a measurement</span>
-    </div>`;
+    </section>`;
 
   // Open right now, across the top of the ledger.
   const openBlock = todays.length ? `
-    <div class="bs-open">
+    <section class="bs-panel bs-panel-warn">
+      <div class="bs-sec-h"><span class="bs-kicker">Open right now</span>
+        <span class="bs-sec-note">${todays.length}</span></div>
+      <div class="bs-open">
       ${todays.map(({ x, s }) => `<a class="bs-open-r" href="/shifts/${x.id}">
         <span class="bs-open-d ${s.key}"></span>
         <b>${esc(dp(x.daypart))} · ${esc(s.label.toLowerCase())}</b>
         <span>${x.people} on · ${Math.min(x.submitters, x.people)} of ${x.people} submitted${x.tips ? ` · ${money(x.tips)} tips so far` : ''}</span>
         <span class="bs-act">Open →</span>
       </a>`).join('')}
-    </div>` : '';
+      </div>
+    </section>` : '';
 
   const monthBlocks = months.map((m) => {
     const list = byMonth.get(m);
@@ -2937,10 +2956,12 @@ function periodIssues(from, to, rows) {
  */
 function periodSendBlock(from, to, rows) {
   if (!isPeriod(from, to)) return `
-    <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Send the summary</span></div>
-    <p class="bs-note">This is a custom range, not a pay period, so there is nothing to send from
-      it — and the Wk&nbsp;1 / Wk&nbsp;2 split below assumes the period starts on ${esc(from)}, which may
-      not line up. Pick a pay period above to send.</p>`;
+    <section class="bs-panel">
+      <div class="bs-sec-h"><span class="bs-kicker">Send the summary</span></div>
+      <p class="bs-note">This is a custom range, not a pay period, so there is nothing to send from
+        it — and the Wk&nbsp;1 / Wk&nbsp;2 split below assumes the period starts on ${esc(from)}, which may
+        not line up. Pick a pay period above to send.</p>
+    </section>`;
 
   const p = { start: from, end: to };
   const done = sendRecord(from);
@@ -2949,16 +2970,20 @@ function periodSendBlock(from, to, rows) {
   const recipients = rows.filter((r) => r.email && (r.hours > 0 || r.takeHome > 0 || r.cashTips > 0)).length;
 
   const checks = issues.length ? `
-    <div class="bs-sec-h bs-sec-gap${blocking.length ? ' warn' : ''}">
-      <span class="bs-kicker">${blocking.length ? 'Check before sending' : 'Worth knowing'}</span>
-      <span class="bs-sec-note">${issues.length} note${issues.length === 1 ? '' : 's'}</span>
-    </div>
-    <ul class="bs-checks">
-      ${issues.map((i) => `<li class="${i.bad ? 'bad' : ''}"><span class="bs-check-k">${i.bad ? 'Check' : 'Note'}</span>${esc(i.text)}</li>`).join('')}
-    </ul>`
-    : `<div class="bs-sec-h bs-sec-gap ok"><span class="bs-kicker">Checks</span></div>
-       <p class="bs-note"><b>Nothing looks off in this period.</b> Every shift has hours, every server
-         with tips has sales against them, and everybody who worked has an email on file.</p>`;
+    <section class="bs-panel${blocking.length ? ' bs-panel-warn' : ''}">
+      <div class="bs-sec-h${blocking.length ? ' warn' : ''}">
+        <span class="bs-kicker">${blocking.length ? 'Check before sending' : 'Worth knowing'}</span>
+        <span class="bs-sec-note">${issues.length} note${issues.length === 1 ? '' : 's'}</span>
+      </div>
+      <ul class="bs-checks">
+        ${issues.map((i) => `<li class="${i.bad ? 'bad' : ''}"><span class="bs-check-k">${i.bad ? 'Check' : 'Note'}</span>${esc(i.text)}</li>`).join('')}
+      </ul>
+    </section>`
+    : `<section class="bs-panel">
+        <div class="bs-sec-h ok"><span class="bs-kicker">Checks</span></div>
+        <p class="bs-note"><b>Nothing looks off in this period.</b> Every shift has hours, every server
+          with tips has sales against them, and everybody who worked has an email on file.</p>
+       </section>`;
 
   const sentNote = done
     ? `<p class="bs-note"><b>Already sent</b> on ${esc(String(done.sent_at).slice(0, 16))} to
@@ -2967,7 +2992,8 @@ function periodSendBlock(from, to, rows) {
 
   return `
     ${checks}
-    <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Send the summary</span></div>
+    <section class="bs-panel">
+    <div class="bs-sec-h"><span class="bs-kicker">Send the summary</span></div>
     <p class="bs-note">One email each with their hours, wages and card tips for
       <b>${esc(labelFor(p))}</b>. It restates the shift emails they already got — it is not extra pay.</p>
     ${sentNote}
@@ -2979,7 +3005,8 @@ function periodSendBlock(from, to, rows) {
       </button>
       ${recipients ? '' : '<span class="bs-sendnote">Nobody in this period has an email on file.</span>'}
       ${blocking.length && recipients ? '<span class="bs-sendnote">Sending is still allowed — the checks above are yours to judge.</span>' : ''}
-    </form>`;
+    </form>
+    </section>`;
 }
 
 app.post('/payroll/send', async (req, res) => {
@@ -3163,17 +3190,18 @@ app.get('/payroll', (req, res) => {
 
       ${periodBar(from, to)}
 
-      <div class="bs-strip">
+      <section class="bs-panel bs-strip">
         ${statCell('Hours', totals.hours, `wk 1 ${totals.wk1Hours} · wk 2 ${totals.wk2Hours}`)}
         ${statCell('Wages', money(totals.wage), `${paid.length} ${paid.length === 1 ? 'person' : 'people'} worked`)}
         ${statCell('Card tip payout', money(totals.paycheckTips), 'goes into Gusto')}
         ${statCell('On the checks', money(totals.takeHome), 'wages + card tips')}
         <span class="bs-strip-note">cash tips are not in this —<br>they already have that money</span>
-      </div>
+      </section>
 
       ${periodSendBlock(from, to, rows)}
 
-      <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Everyone who worked</span>
+      <section class="bs-panel">
+      <div class="bs-sec-h"><span class="bs-kicker">Everyone who worked</span>
         <span class="bs-sec-note">hours and card tip payout are the two figures Gusto asks for</span></div>
       ${rows.length ? `
       <div class="bs-lhead bs-rhead">
@@ -3191,6 +3219,7 @@ app.get('/payroll', (req, res) => {
         <span class="bs-lr-n strong">${money(totals.takeHome)}</span>
         <span></span>
       </div>` : '<p class="bs-clear">Nobody worked in this range.</p>'}
+      </section>
 
       <p class="bs-note bs-note-wide">
         <b>Card tip payout</b> is what goes into Gusto — card tips net of tip-out, owed on the paycheck.
@@ -4672,25 +4701,25 @@ app.get('/sales', (req, res) => {
         <div class="sp-filters">${filterSheet}</div>
       </div>
 
-      <div class="bs-strip">
+      <section class="bs-panel bs-strip">
         ${statCell('Total sales', brief(sales), `${traded.length} service${traded.length === 1 ? '' : 's'} with figures`)}
         ${statCell('Average day', avgDaily === null ? '—' : brief(avgDaily), byDay.size ? `over ${byDay.size} day${byDay.size === 1 ? '' : 's'} traded` : 'nothing traded')}
         ${statCell('Per service', perService === null ? '—' : brief(perService), 'services with figures only')}
         ${statCell('Best day', best ? brief(best[1]) : '—', best ? esc(whenOf(best[0])) : 'nothing yet')}
         ${statCell('Tips', tips ? brief(tips) : '—', tips ? 'collected in the period' : 'none reported')}
-      </div>
+      </section>
 
       ${outsideLine}
 
       <div class="bs-cols2">
-        <section>
+        <section class="bs-panel">
           <div class="bs-sec-h"><span class="bs-kicker">Sales, day by day</span>
             <span class="bs-sec-note">${svc ? esc(dp(svc)) : 'whole restaurant'}</span></div>
           <div class="bs-chart">${CH.lineChart([{ label: 'Sales', values: chartVals, area: true }],
             { height: 240, empty: 'No days with sales in this period.' })}</div>
           <div class="sp-point" id="sp-point" hidden></div>
         </section>
-        <section>
+        <section class="bs-panel">
           <div class="bs-sec-h"><span class="bs-kicker">Where it came from</span>
             <span class="bs-sec-note">${mixTotal ? money(mixTotal) + ' split' : 'not split'}</span></div>
           ${mixRows.length ? `<div class="bs-share">${mixRows.map((x) => {
@@ -4706,7 +4735,9 @@ app.get('/sales', (req, res) => {
             category totals existed, so it cannot be split.</p>` : ''}
 
           ${services.length > 1 ? `
-            <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">By service</span></div>
+            </section>
+            <section class="bs-panel">
+            <div class="bs-sec-h"><span class="bs-kicker">By service</span></div>
             <div class="bs-share">${services.map((x) => {
               const t = services.reduce((a, y) => a + y.sales, 0) || 1;
               const pct = (x.sales / t) * 100;
@@ -4716,12 +4747,15 @@ app.get('/sales', (req, res) => {
             }).join('')}</div>` : ''}
 
           ${hi.length ? `
-            <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Worth noting</span></div>
+            </section>
+            <section class="bs-panel">
+            <div class="bs-sec-h"><span class="bs-kicker">Worth noting</span></div>
             <ul class="bs-hilite">${hi.map((h) => `<li>${h}</li>`).join('')}</ul>` : ''}
         </section>
       </div>
 
       ${awaiting.length ? `
+        <section class="bs-panel bs-panel-warn">
         <div class="bs-sec-h warn"><span class="bs-kicker">Needs sales entry</span>
           <span class="bs-sec-note">${awaiting.length}</span></div>
         <div class="bs-items">
@@ -4731,15 +4765,18 @@ app.get('/sales', (req, res) => {
             <span class="bs-item-s">${x.people ? `${x.people} on · ${Math.round(x.hours)} hrs` : 'nobody on it'}<span class="bs-sep"> · </span><span class="bs-act">Enter →</span></span>
           </a>`).join('')}
         </div>
-        ${awaiting.length > 6 ? `<p class="bs-note">${awaiting.length - 6} more in this period, marked in the ledger below.</p>` : ''}` : ''}
+        ${awaiting.length > 6 ? `<p class="bs-note">${awaiting.length - 6} more in this period, marked in the ledger below.</p>` : ''}
+        </section>` : ''}
 
       ${serverOnlyCount ? `<p class="bs-note bs-note-wide"><b>${serverOnlyCount} service${serverOnlyCount === 1 ? '' : 's'} show what servers rang, not a POS total.</b>
         Counter and to-go revenue is not in those figures, so they are a floor. Open any day below and the real
         total replaces the estimate everywhere.</p>` : ''}
 
-      <div class="bs-sec-h"><span class="bs-kicker">The ledger</span>
-        <span class="bs-sec-note">${rows.length} service${rows.length === 1 ? '' : 's'}</span></div>
-      ${ledger || '<p class="bs-clear">No services in this range. Pick a different period, or log a shift.</p>'}
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">The ledger</span>
+          <span class="bs-sec-note">${rows.length} service${rows.length === 1 ? '' : 's'}</span></div>
+        ${ledger || '<p class="bs-clear">No services in this range. Pick a different period, or log a shift.</p>'}
+      </section>
 
       <details class="bs-pos">
         <summary>With a POS connected<i>8 more measures</i></summary>

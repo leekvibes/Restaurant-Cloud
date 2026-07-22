@@ -39,6 +39,17 @@
   --stripe:       #ebdfc6;   /* every other ledger line — a browner cream, sitting
                                 between --tp-panel and --rule-light so it reads as
                                 a shade of the paper and never as a hairline */
+
+  /* --- section framing -------------------------------------------------- */
+  /* The handoff draws these on a #f4ead9 page and specifies #f8f0e2 for the
+     panel — a 4/6/9 step lighter. Our paper is #f7eee0, so the literal value
+     would be a 1/2/2 step and effectively invisible. The RELATIONSHIP is what
+     the pattern is, so it is carried over onto the paper we actually have. */
+  --panel:        #fbf4e9;
+  --panel-line:   #e2d6bd;
+  --panel-up:     #fffdf8;
+  --panel-up-line:#c7ba9e;
+  --panel-lift:   0 4px 16px rgba(31, 29, 26, .09);
   --pop-shadow:   4px 4px 0 rgba(23, 23, 26, .12);
 }
 
@@ -70,6 +81,13 @@
   --btn-ink:      #191815;
   --row-hover:    #22201c;
   --stripe:       #26231c;   /* the same step, warm side, going lighter */
+  /* Night needs no reinterpretation — our page, surface and rule already are
+     the values the handoff asks for. */
+  --panel:        #211f1b;
+  --panel-line:   #35332c;
+  --panel-up:     #26241d;
+  --panel-up-line:#4a4636;
+  --panel-lift:   0 4px 16px rgba(0, 0, 0, .35);
   --pop-shadow:   4px 4px 0 rgba(0, 0, 0, .35);
 }
 
@@ -1474,4 +1492,96 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 :where(.bs-week) > :where(.bs-lr):nth-child(even),
 :where(.bs-srows) > :where(.bs-srow):nth-child(even) {
   background: var(--stripe);
+}
+
+/* ===========================================================================
+   SECTION FRAMING
+   ---------------------------------------------------------------------------
+   One panel per section — a kicker and the data under it. At rest it is barely
+   there: a whisper lighter than the page and a hairline. On hover it lifts.
+   The separation has to work without the hover, so the resting frame carries
+   it on touch and in print; the lift is the reward for pointing at something.
+
+   Rules this encodes, from the handoff:
+     · one panel per section, never per row or per single stat
+     · a stat row is ONE panel with internal dividers — the panel lifts, not
+       the cell
+     · urgency is a 3px left hairline in the meaning colour, never a fill
+     · no nesting; sub-groups inside a panel get dotted rules
+   ======================================================================== */
+
+.bs-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  padding: 15px 17px 16px;
+  /* Named properties, not `all` — transitioning `all` animates layout as well,
+     and a panel containing a chart will visibly re-draw it on every hover. */
+  transition: background-color .15s ease, border-color .15s ease,
+              box-shadow .15s ease, transform .15s ease;
+}
+.bs-panel + .bs-panel { margin-top: 14px; }
+
+/* A ledger inside a panel sits on the panel's plane, not the page's, so the
+   alternating stripe has to step from there or it lands twice as heavy as the
+   one that was tuned against the paper. Same magnitude, new starting point. */
+.bs-panel { --stripe: #efe5cf; }
+:root[data-theme="night"] .bs-panel { --stripe: #2e2a22; }
+
+/* Only where hover is a real thing. On a touch screen :hover latches after a
+   tap and the panel stays lifted until you touch something else. */
+@media (hover: hover) and (pointer: fine) {
+  .bs-panel:hover {
+    background: var(--panel-up);
+    border-color: var(--panel-up-line);
+    box-shadow: var(--panel-lift);
+    transform: translateY(-2px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bs-panel { transition: none; }
+  .bs-panel:hover { transform: none; }
+}
+
+/* Urgency: a hairline down the left edge, and nothing else. The plane keeps
+   its tint — a filled panel would shout across the whole page. */
+.bs-panel-warn { border-left: 3px solid var(--warning); }
+.bs-panel-crit { border-left: 3px solid var(--danger); }
+
+/* Inside a frame the kicker's ink rule is heavier than it needs to be — the
+   panel is already doing the separating. It softens to the frame's own line.
+   The warn/crit variants keep their meaning colour on the kicker text. */
+.bs-panel > .bs-sec-h { border-bottom-color: var(--panel-line); }
+.bs-panel > .bs-sec-h:first-child { margin-top: 0; }
+.bs-panel > :last-child { margin-bottom: 0; }
+
+/* A stat row is one panel. Its own top/bottom rules come off — the frame
+   replaces them — and the cell dividers become the frame's line. */
+.bs-panel.bs-strip {
+  border-top: 1px solid var(--panel-line);
+  border-bottom: 1px solid var(--panel-line);
+  margin-top: 0;
+  padding: 15px 17px 16px;
+}
+.bs-panel.bs-strip .bs-strip-c:first-child { padding-left: 0; }
+.bs-panel.bs-strip .bs-strip-c + .bs-strip-c { border-left-color: var(--panel-line); }
+.bs-panel .bs-figcell { border-bottom-color: var(--panel-line); }
+.bs-panel .bs-figcell:nth-child(even) { border-left-color: var(--panel-line); }
+
+/* Panels stack down a column, so the dashboard's column dividers would draw a
+   second vertical line a few pixels from every panel's own border. The frames
+   are the separation now. */
+.bs-cols3 > .bs-col:first-child { border-right: 0; }
+.bs-cols3 > .bs-col:last-child { border-left: 0; }
+
+/* Two-column sections: once each column is a framed panel, a grid that
+   stretches them to equal height leaves the shorter one as a tall empty box,
+   and the divider rule between them draws a second line a few pixels from
+   each panel's own border. Both go. */
+.bs-cols2 { align-items: start; }
+.bs-cols2 > section.bs-panel:last-child { padding-left: 17px; border-left: 1px solid var(--panel-line); }
+@media (max-width: 1000px) {
+  .bs-cols2 > section.bs-panel:last-child {
+    padding-left: 17px; padding-top: 15px;
+    border-left: 1px solid var(--panel-line); border-top: 1px solid var(--panel-line);
+  }
 }
