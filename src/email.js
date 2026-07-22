@@ -25,7 +25,15 @@ function shell(title, bodyRows, hero) {
       <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.05em">${hero.label}</div>
       <div style="font-size:42px;font-weight:800;color:#2563eb;letter-spacing:-.02em;margin-top:2px;line-height:1">${hero.value}</div>
     </div>` : '';
-  return `<!doctype html><html><body style="margin:0;background:#f4f7fc;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a">
+  // The charset is declared in the document, not only in the MIME headers.
+  // Nodemailer sets the header, so a normal send has always been fine — but
+  // anything that renders this HTML on its own (a client's "view in browser",
+  // a forward that drops the headers, the preview files written to previews/)
+  // falls back to latin-1 and turns every · into Â· and every — into â€".
+  return `<!doctype html><html><head><meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${title}</title></head>
+  <body style="margin:0;background:#f4f7fc;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a">
   <div style="max-width:520px;margin:0 auto;padding:24px 16px">
     <div style="background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e6ecf4;box-shadow:0 6px 24px rgba(15,23,42,.06)">
       <div style="background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%);color:#fff;padding:20px 22px">
@@ -34,9 +42,6 @@ function shell(title, bodyRows, hero) {
       </div>
       ${heroBlock}
       <div style="padding:10px 22px 20px">${bodyRows}</div>
-      <div style="padding:14px 22px;border-top:1px solid #eef2f7;color:#94a3b8;font-size:12px;line-height:1.5">
-        This is a summary, not a pay stub — final amounts are set in payroll.
-      </div>
     </div>
   </div></body></html>`;
 }
@@ -238,8 +243,9 @@ function periodEmail(r, ctx) {
     body += hint('You already have this — it is not on the check.');
   }
 
-  // The shell footer already covers "not a pay stub" — this only needs to make
-  // the one point staff would otherwise get wrong: it isn't additional money.
+  // The one point staff would otherwise get wrong: this is not additional
+  // money. It used to lean on a shell footer that also said "not a pay stub";
+  // that footer is gone, so this line now carries the whole job.
   body += `<div style="margin-top:12px;font-size:12px;color:#94a3b8;line-height:1.5">This adds up the shift emails you already received — it isn't extra pay.</div>`;
 
   const subject = `${RESTAURANT}: pay period ${range} — ${fmt(r.takeHome)} on this check`;
