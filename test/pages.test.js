@@ -305,3 +305,57 @@ test('Export to Excel is not swallowed by the drill-down route', async () => {
   assert.strictEqual(res.status, 200, 'the export renders');
   assert.match(res.headers.get('content-type') || '', /spreadsheet/, 'and it is a workbook, not a web page');
 });
+
+test('every inline script the server emits actually parses', async () => {
+  // Client JS is built inside template literals, so a backslash that is not
+  // doubled is eaten on the way out. `/^#s\d+$/` has shipped as `/^#sd+$/`
+  // three times. Parsing does not catch that particular one — a mangled regex
+  // is still valid JS — but it catches everything that breaks outright, and
+  // the guard it replaced is now a plain string compare for the same reason.
+  const broken = [];
+  let scripts = 0;
+  for (const p of ['/', '/shifts', '/sales', '/payroll', '/cash', '/costs']) {
+    const res = await fetch(`${BASE}${p}`, { redirect: 'manual' });
+    if (res.status !== 200) continue;
+    const html = await res.text();
+    for (const [, body] of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+      if (!body.trim()) continue;
+      scripts++;
+      try { new Function(body); } catch (e) { broken.push(`${p}: ${e.message}`); }
+    }
+  }
+  assert.ok(scripts > 5, `found ${scripts} inline scripts to check`);
+  assert.deepStrictEqual(broken, []);
+});
+
+test('saving a row sends you back to that row', async () => {
+  // Both ledgers redirect to an anchor so the page can put you back where you
+  // were. Without it you land at the top and hunt for your place after every
+  // save — which on a seven-person shift is seven times a night.
+  const d = new (require('better-sqlite3'))(DB, { readonly: true });
+  const sh = d.prepare('SELECT id FROM shifts LIMIT 1').get();
+  const emp = d.prepare('SELECT id FROM employees LIMIT 1').get();
+  d.close();
+  assert.ok(sh && emp, 'the fixture has a shift and a person');
+
+  const post = (url, form) => fetch(`${BASE}${url}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(form).toString(),
+  });
+
+  const staff = await post(`/shifts/${sh.id}/support`,
+    { employee_id: String(emp.id), role: 'kitchen', hours: '6', wage: '18' });
+  assert.strictEqual(staff.status, 302, 'the staff save redirects');
+  assert.match(staff.headers.get('location'), new RegExp(`#edit-${emp.id}$`),
+    'back to the person whose row you edited');
+
+  // The range rides in the form body, the way the page's own hidden input
+  // sends it — not on the query string, which the handler never reads.
+  const sale = await post(`/sales/${sh.id}`,
+    { r: '30', food: '100', coffee: '50', alcohol: '0', other: '0' });
+  assert.strictEqual(sale.status, 302, 'the sales save redirects');
+  const loc = sale.headers.get('location');
+  assert.match(loc, new RegExp(`#s${sh.id}$`), 'back to the day you entered');
+  assert.match(loc, /r=30/, 'and to the range you were filtering by');
+});

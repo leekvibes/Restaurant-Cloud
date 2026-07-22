@@ -776,7 +776,22 @@ body {
 .bs-sr { padding: 12px 0; cursor: pointer; list-style: none; }
 .bs-sr::-webkit-details-marker { display: none; }
 .bs-sr:hover { background: var(--row-hover); }
-.bs-srow[open] > .bs-sr { background: var(--row-hover); }
+/* An open row is one block, so it is tinted as one block — summary and the
+   detail beneath it together. Tinting only the summary left the thing you
+   opened sitting on plain paper, and on a long ledger there was nothing
+   telling you which row you were inside. */
+.bs-srow[open] { background: var(--row-hover); }
+/* The tint is lighter and cooler than the paper, so a bordered off-white
+   button laid on it nearly disappears. The primary action of an opened row
+   goes solid instead — which is also what the staff sheet's Save button does
+   one row below it. */
+.bs-srow[open] .bs-btn-sm {
+  background: var(--btn-bg); color: var(--btn-ink); border-color: var(--btn-bg);
+}
+.bs-srow[open] .bs-btn-sm:hover { background: var(--ink); color: var(--btn-ink); opacity: .88; }
+/* Fields keep their own fill but take a firmer edge, so they still read as
+   inputs against a background that is now close to their own colour. */
+.bs-srow[open] .bs-pill input, .bs-srow[open] .bs-pill select { border-color: var(--rule); }
 .bs-sr-n { font-size: 14px; font-weight: 600; color: var(--headline); }
 .bs-sr-r { font-size: 13px; color: var(--muted); }
 .bs-sr-f {
@@ -1313,8 +1328,10 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-fields { grid-template-columns: 1fr; }
   .bs-entry-alt { margin-left: 0; flex-basis: 100%; }
 }
-/* The row you just saved, so returning to a long ledger shows you where. */
-.bs-justsaved > .bs-sr { background: var(--accent-fill); }
+/* The row you just saved, so returning to a long ledger shows you where.
+   Written to out-specify `.bs-srow[open]` above — a class and an attribute
+   beat a lone class, and the open tint would otherwise win. */
+.bs-srow.bs-justsaved, .bs-srow[open].bs-justsaved { background: var(--accent-fill); }
 
 /* ===========================================================================
    PAYROLL — the fortnightly run.

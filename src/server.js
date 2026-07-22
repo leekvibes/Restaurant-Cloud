@@ -1489,6 +1489,10 @@ app.get('/shifts/:id', (req, res) => {
         el.open = open;
         if (open) el.scrollIntoView({ block: 'nearest' });
       }
+      // Saving a staff row used to return you to the top of the sheet. On a
+      // seven-person night that meant finding your place again after every
+      // single save.
+      ${returnToRowScript('edit-', false)}
     </script>`;
 
   const body = `
@@ -1731,7 +1735,7 @@ app.post('/shifts/:id/server', (req, res) => {
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, 'server', req.body);
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Server saved.'));
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Server saved.') + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/support', (req, res) => {
@@ -1744,7 +1748,7 @@ app.post('/shifts/:id/support', (req, res) => {
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, req.body.role, req.body);
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Support saved.'));
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Support saved.') + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/remove', (req, res) => {
@@ -4403,21 +4407,71 @@ app.get('/sales', (req, res) => {
     <script>${salesScript()}</script>`));
 });
 
-function salesScript() {
+/**
+ * Land back on the row you just saved, centred and marked.
+ *
+ * Saving redirects to `#<prefix><id>`, and the row is usually inside a month
+ * that is shut — which the browser cannot scroll to at all. So: open every
+ * <details> above it, then place it.
+ *
+ * `prefix` is matched as a plain string and the rest checked for digits, in
+ * place of emitting a regex. A pattern written into a template literal has to
+ * have its backslashes doubled, and `/^#s\d+$/` has already gone out as
+ * `/^#sd+$/` three times in this file.
+ *
+ * `openSelf` opens the target too. The sales ledger wants that — the row is
+ * the day and its detail is the figures you just entered. The staff sheet does
+ * not: the target there is the edit form, and re-opening it after a save shows
+ * you the form again instead of the result.
+ */
+function returnToRowScript(prefix, openSelf) {
   return `
-  // Coming back from a save lands on #sNN — a row inside a month that is shut,
-  // which the browser cannot scroll to. Open its month first, then go.
   (function(){
-    var id = location.hash && location.hash.match(/^#s\\d+$/) ? location.hash.slice(1) : null;
-    if(!id) return;
-    var row = document.getElementById(id);
-    if(!row) return;
-    var el = row;
+    var h = location.hash ? location.hash.slice(1) : '';
+    var p = ${JSON.stringify(prefix)};
+    if (h.slice(0, p.length) !== p) return;
+    var rest = h.slice(p.length);
+    if (!rest || /[^0-9]/.test(rest)) return;
+    var row = document.getElementById(h);
+    if (!row) return;
+
+    // Stop the browser putting back the scroll position it remembers for this
+    // URL after we have already placed the row.
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+
+    var el = ${openSelf ? 'row' : 'row.parentElement'};
     while(el){ if(el.tagName === 'DETAILS') el.open = true; el = el.parentElement; }
-    row.scrollIntoView({ block: 'center' });
+
+    // Centre the row LINE, not the whole open block. scrollIntoView centres an
+    // element's box, and that box is a <details> — so its middle sits somewhere
+    // down in the detail and the line you were actually looking at ends up well
+    // above the fold. That is why coming back from a save still meant scrolling
+    // up to find your place.
+    var line = row.querySelector('summary') || row;
+    var moved = false;
+    ['wheel','touchstart','keydown'].forEach(function(ev){
+      window.addEventListener(ev, function(){ moved = true; }, { passive: true, once: true });
+    });
+    function centre(){
+      if(moved) return;
+      var r = line.getBoundingClientRect();
+      window.scrollTo(0, Math.max(0, r.top + window.pageYOffset - (window.innerHeight - r.height) / 2));
+    }
+    centre();
+    // Again once the layout has settled. The first pass runs before the
+    // self-hosted fonts have swapped in, and the reflow that follows shifts
+    // every row above this one — landing you a little under where you were.
+    requestAnimationFrame(centre);
+    window.addEventListener('load', centre);
+
     row.classList.add('bs-justsaved');
     setTimeout(function(){ row.classList.remove('bs-justsaved'); }, 2200);
-  })();
+  })();`;
+}
+
+function salesScript() {
+  return `
+  ${returnToRowScript('s', true)}
 
   (function(){
     var box=document.getElementById('sp-point');
