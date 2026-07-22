@@ -482,7 +482,10 @@ test('both themes give the stripe its own colour', () => {
 // as an enhancement the layout does not depend on.
 // ---------------------------------------------------------------------------
 
-const PANEL_PAGES = ['/', '/shifts', '/sales', '/payroll'];
+// The dashboard came back out: framing it flattened the one page whose job is
+// reading at a glance, and it now runs the ruled three-column layout it had
+// before. Shifts, Sales and Payroll keep the pattern.
+const PANEL_PAGES = ['/shifts', '/sales', '/payroll'];
 
 /** Outermost-first list of panel fragments on a page, with nesting depth. */
 function panelsWithDepth(html) {
@@ -613,69 +616,6 @@ test('both themes define every panel token', () => {
   }
 });
 
-test('the dashboard frames what wants something, and leaves what you read', async () => {
-  // Five frames on one page meant none of them was saying anything, and the
-  // doubled padding cost the columns their line length. The split now carries
-  // meaning: a frame is "this wants something from you". Needs attention and
-  // Coming up are things to act on; the week's figures and the activity feed
-  // are things you read, and they stay plain document with the ink kicker rule
-  // the rest of the broadsheet uses.
-  const html = await (await fetch(`${BASE}/`, { redirect: 'manual' })).text();
-  const framed = [...html.matchAll(/<section class="bs-panel[^"]*"[^>]*>[\s\S]*?class="bs-kicker">([^<]*)</g)]
-    .map((m) => m[1].trim());
-  const plain = [...html.matchAll(/<section class="bs-plainsec"[^>]*>[\s\S]*?class="bs-kicker">([^<]*)</g)]
-    .map((m) => m[1].trim());
-
-  assert.ok(framed.length >= 2 && plain.length >= 2,
-    `expected a mix, got ${framed.length} framed and ${plain.length} plain`);
-  assert.ok(framed.some((t) => /needs attention/i.test(t)), 'attention is framed');
-  assert.ok(plain.some((t) => /the record/i.test(t)), 'the record is plain');
-  assert.ok(!framed.some((t) => /the record|week in numbers/i.test(t)),
-    'the sections you read are not boxed');
-});
-
-test('a plain section keeps the ink rule; a framed one softens it', () => {
-  // The two have to stay distinguishable, or the split stops meaning anything.
-  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-  let softened = null;
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (m[1].trim() === '.bs-panel > .bs-sec-h') softened = m[2];
-  }
-  assert.ok(softened, 'a framed section softens its kicker rule');
-  assert.match(softened, /border-bottom-color:\s*var\(--panel-line\)/);
-  // And nothing softens it for a plain one.
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (/\.bs-plainsec[^,{]*\.bs-sec-h/.test(m[1])) {
-      assert.ok(!/border-bottom-color/.test(m[2]), 'a plain section keeps the ink rule');
-    }
-  }
-});
-
-test('columns pad once, not twice', () => {
-  // 28px of column padding plus 17px of panel padding put content 45px in and
-  // left a 56px empty gutter with nothing in it — the frames had replaced the
-  // rule that used to live there. The gap does the separating now.
-  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
-  // Anchored: `padding: 0 28px` also starts with a zero, and a looser regex
-  // called that "no padding" and let the 56px gutter straight back in.
-  const zeroed = rules.some((m) => m[1].trim() === '.bs-cols3 > .bs-col'
-    && /padding:\s*0\s*(?:;|$)/.test(m[2].trim()));
-  assert.ok(zeroed, 'the framed column carries no padding of its own');
-  const gap = rules.find((m) => m[1].trim() === '.bs-cols3' && /gap:/.test(m[2]));
-  assert.ok(gap, '.bs-cols3 sets a gap instead');
-});
-
-// ---------------------------------------------------------------------------
-// The two nav strips.
-//
-// The band grows and shrinks in flow, which is the whole reason it is safe:
-// floating it would put whatever you were reaching for underneath a panel
-// that appeared *because* you reached for it. And hover is enhancement — the
-// collapsed row has to be usable on its own, because a phone has no hover and
-// a keyboard has no cursor.
-// ---------------------------------------------------------------------------
-
 test('the nav band carries both states, and the collapsed one is complete', async () => {
   const html = await (await fetch(`${BASE}/`, { redirect: 'manual' })).text();
   assert.match(html, /<nav class="bs-band"/, 'the band exists');
@@ -712,14 +652,14 @@ test('the band pushes content rather than floating over it', () => {
   assert.ok(!/position:\s*(absolute|fixed)/.test(band),
     'the band stays in flow — an overlay would cover the thing you reached for');
 
-  // The lift is behind a real-hover query; a tap latches :hover on a phone.
-  const hoverBlocks = [...css.matchAll(/@media([^{]*)\{([\s\S]*?)\n\}/g)]
-    .filter((m) => /\.bs-band:hover \.bs-band-x/.test(m[2]));
-  assert.strictEqual(hoverBlocks.length, 1, 'one place expands on hover');
-  assert.match(hoverBlocks[0][1], /hover:\s*hover/, 'gated on a hover device');
+  // The state is a class now, set by script — CSS :hover re-evaluates as the
+  // box resizes, which is what let the band chase its own layout.
+  assert.ok(!/\.bs-band:hover/.test(css), 'no :hover state on the band');
+  assert.match(css, /\.bs-band\.open \.bs-band-x/, 'one class drives it, for cursor, touch and keyboard alike');
 
-  // And a class-based path exists for keyboard and touch.
-  assert.match(css, /\.bs-band\.open \.bs-band-x/, 'focus and tap can open it without a cursor');
+  // And the script only wires the cursor path where a cursor exists.
+  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
+  assert.match(views, /hover:\s*hover\) and \(pointer:\s*fine/, 'enter/leave only on a real pointer');
 });
 
 test('the band is not a third copy of the nav on a phone', () => {
@@ -752,4 +692,60 @@ test('the shift button is gone from the bar, not just hidden', async () => {
   const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
   assert.ok(!/Log a shift/.test(bar), 'not in the top bar');
   assert.match(html, /Log a shift/, 'still on the page it belongs to');
+});
+
+test('the nav band cannot shrink out from under the cursor', () => {
+  // The twitch: both states used to animate at once, the collapsed row
+  // shrinking while the groups grew. Measured, the band dipped from 58px to
+  // 42px in the first frames. If the cursor sat in the lower part of the row
+  // the band shrank away from it, :hover went false, it collapsed, the cursor
+  // was over it again, it reopened — several times a second.
+  //
+  // The fix is structural, not a tuned delay: both states occupy ONE grid
+  // cell, so the band is always as tall as its tallest child and the height
+  // can only go up. That holds only while the collapsed row keeps its height,
+  // so this checks the two things that make it true.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const ruleFor = (sel) => {
+    let body = null;
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === sel) body = (body || '') + m[2];
+    return body;
+  };
+
+  assert.match(ruleFor('.bs-band') || '', /display:\s*grid/, 'the band is a grid');
+  assert.match(ruleFor('.bs-band-c, .bs-band-x') || '', /grid-area:\s*1\s*\/\s*1/,
+    'both states share one cell, so the band takes the taller of them');
+
+  // The collapsed row fades; it must never animate its box, or the dip is back.
+  const collapsedOpen = ruleFor('.bs-band.open .bs-band-c') || '';
+  assert.ok(!/max-height|height|padding/.test(collapsedOpen),
+    `opening must only fade the collapsed row, got: ${collapsedOpen.trim()}`);
+  assert.match(collapsedOpen, /opacity:\s*0/, 'it fades');
+
+  // And the state change is deferred, not immediate. Checking for the two
+  // constants by name proved worthless: renaming the declaration left the name
+  // behind at the usage site and the assertion sailed through. What matters is
+  // that opening goes through a timer at all — without one, brushing past the
+  // band flicks it open and shut.
+  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
+  const band = views.slice(views.indexOf('const bandScript'), views.indexOf('const swScript'));
+  assert.match(band, /mouseenter/, 'enter/leave, not :hover — :hover re-evaluates as the box resizes');
+  assert.match(band, /timer\s*=\s*setTimeout/, 'the state change runs on a timer');
+  // Two distinct delays declared, so opening and closing are not the same
+  // reflex — a quick pass should not open it, a diagonal move should not shut
+  // it. Read from the declarations, which a rename cannot fake past.
+  const delays = [...band.matchAll(/var\s+\w+\s*=\s*(\d{2,4})\s*;/g)]
+    .map((m) => Number(m[1])).filter((n) => n >= 50 && n <= 1000);
+  assert.ok(new Set(delays).size >= 2, `two distinct delays, got ${JSON.stringify(delays)}`);
+});
+
+test('the group labels are legible, not fine print', () => {
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  let body = null;
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === '.bs-bandg-t') body = m[2];
+  assert.ok(body, '.bs-bandg-t exists');
+  const weight = Number((body.match(/font-weight:\s*(\d+)/) || [])[1]);
+  const size = parseFloat((body.match(/font-size:\s*([\d.]+)px/) || [])[1]);
+  assert.ok(weight >= 700, `group labels are bold, got ${weight}`);
+  assert.ok(size >= 10, `and readable, got ${size}px`);
 });

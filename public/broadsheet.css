@@ -1544,9 +1544,6 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
               box-shadow .15s ease, transform .15s ease;
 }
 .bs-panel + .bs-panel { margin-top: 14px; }
-/* A framed section next to a plain one, in either order. */
-.bs-panel + .bs-plainsec, .bs-plainsec + .bs-panel { margin-top: 22px; }
-.bs-plainsec + .bs-plainsec { margin-top: 24px; }
 
 /* A ledger inside a panel sits on the panel's plane, not the page's, so the
    alternating stripe has to step from there or it lands twice as heavy as the
@@ -1594,19 +1591,6 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-panel .bs-figcell { border-bottom-color: var(--panel-line); }
 .bs-panel .bs-figcell:nth-child(even) { border-left-color: var(--panel-line); }
 
-/* Panels stack down a column, so the dashboard's column dividers would draw a
-   second vertical line a few pixels from every panel's own border. The frames
-   are the separation now. */
-.bs-cols3 > .bs-col:first-child { border-right: 0; }
-.bs-cols3 > .bs-col:last-child { border-left: 0; }
-
-/* The 28px each side was sized for a layout where a rule ran down the middle
-   of the gutter and did the separating. With the rule gone and every section
-   carrying its own frame, it became 56px of nothing between panels, and it
-   cost the left column 18% of its line length on top. The grid gap replaces
-   it — one measure, not two paddings that add up. */
-.bs-cols3 { gap: 0 18px; }
-.bs-cols3 > .bs-col { padding: 0; }
 .bs-cols2 > section.bs-panel:last-child { padding-left: 13px; }
 
 /* Two-column sections: once each column is a framed panel, a grid that
@@ -1622,14 +1606,6 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   }
 }
 
-/* The dashboard runs two columns, not three. Three made the middle twice the
-   width of the others, so the framed blocks either side read as slight beside
-   a very wide chart. Wide left carries what happened and what needs doing;
-   narrow right carries the last service and what is coming. */
-.bs-cols3.bs-dash2 { grid-template-columns: 1fr 340px; gap: 0 24px; }
-@media (max-width: 1000px) {
-  .bs-cols3.bs-dash2 { grid-template-columns: 1fr; gap: 24px 0; }
-}
 
 /* ===========================================================================
    THE TWO NAV STRIPS
@@ -1667,42 +1643,54 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-band .bs-nav-sep { width: 1px; height: 14px; background: var(--band-div); margin: 0 9px; flex-shrink: 0; }
 
 /* --- expand / collapse --------------------------------------------------- */
-/* Delays live in the transition, not in JavaScript: 120ms before it opens so
-   a cursor crossing the band does not flick it open, 200ms before it closes
-   so a diagonal move to a far group does not snap it shut. */
+/*
+ * Both states live in ONE grid cell, stacked. That is not a layout nicety —
+ * it is the fix for a real bug.
+ *
+ * They used to animate side by side: the collapsed row shrinking to zero while
+ * the groups grew. Measured, the band dipped from 58px to 42px in the first
+ * frames before it grew. If the cursor was in the lower part of the row, the
+ * band shrank out from under it, :hover went false, the band collapsed, the
+ * cursor was over it again, it reopened — a visible twitch, several times a
+ * second, every time you moved onto it.
+ *
+ * Stacked, the container is always as tall as its tallest child, so the height
+ * only ever goes up: 58 → 169. The collapsed row fades in place rather than
+ * shrinking, and never leaves a gap to fall through.
+ */
+.bs-band { display: grid; }
+.bs-band-c, .bs-band-x { grid-area: 1 / 1; }
+
+.bs-band-c { transition: opacity .16s ease; }
+.bs-band.open .bs-band-c { opacity: 0; pointer-events: none; }
+
 .bs-band-x {
   max-height: 0; opacity: 0; overflow: hidden;
   padding: 0 var(--gutter);
-  transition: max-height .28s ease .2s, opacity .18s ease .2s, padding .28s ease .2s;
+  pointer-events: none;
+  transition: max-height .26s ease, opacity .18s ease, padding .26s ease;
 }
-.bs-band-c {
-  max-height: 60px; opacity: 1; overflow: hidden;
-  transition: max-height .28s ease .2s, opacity .18s ease .2s;
+.bs-band.open .bs-band-x {
+  max-height: 240px; opacity: 1; padding: 12px var(--gutter) 16px;
+  pointer-events: auto;
 }
-@media (hover: hover) and (pointer: fine) {
-  .bs-band:hover .bs-band-x, .bs-band:focus-within .bs-band-x {
-    max-height: 220px; opacity: 1; padding: 12px var(--gutter) 16px;
-    transition-delay: .12s;
-  }
-  .bs-band:hover .bs-band-c, .bs-band:focus-within .bs-band-c {
-    max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0;
-    transition-delay: .12s;
-  }
-}
-/* Tabbing in holds it open even without a pointer. */
-.bs-band.open .bs-band-x { max-height: 220px; opacity: 1; padding: 12px var(--gutter) 16px; }
-.bs-band.open .bs-band-c { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; }
 
+/* The open/close delays are in script now, not in transition-delay: the state
+   is a class, so it cannot flap, and one timer is easier to reason about than
+   two transitions racing. */
 @media (prefers-reduced-motion: reduce) {
-  .bs-band-x, .bs-band-c { transition: none; }
+  .bs-band-c, .bs-band-x { transition: none; }
 }
 
 /* --- the groups ---------------------------------------------------------- */
 .bs-band-x { display: flex; gap: 40px; flex-wrap: wrap; }
 .bs-bandg { display: grid; gap: 6px; align-content: start; }
+/* The group names carry the whole structure of the expanded state, so they
+   read as headings rather than as fine print: heavier, a shade larger, and in
+   the muted ink rather than the faint tan they started in. */
 .bs-bandg-t {
-  font-family: var(--mono); font-size: 9.5px; font-weight: 600;
-  letter-spacing: .16em; text-transform: uppercase; color: var(--band-label);
+  font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
 }
 .bs-bandg-l { display: flex; gap: 2px; flex-wrap: wrap; }
 .bs-bandg-l a { padding: 5px 11px; }

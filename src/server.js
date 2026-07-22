@@ -781,34 +781,20 @@ app.get('/', (req, res) => {
   const shown = [...reds, ...ambers.slice(0, 2)];
   const folded = [...ambers.slice(2), ...blues];
 
-  // The panel takes the meaning colour on its left edge when there is anything
-  // to answer for — red if any of it is critical, amber otherwise. A hairline,
-  // never a fill: the plane keeps the same tint as every other section.
-  const attnEdge = reds.length ? ' bs-panel-crit' : (attn.length ? ' bs-panel-warn' : '');
   const attnBlock = attn.length ? `
-    <section class="bs-panel${attnEdge}">
-      <div class="bs-sec-h warn"><span class="bs-kicker">Needs attention</span>
-        <span class="bs-sec-note">${attn.length}</span></div>
-      <div class="bs-items">${shown.map(nitem).join('')}</div>
-      ${folded.length ? `<details class="bs-fold">
-        <summary>${folded.length} more item${folded.length === 1 ? '' : 's'} <span aria-hidden="true">▾</span></summary>
-        <div class="bs-items">${folded.map(nitem).join('')}</div></details>` : ''}
-    </section>`
-    : `<section class="bs-panel">
-        <div class="bs-sec-h"><span class="bs-kicker">Needs attention</span></div>
-        <p class="bs-clear">Nothing needs your attention right now.</p>
-       </section>`;
+    <div class="bs-sec-h warn"><span class="bs-kicker">Needs attention</span></div>
+    <div class="bs-items">${shown.map(nitem).join('')}</div>
+    ${folded.length ? `<details class="bs-fold">
+      <summary>${folded.length} more item${folded.length === 1 ? '' : 's'} <span aria-hidden="true">▾</span></summary>
+      <div class="bs-items">${folded.map(nitem).join('')}</div></details>` : ''}`
+    : `<div class="bs-sec-h"><span class="bs-kicker">Needs attention</span></div>
+       <p class="bs-clear">Nothing needs your attention right now.</p>`;
 
   // --- column 2: the week in numbers ---------------------------------------
   const figCell = (label, value, sub) =>
     `<div class="bs-figcell"><span class="bs-figlabel">${label}</span><span class="bs-stat">${value}</span>${sub ? `<span class="bs-figsub">${sub}</span>` : ''}</div>`;
 
-  // Framed on the dashboard: the sections that want something FROM you.
-  // Unframed: the ones you read. A box around a figure you are only scanning
-  // adds a border and takes away line length, and five boxes on one page mean
-  // none of them is saying anything.
   const weekBand = p7 && seeCosts ? `
-    <section class="bs-plainsec">
     <div class="bs-sec-h"><span class="bs-kicker">The week in numbers</span>
       ${may('costs') ? '<a class="bs-act" href="/costs">Performance →</a>' : ''}</div>
     <div class="bs-grid2">
@@ -822,26 +808,16 @@ app.get('/', (req, res) => {
       <div class="bs-spark">${CH.lineChart(
         [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v) => ({ x: '', y: v })), area: true }],
         { height: 96, empty: '' })}</div>` : ''}
-    </section>` : '';
-
-  // Its own block now: it belongs beside the last service in the narrow
-  // column, not tacked under the week's figures. It also no longer depends on
-  // `seeCosts` — an expiry is not a cost figure, and a viewer who cannot see
-  // margins should still be told the liquor licence is about to lapse.
-  const soonBand = soon.length ? `
-    <section class="bs-panel bs-soon-panel">
-      <div class="bs-sec-h"><span class="bs-kicker">Coming up</span>
-        <span class="bs-sec-note">${soon.length}</span></div>
+    ${soon.length ? `
+      <div class="bs-sec-h bs-soon-h"><span class="bs-kicker">Coming up</span></div>
       <div class="bs-soon">
         ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
           <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
-      </div>
-    </section>` : '';
+      </div>` : ''}` : '';
 
   // --- column 3: last service, and the record ------------------------------
   const row = (label, value) => `<div class="bs-lrow"><span>${label}</span><b class="bs-fig">${value}</b></div>`;
   const lastBand = lastShift ? `
-    <section class="bs-panel">
     <div class="bs-sec-h"><span class="bs-kicker">Last service — ${esc(whenOf(lastShift.date, lastShift.daypart))}</span>
       ${may('shifts') ? `<a class="bs-act" href="/shifts/${lastShift.id}">Open →</a>` : ''}</div>
     <div class="bs-lrows">
@@ -849,7 +825,7 @@ app.get('/', (req, res) => {
       ${row('Tips', lastShift.tips ? money(lastShift.tips) : '—')}
       ${row('Hours', lastShift.hours ? (Math.round(lastShift.hours * 10) / 10).toFixed(1) : '—')}
       ${row('Staff', lastShift.people || '—')}
-    </div></section>` : '';
+    </div>` : '';
 
   const feedRows = events.slice(0, 5).map((r) => {
     const f = FEED[r.kind](r);
@@ -857,10 +833,8 @@ app.get('/', (req, res) => {
     return f.href ? `<a class="bs-rec" href="${f.href}">${inner}</a>` : `<div class="bs-rec">${inner}</div>`;
   }).join('');
   const record = `
-    <section class="bs-plainsec">
-      <div class="bs-sec-h"><span class="bs-kicker">The record</span></div>
-      ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}
-    </section>`;
+    <div class="bs-sec-h bs-rec-h"><span class="bs-kicker">The record</span></div>
+    ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}`;
 
   const bodyHtml = `
     ${flash(req)}
@@ -874,13 +848,10 @@ app.get('/', (req, res) => {
         </div>
         <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>
-      <!-- Two columns, as the handoff draws it. Three made the middle twice
-           the width of its neighbours, so the framed blocks either side read
-           as slight next to a very wide chart. Wide column: what happened and
-           what needs doing. Narrow: the last service and what is coming. -->
-      <div class="bs-cols3 bs-dash2">
-        <div class="bs-col">${attnBlock}${weekBand}${record}</div>
-        <div class="bs-col">${lastBand}${soonBand}</div>
+      <div class="bs-cols3">
+        <div class="bs-col">${attnBlock}</div>
+        <div class="bs-col">${weekBand}</div>
+        <div class="bs-col">${lastBand}${record}</div>
       </div>
     </div>`;
 

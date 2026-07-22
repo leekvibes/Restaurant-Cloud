@@ -671,26 +671,44 @@ const bandScript = `<script>
   var band = document.getElementById('bs-band');
   if (!band) return;
   var tap = document.getElementById('bs-band-tap');
-  // Touch has no hover, so a tap opens the groups and a tap outside shuts
-  // them. The collapsed row stays fully usable on its own either way.
+  var timer = null;
+  var OPEN_AFTER = 120;   // a cursor crossing the band should not flick it open
+  var CLOSE_AFTER = 200;  // a diagonal move to a far group should not snap it shut
+
+  function set(open) {
+    band.classList.toggle('open', open);
+    if (tap) tap.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  function schedule(open) {
+    clearTimeout(timer);
+    timer = setTimeout(function () { set(open); }, open ? OPEN_AFTER : CLOSE_AFTER);
+  }
+
+  // mouseenter/mouseleave, not :hover. They fire on the band's real boundary
+  // and do not re-evaluate as the box resizes, so the open state cannot chase
+  // its own layout — which is what made it twitch.
+  var fine = window.matchMedia('(hover: hover) and (pointer: fine)');
+  if (fine.matches) {
+    band.addEventListener('mouseenter', function () { schedule(true); });
+    band.addEventListener('mouseleave', function () { schedule(false); });
+  }
+
+  // No hover on a touch screen, so a tap toggles and a tap outside shuts it.
   if (tap) tap.addEventListener('click', function () {
-    var open = band.classList.toggle('open');
-    tap.setAttribute('aria-expanded', open ? 'true' : 'false');
+    clearTimeout(timer);
+    set(!band.classList.contains('open'));
   });
   document.addEventListener('click', function (e) {
-    if (!band.contains(e.target)) {
-      band.classList.remove('open');
-      if (tap) tap.setAttribute('aria-expanded', 'false');
-    }
+    if (!band.contains(e.target)) { clearTimeout(timer); set(false); }
   });
-  // Tabbing into the collapsed row opens the groups, so a keyboard reaches
-  // every section without a pointer.
-  band.addEventListener('focusin', function () { band.classList.add('open'); });
+
+  // Tabbing in opens it, so a keyboard reaches every section without a cursor.
+  band.addEventListener('focusin', function () { clearTimeout(timer); set(true); });
   band.addEventListener('focusout', function () {
-    setTimeout(function () { if (!band.contains(document.activeElement)) band.classList.remove('open'); }, 0);
+    setTimeout(function () { if (!band.contains(document.activeElement)) set(false); }, 0);
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') band.classList.remove('open');
+    if (e.key === 'Escape') { clearTimeout(timer); set(false); }
   });
 })();
 </script>`;
