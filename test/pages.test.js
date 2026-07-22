@@ -419,3 +419,57 @@ test('page titles carry no emoji', async () => {
   }
   assert.deepStrictEqual(found, []);
 });
+
+test('the row stripe never covers a row that is saying something', () => {
+  // Alternating tint on the ledgers is the quietest state a row has. A row you
+  // are pointing at, one you have opened, and one you have just saved all have
+  // something to say, and each says it with a background — so the stripe has
+  // to lose to every one of them.
+  //
+  // It does that by scoring lower, not by being written first: source order
+  // only decides ties. :where() contributes nothing, so the stripe selectors
+  // score a single pseudo-class while .bs-lr:hover and .bs-srow[open] score
+  // two. Wrap the stripe in a plain class instead and it starts winning, and
+  // hover silently stops working on every other row.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+
+  // a, b, c — ids, then classes/attributes/pseudo-classes, then elements.
+  // :where() contributes nothing; :not()/:is() contribute their argument.
+  const specificity = (sel) => {
+    const s = sel.replace(/:where\([^)]*\)/g, '');
+    const a = (s.match(/#[\w-]+/g) || []).length;
+    const b = (s.match(/\.[\w-]+|\[[^\]]*\]|:(?!not\b|is\b)[\w-]+(?:\([^)]*\))?/g) || []).length;
+    return a * 100 + b;
+  };
+
+  const ruleFor = (needle) => {
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (m[1].includes(needle) && /background/.test(m[2])) return m[1];
+    }
+    return null;
+  };
+
+  const stripe = ruleFor('nth-child(even)');
+  assert.ok(stripe, 'the stripe rule exists');
+  const worst = Math.max(...stripe.split(',').map((s) => specificity(s.trim())));
+
+  for (const louder of ['.bs-lr:hover', '.bs-srow[open]']) {
+    const rule = ruleFor(louder);
+    assert.ok(rule, `${louder} still sets a background`);
+    const best = Math.min(...rule.split(',').map((s) => specificity(s.trim())));
+    assert.ok(best > worst,
+      `${louder} scores ${best} and the stripe scores ${worst} — the stripe would win and hide it`);
+  }
+});
+
+test('both themes give the stripe its own colour', () => {
+  // A stripe that falls back to the day colour in night mode is a pale band
+  // across a dark page — worse than no stripe at all.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const day = css.match(/:root,\s*:root\[data-theme="day"\][\s\S]*?\}/);
+  const night = css.match(/:root\[data-theme="night"\][\s\S]*?\}/);
+  assert.ok(day && /--stripe:/.test(day[0]), 'day defines --stripe');
+  assert.ok(night && /--stripe:/.test(night[0]), 'night defines --stripe');
+  const val = (block) => (block.match(/--stripe:\s*([^;]+);/) || [])[1].trim();
+  assert.notStrictEqual(val(day[0]), val(night[0]), 'and they are not the same colour');
+});

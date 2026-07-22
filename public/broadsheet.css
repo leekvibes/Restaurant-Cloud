@@ -36,6 +36,7 @@
   --btn-bg:       #1f1d1a;
   --btn-ink:      #f7eee0;
   --row-hover:    #f6f4ee;
+  --stripe:       #f3ebdc;   /* every other ledger line — ~3% ink on the paper */
   --pop-shadow:   4px 4px 0 rgba(23, 23, 26, .12);
 }
 
@@ -66,6 +67,7 @@
   --btn-bg:       #eae6d9;
   --btn-ink:      #191815;
   --row-hover:    #22201c;
+  --stripe:       #1d1c19;
   --pop-shadow:   4px 4px 0 rgba(0, 0, 0, .35);
 }
 
@@ -1445,4 +1447,29 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 }
 @media (max-width: 560px) {
   .bs .page-head h1, .bs .phead-t h1 { font-size: 22px; }
+}
+
+/* ===========================================================================
+   ALTERNATING ROWS — the ledgers only.
+   ---------------------------------------------------------------------------
+   A ledger of forty near-identical lines is hard to track across on a wide
+   screen; the eye loses the row between the date on the left and the money on
+   the right. The oldest fix in print is to tint every other line, and it costs
+   nothing structurally — no boxes, no borders, just a shade.
+
+   Kept deliberately faint: about 3% of ink over the paper. It should register
+   as texture when you scan the column and be almost invisible when you read
+   one row, which is the opposite of a striped table in a spreadsheet.
+
+   Specificity is the whole trick here. :where() contributes nothing, so these
+   rules score a single pseudo-class (0,1,0) — under .bs-lr:hover (0,2,0),
+   .bs-srow[open] (0,2,0) and .bs-justsaved. A row you are pointing at, have
+   opened, or have just saved keeps saying so; the stripe only ever paints the
+   rows doing nothing.
+   ======================================================================== */
+
+:where(.bs-lrows) > :where(.bs-lr):nth-child(even),
+:where(.bs-week) > :where(.bs-lr):nth-child(even),
+:where(.bs-srows) > :where(.bs-srow):nth-child(even) {
+  background: var(--stripe);
 }
