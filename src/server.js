@@ -153,7 +153,9 @@ const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips(\/|$)/, /^\/version$/,
 app.use((req, res, next) => {
   const user = currentUser(req);
   req.user = user;
-  reqCtx.run({ user }, () => {
+  // The path rides along so the nav can mark itself active without every
+  // route remembering to pass it down.
+  reqCtx.run({ user, path: req.path }, () => {
     if (!APP_PASSWORD) return next();                               // not configured → open (banner warns)
     if (OPEN_PATHS.some((re) => re.test(req.path))) return next();
     if (!user) {

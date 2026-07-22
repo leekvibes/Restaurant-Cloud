@@ -1,0 +1,479 @@
+/* ===========================================================================
+   BROADSHEET — the token layer and the shared chrome.
+   ---------------------------------------------------------------------------
+   A newspaper, not a dashboard. Hairline rules instead of cards, one accent,
+   serif headlines, monospace for every figure. No radius, no shadows, no
+   decorative colour — colour carries meaning or it is not used.
+   ...........................................................................
+   Day and night are ONE token set swapped by [data-theme] on the root, so the
+   change is a single attribute and nothing re-renders. Every rule below reads
+   variables; none of them names a colour.
+   ======================================================================== */
+
+:root,
+:root[data-theme="day"] {
+  --paper:        #f7eee0;
+  --surface:      #fffdf8;
+  --ink:          #1f1d1a;
+  --body:         #443f33;
+  --secondary:    #5c5647;
+  --muted:        #77705f;
+  --faint:        #a89f8a;
+
+  --rule-heavy:   #1f1d1a;
+  --rule:         #ddd0b8;
+  --rule-light:   #e5dac2;
+  --rule-dotted:  #cfc2a6;
+  --field-border: #d8d5cb;
+
+  --accent:       #2451c9;
+  --accent-hover: #173a9e;
+  --accent-fill:  rgba(36, 81, 201, .12);
+  --warning:      #9a5b12;
+  --positive:     #1a7a3c;
+  --danger:       #9a2c1d;
+
+  --btn-bg:       #1f1d1a;
+  --btn-ink:      #f7eee0;
+  --row-hover:    #f6f4ee;
+  --pop-shadow:   4px 4px 0 rgba(23, 23, 26, .12);
+}
+
+:root[data-theme="night"] {
+  --paper:        #191815;
+  --surface:      #211f1b;
+  --ink:          #eae6d9;
+  --headline:     #f3f0e6;
+  --body:         #c8c2b0;
+  --secondary:    #b3ad9c;
+  --muted:        #8f8a7a;
+  --faint:        #6f6a5c;
+
+  --rule-heavy:   #eae6d9;
+  --rule:         #35332c;
+  --rule-light:   #2e2c25;
+  --rule-dotted:  #403d33;
+  --field-border: #35332c;
+
+  --accent:       #8fa8ff;
+  --accent-hover: #b3c4ff;
+  --accent-fill:  rgba(143, 168, 255, .10);
+  --warning:      #d9a05b;
+  --positive:     #5fc389;
+  --danger:       #e08573;
+
+  /* The primary button inverts: cream ground, dark text. */
+  --btn-bg:       #eae6d9;
+  --btn-ink:      #191815;
+  --row-hover:    #22201c;
+  --pop-shadow:   4px 4px 0 rgba(0, 0, 0, .35);
+}
+
+:root { --headline: var(--ink); }
+
+/* --- type ---------------------------------------------------------------- */
+:root {
+  --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --gutter: 40px;
+}
+
+html, body { background: var(--paper); }
+body {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  color: var(--body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Radius is zero everywhere. Stated once, loudly, because the old sheet sets
+   it in forty places and a single survivor reads as a mistake. */
+.bs *, .bs *::before, .bs *::after { border-radius: 0 !important; box-shadow: none !important; }
+
+.bs h1, .bs h2, .bs h3 { font-family: var(--sans); color: var(--headline); }
+
+/* The one serif: a headline that states the day's verdict. */
+.bs-headline {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 32px;
+  line-height: 1.16;
+  letter-spacing: -.005em;
+  color: var(--headline);
+  margin: 0;
+}
+.bs-headline .warn { color: var(--warning); }
+.bs-headline .ok { color: var(--positive); }
+
+/* Every figure is monospace, so columns of money line up without a table. */
+.bs-fig { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.bs-stat {
+  font-family: var(--mono); font-weight: 600; font-size: 26px;
+  letter-spacing: -.02em; color: var(--headline);
+  font-variant-numeric: tabular-nums;
+}
+.bs-kicker {
+  font-family: var(--mono); font-weight: 600; font-size: 11px;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--ink);
+}
+.bs-colhead {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-meta { font-size: 12px; color: var(--muted); }
+
+/* --- rules --------------------------------------------------------------- */
+.bs-rule-heavy { border-bottom: 2px solid var(--rule-heavy); }
+.bs-rule { border-bottom: 1px solid var(--rule); }
+.bs-rule-dot { border-bottom: 1px dotted var(--rule-dotted); }
+
+/* A section rule takes its section's semantic colour. Colour is never
+   decorative — amber means money is at risk, and nothing else is amber. */
+.bs-sec { padding-top: 22px; }
+.bs-sec-h {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+  padding-bottom: 7px; border-bottom: 1px solid var(--ink);
+}
+.bs-sec-h.warn { border-bottom-color: var(--warning); }
+.bs-sec-h.warn .bs-kicker { color: var(--warning); }
+.bs-sec-h.crit { border-bottom-color: var(--danger); }
+.bs-sec-h.crit .bs-kicker { color: var(--danger); }
+.bs-sec-h.info { border-bottom-color: var(--accent); }
+.bs-sec-h.info .bs-kicker { color: var(--accent); }
+
+/* --- links and buttons --------------------------------------------------- */
+/* :where() so this contributes no specificity — it is the DEFAULT for a link,
+   and any component that names its own colour has to win without a fight.
+   Written as `.bs a` it beat .bs-wordmark and .bs-btn, and the masthead came
+   out accent-blue. */
+:where(.bs) a { color: var(--accent); text-decoration: none; }
+:where(.bs) a:hover { color: var(--accent-hover); text-decoration: none; }
+.bs-act { font-weight: 500; white-space: nowrap; }
+
+.bs-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--btn-bg); color: var(--btn-ink);
+  border: 0; padding: 9px 14px; cursor: pointer;
+  font-family: var(--sans); font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.bs-btn:hover { color: var(--btn-ink); opacity: .88; }
+.bs-btn-quiet {
+  background: none; color: var(--ink); border: 1px solid var(--ink);
+  padding: 8px 13px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.bs-btn-quiet:hover { background: var(--row-hover); color: var(--ink); }
+
+/* ===========================================================================
+   MASTHEAD
+   ======================================================================== */
+.bs-masthead {
+  display: flex; align-items: center; gap: 18px;
+  padding: 13px var(--gutter);
+  border-bottom: 2px solid var(--rule-heavy);
+  background: var(--paper);
+  position: sticky; top: 0; z-index: 60;
+}
+.bs-wordmark {
+  font-family: var(--sans); font-weight: 700; font-size: 17px;
+  letter-spacing: .16em; color: var(--ink); flex-shrink: 0;
+}
+.bs-wordmark:hover { color: var(--ink); }
+.bs-loc {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+  color: var(--secondary); text-transform: uppercase; white-space: nowrap;
+}
+.bs-search {
+  flex: 1; max-width: 620px; position: relative;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface); border: 1px solid var(--field-border);
+  padding: 0 10px; height: 34px;
+}
+.bs-search input {
+  flex: 1; min-width: 0; border: 0; background: none; outline: none;
+  font-family: var(--sans); font-size: 13px; color: var(--ink);
+}
+.bs-search .bs-kbd {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--field-border); padding: 2px 5px; flex-shrink: 0;
+}
+.bs-date {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .06em;
+  color: var(--secondary); text-transform: uppercase; white-space: nowrap;
+  margin-left: auto;
+}
+.bs-theme, .bs-avatar {
+  width: 28px; height: 28px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--ink); background: var(--surface);
+  color: var(--ink); font-family: var(--sans); font-size: 13px; font-weight: 600;
+  cursor: pointer; padding: 0;
+}
+.bs-theme { font-size: 14px; }
+.bs-theme:hover, .bs-avatar:hover { background: var(--row-hover); color: var(--ink); }
+
+/* Account popover */
+.bs-acct { position: relative; }
+.bs-acct > summary { list-style: none; cursor: pointer; }
+.bs-acct > summary::-webkit-details-marker { display: none; }
+.bs-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 80;
+  width: 230px; background: var(--surface); border: 1px solid var(--ink);
+  box-shadow: var(--pop-shadow) !important;
+}
+.bs-pop-h { padding: 11px 13px; border-bottom: 1px solid var(--rule); }
+.bs-pop-h b { display: block; font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.bs-pop-h i { font-style: normal; font-size: 12px; color: var(--muted); }
+.bs-pop a {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 13px; font-size: 13px; color: var(--body);
+}
+.bs-pop a:hover { background: var(--row-hover); color: var(--ink); }
+.bs-pop a span { color: var(--faint); }
+.bs-pop-div { border-top: 1px solid var(--rule); }
+.bs-pop a.bs-out { color: var(--danger); }
+
+/* ===========================================================================
+   NAV ROW — every section on one line, groups split by hairlines.
+   ======================================================================== */
+.bs-nav {
+  display: flex; align-items: center; gap: 0;
+  padding: 0 var(--gutter);
+  border-bottom: 1px solid var(--field-border);
+  background: var(--paper);
+  position: sticky; top: 61px; z-index: 55;
+}
+.bs-nav-scroll { display: flex; align-items: center; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.bs-nav-scroll::-webkit-scrollbar { display: none; }
+.bs-nav a {
+  padding: 11px 11px; font-size: 12.5px; font-weight: 500;
+  color: var(--secondary); white-space: nowrap;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.bs-nav a:hover { color: var(--ink); }
+.bs-nav a.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--ink); }
+.bs-nav-sep { width: 1px; height: 14px; background: var(--field-border); margin: 0 9px; flex-shrink: 0; }
+
+/* The overflow. Everything that does not belong on the front row lives here
+   rather than being dropped — nothing is unreachable. */
+.bs-more { position: relative; flex-shrink: 0; }
+.bs-more > summary {
+  list-style: none; cursor: pointer; padding: 11px 12px;
+  font-size: 12.5px; color: var(--secondary);
+}
+.bs-more > summary::-webkit-details-marker { display: none; }
+.bs-more > summary:hover { color: var(--ink); }
+.bs-more[open] > summary { color: var(--ink); font-weight: 600; }
+.bs-more-pop {
+  position: absolute; right: 0; top: 100%; z-index: 80; min-width: 220px;
+  background: var(--surface); border: 1px solid var(--ink);
+  box-shadow: var(--pop-shadow) !important; padding: 4px 0;
+}
+.bs-more-pop .bs-more-grp {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint);
+  padding: 9px 13px 4px;
+}
+.bs-more-pop a { display: block; padding: 8px 13px; font-size: 13px; color: var(--body); border: 0; }
+.bs-more-pop a:hover { background: var(--row-hover); color: var(--ink); }
+.bs-more-pop a.on { color: var(--ink); font-weight: 600; }
+
+/* ===========================================================================
+   SUB-NAV — the group you are inside, and its siblings.
+   Same hairline treatment, group name at the left, so moving between Staff,
+   Positions and Tip-out policy never means going back up to the top row.
+   ======================================================================== */
+.bs-subnav {
+  display: flex; align-items: center; gap: 16px;
+  padding: 9px var(--gutter);
+  border-bottom: 1px solid var(--field-border);
+  background: var(--paper);
+  overflow-x: auto; scrollbar-width: none;
+}
+.bs-subnav::-webkit-scrollbar { display: none; }
+.bs-subnav-name {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--faint); flex-shrink: 0;
+}
+.bs-subnav-links { display: flex; align-items: center; gap: 2px; }
+.bs-subnav a { padding: 4px 9px; font-size: 12.5px; color: var(--secondary); white-space: nowrap; }
+.bs-subnav a:hover { color: var(--ink); }
+.bs-subnav a.on { color: var(--ink); font-weight: 600; }
+
+/* ===========================================================================
+   PAGE SHELL
+   ======================================================================== */
+.bs-main { padding: 0 var(--gutter) 60px; }
+.bs-foot {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 20px;
+  margin: 40px var(--gutter) 0; padding: 14px 0 30px;
+  border-top: 2px solid var(--rule-heavy);
+  font-size: 12px; color: var(--muted); flex-wrap: wrap;
+}
+.bs-foot-file { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+/* Banners the shell owns: no password, view-only, flash. */
+.bs-banner {
+  padding: 9px var(--gutter); font-size: 12.5px;
+  border-bottom: 1px solid var(--rule);
+}
+.bs-banner-warn { color: var(--danger); }
+.bs-banner-ok { color: var(--positive); }
+
+/* ===========================================================================
+   MOBILE — a bottom bar, and the nav row scrolls.
+   ======================================================================== */
+.bs-bottom { display: none; }
+
+@media (max-width: 900px) {
+  :root { --gutter: 16px; }
+  .bs-masthead { gap: 11px; padding: 10px var(--gutter); position: static; }
+  .bs-date, .bs-loc { display: none; }
+  .bs-search { max-width: none; }
+  .bs-nav { position: static; }
+  .bs-headline { font-size: 25px; }
+  .bs-stat { font-size: 22px; }
+  .bs-main { padding-bottom: 92px; }   /* clear of the bottom bar */
+  .bs-foot { margin-bottom: 70px; }
+
+  /* The five places a phone actually goes. Everything else is one tap further
+     in, under Index — nothing is unreachable, it is just not underfoot. */
+  .bs-bottom {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
+    background: var(--paper); border-top: 2px solid var(--rule-heavy);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bs-bottom a {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 9px 2px 8px; min-height: 54px;
+    font-size: 11px; color: var(--muted); font-weight: 500;
+  }
+  .bs-bottom a.on { color: var(--ink); font-weight: 600; }
+  .bs-bottom .bs-bottom-g { font-size: 16px; line-height: 1; }
+}
+
+@media (max-width: 560px) {
+  .bs-masthead .bs-search { order: 3; flex-basis: 100%; }
+  .bs-masthead { flex-wrap: wrap; }
+  .bs-headline { font-size: 22px; }
+}
+
+/* Someone who asked for less motion gets none of it. Nothing here animates
+   beyond a popover, which is the whole budget. */
+@media (prefers-reduced-motion: no-preference) {
+  .bs-pop, .bs-more-pop { animation: bs-in 120ms ease-out; }
+  @keyframes bs-in { from { opacity: 0; transform: translateY(-3px); } }
+}
+
+/* ===========================================================================
+   BRIDGE — pages not yet redesigned
+   ---------------------------------------------------------------------------
+   The chrome changes on every page the moment the masthead lands, but the
+   bodies arrive one slice at a time. Without this, an untouched page sits on
+   cool blue-grey under a warm masthead, and in night mode it is white cards on
+   a black ground — unreadable, on fifteen pages.
+   ...........................................................................
+   styles.css is fully tokenised, so remapping its variables is enough. This is
+   scaffolding: every line here can go once its page has been redesigned.
+   ======================================================================== */
+:root[data-theme="day"] {
+  --bg:        #f7eee0;
+  --surface:   #fffdf8;
+  --surface-2: #f4ead9;
+  --surface-3: #efe4d0;
+  --ink:       #1f1d1a;
+  --ink-2:     #443f33;
+  --muted:     #77705f;
+  --faint:     #a89f8a;
+  --line:      #e5dac2;
+  --line-2:    #ddd0b8;
+  --primary:   #2451c9;
+  --primary-hover: #173a9e;
+  --primary-700:   #173a9e;
+  --primary-50:  #edf0fb;
+  --primary-100: #dde4f7;
+  --primary-200: #c3cff0;
+  --ok:   #1a7a3c;  --ok-bg:   #e4f0e6;
+  --warn: #9a5b12;  --warn-bg: #f6ead6;
+  --amber:#9a5b12;  --amber-bg:#f6ead6;
+  --danger:#9a2c1d; --danger-bg:#f7e3df;
+  --ring: 0 0 0 3px rgba(36, 81, 201, .15);
+}
+
+:root[data-theme="night"] {
+  --bg:        #191815;
+  --surface:   #211f1b;
+  --surface-2: #1f1d1a;
+  --surface-3: #262420;
+  --ink:       #f3f0e6;
+  --ink-2:     #c8c2b0;
+  --muted:     #8f8a7a;
+  --faint:     #6f6a5c;
+  --line:      #2e2c25;
+  --line-2:    #35332c;
+  --primary:   #8fa8ff;
+  --primary-hover: #b3c4ff;
+  --primary-700:   #b3c4ff;
+  --primary-50:  #21242e;
+  --primary-100: #262a36;
+  --primary-200: #2f3543;
+  --ok:   #5fc389;  --ok-bg:   #1c2a22;
+  --warn: #d9a05b;  --warn-bg: #2b2419;
+  --amber:#d9a05b;  --amber-bg:#2b2419;
+  --danger:#e08573; --danger-bg:#2e1f1c;
+  --ring: 0 0 0 3px rgba(143, 168, 255, .18);
+}
+
+/* A few places in the old sheet name a colour outright rather than reading a
+   token. In night mode those are the ones that come out white-on-white. */
+:root[data-theme="night"] .bs input,
+:root[data-theme="night"] .bs select,
+:root[data-theme="night"] .bs textarea {
+  background: var(--surface); color: var(--ink); border-color: var(--line-2);
+}
+:root[data-theme="night"] .bs .card,
+:root[data-theme="night"] .bs .panel,
+:root[data-theme="night"] .bs .pcard { background: var(--surface); }
+
+/* The old shell assumed a rail on the left and a topbar above. Both are gone. */
+.bs .app { display: block; }
+.bs .sidebar, .bs .topbar, .bs .scrim { display: none !important; }
+.bs .content { margin-left: 0 !important; }
+.bs .wrap { max-width: none; padding: 0; margin: 0; }
+
+/* --- the Index sheet ------------------------------------------------------ */
+/* Every section, one tap from the bottom bar. Without it the nav row scrolling
+   off a phone would put two thirds of the app out of reach. */
+.bs-index { flex: 1; }
+.bs-index > summary {
+  list-style: none; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 9px 2px 8px; min-height: 54px;
+  font-size: 11px; color: var(--muted); font-weight: 500;
+}
+.bs-index > summary::-webkit-details-marker { display: none; }
+.bs-index[open] > summary { color: var(--ink); font-weight: 600; }
+.bs-index-body { position: fixed; inset: 0; z-index: 90; }
+.bs-index-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .38); }
+.bs-index-sheet {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  max-height: 82vh; overflow-y: auto;
+  background: var(--paper); border-top: 2px solid var(--rule-heavy);
+  padding: 14px 16px calc(70px + env(safe-area-inset-bottom));
+}
+.bs-index-h { padding-bottom: 8px; border-bottom: 1px solid var(--ink); margin-bottom: 4px; }
+.bs-index-grp {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint); padding: 14px 0 6px;
+}
+.bs-index-links { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 12px; }
+.bs-index-links a {
+  padding: 11px 2px; font-size: 13.5px; color: var(--body); text-align: left;
+  border-bottom: 1px dotted var(--rule-dotted); min-height: 44px;
+  display: flex; align-items: center; gap: 6px;
+}
+.bs-index-links a.on { color: var(--ink); font-weight: 600; }
+.bs-index-links a i {
+  font-style: normal; font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: .08em; color: var(--faint);
+}

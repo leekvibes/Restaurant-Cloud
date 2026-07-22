@@ -82,7 +82,7 @@ const SECTIONS = [
     ['/c/incidents', 'incidents', 'Incident log', '#dc2626', 'trackers'],
     ['/c/notes', 'notes', 'Decisions log', '#7c3aed', 'trackers'],
   ] },
-  { title: 'People', links: [
+  { title: 'Team', links: [
     ['/employees', 'staff', 'Staff', '#2563eb', 'staff'],
     ['/positions', 'positions', 'Positions', '#7c3aed', 'settings'],
     ['/policy', 'policy', 'Tip-out policy', '#0891b2', 'settings'],
