@@ -628,3 +628,57 @@ test('the billboard reserves one height and never moves the page', async () => {
   assert.match(html, /class="bs-headline bs-bb-i on"/, 'the verdict shows first');
   assert.match(html, /class="bs-greet"/, 'and the greeting sits above it');
 });
+
+test('a phone gets one navigation, not three', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  // Below 900px every section is reachable from the bottom bar and the Index,
+  // so a scrolling row of tabs above the content is the same list a third time.
+  const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
+  assert.match(mob, /\.bs-nav \{[^}]*display:\s*none/, 'the nav row is hidden on a phone');
+
+  // The bottom bar's own links stack a glyph over a label. That rule must not
+  // reach the Index sheet inside the same <nav>, or every row there stacks its
+  // status under its name instead of sitting on the end of the line.
+  assert.ok(!/^\.bs-bottom a \{/m.test(css) && !/\n  \.bs-bottom a \{/.test(css),
+    'the tab rule is scoped to direct children');
+  assert.match(css, /\.bs-bottom > a \{/, 'via .bs-bottom > a');
+});
+
+test('the index reaches every section, and the account', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/')).text();
+  // The first </nav> in the page closes the desktop nav row, twelve thousand
+  // characters before the sheet — so the end of the slice has to be found
+  // AFTER the start, not from the top of the document.
+  const from = html.indexOf('bs-index-sheet');
+  const sheet = html.slice(from, html.indexOf('</nav>', from));
+  assert.ok(sheet.length > 500, 'the index sheet is in the page');
+
+  // Everything the sidebar used to hold has to be in here — it is the only
+  // route to two thirds of the app once the nav row is gone.
+  for (const href of ['/shifts', '/sales', '/costs', '/cash', '/payroll',
+    '/c/invoices', '/c/vendors', '/c/products', '/menu',
+    '/c/expirations', '/c/equipment', '/c/documents', '/c/contacts',
+    '/c/recurring', '/c/incidents', '/c/notes', '/employees', '/positions', '/policy']) {
+    assert.ok(sheet.includes(`href="${href}"`), `${href} is reachable from the index`);
+  }
+  // A close button that closes. Tapping another tab also works, but a
+  // full-screen overlay with no visible way out is a trap.
+  const x = sheet.match(/<button[^>]*class="bs-index-x"[^>]*>/);
+  assert.ok(x, 'there is a close button');
+  assert.match(x[0], /open\s*=\s*false/, `and it closes the sheet: ${x[0]}`);
+  assert.match(x[0], /aria-label="Close"/);
+  assert.match(sheet, /href="\/logout"/, 'with sign out on it');
+  assert.match(sheet, /Users &amp; access/);
+  assert.match(sheet, /bs-index-title">Index</);
+});
+
+test('the bottom bar says Dashboard, and Sales rather than Cash', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/')).text();
+  const bar = html.slice(html.indexOf('class="bs-bottom"'), html.indexOf('bs-index-sheet'));
+  assert.match(bar, />Dashboard</, 'the front page is called what the index calls it');
+  assert.ok(!/>Today</.test(bar));
+  assert.match(bar, /href="\/sales"/);
+  assert.ok(!/href="\/cash"/.test(bar), 'cash is in the index, not the bar');
+});

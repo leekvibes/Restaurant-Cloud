@@ -344,12 +344,12 @@ body {
     background: var(--paper); border-top: 2px solid var(--rule-heavy);
     padding-bottom: env(safe-area-inset-bottom);
   }
-  .bs-bottom a {
+  .bs-bottom > a {
     flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
     padding: 9px 2px 8px; min-height: 54px;
     font-size: 11px; color: var(--muted); font-weight: 500;
   }
-  .bs-bottom a.on { color: var(--ink); font-weight: 600; }
+  .bs-bottom > a.on { color: var(--ink); font-weight: 600; }
   .bs-bottom .bs-bottom-g { font-size: 16px; line-height: 1; }
 }
 
@@ -455,38 +455,10 @@ body {
 }
 .bs-index > summary::-webkit-details-marker { display: none; }
 .bs-index[open] > summary { color: var(--ink); font-weight: 600; }
-.bs-index-body { position: fixed; inset: 0; z-index: 90; }
-.bs-index-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .38); }
-.bs-index-sheet {
-  position: absolute; left: 0; right: 0; bottom: 0;
-  max-height: 82vh; overflow-y: auto;
-  background: var(--paper); border-top: 2px solid var(--rule-heavy);
-  padding: 14px 16px calc(70px + env(safe-area-inset-bottom));
-}
-.bs-index-h { padding-bottom: 8px; border-bottom: 1px solid var(--ink); margin-bottom: 4px; }
-.bs-index-grp {
-  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
-  text-transform: uppercase; color: var(--faint); padding: 14px 0 6px;
-}
-.bs-index-links { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 12px; }
-.bs-index-links a {
-  padding: 11px 2px; font-size: 13.5px; color: var(--body); text-align: left;
-  border-bottom: 1px dotted var(--rule-dotted); min-height: 44px;
-  display: flex; align-items: center; gap: 6px;
-}
-.bs-index-links a.on { color: var(--ink); font-weight: 600; }
-.bs-index-links a i {
-  font-style: normal; font-family: var(--mono); font-size: 9.5px;
-  letter-spacing: .08em; color: var(--faint);
-}
+/* The old index-sheet rules lived here; the full-screen version below
+   replaces them. A two-column grid on the container survived the rewrite and
+   put Shifts and Sales side by side with their status wrapped underneath. */
 
-/* ===========================================================================
-   DASHBOARD — the front page
-   ---------------------------------------------------------------------------
-   A verdict headline, then three ruled columns: what needs doing, what the
-   week says, what the last service was and what has happened since.
-   ======================================================================== */
-.bs-page { padding-top: 26px; }
 .bs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 30px; }
 .bs-greet {
   font-family: var(--mono); font-size: 11px; font-weight: 600;
@@ -1020,3 +992,84 @@ body {
   .bs-bb-s { font-size: .5em; }
   .bs-bb-i .bs-act { font-size: .46em; }
 }
+
+
+/* ===========================================================================
+   MOBILE — the nav row goes, the Index takes over
+   ---------------------------------------------------------------------------
+   Below 900px every section is reachable from the bottom bar and the Index,
+   so a scrolling row of tabs above the content is the same list a third time.
+   ======================================================================== */
+@media (max-width: 900px) {
+  .bs-nav { display: none; }
+  .bs-sub { border-top: 0; }
+}
+
+/* --- the Index, full screen ------------------------------------------------ */
+.bs-index-body {
+  position: fixed; inset: 0; z-index: 300;
+  background: var(--paper);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.bs-index-sheet {
+  padding: 20px 18px calc(90px + env(safe-area-inset-bottom));
+  max-width: 640px; margin: 0 auto;
+}
+.bs-index-top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin-bottom: 18px;
+}
+.bs-index-title {
+  font-family: var(--serif); font-weight: 500; font-size: 30px;
+  color: var(--headline); margin: 0; letter-spacing: -.01em;
+}
+.bs-index-x {
+  width: 38px; height: 38px; flex-shrink: 0;
+  border: 1.5px solid var(--ink); background: var(--surface);
+  color: var(--ink); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.bs-index-grp {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  padding: 22px 0 7px; border-bottom: 1px solid var(--ink);
+}
+.bs-index-links a {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 14px 0; border-bottom: 1px dotted var(--rule-dotted);
+  font-size: 17px; font-weight: 500; color: var(--headline); text-decoration: none;
+  min-height: 44px;
+}
+.bs-index-links a.on { color: var(--accent); }
+.bs-index-links a i {
+  font-style: normal; font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: .1em; color: var(--muted); vertical-align: middle;
+}
+.bs-index-hint {
+  font-family: var(--mono); font-size: 12px; font-weight: 500;
+  white-space: nowrap; color: var(--muted);
+}
+.bs-index-hint.go { color: var(--faint); font-size: 15px; }
+.bs-index-hint.warn { color: var(--warning); }
+.bs-index-hint.ok { color: var(--positive); }
+
+.bs-index-me {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 30px; padding-top: 18px; border-top: 2px solid var(--ink);
+}
+.bs-index-av {
+  width: 42px; height: 42px; flex-shrink: 0;
+  border: 1.5px solid var(--ink); background: var(--surface);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--sans); font-size: 15px; font-weight: 600; color: var(--ink);
+}
+.bs-index-who { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.bs-index-who b { font-size: 16px; font-weight: 600; color: var(--headline); }
+.bs-index-who i { font-style: normal; font-size: 12.5px; color: var(--muted); }
+.bs-index-acct {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  margin-top: 14px; font-size: 13.5px;
+}
+.bs-index-acct a { color: var(--accent); text-decoration: none; }
+.bs-index-acct a.danger { color: var(--danger); font-weight: 500; }
+.bs-index-acct span { color: var(--faint); }

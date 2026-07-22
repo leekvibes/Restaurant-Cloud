@@ -61,6 +61,9 @@ const dp = (d) => (d === 'cafe' ? 'Café' : 'Dinner');
 let viewCtx = null;
 const setViewContext = (als) => { viewCtx = als; };
 const currentViewUser = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().user : null);
+/** Two letters for the avatar. Declared once; three places were spelling it. */
+const initialsOf = (u) => String((u && u.name) || 'Owner')
+  .split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || 'M';
 const currentPath = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().path : '') || '/';
 
 /**
@@ -437,11 +440,50 @@ function subNav(path) {
  * of the chrome.
  */
 const BOTTOM = [
-  ['/', '▤', 'Today'],
+  ['/', '▤', 'Dashboard'],
   ['/shifts', '≡', 'Shifts'],
   ['/sales', '$', 'Sales'],
   ['/c/invoices', '▦', 'Invoices'],
 ];
+
+/**
+ * A live word beside the sections worth checking before you tap through.
+ *
+ * Three indexed counts, run only when the index is built. Lazily required so
+ * this file has no load-time dependency on the database — views.js is imported
+ * by scripts and tests that never open one.
+ */
+function indexHints() {
+  try {
+    const { db } = require('./db');
+    const out = {};
+
+    const sh = db.prepare("SELECT COUNT(*) n, SUM(status <> 'emailed') open FROM shifts").get();
+    if (sh && sh.n) {
+      out['/shifts'] = sh.open
+        ? { text: `${sh.n} · ${sh.open} not sent`, tone: 'warn' }
+        : { text: `${sh.n} · all sent`, tone: 'muted' };
+    }
+
+    // A service that rang cash and has no final count against it.
+    const cash = db.prepare(`SELECT COUNT(*) n FROM shifts sh
+      WHERE sh.date >= date('now','-6 days')
+        AND (SELECT COALESCE(SUM(ss.food_cents+ss.coffee_cents+ss.alcohol_cents),0)
+               FROM server_sales ss WHERE ss.shift_id = sh.id) > 0
+        AND NOT EXISTS (SELECT 1 FROM cash_recon c
+               WHERE c.date = sh.date AND c.daypart = sh.daypart AND c.status = 'final')`).get();
+    if (cash && cash.n) out['/cash'] = { text: `${cash.n} open`, tone: 'warn' };
+
+    const pay = db.prepare('SELECT COUNT(*) n FROM period_sends').get();
+    const per = db.prepare("SELECT COUNT(*) n FROM shifts WHERE status <> 'emailed'").get();
+    if (pay && per && !per.n) out['/payroll'] = { text: 'ready', tone: 'ok' };
+
+    return out;
+  } catch {
+    // The index is navigation. It renders whether or not a count is available.
+    return {};
+  }
+}
 
 function bottomBar(path) {
   const tabs = BOTTOM.filter(([href]) => navAllowed(href)).map(([href, glyph, label]) =>
@@ -450,6 +492,8 @@ function bottomBar(path) {
   const groups = SECTIONS
     .map((g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) }))
     .filter((g) => g.links.length);
+  const hints = indexHints();
+  const u = currentViewUser();
 
   return `
     <nav class="bs-bottom">
@@ -457,15 +501,37 @@ function bottomBar(path) {
       <details class="bs-index">
         <summary><span class="bs-bottom-g" aria-hidden="true">⋯</span>Index</summary>
         <div class="bs-index-body">
-          <label class="bs-index-scrim" for="bs-index-close" aria-hidden="true"></label>
           <div class="bs-index-sheet">
-            <div class="bs-index-h"><span class="bs-kicker">Everything</span></div>
+            <div class="bs-index-top">
+              <h1 class="bs-index-title">Index</h1>
+              <button type="button" class="bs-index-x" aria-label="Close"
+                onclick="this.closest('details').open=false">✕</button>
+            </div>
             ${groups.map((g) => `
               <div class="bs-index-grp">${esc(g.title || 'Front page')}</div>
               <div class="bs-index-links">
-                ${g.links.map(([href, , label, , , tag]) =>
-                  `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${tag ? ` <i>${esc(tag)}</i>` : ''}</a>`).join('')}
+                ${g.links.map(([href, , label, , , tag]) => {
+                  const h = hints[href];
+                  return `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>
+                    <span>${esc(label)}${tag ? ` <i>${esc(tag)}</i>` : ''}</span>
+                    <b class="bs-index-hint ${h ? h.tone : 'go'}">${h ? esc(h.text) : '→'}</b>
+                  </a>`;
+                }).join('')}
               </div>`).join('')}
+
+            <div class="bs-index-me">
+              <span class="bs-index-av">${esc(initialsOf(u))}</span>
+              <span class="bs-index-who">
+                <b>${esc((u && u.name) || 'Owner')}</b>
+                <i>${esc(u && u.role === 'viewer' ? 'View only' : 'Owner')}${u && u.email ? ` · ${esc(u.email)}` : ''}</i>
+              </span>
+              ${navAllowed('/settings') ? '<a class="bs-act" href="/settings">Settings →</a>' : ''}
+            </div>
+            <div class="bs-index-acct">
+              ${navAllowed('/users') ? '<a href="/users">Users &amp; access</a><span aria-hidden="true">·</span>' : ''}
+              ${navAllowed('/settings') ? '<a href="/settings">Billing</a><span aria-hidden="true">·</span>' : ''}
+              <a class="danger" href="/logout">Sign out</a>
+            </div>
           </div>
         </div>
       </details>
