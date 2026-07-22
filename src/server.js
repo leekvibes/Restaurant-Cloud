@@ -998,7 +998,7 @@ app.get('/shifts', (req, res) => {
       const none = shiftSales(x) === 0;
       const dow = new Date(x.date + 'T00:00:00').getDay();
       const weekend = dow === 0 || dow === 5 || dow === 6;
-      return `<a class="bs-lr${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
+      return `<a class="bs-lr bs-shiftrow${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
          data-service="${esc(x.daypart)}" data-search="${esc(search)}">
         <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8, 10))}</span>
         <span class="bs-lr-s">${esc(dp(x.daypart))}</span>
@@ -1028,7 +1028,7 @@ app.get('/shifts', (req, res) => {
         <span class="bs-month-tot"><b>${money(sales)}</b>${tips ? ` + ${money(tips)} tips` : ''}</span>
         <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
       </summary>
-      <div class="bs-lhead">
+      <div class="bs-lhead bs-shifthead">
         <span>Date</span><span>Service</span><span>Status</span>
         <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
       </div>
@@ -1440,7 +1440,7 @@ app.get('/shifts/:id', (req, res) => {
     const e = entries[p.employeeId] || {};
     const id = `edit-${p.employeeId}`;
     return `<details class="bs-srow" id="${id}">
-      <summary class="bs-sr${st2.key === 'ok' ? '' : ' warn'}">
+      <summary class="bs-sr bs-staffrow${st2.key === 'ok' ? '' : ' warn'}">
         <span class="bs-sr-n">${esc(p.name)}</span>
         <span class="bs-sr-r">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</span>
         <span class="bs-sr-f">${isServer ? money0(toCents(p.food)) : '<span class="bs-em">—</span>'}</span>
@@ -1568,7 +1568,7 @@ app.get('/shifts/:id', (req, res) => {
           <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span></div>
 
           ${people.length ? `
-            <div class="bs-shead${anyAlcohol ? ' has-alc' : ''}">
+            <div class="bs-shead bs-staffhead${anyAlcohol ? ' has-alc' : ''}">
               <span>Name</span><span>Role</span><span class="r">Kitchen</span><span class="r">Coffee</span>
               ${anyAlcohol ? '<span class="r">Alcohol</span>' : ''}
               <span class="r">Tips</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
@@ -2487,27 +2487,44 @@ function shiftBack(dateStr, days) {
 
 // --- Pay period UI ---------------------------------------------------------
 
-/** Period dropdown plus a custom range, so the common case needs no typing. */
-function periodPicker(from, to) {
+/**
+ * Periods as chips, the older ones behind a select, and a custom range.
+ *
+ * The four most recent are one tap each because they are the four anybody
+ * opens; going back further is rare enough to deserve a menu rather than a
+ * row of twelve identical dates.
+ */
+function periodBar(from, to) {
   const list = recentPeriods(8);
   const cur = currentPeriod();
-  const opts = list.map((p) => {
-    const tag = p.start === cur.start ? ' (current)' : (p.start === list[1] && list[1].start === p.start ? '' : '');
-    return `<option value="${p.start}|${p.end}"${p.start === from && p.end === to ? ' selected' : ''}>${esc(labelFor(p))}${tag}</option>`;
-  }).join('');
   const custom = !isPeriod(from, to);
+  const near = list.slice(0, 4);
+
+  const chips = near.map((p) => `<a class="bs-fchip${p.start === from && p.end === to ? ' on' : ''}"
+    href="/payroll?from=${p.start}&to=${p.end}">${esc(labelFor(p))}${p.start === cur.start ? ' <i>now</i>' : ''}</a>`).join('');
+
+  const older = list.slice(4);
+  const olderSel = older.length ? `
+    <form class="bs-inline-pick" method="get" action="/payroll">
+      <select name="period" aria-label="Earlier pay period"
+        onchange="var v=this.value.split('|');if(!v[1])return;this.form.from.value=v[0];this.form.to.value=v[1];this.form.submit();">
+        <option value="">Earlier…</option>
+        ${older.map((p) => `<option value="${p.start}|${p.end}"${p.start === from && p.end === to ? ' selected' : ''}>${esc(labelFor(p))}</option>`).join('')}
+      </select>
+      <input type="hidden" name="from" value="${esc(from)}"><input type="hidden" name="to" value="${esc(to)}">
+    </form>` : '';
+
   return `
-    <form method="get" action="/payroll" class="card form inline-range">
-      <label>Pay period
-        <select name="period" onchange="var v=this.value.split('|');this.form.from.value=v[0];this.form.to.value=v[1];this.form.submit();">
-          ${custom ? '<option selected>Custom range</option>' : ''}${opts}
-        </select>
-      </label>
-      <label>From <input type="date" name="from" value="${from}"></label>
-      <label>To <input type="date" name="to" value="${to}"></label>
-      <button class="btn" type="submit">Update</button>
-    </form>
-    ${custom ? '<p class="muted">Custom range — the Wk 1 / Wk 2 split assumes the period starts on the From date. Pick a pay period above to be sure it lines up.</p>' : ''}`;
+    <div class="bs-filter">
+      <span class="bs-filter-l">Period:</span>
+      ${chips}${custom ? '<span class="bs-fchip on">Custom</span>' : ''}
+      ${olderSel}
+      <form class="bs-inline-range" method="get" action="/payroll">
+        <input type="date" name="from" value="${esc(from)}"><span>to</span>
+        <input type="date" name="to" value="${esc(to)}">
+        <button class="bs-btn-sm" type="submit">Go</button>
+      </form>
+    </div>`;
 }
 
 /**
@@ -2539,42 +2556,81 @@ function periodIssues(from, to, rows) {
   const open = shifts.filter((sh) => sh.status !== 'emailed').map((sh) => `${sh.date} ${dp(sh.daypart)}`);
   const noEmail = rows.filter((r) => !r.email).map((r) => r.name);
 
-  if (zeroHours.length) issues.push({ text: `No hours entered: ${zeroHours.join(', ')} — they earn $0 wages and no share of any pool.`, bad: true });
-  if (noSales.length) issues.push({ text: `Tips but no sales: ${noSales.join(', ')} — their tip-out calculated off $0.`, bad: true });
-  if (noEmail.length) issues.push({ text: `No email on file: ${noEmail.join(', ')} — they won't receive anything.`, bad: true });
-  if (open.length) issues.push({ text: `Never closed out: ${open.join(', ')}. The numbers are still counted, but you haven't reviewed them.`, bad: false });
-  if (noCash.length) issues.push({ text: `Cash tips never entered: ${noCash.join(', ')}.`, bad: false });
+  // Over a fortnight these lists run to twenty-odd entries, and a paragraph
+  // that long stops being read at all — which is the opposite of what a
+  // pre-send check is for. Lead with the count, name the first few, and say
+  // how many more there are.
+  const list = (arr, cap = 5) => (arr.length <= cap
+    ? arr.join(', ')
+    : `${arr.slice(0, cap).join(', ')}, and ${arr.length - cap} more`);
+  const PLURAL = { person: 'people' };
+  const many = (arr, noun) => `${arr.length} ${arr.length === 1 ? noun : (PLURAL[noun] || noun + 's')}`;
+
+  if (zeroHours.length) issues.push({ bad: true,
+    text: `No hours entered on ${many(zeroHours, 'shift')} — ${list(zeroHours)}. They earn $0 wages and no share of any pool.` });
+  if (noSales.length) issues.push({ bad: true,
+    text: `Tips but no sales on ${many(noSales, 'shift')} — ${list(noSales)}. Their tip-out calculated off $0.` });
+  if (noEmail.length) issues.push({ bad: true,
+    text: `No email on file for ${many(noEmail, 'person')} — ${list(noEmail)}. They won't receive anything.` });
+  if (open.length) issues.push({ bad: false,
+    text: `${many(open, 'service')} never closed out — ${list(open)}. The numbers are still counted, but you haven't reviewed them.` });
+  if (noCash.length) issues.push({ bad: false,
+    text: `Cash tips never entered on ${many(noCash, 'shift')} — ${list(noCash)}.` });
   return issues;
 }
 
+/**
+ * The checks, then the send.
+ *
+ * Ordered deliberately: what could be wrong comes before the button that
+ * mails it to everybody. A blocking issue leaves the button reachable — this
+ * is his restaurant and he may know why a figure looks odd — but it stops
+ * being the emphatic one.
+ */
 function periodSendBlock(from, to, rows) {
-  if (!isPeriod(from, to)) return '';
+  if (!isPeriod(from, to)) return `
+    <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Send the summary</span></div>
+    <p class="bs-note">This is a custom range, not a pay period, so there is nothing to send from
+      it — and the Wk&nbsp;1 / Wk&nbsp;2 split below assumes the period starts on ${esc(from)}, which may
+      not line up. Pick a pay period above to send.</p>`;
+
   const p = { start: from, end: to };
   const done = sendRecord(from);
   const issues = periodIssues(from, to, rows);
   const blocking = issues.filter((i) => i.bad);
   const recipients = rows.filter((r) => r.email && (r.hours > 0 || r.takeHome > 0 || r.cashTips > 0)).length;
 
-  const issueList = issues.length ? `
-    <div class="flash flash-${blocking.length ? 'warn' : 'info'}"><div>
-      <b>${blocking.length ? 'Check these before sending:' : 'Worth knowing:'}</b>
-      <ul>${issues.map((i) => `<li>${esc(i.text)}</li>`).join('')}</ul>
-    </div></div>` : '<div class="flash flash-ok"><div>Nothing looks off in this period.</div></div>';
+  const checks = issues.length ? `
+    <div class="bs-sec-h bs-sec-gap${blocking.length ? ' warn' : ''}">
+      <span class="bs-kicker">${blocking.length ? 'Check before sending' : 'Worth knowing'}</span>
+      <span class="bs-sec-note">${issues.length} note${issues.length === 1 ? '' : 's'}</span>
+    </div>
+    <ul class="bs-checks">
+      ${issues.map((i) => `<li class="${i.bad ? 'bad' : ''}"><span class="bs-check-k">${i.bad ? 'Check' : 'Note'}</span>${esc(i.text)}</li>`).join('')}
+    </ul>`
+    : `<div class="bs-sec-h bs-sec-gap ok"><span class="bs-kicker">Checks</span></div>
+       <p class="bs-note"><b>Nothing looks off in this period.</b> Every shift has hours, every server
+         with tips has sales against them, and everybody who worked has an email on file.</p>`;
 
   const sentNote = done
-    ? `<div class="flash flash-warn"><div>Already sent on <b>${esc(String(done.sent_at).slice(0, 16))}</b> to ${done.sent_count} ${done.sent_count === 1 ? 'person' : 'people'}. Sending again gives everyone a second email — only do it if the numbers changed.</div></div>`
-    : '';
+    ? `<p class="bs-note"><b>Already sent</b> on ${esc(String(done.sent_at).slice(0, 16))} to
+        ${done.sent_count} ${done.sent_count === 1 ? 'person' : 'people'}. Sending again gives everyone a
+        second email — only do it if the numbers have changed since.</p>` : '';
 
   return `
-    <h2>Send the period summary</h2>
-    <p class="muted">One email each with their hours, wages and card tips for ${esc(labelFor(p))}. It restates the shift emails they already got — it isn't extra pay.</p>
-    ${sentNote}${issueList}
-    <form method="post" action="/payroll/send" onsubmit="return confirm('Email the ${esc(labelFor(p))} summary to ${recipients} people?')" class="card">
+    ${checks}
+    <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Send the summary</span></div>
+    <p class="bs-note">One email each with their hours, wages and card tips for
+      <b>${esc(labelFor(p))}</b>. It restates the shift emails they already got — it is not extra pay.</p>
+    ${sentNote}
+    <form class="bs-sendrow" method="post" action="/payroll/send"
+      onsubmit="return confirm('Email the ${esc(labelFor(p))} summary to ${recipients} ${recipients === 1 ? 'person' : 'people'}?')">
       <input type="hidden" name="from" value="${from}"><input type="hidden" name="to" value="${to}">
-      <button class="btn ${blocking.length ? '' : 'btn-primary'}" type="submit"${recipients ? '' : ' disabled'}>
-        ✉ ${done ? 'Send again' : 'Send'} to ${recipients} ${recipients === 1 ? 'person' : 'people'}
+      <button class="${blocking.length ? 'bs-btn-sm' : 'bs-btn'}" type="submit"${recipients ? '' : ' disabled'}>
+        ${done ? 'Send again' : 'Send'} to ${recipients} ${recipients === 1 ? 'person' : 'people'}
       </button>
-      ${recipients ? '' : '<span class="muted">Nobody in this period has an email on file.</span>'}
+      ${recipients ? '' : '<span class="bs-sendnote">Nobody in this period has an email on file.</span>'}
+      ${blocking.length && recipients ? '<span class="bs-sendnote">Sending is still allowed — the checks above are yours to judge.</span>' : ''}
     </form>`;
 }
 
@@ -2604,7 +2660,12 @@ app.post('/payroll/send', async (req, res) => {
  * rows it already builds, filtered to one employee. No second calculation, so
  * the breakdown cannot disagree with the row it opened from.
  */
-app.get('/payroll/:employeeId', (req, res) => {
+// The id is constrained to digits, and that constraint is load-bearing: this
+// route is registered before /payroll/export, so without it Express hands
+// "export" to this handler, Number('export') is NaN, and Export to Excel has
+// been answering 404 "No such person" since the drill-down shipped. Matching
+// on \d+ makes the two routes independent of the order they are declared in.
+app.get('/payroll/:employeeId(\\d+)', (req, res) => {
   const id = Number(req.params.employeeId);
   const emp = q.allEmployees.all().find((e) => e.id === id);
   if (!emp) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1 class="bs-headline">No such person</h1></div>'));
@@ -2637,7 +2698,8 @@ app.get('/payroll/:employeeId', (req, res) => {
       <a class="bs-back" href="/payroll?from=${from}&to=${to}">← Payroll</a>
       <div class="bs-head">
         <div class="bs-headwrap">
-          <p class="bs-greet">${esc(from)} — ${esc(to)}<span class="bs-greet-d">${mine.length} shift${mine.length === 1 ? '' : 's'}</span></p>
+          <p class="bs-greet">${esc(isPeriod(from, to) ? labelFor({ start: from, end: to }) : `${from} — ${to}`)}<span
+            class="bs-greet-d">${mine.length} shift${mine.length === 1 ? '' : 's'}</span></p>
           <h1 class="bs-headline">${esc(emp.name)}</h1>
         </div>
       </div>
@@ -2657,7 +2719,7 @@ app.get('/payroll/:employeeId', (req, res) => {
         ${cell('Hours', me.hours, `${me.wk1Hours} + ${me.wk2Hours} by week`)}
         ${cell('Wages', money(me.wage), esc(me.roles))}
         ${cell('Card tip payout', money(me.paycheckTips), 'goes on the paycheck')}
-        ${cell('Take-home', money(me.takeHome), me.cashHome || me.weeklyCash ? `plus ${money(me.cashHome + me.weeklyCash)} in cash` : 'wages + card tips')}
+        ${cell('On the check', money(me.takeHome), me.cashHome || me.weeklyCash ? `plus ${money(me.cashHome + me.weeklyCash)} in cash` : 'wages + card tips')}
       </div>` : '<p class="bs-clear">Nothing worked in this range.</p>'}
 
       ${mine.length ? `
@@ -2690,52 +2752,105 @@ app.get('/payroll', (req, res) => {
   const to = req.query.to || justEnded.end;
   const { rows, totals, shiftCount, midDate } = aggregatePayroll(from, to);
 
-  const body = rows.map((r) => `
-    <tr>
-      <td><a class="person" href="/payroll/${r.employeeId}?from=${from}&to=${to}"><span class="avatar">${r.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}</span><span>${esc(r.name)}</span></a>
-        <div class="sub" style="margin-left:40px">${esc(r.roles)}</div></td>
-      <td class="num">${r.shifts}</td>
-      <td class="num"><b>${r.hours}</b></td>
-      <td class="num">${money(r.wage)}</td>
-      <td class="num">${money(r.cashTips)}</td>
-      <td class="num pos strong">${money(r.paycheckTips)}</td>
-      <td class="num strong">${money(r.takeHome)}</td>
-      <td class="num muted">${r.wk1Hours}</td>
-      <td class="num muted">${r.wk2Hours}</td>
-    </tr>`).join('');
+  // =========================================================================
+  // BROADSHEET — the payroll run
+  // -------------------------------------------------------------------------
+  // A verdict on the period, the four totals, the checks, the send, then the
+  // roster. Every figure the old nine-column table carried is still here: the
+  // shift count moved under the name, and Wk 1 / Wk 2 under the hours, because
+  // they are readings OF those columns rather than columns of their own. That
+  // is what took the table from nine columns to six and let it survive a
+  // phone without a horizontal scrollbar.
+  // =========================================================================
+  const today = isoDate(startOfToday());
+  const period = isPeriod(from, to);
+  const sent = period ? sendRecord(from) : null;
+  const issues = period ? periodIssues(from, to, rows) : [];
+  const blocking = issues.filter((i) => i.bad).length;
+  const paid = rows.filter((r) => r.hours > 0 || r.takeHome > 0);
+
+  // The headline answers the only question this page is opened with: can I run
+  // payroll, and is anything going to bite me. Not the name of the page — the
+  // nav already says Payroll, and a masthead that repeats itself wastes the
+  // one line the reader actually reads.
+  const verdict = !shiftCount
+    ? { t: 'Nothing logged in this range', k: 'warn' }
+    : to > today
+      ? { t: 'This period is still running', k: '' }
+      : sent
+        ? { t: `Sent to ${sent.sent_count} ${sent.sent_count === 1 ? 'person' : 'people'}`, k: 'ok' }
+        : !period
+          ? { t: `${paid.length} ${paid.length === 1 ? 'person' : 'people'}, ${totals.hours} hours`, k: '' }
+          : blocking
+            ? { t: `${blocking} thing${blocking === 1 ? '' : 's'} to check before you send`, k: 'warn' }
+            : { t: 'Ready to send', k: 'ok' };
+
+  const statCell = (label, value, sub) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  // --- the roster ------------------------------------------------------------
+  const roster = rows.map((r) => `
+    <a class="bs-lr bs-rrow" href="/payroll/${r.employeeId}?from=${from}&to=${to}">
+      <span class="bs-rr-n">${esc(r.name)}
+        <i>${esc(r.roles)} · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
+      <span class="bs-lr-n">${r.hours}<i>${r.wk1Hours} + ${r.wk2Hours}</i></span>
+      <span class="bs-lr-n">${money(r.wage)}</span>
+      <span class="bs-lr-n muted">${r.cashTips ? money(r.cashTips) : '<span class="bs-em">—</span>'}</span>
+      <span class="bs-lr-n strong">${money(r.paycheckTips)}</span>
+      <span class="bs-lr-n strong">${money(r.takeHome)}</span>
+      <span class="bs-lr-go">→</span>
+    </a>`).join('');
 
   res.send(layout('Payroll', `
     ${flash(req)}
-    <div class="page-head">
-      <div><h1>💰 Payroll</h1><p class="sub">${shiftCount} shift${shiftCount === 1 ? '' : 's'} · ${from} → ${to}. Enter <b>hours</b> and <b>card tip payout</b> into Gusto.</p></div>
-      <a class="btn btn-primary" href="/payroll/export?from=${from}&to=${to}">⬇ Export to Excel</a>
-    </div>
-    <div class="stats">
-      <div class="stat"><div class="stat-label">Total hours</div><div class="stat-value">${totals.hours}</div><div class="stat-sub">wk1 ${totals.wk1Hours} · wk2 ${totals.wk2Hours}</div></div>
-      <div class="stat"><div class="stat-label">Wages</div><div class="stat-value">${money(totals.wage)}</div></div>
-      <div class="stat"><div class="stat-label">Card tip payout</div><div class="stat-value pos">${money(totals.paycheckTips)}</div><div class="stat-sub">→ enter into Gusto</div></div>
-      <div class="stat"><div class="stat-label">Total take-home</div><div class="stat-value">${money(totals.takeHome)}</div><div class="stat-sub">wages + card tips (on the check)</div></div>
-    </div>
-    ${periodPicker(from, to)}
-    ${periodSendBlock(from, to, rows)}
-    <div class="table-wrap"><table class="table">
-      <thead><tr>
-        <th>Employee</th><th class="num">Shifts</th><th class="num">Total hours</th><th class="num">Wage earning</th>
-        <th class="num">Cash tips</th><th class="num">Card tip payout</th><th class="num">Total take-home</th>
-        <th class="num">Wk 1 hrs</th><th class="num">Wk 2 hrs</th>
-      </tr></thead>
-      <tbody>${body || '<tr><td colspan="9" class="muted">No shifts in this range.</td></tr>'}</tbody>
-      <tfoot><tr>
-        <td><b>Total</b></td><td class="num"><b>${totals.shifts}</b></td><td class="num"><b>${totals.hours}</b></td>
-        <td class="num"><b>${money(totals.wage)}</b></td><td class="num"><b>${money(totals.cashTips)}</b></td>
-        <td class="num"><b>${money(totals.paycheckTips)}</b></td><td class="num"><b>${money(totals.takeHome)}</b></td>
-        <td class="num"><b>${totals.wk1Hours}</b></td><td class="num"><b>${totals.wk2Hours}</b></td>
-      </tr></tfoot>
-    </table></div>
-    <p class="sub"><b>Card tip payout</b> is what goes into Gusto — tips owed on the paycheck (card tips net of tip-out).
-      <b>Total take-home = wages + card tip payout</b>, i.e. what lands on their check.
-      <b>Cash tips</b> (taken home nightly + weekly jar/to-go) are listed for reference only and are <b>not</b> in take-home — they already have that money.
-      Wk 1 = ${from} → ${shiftBack(midDate, 1)}, Wk 2 = ${midDate} → ${to}.</p>`));
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <p class="bs-greet">Pay period<span class="bs-greet-d">${esc(period ? labelFor({ start: from, end: to }) : `${from} → ${to}`)}</span>
+            <span class="bs-greet-d">${shiftCount} shift${shiftCount === 1 ? '' : 's'}</span></p>
+          <h1 class="bs-headline"><span class="${verdict.k}">${esc(verdict.t)}</span></h1>
+        </div>
+        <a class="bs-btn-sm" href="/payroll/export?from=${from}&to=${to}">Export to Excel</a>
+      </div>
+
+      ${periodBar(from, to)}
+
+      <div class="bs-strip">
+        ${statCell('Hours', totals.hours, `wk 1 ${totals.wk1Hours} · wk 2 ${totals.wk2Hours}`)}
+        ${statCell('Wages', money(totals.wage), `${paid.length} ${paid.length === 1 ? 'person' : 'people'} worked`)}
+        ${statCell('Card tip payout', money(totals.paycheckTips), 'goes into Gusto')}
+        ${statCell('On the checks', money(totals.takeHome), 'wages + card tips')}
+        <span class="bs-strip-note">cash tips are not in this —<br>they already have that money</span>
+      </div>
+
+      ${periodSendBlock(from, to, rows)}
+
+      <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Everyone who worked</span>
+        <span class="bs-sec-note">hours and card tip payout are the two figures Gusto asks for</span></div>
+      ${rows.length ? `
+      <div class="bs-lhead bs-rhead">
+        <span>Person</span><span class="r">Hours</span><span class="r">Wages</span>
+        <span class="r">Cash tips</span><span class="r">Card payout</span><span class="r">On the check</span><span></span>
+      </div>
+      <div class="bs-lrows">${roster}</div>
+      <div class="bs-lr bs-rrow bs-rtot">
+        <span class="bs-rr-n">Total<i>${totals.shifts} shift${totals.shifts === 1 ? '' : 's'} between them,
+          across ${shiftCount} service${shiftCount === 1 ? '' : 's'}</i></span>
+        <span class="bs-lr-n">${totals.hours}<i>${totals.wk1Hours} + ${totals.wk2Hours}</i></span>
+        <span class="bs-lr-n">${money(totals.wage)}</span>
+        <span class="bs-lr-n muted">${money(totals.cashTips)}</span>
+        <span class="bs-lr-n strong">${money(totals.paycheckTips)}</span>
+        <span class="bs-lr-n strong">${money(totals.takeHome)}</span>
+        <span></span>
+      </div>` : '<p class="bs-clear">Nobody worked in this range.</p>'}
+
+      <p class="bs-note bs-note-wide">
+        <b>Card tip payout</b> is what goes into Gusto — card tips net of tip-out, owed on the paycheck.
+        <b>On the check</b> is wages plus that payout.
+        <b>Cash tips</b> — taken home nightly, plus the weekly jar and to-go share — are here for reference
+        and are deliberately not in the check total: they already walked out with that money.
+        Wk&nbsp;1 is ${esc(from)} → ${esc(shiftBack(midDate, 1))}, Wk&nbsp;2 is ${esc(midDate)} → ${esc(to)}.</p>
+    </div>`));
 });
 
 app.get('/payroll/export', async (req, res) => {

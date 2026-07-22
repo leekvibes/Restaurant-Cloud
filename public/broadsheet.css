@@ -714,10 +714,13 @@ body {
 }
 @media (max-width: 760px) {
   /* The ledger keeps its shape but sheds the columns a phone cannot carry.
-     Nothing is lost — hours and staff are on the shift itself. */
-  .bs-lhead, .bs-lr { grid-template-columns: 62px 1fr 92px 100px 20px; }
-  .bs-lhead span:nth-child(5), .bs-lhead span:nth-child(6), .bs-lhead span:nth-child(7),
-  .bs-lr span:nth-child(5), .bs-lr span:nth-child(6), .bs-lr span:nth-child(7) { display: none; }
+     Nothing is lost — hours and staff are on the shift itself.
+     Scoped to .bs-shiftrow, not to the bare .bs-lr it is built on: payroll's
+     roster and drill-down are .bs-lr too, and this fold was reaching them and
+     hiding three columns their own grids had already accounted for. */
+  .bs-shifthead, .bs-shiftrow { grid-template-columns: 62px 1fr 92px 100px 20px; }
+  .bs-shifthead > :nth-child(5), .bs-shifthead > :nth-child(6), .bs-shifthead > :nth-child(7),
+  .bs-shiftrow > :nth-child(5), .bs-shiftrow > :nth-child(6), .bs-shiftrow > :nth-child(7) { display: none; }
   .bs-month-tot { flex-basis: 100%; margin-left: 0; }
   .bs-month-h, .bs-month-old > summary { flex-wrap: wrap; gap: 4px 12px; }
   .bs-strip-c { flex-basis: 100%; }
@@ -749,12 +752,17 @@ body {
 .bs-sheet-note { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
 
 /* --- who was on ----------------------------------------------------------- */
+/* .bs-shead / .bs-sr are the shared shape of a ruled ledger — grid, baseline,
+   gap — and nothing more. The column tracks belong to whichever ledger it is,
+   because the sales day ledger wears these same two classes. */
 .bs-shead, .bs-sr {
   display: grid;
-  grid-template-columns: 1fr 78px 96px 92px 88px 60px 72px 52px;
   align-items: baseline; gap: 0 12px;
 }
-.bs-shead.has-alc, .has-alc .bs-sr {
+.bs-staffhead, .bs-staffrow {
+  grid-template-columns: 1fr 78px 96px 92px 88px 60px 72px 52px;
+}
+.bs-staffhead.has-alc, .has-alc .bs-staffrow {
   grid-template-columns: 1fr 74px 88px 84px 80px 82px 56px 68px 50px;
 }
 .bs-shead {
@@ -852,12 +860,10 @@ body {
     border-top: 1px solid var(--field-border);
   }
 }
-@media (max-width: 760px) {
-  /* Wage and role fold away; both are on the person's own record. */
-  .bs-shead, .bs-sr { grid-template-columns: 1fr 84px 74px 56px 50px; }
-  .bs-shead span:nth-child(2), .bs-sr .bs-sr-r,
-  .bs-shead span:nth-child(6), .bs-sr .bs-sr-f:nth-of-type(4) { display: none; }
-}
+/* The staff table's responsive rules live together further down, in one block
+   per breakpoint. They used to be split across a 760px block here and a 900px
+   block below, which both matched on a phone — and because the later one won,
+   this block's grid never applied while its display:none rules still did. */
 
 /* The sheet has Preview & send in its header; the old sticky bar repeated it
    at the foot in the previous shell. One is enough. */
@@ -926,13 +932,37 @@ body {
 
 @media (max-width: 900px) {
   /* Kitchen and coffee are the point of this table, so role and wage go
-     before they do — both are on the person's own record. */
-  .bs-shead, .bs-sr, .bs-shead.has-alc, .has-alc .bs-sr {
+     before they do — both are on the person's own record.
+     Positions, applied to head and row alike: the two are the same eight
+     cells in the same order (nine with alcohol), so anything that hides a
+     column has to hide it in both or the headings stop naming the figures
+     underneath them.
+                1        2      3        4       5         6      7      8/9
+     plain:   Name     Role   Kitchen  Coffee  Tips      Hrs    Wage   Edit
+     has-alc: Name     Role   Kitchen  Coffee  Alcohol   Tips   Hrs    Wage  Edit */
+  /* Scoped to .bs-staffhead / .bs-staffrow, not to the .bs-shead / .bs-sr they
+     are built on. The sales day ledger is .bs-shead + .bs-sr too, and inside a
+     .bs-srows container — so these folds were reaching it and blanking its
+     Service and Edit columns, leaving two empty tracks in its grid. */
+  /* The alcohol variant is named here too. A media query adds no specificity,
+     so `.bs-staffhead.has-alc` in the base section (two classes) outranks a
+     bare `.bs-staffhead` in this block (one) and the wide nine-column track
+     list survives onto the phone — six cells spread across nine columns. */
+  .bs-staffhead, .bs-staffrow,
+  .bs-staffhead.has-alc, .has-alc .bs-staffrow {
     grid-template-columns: 1fr 76px 74px 62px 52px 48px;
   }
-  .bs-shead span:nth-child(2), .bs-sr .bs-sr-r { display: none; }
-  .bs-shead.has-alc span:nth-child(5), .has-alc .bs-sr .bs-sr-f:nth-of-type(3) { display: none; }
-  .bs-shead span:nth-last-child(2), .bs-sr .bs-sr-f:last-of-type { display: none; }
+
+  /* Wage sits at 7 without alcohol and at 8 with it, so the two variants are
+     addressed separately rather than one rule reaching across both. */
+  .bs-staffhead:not(.has-alc) > :nth-child(2), .bs-staffhead:not(.has-alc) > :nth-child(7),
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(2),
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(7) { display: none; }
+
+  .bs-staffhead.has-alc > :nth-child(2), .has-alc .bs-staffrow > :nth-child(2),
+  .bs-staffhead.has-alc > :nth-child(5), .has-alc .bs-staffrow > :nth-child(5),
+  .bs-staffhead.has-alc > :nth-child(8), .has-alc .bs-staffrow > :nth-child(8) { display: none; }
+
   .bs-pill input, .bs-pill select { width: 100%; }
   .bs-pill { flex: 1 1 132px; }
   .bs-inline { gap: 10px 8px; }
@@ -1177,9 +1207,14 @@ a.person { text-decoration: none; color: inherit; }
 a.person:hover span:last-child { color: var(--accent); text-decoration: underline; }
 
 @media (max-width: 900px) {
+  /* Was written with :first-of-type / :nth-of-type, which count <span>
+     elements and disregard the class beside them — so neither selector matched
+     a single cell. The header dropped to six columns and the rows kept all
+     eight, and every row on a phone was shifted out of line with its heading.
+     Positional, on both, so they move together. */
   .bs-payhead, .bs-payrow { grid-template-columns: 78px 1fr 64px 86px 96px 24px; }
-  .bs-payhead span:nth-child(2), .bs-payrow .bs-lr-s:first-of-type { display: none; }
-  .bs-payhead span:nth-child(6), .bs-payrow .bs-lr-n:nth-of-type(3) { display: none; }
+  .bs-payhead > :nth-child(2), .bs-payrow > :nth-child(2),
+  .bs-payhead > :nth-child(6), .bs-payrow > :nth-child(6) { display: none; }
   .bs-inline-range { margin-left: 0; flex-basis: 100%; }
 }
 
@@ -1266,12 +1301,94 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
     border-top: 1px solid var(--field-border); padding-top: 22px; }
 }
 @media (max-width: 640px) {
+  /* Kitchen and coffee fold; the day expands in place and shows both.
+     The row half of this was written as .bs-sr-f:nth-of-type(n), which counts
+     <span> siblings and pays no attention to the class in front of it — so it
+     matched nothing, the heading dropped to five columns and the row kept
+     seven, and every day on a phone was one cell out of step. */
   .bs-dayhead, .bs-dayrow > .bs-sr { grid-template-columns: 74px 1fr 92px 84px 44px; }
-  .bs-dayhead span:nth-child(4), .bs-dayrow .bs-sr-f:nth-of-type(2) { display: none; }
-  .bs-dayhead span:nth-child(5), .bs-dayrow .bs-sr-f:nth-of-type(3) { display: none; }
+  .bs-dayhead > :nth-child(4), .bs-dayrow > .bs-sr > :nth-child(4),
+  .bs-dayhead > :nth-child(5), .bs-dayrow > .bs-sr > :nth-child(5) { display: none; }
   .bs-dayx { padding-left: 0; }
   .bs-fields { grid-template-columns: 1fr; }
   .bs-entry-alt { margin-left: 0; flex-basis: 100%; }
 }
 /* The row you just saved, so returning to a long ledger shows you where. */
 .bs-justsaved > .bs-sr { background: var(--accent-fill); }
+
+/* ===========================================================================
+   PAYROLL — the fortnightly run.
+   ======================================================================== */
+
+/* The roster. Six columns, not the old nine: the shift count sits under the
+   name and the week split under the hours, because both are readings of the
+   column above them rather than columns in their own right. */
+.bs-rhead, .bs-rrow { grid-template-columns: 1fr 96px 104px 100px 116px 118px 24px; }
+.bs-rr-n { font-size: 14px; font-weight: 600; color: var(--headline); min-width: 0; }
+.bs-rr-n i {
+  display: block; font-style: normal; font-weight: 400;
+  font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bs-rrow .bs-lr-n i {
+  display: block; font-style: normal; font-size: 10.5px; color: var(--faint);
+}
+.bs-rrow .bs-lr-n.strong { font-weight: 600; }
+/* The total closes the ledger with a rule above it, the way a column of
+   figures is closed on paper. */
+.bs-rtot {
+  border-top: 2px solid var(--rule-heavy); border-bottom: 0;
+  margin-top: 2px; padding-top: 13px;
+}
+.bs-rtot:hover { background: none; }
+.bs-rtot .bs-rr-n { font-family: var(--sans); }
+
+/* The pre-send checks. A list, ruled, with the blocking ones named as such —
+   the old version was a bullet list inside a coloured box. */
+.bs-checks { list-style: none; margin: 0; padding: 0; }
+.bs-checks li {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 11px 0; border-bottom: 1px dotted var(--rule-dotted);
+  font-size: 13.5px; color: var(--body); line-height: 1.5;
+}
+.bs-check-k {
+  flex: none; width: 46px;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
+}
+.bs-checks li.bad { color: var(--headline); }
+.bs-checks li.bad .bs-check-k { color: var(--warning); }
+
+.bs-sendrow { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+.bs-sendnote { font-size: 12.5px; color: var(--muted); }
+.bs-sendrow button[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* "Earlier…" — the periods nobody opens, out of the way of the four they do. */
+.bs-inline-pick select {
+  padding: 5px 8px; border: 1px solid var(--field-border);
+  background: var(--surface); color: var(--ink);
+  font-family: var(--sans); font-size: 12.5px;
+}
+.bs-fchip i {
+  font-style: normal; margin-left: 5px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--faint);
+}
+
+/* Head and row carry the same seven cells in the same order, so one
+   positional selector governs both and they cannot drift apart.
+   :nth-child, never :nth-of-type — every cell here is a <span>, so
+   :nth-of-type counts spans and ignores the class you wrote next to it. */
+@media (max-width: 1000px) {
+  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
+  /* Cash tips go first — reference only, and never typed into anything. */
+  .bs-rhead > :nth-child(4), .bs-rrow > :nth-child(4) { display: none; }
+}
+@media (max-width: 640px) {
+  /* What survives is the name and the two figures Gusto asks for. */
+  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 66px 98px 18px; }
+  .bs-rhead > :nth-child(3), .bs-rrow > :nth-child(3),
+  .bs-rhead > :nth-child(6), .bs-rrow > :nth-child(6) { display: none; }
+  .bs-checks li { flex-wrap: wrap; gap: 3px 12px; }
+  .bs-check-k { flex-basis: 100%; width: auto; }
+}

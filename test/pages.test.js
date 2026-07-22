@@ -159,3 +159,149 @@ test('the sales entry form is not the shift sheet form', async () => {
   assert.ok(!/<form[^>]*class="bs-form"[^>]*action="\/sales/.test(html),
     'and does not borrow the one that lays out in columns');
 });
+
+// ---------------------------------------------------------------------------
+// Ruled grids: the heading and the row have to agree.
+//
+// Every ledger on the site is a CSS grid where one element is the heading and
+// another is the row, and the two are kept in step only by both declaring the
+// same `grid-template-columns`. When a breakpoint folds a column away it has
+// to fold it away in BOTH, at the same position, or the headings stop naming
+// the figures underneath them.
+//
+// Three of the five grids were wrong at once. All three were written as
+// `.some-class:nth-of-type(n)` — which counts sibling ELEMENTS and disregards
+// the class written in front of it. Every cell in these grids is a <span>, so
+// `.bs-sr-f:nth-of-type(2)` asks for "the 2nd span, if it happens to be an
+// .bs-sr-f" and quietly matches nothing when it is not. The heading dropped to
+// five columns and the row kept seven, on the phone, on pages used nightly.
+// ---------------------------------------------------------------------------
+
+/** Direct element children of the outermost tag in a fragment. */
+function directChildren(html) {
+  const inner = html.replace(/^<[^>]+>/, '').replace(/<\/[a-z]+>\s*$/i, '');
+  let depth = 0, n = 0;
+  for (const m of inner.matchAll(/<(\/?)([a-z]+)\b[^>]*?(\/?)>/gi)) {
+    const [, close, tag, selfClose] = m;
+    if (/^(input|img|br|hr|meta|link)$/i.test(tag)) { if (depth === 0 && !close) n++; continue; }
+    if (close) depth--;
+    else { if (depth === 0) n++; if (!selfClose) depth++; }
+  }
+  return n;
+}
+
+/** The stylesheet with /* comments *\/ removed, so prose about a mistake is
+    not mistaken for the mistake. Line numbers are preserved. */
+function stripComments(css) {
+  return css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
+}
+
+test('no ruled grid uses :nth-of-type to fold a column', () => {
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const offenders = [];
+  css.split('\n').forEach((line, i) => {
+    if (/:(nth|first|last)-of-type/.test(line)) offenders.push(`${i + 1}: ${line.trim()}`);
+  });
+  assert.deepStrictEqual(offenders, [],
+    'position a grid cell with :nth-child — :nth-of-type ignores the class beside it');
+});
+
+test('every ledger heading has as many cells as its rows', async () => {
+  // Rendered, not read out of the source: the whole point is what the browser
+  // is handed. A grid whose heading and rows disagree is misaligned at every
+  // width, before any breakpoint gets involved.
+  //
+  // The ranges are explicit and wide. Asked for its default period, /payroll
+  // shows the fortnight that just ended — which holds none of the fixture's
+  // shifts, so the page rendered no rows, this test compared nothing, and it
+  // passed while a deliberately broken row went by untouched. Hence the
+  // `checked` count at the bottom: a test that can quietly examine nothing is
+  // not a test.
+  const d = new (require('better-sqlite3'))(DB, { readonly: true });
+  const span = (() => { try { return d.prepare('SELECT MIN(date) a, MAX(date) b FROM shifts').get(); } catch { return null; } })();
+  const emp = (() => { try { return d.prepare('SELECT id FROM employees LIMIT 1').get(); } catch { return null; } })();
+  d.close();
+  assert.ok(span && span.a, 'the fixture has shifts to render');
+
+  const range = `from=${span.a}&to=${span.b}`;
+  const pairs = [
+    [`/payroll?${range}`, 'the payroll roster', /<div class="bs-lhead bs-rhead">[\s\S]*?<\/div>/,
+      /<a class="bs-lr bs-rrow" href[\s\S]*?<\/a>/g],
+    [`/sales?r=custom&${range}`, 'the sales day ledger', /<div class="bs-shead bs-dayhead">[\s\S]*?<\/div>/,
+      /<summary class="bs-sr">[\s\S]*?<\/summary>/g],
+  ];
+  if (emp) pairs.push([`/payroll/${emp.id}?${range}`, 'the payroll drill-down',
+    /<div class="bs-lhead bs-payhead">[\s\S]*?<\/div>/, /<a class="bs-lr bs-payrow" href[\s\S]*?<\/a>/g]);
+
+  const wrong = [];
+  let checked = 0;
+  for (const [url, what, headRe, rowRe] of pairs) {
+    const res = await fetch(`${BASE}${url}`, { redirect: 'manual' });
+    assert.strictEqual(res.status, 200, `${url} renders`);
+    const html = await res.text();
+    const head = html.match(headRe);
+    const rows = [...html.matchAll(rowRe)].map((m) => m[0]);
+    assert.ok(head, `${what}: a heading was rendered`);
+    assert.ok(rows.length, `${what}: rows were rendered`);
+    const want = directChildren(head[0]);
+    for (const r of rows) {
+      checked++;
+      const got = directChildren(r);
+      if (got !== want) { wrong.push(`${what}: heading has ${want} cells, a row has ${got}`); break; }
+    }
+  }
+  assert.deepStrictEqual(wrong, []);
+  assert.ok(checked >= pairs.length, `compared ${checked} rows, not zero`);
+});
+
+test('folding a column folds it in the heading and the row alike', () => {
+  // Read the stylesheet the way the browser does: inside each media block,
+  // find what gets display:none, and check the heading and its row lose the
+  // same positions. This is what actually broke — the heading folded two
+  // columns and the row folded none.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  // Most specific first. A selector is attributed to the first pair whose
+  // heading or row class it names, so `.bs-dayrow > .bs-sr` counts as the day
+  // ledger's row and not as the shift sheet's, which it also literally names.
+  const PAIRS = [
+    ['bs-dayhead', 'bs-dayrow'], ['bs-payhead', 'bs-payrow'], ['bs-rhead', 'bs-rrow'],
+    ['bs-shifthead', 'bs-shiftrow'], ['bs-staffhead', 'bs-staffrow'],
+  ];
+  // Exact class tokens — `.bs-lr-n` must not read as `.bs-lr`.
+  const classesIn = (sel) => new Set([...sel.matchAll(/\.([a-z0-9-]+)/g)].map((m) => m[1]));
+
+  const problems = [];
+  for (const block of css.matchAll(/@media[^{]*\{([\s\S]*?)\n\}/g)) {
+    const body = block[1];
+    const at = (block.input.slice(0, block.index).match(/\n/g) || []).length + 1;
+    for (const rule of body.matchAll(/([^{}]+)\{([^}]*display:\s*none[^}]*)\}/g)) {
+      const selectors = rule[1].split(',').map((x) => x.trim()).filter(Boolean);
+      // Attribute each selector to exactly one pair and one side of it.
+      const folds = new Map();   // pairIndex -> {head:Set, row:Set}
+      for (const sel of selectors) {
+        const cls = classesIn(sel);
+        const i = PAIRS.findIndex(([h, r]) => cls.has(h) || cls.has(r));
+        if (i < 0) continue;
+        const pos = (sel.match(/:nth-child\((\d+)\)/) || [])[1];
+        if (!pos) continue;                       // folded by class, not position
+        if (!folds.has(i)) folds.set(i, { head: new Set(), row: new Set() });
+        folds.get(i)[cls.has(PAIRS[i][0]) ? 'head' : 'row'].add(pos);
+      }
+      for (const [i, { head, row }] of folds) {
+        const same = head.size === row.size && [...head].every((p) => row.has(p));
+        if (!same) problems.push(`line ~${at}: .${PAIRS[i][0]} folds {${[...head]}} but .${PAIRS[i][1]} folds {${[...row]}}`);
+      }
+    }
+  }
+  assert.deepStrictEqual(problems, []);
+});
+
+test('Export to Excel is not swallowed by the drill-down route', async () => {
+  // /payroll/:employeeId is declared before /payroll/export, so without a
+  // digits-only constraint on the parameter Express hands "export" to the
+  // drill-down, Number('export') is NaN, no employee matches, and the only way
+  // to get the numbers into Gusto answers 404 "No such person".
+  const res = await fetch(`${BASE}/payroll/export?from=2026-07-04&to=2026-07-17`, { redirect: 'manual' });
+  assert.strictEqual(res.status, 200, 'the export renders');
+  assert.match(res.headers.get('content-type') || '', /spreadsheet/, 'and it is a workbook, not a web page');
+});
