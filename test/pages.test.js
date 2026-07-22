@@ -612,3 +612,56 @@ test('both themes define every panel token', () => {
     assert.ok(night.includes(t + ':'), `night defines ${t}`);
   }
 });
+
+test('the dashboard frames what wants something, and leaves what you read', async () => {
+  // Five frames on one page meant none of them was saying anything, and the
+  // doubled padding cost the columns their line length. The split now carries
+  // meaning: a frame is "this wants something from you". Needs attention and
+  // Coming up are things to act on; the week's figures and the activity feed
+  // are things you read, and they stay plain document with the ink kicker rule
+  // the rest of the broadsheet uses.
+  const html = await (await fetch(`${BASE}/`, { redirect: 'manual' })).text();
+  const framed = [...html.matchAll(/<section class="bs-panel[^"]*"[^>]*>[\s\S]*?class="bs-kicker">([^<]*)</g)]
+    .map((m) => m[1].trim());
+  const plain = [...html.matchAll(/<section class="bs-plainsec"[^>]*>[\s\S]*?class="bs-kicker">([^<]*)</g)]
+    .map((m) => m[1].trim());
+
+  assert.ok(framed.length >= 2 && plain.length >= 2,
+    `expected a mix, got ${framed.length} framed and ${plain.length} plain`);
+  assert.ok(framed.some((t) => /needs attention/i.test(t)), 'attention is framed');
+  assert.ok(plain.some((t) => /the record/i.test(t)), 'the record is plain');
+  assert.ok(!framed.some((t) => /the record|week in numbers/i.test(t)),
+    'the sections you read are not boxed');
+});
+
+test('a plain section keeps the ink rule; a framed one softens it', () => {
+  // The two have to stay distinguishable, or the split stops meaning anything.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  let softened = null;
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (m[1].trim() === '.bs-panel > .bs-sec-h') softened = m[2];
+  }
+  assert.ok(softened, 'a framed section softens its kicker rule');
+  assert.match(softened, /border-bottom-color:\s*var\(--panel-line\)/);
+  // And nothing softens it for a plain one.
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (/\.bs-plainsec[^,{]*\.bs-sec-h/.test(m[1])) {
+      assert.ok(!/border-bottom-color/.test(m[2]), 'a plain section keeps the ink rule');
+    }
+  }
+});
+
+test('columns pad once, not twice', () => {
+  // 28px of column padding plus 17px of panel padding put content 45px in and
+  // left a 56px empty gutter with nothing in it — the frames had replaced the
+  // rule that used to live there. The gap does the separating now.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  // Anchored: `padding: 0 28px` also starts with a zero, and a looser regex
+  // called that "no padding" and let the 56px gutter straight back in.
+  const zeroed = rules.some((m) => m[1].trim() === '.bs-cols3 > .bs-col'
+    && /padding:\s*0\s*(?:;|$)/.test(m[2].trim()));
+  assert.ok(zeroed, 'the framed column carries no padding of its own');
+  const gap = rules.find((m) => m[1].trim() === '.bs-cols3' && /gap:/.test(m[2]));
+  assert.ok(gap, '.bs-cols3 sets a gap instead');
+});

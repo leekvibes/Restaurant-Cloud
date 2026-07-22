@@ -803,8 +803,12 @@ app.get('/', (req, res) => {
   const figCell = (label, value, sub) =>
     `<div class="bs-figcell"><span class="bs-figlabel">${label}</span><span class="bs-stat">${value}</span>${sub ? `<span class="bs-figsub">${sub}</span>` : ''}</div>`;
 
+  // Framed on the dashboard: the sections that want something FROM you.
+  // Unframed: the ones you read. A box around a figure you are only scanning
+  // adds a border and takes away line length, and five boxes on one page mean
+  // none of them is saying anything.
   const weekBand = p7 && seeCosts ? `
-    <section class="bs-panel">
+    <section class="bs-plainsec">
     <div class="bs-sec-h"><span class="bs-kicker">The week in numbers</span>
       ${may('costs') ? '<a class="bs-act" href="/costs">Performance →</a>' : ''}</div>
     <div class="bs-grid2">
@@ -820,7 +824,7 @@ app.get('/', (req, res) => {
         { height: 96, empty: '' })}</div>` : ''}
     </section>
     ${soon.length ? `
-      <section class="bs-panel">
+      <section class="bs-panel bs-soon-panel">
       <div class="bs-sec-h"><span class="bs-kicker">Coming up</span></div>
       <div class="bs-soon">
         ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
@@ -846,7 +850,7 @@ app.get('/', (req, res) => {
     return f.href ? `<a class="bs-rec" href="${f.href}">${inner}</a>` : `<div class="bs-rec">${inner}</div>`;
   }).join('');
   const record = `
-    <section class="bs-panel">
+    <section class="bs-plainsec">
       <div class="bs-sec-h"><span class="bs-kicker">The record</span></div>
       ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}
     </section>`;

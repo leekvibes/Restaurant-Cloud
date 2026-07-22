@@ -1513,13 +1513,18 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-panel {
   background: var(--panel);
   border: 1px solid var(--panel-line);
-  padding: 15px 17px 16px;
+  /* Just under the handoff's stated 14–18px. At 17 the border floated a long
+     way off the content and the page read as scattered boxes; this hugs. */
+  padding: 12px 13px 13px;
   /* Named properties, not `all` — transitioning `all` animates layout as well,
      and a panel containing a chart will visibly re-draw it on every hover. */
   transition: background-color .15s ease, border-color .15s ease,
               box-shadow .15s ease, transform .15s ease;
 }
 .bs-panel + .bs-panel { margin-top: 14px; }
+/* A framed section next to a plain one, in either order. */
+.bs-panel + .bs-plainsec, .bs-plainsec + .bs-panel { margin-top: 22px; }
+.bs-plainsec + .bs-plainsec { margin-top: 24px; }
 
 /* A ledger inside a panel sits on the panel's plane, not the page's, so the
    alternating stripe has to step from there or it lands twice as heavy as the
@@ -1560,7 +1565,7 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   border-top: 1px solid var(--panel-line);
   border-bottom: 1px solid var(--panel-line);
   margin-top: 0;
-  padding: 15px 17px 16px;
+  padding: 14px 13px 15px;
 }
 .bs-panel.bs-strip .bs-strip-c:first-child { padding-left: 0; }
 .bs-panel.bs-strip .bs-strip-c + .bs-strip-c { border-left-color: var(--panel-line); }
@@ -1572,6 +1577,15 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    are the separation now. */
 .bs-cols3 > .bs-col:first-child { border-right: 0; }
 .bs-cols3 > .bs-col:last-child { border-left: 0; }
+
+/* The 28px each side was sized for a layout where a rule ran down the middle
+   of the gutter and did the separating. With the rule gone and every section
+   carrying its own frame, it became 56px of nothing between panels, and it
+   cost the left column 18% of its line length on top. The grid gap replaces
+   it — one measure, not two paddings that add up. */
+.bs-cols3 { gap: 0 18px; }
+.bs-cols3 > .bs-col { padding: 0; }
+.bs-cols2 > section.bs-panel:last-child { padding-left: 13px; }
 
 /* Two-column sections: once each column is a framed panel, a grid that
    stretches them to equal height leaves the shorter one as a tall empty box,
