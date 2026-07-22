@@ -332,6 +332,7 @@ body {
   .bs-search { max-width: none; }
   .bs-nav { position: static; }
   .bs-headline { font-size: 25px; }
+  .bs-bb-i { font-size: 27px; }
   .bs-stat { font-size: 22px; }
   .bs-main { padding-bottom: 92px; }   /* clear of the bottom bar */
   .bs-foot { margin-bottom: 70px; }
@@ -356,6 +357,7 @@ body {
   .bs-masthead .bs-search { order: 3; flex-basis: 100%; }
   .bs-masthead { flex-wrap: wrap; }
   .bs-headline { font-size: 22px; }
+  .bs-bb-i { font-size: 23px; }
 }
 
 /* Someone who asked for less motion gets none of it. Nothing here animates
@@ -734,8 +736,12 @@ body {
 
 /* --- who was on ----------------------------------------------------------- */
 .bs-shead, .bs-sr {
-  display: grid; grid-template-columns: 1fr 84px 96px 92px 62px 74px 52px;
+  display: grid;
+  grid-template-columns: 1fr 78px 96px 92px 88px 60px 72px 52px;
   align-items: baseline; gap: 0 12px;
+}
+.bs-shead.has-alc, .has-alc .bs-sr {
+  grid-template-columns: 1fr 74px 88px 84px 80px 82px 56px 68px 50px;
 }
 .bs-shead {
   padding: 12px 0 8px;
@@ -743,8 +749,12 @@ body {
   text-transform: uppercase; color: var(--muted);
 }
 .bs-shead .r, .bs-sr-f { text-align: right; }
-.bs-sr { padding: 12px 0; border-bottom: 1px dotted var(--rule-dotted); }
+
+.bs-srow { border-bottom: 1px dotted var(--rule-dotted); }
+.bs-sr { padding: 12px 0; cursor: pointer; list-style: none; }
+.bs-sr::-webkit-details-marker { display: none; }
 .bs-sr:hover { background: var(--row-hover); }
+.bs-srow[open] > .bs-sr { background: var(--row-hover); }
 .bs-sr-n { font-size: 14px; font-weight: 600; color: var(--headline); }
 .bs-sr-r { font-size: 13px; color: var(--muted); }
 .bs-sr-f {
@@ -752,11 +762,49 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .bs-sr-f.miss { color: var(--warning); }
-.bs-sr-e {
-  border: 0; background: none; cursor: pointer; text-align: right;
-  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent);
+.bs-sr-e { text-align: right; font-size: 13px; font-weight: 500; color: var(--accent); }
+.bs-srow[open] .bs-sr-e { color: var(--muted); }
+.bs-srow[open] .bs-sr-e::after { content: ''; }
+
+/* --- editing, on the row itself ------------------------------------------- */
+.bs-inline {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px;
+  padding: 4px 0 14px;
 }
-.bs-sr-e:hover { color: var(--accent-hover); }
+/* A pill you type into. No spinners — the arrows on a number input are a
+   pixel-hunt on a laptop and useless on a phone, and every value here is money
+   or hours typed in full. */
+.bs-pill { display: grid; gap: 4px; }
+.bs-pill > span {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-pill input, .bs-pill select {
+  width: 104px; padding: 8px 12px;
+  border: 1px solid var(--field-border); background: var(--surface);
+  border-radius: 999px !important;
+  font-family: var(--mono); font-size: 13px; color: var(--ink);
+  -moz-appearance: textfield; appearance: none;
+}
+.bs-pill select { width: 128px; font-family: var(--sans); }
+.bs-pill input::-webkit-outer-spin-button,
+.bs-pill input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.bs-pill input:focus, .bs-pill select:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-fill) !important;
+}
+.bs-inline .bs-btn { border-radius: 999px !important; padding: 9px 20px; }
+.bs-inline-x {
+  border: 0; background: none; cursor: pointer; padding: 9px 4px;
+  font-family: var(--sans); font-size: 13px; color: var(--muted);
+}
+.bs-inline-x:hover { color: var(--ink); }
+.bs-inline-rm { padding: 0 0 14px; }
+.bs-inline-rm button {
+  border: 0; background: none; cursor: pointer; padding: 0;
+  font-family: var(--sans); font-size: 12.5px; color: var(--danger);
+}
+.bs-inline-rm button:hover { text-decoration: underline; }
 
 /* --- the disclosures that hold every form the old workspace had ----------- */
 .bs-x { border-top: 1px solid var(--rule); margin-top: 2px; }
@@ -812,18 +860,22 @@ body {
 .bs-bb { position: relative; flex: 1; min-width: 0; }
 .bs-bb-i {
   margin: 0;
-  transition: transform .42s cubic-bezier(.32,.72,0,1), opacity .3s ease-out;
+  font-size: 40px;
+  /* The exit is slower than the entrance on purpose — you should see the line
+     leave, not find it already gone. */
+  transition: transform .62s cubic-bezier(.32,.72,0,1), opacity .5s ease-out;
 }
 /* Stacked, so the block keeps the height of the tallest message and nothing
    below it jumps as they cycle. */
 .bs-bb-i:not(.on) {
   position: absolute; inset: 0;
-  transform: translateY(14px); opacity: 0; pointer-events: none;
+  transform: translateY(22px); opacity: 0; pointer-events: none;
+  transition: transform .5s cubic-bezier(.32,.72,0,1), opacity .34s ease-out;
 }
 .bs-bb-i.on { transform: none; opacity: 1; }
-.bs-bb-i.out { transform: translateY(-14px); opacity: 0; pointer-events: none; }
-.bs-bb-s { color: var(--muted); font-family: var(--sans); font-size: .62em; font-weight: 400; }
-.bs-bb-i .bs-act { font-family: var(--sans); font-size: .5em; vertical-align: middle; }
+.bs-bb-i.out { transform: translateY(-26px); opacity: 0; pointer-events: none; }
+.bs-bb-s { color: var(--muted); font-family: var(--sans); font-size: .42em; font-weight: 400; }
+.bs-bb-i .bs-act { font-family: var(--sans); font-size: .36em; vertical-align: middle; }
 
 /* A headline runs the width it has. It only wraps when it genuinely needs to —
    a 22ch clamp was breaking two-word tails onto a line of their own. */
@@ -835,19 +887,66 @@ body {
 }
 
 /* --- shift sheet: the tools, above the data ------------------------------- */
+/* Text actions on a ruled line, not a row of boxes. The page has no other
+   containers in it; four white rectangles read as a different product. */
 .bs-tools {
-  display: flex; flex-wrap: wrap; gap: 8px;
-  margin: 20px 0 0; padding-top: 18px; border-top: 1px solid var(--field-border);
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0;
+  margin: 22px 0 0; padding: 11px 0;
+  border-top: 1px solid var(--field-border); border-bottom: 1px solid var(--field-border);
 }
 .bs-tool {
-  border: 1px solid var(--field-border); background: var(--surface);
-  padding: 8px 13px; cursor: pointer;
-  font-family: var(--sans); font-size: 12.5px; font-weight: 500; color: var(--ink-2);
+  border: 0; background: none; cursor: pointer; padding: 4px 16px 4px 0;
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent);
 }
-.bs-tool:hover { border-color: var(--ink); color: var(--ink); }
-.bs-tool-danger { color: var(--danger); }
-.bs-tool-danger:hover { border-color: var(--danger); color: var(--danger); }
+.bs-tool + .bs-tool { padding-left: 16px; border-left: 1px solid var(--rule); }
+.bs-tool:hover { color: var(--accent-hover); }
+.bs-tool-danger { color: var(--danger); margin-left: auto; }
+.bs-tool-danger:hover { color: var(--danger); text-decoration: underline; }
 .bs-toolpanes:not(:empty) { margin-bottom: 4px; }
 .bs-toolpanes .bs-x { border-top: 0; }
 .bs-toolpanes .bs-x > summary { display: none; }   /* the buttons above are the summary */
 .bs-toolpanes .bs-x[open] { border-bottom: 1px solid var(--field-border); padding-bottom: 6px; }
+
+@media (max-width: 900px) {
+  /* Kitchen and coffee are the point of this table, so role and wage go
+     before they do — both are on the person's own record. */
+  .bs-shead, .bs-sr, .bs-shead.has-alc, .has-alc .bs-sr {
+    grid-template-columns: 1fr 76px 74px 62px 52px 48px;
+  }
+  .bs-shead span:nth-child(2), .bs-sr .bs-sr-r { display: none; }
+  .bs-shead.has-alc span:nth-child(5), .has-alc .bs-sr .bs-sr-f:nth-of-type(3) { display: none; }
+  .bs-shead span:nth-last-child(2), .bs-sr .bs-sr-f:last-of-type { display: none; }
+  .bs-pill input, .bs-pill select { width: 100%; }
+  .bs-pill { flex: 1 1 132px; }
+  .bs-inline { gap: 10px 8px; }
+  .bs-tool-danger { margin-left: 0; }
+}
+
+/* --- the ledger, made scannable ------------------------------------------- */
+/* Sticky month header: scroll into a month and its name stays with you, so
+   "which month am I in" never needs a scroll back up. */
+.bs-month-h, .bs-month-old > summary {
+  position: sticky; top: 96px; z-index: 20; background: var(--paper);
+}
+.bs-lhead { position: sticky; top: 137px; z-index: 19; background: var(--paper); }
+
+/* Weeks, each closed by its own subtotal. */
+.bs-week + .bs-week { margin-top: 2px; }
+.bs-week-f {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 7px 0 9px; border-bottom: 1px solid var(--rule);
+  font-size: 11.5px; color: var(--faint);
+}
+.bs-week-f b { margin-left: auto; font-size: 12px; color: var(--muted); font-weight: 600; }
+.bs-week-f i { font-style: normal; font-size: 11.5px; color: var(--faint); min-width: 88px; text-align: right; }
+.bs-week:last-child .bs-week-f { border-bottom: 0; }
+
+/* Friday, Saturday and Sunday are the big days; a shade more ink gives the
+   column a rhythm instead of twenty-one identical lines. */
+.bs-lr.wknd .bs-lr-d { color: var(--secondary); }
+.bs-lr.wknd .bs-lr-s { color: var(--headline); }
+.bs-lr.wknd .bs-lr-n { color: var(--headline); }
+
+@media (max-width: 900px) {
+  .bs-month-h, .bs-month-old > summary, .bs-lhead { position: static; }
+}

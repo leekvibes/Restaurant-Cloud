@@ -664,9 +664,11 @@ function layout(title, body, opts = {}) {
             i = (i + 1) % items.length;
             cur.classList.remove('on');
             cur.classList.add('out');
-            items[i].classList.add('on');
-            setTimeout(function () { cur.classList.remove('out'); }, 460);
-          }, 6000);
+            // The incoming one waits until the outgoing has cleared, so you
+            // watch the change happen instead of seeing two lines cross.
+            setTimeout(function () { items[i].classList.add('on'); }, 260);
+            setTimeout(function () { cur.classList.remove('out'); }, 900);
+          }, 3000);
         })();
       </script>
       <script>${searchScript()}</script>

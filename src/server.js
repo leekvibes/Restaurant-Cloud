@@ -963,10 +963,39 @@ app.get('/shifts', (req, res) => {
     const open = list.filter(({ s }) => s.key !== 'sent').length;
     const label = `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
 
+    // Weeks, so twenty-one identical rows become three groups your eye can
+    // hold — and a week subtotal is a question the page could not answer
+    // before. Monday starts the week, matching the payroll period.
+    const weekOf = (d) => {
+      const dt = new Date(d + 'T00:00:00');
+      return addDays(d, -((dt.getDay() + 6) % 7));
+    };
+    const inWeeks = (items) => {
+      const out = [];
+      for (const it of items) {
+        const wk = weekOf(it.x.date);
+        if (!out.length || out[out.length - 1].wk !== wk) out.push({ wk, list: [] });
+        out[out.length - 1].list.push(it);
+      }
+      return out;
+    };
+    const weekBlock = (items) => inWeeks(items).map(({ wk, list: wl }) => {
+      const wSales = sum(wl, ({ x }) => shiftSales(x));
+      const wTips = sum(wl, ({ x }) => x.tips);
+      return `<div class="bs-week">
+        ${wl.map(row).join('')}
+        <div class="bs-week-f"><span>week of ${esc(whenOf(wk))}</span>
+          <b class="bs-fig">${money(wSales)}</b>
+          <i class="bs-fig">${wTips ? money(wTips) + ' tips' : ''}</i></div>
+      </div>`;
+    }).join('');
+
     const row = ({ x, s }) => {
       const search = [x.date, dp(x.daypart), s.label, label].join(' ').toLowerCase();
       const none = shiftSales(x) === 0;
-      return `<a class="bs-lr" href="/shifts/${x.id}" data-shift data-status="${s.key}"
+      const dow = new Date(x.date + 'T00:00:00').getDay();
+      const weekend = dow === 0 || dow === 5 || dow === 6;
+      return `<a class="bs-lr${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
          data-service="${esc(x.daypart)}" data-search="${esc(search)}">
         <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8, 10))}</span>
         <span class="bs-lr-s">${esc(dp(x.daypart))}</span>
@@ -994,9 +1023,9 @@ app.get('/shifts', (req, res) => {
           <span>Date</span><span>Service</span><span>Status</span>
           <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
         </div>
-        <div class="bs-lrows">${first.map(row).join('')}</div>
+        <div class="bs-lrows">${weekBlock(first)}</div>
         ${rest.length ? `<details class="bs-fold"><summary>${rest.length} earlier day${rest.length === 1 ? '' : 's'} <span aria-hidden="true">show ▾</span></summary>
-          <div class="bs-lrows">${rest.map(row).join('')}</div></details>` : ''}
+          <div class="bs-lrows">${weekBlock(rest)}</div></details>` : ''}
       </details>`;
     }
     return `<details class="bs-month bs-month-old" data-month>
@@ -1011,7 +1040,7 @@ app.get('/shifts', (req, res) => {
         <span>Date</span><span>Service</span><span>Status</span>
         <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
       </div>
-      <div class="bs-lrows">${list.map(row).join('')}</div>
+      <div class="bs-lrows">${weekBlock(list)}</div>
     </details>`;
   }).join('');
 
@@ -1405,18 +1434,51 @@ app.get('/shifts/:id', (req, res) => {
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
   const money0 = (c) => (c ? money(c) : '<span class="bs-em">—</span>');
+
+  // Alcohol is $0 on every service so far. The column only appears if somebody
+  // actually rang some — a permanently empty column is a column that teaches
+  // you to stop reading the row.
+  const anyAlcohol = inp.servers.some((p) => toCents(p.alcohol) > 0);
+
+  const num = (name, val) =>
+    `<label class="bs-pill"><span>${name}</span><input name="${name === 'Kitchen' ? 'food' : name.toLowerCase()}" type="text" inputmode="decimal" value="${val || ''}" placeholder="0.00"></label>`;
+
   const staffRow = ({ p, st: st2 }, isServer) => {
     const tips = toCents(p.cardTips) + toCents(p.cashTips);
-    const sales = toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol);
-    return `<div class="bs-sr${st2.key === 'ok' ? '' : ' warn'}">
-      <span class="bs-sr-n">${esc(p.name)}</span>
-      <span class="bs-sr-r">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</span>
-      <span class="bs-sr-f">${isServer ? money0(sales) : '<span class="bs-em">—</span>'}</span>
-      <span class="bs-sr-f">${money0(tips)}</span>
-      <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? (Math.round(p.hours * 100) / 100).toFixed(2) : 'missing'}</span>
-      <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
-      ${canWrite() ? `<button type="button" class="bs-sr-e" onclick="startEdit(${p.employeeId},'${isServer ? 'server' : 'support'}')">Edit</button>` : '<span></span>'}
-    </div>`;
+    const e = entries[p.employeeId] || {};
+    const id = `edit-${p.employeeId}`;
+    return `<details class="bs-srow" id="${id}">
+      <summary class="bs-sr${st2.key === 'ok' ? '' : ' warn'}">
+        <span class="bs-sr-n">${esc(p.name)}</span>
+        <span class="bs-sr-r">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</span>
+        <span class="bs-sr-f">${isServer ? money0(toCents(p.food)) : '<span class="bs-em">—</span>'}</span>
+        <span class="bs-sr-f">${isServer ? money0(toCents(p.coffee)) : '<span class="bs-em">—</span>'}</span>
+        ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
+        <span class="bs-sr-f">${money0(tips)}</span>
+        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? (Math.round(p.hours * 100) / 100).toFixed(2) : 'missing'}</span>
+        <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
+        ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
+      </summary>
+      ${canWrite() ? `
+      <form class="bs-inline" method="post" action="/shifts/${sh.id}/${isServer ? 'server' : 'support'}">
+        <input type="hidden" name="employee_id" value="${p.employeeId}">
+        ${isServer ? `
+          ${num('Kitchen', e.food)}
+          ${num('Coffee', e.coffee)}
+          ${num('Alcohol', e.alcohol)}
+          <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
+        ` : `<label class="bs-pill"><span>Role</span><select name="role">${roleOpts(p.role)}</select></label>`}
+        <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="decimal" value="${e.hours || ''}" placeholder="0.00"></label>
+        <label class="bs-pill"><span>Wage/hr</span><input name="wage" type="text" inputmode="decimal" value="${e.wage || ''}" placeholder="default"></label>
+        <button class="bs-btn" type="submit">Save</button>
+        <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
+      </form>
+      <form class="bs-inline-rm" method="post" action="/shifts/${sh.id}/remove"
+            onsubmit="return confirm('Take ${esc(p.name).replace(/'/g, "\\'")} off this shift?')">
+        <input type="hidden" name="employee_id" value="${p.employeeId}">
+        <button type="submit">Take off this shift</button>
+      </form>` : ''}
+    </details>`;
   };
 
   const splitRows = eligible.length ? eligible.map((p) => `
@@ -1514,11 +1576,12 @@ app.get('/shifts/:id', (req, res) => {
           <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span></div>
 
           ${people.length ? `
-            <div class="bs-shead">
-              <span>Name</span><span>Role</span><span class="r">Sales</span>
+            <div class="bs-shead${anyAlcohol ? ' has-alc' : ''}">
+              <span>Name</span><span>Role</span><span class="r">Kitchen</span><span class="r">Coffee</span>
+              ${anyAlcohol ? '<span class="r">Alcohol</span>' : ''}
               <span class="r">Tips</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
             </div>
-            <div class="bs-srows">
+            <div class="bs-srows${anyAlcohol ? ' has-alc' : ''}">
               ${serverStates.map((x) => staffRow(x, true)).join('')}
               ${supportStates.map((x) => staffRow(x, false)).join('')}
             </div>`

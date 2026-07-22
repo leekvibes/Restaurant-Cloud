@@ -161,12 +161,32 @@ test('the sheet keeps every form the workspace had', async () => {
     assert.ok(h.includes(`action="${action}"`), `${what} is still reachable`);
   }
   assert.match(h, new RegExp(`href="/shifts/${sent}/results"`), 'and preview & send');
-  // In the ROW, not merely somewhere on the page — the function's own
-  // definition contains its name, so a page with no Edit buttons still had it.
+
+  // Every row edits in place, and posts to the endpoint for what that person
+  // is. Asserted in the TABLE, not merely somewhere on the page.
   const table = h.slice(h.indexOf('bs-srows'), h.indexOf('bs-sheet-note'));
-  const edits = (table.match(/onclick="startEdit\(/g) || []).length;
   const onShift = db.prepare('SELECT COUNT(*) n FROM work WHERE shift_id = ?').get(sent).n;
-  assert.strictEqual(edits, onShift, `every row can be edited, got ${edits} of ${onShift}`);
+  const forms = (table.match(/class="bs-inline" method="post"/g) || []).length;
+  assert.strictEqual(forms, onShift, `one editor per person, got ${forms} of ${onShift}`);
+  assert.ok(table.includes(`action="/shifts/${sent}/server"`), 'the server edits as a server');
+  assert.ok(table.includes(`action="/shifts/${sent}/support"`), 'and support as support');
+  // Each row carries ITS OWN person. Counting the fields is not enough —
+  // hardcoding every one to the same id gives the same count and silently
+  // posts every edit onto one employee.
+  // Per row, matched against the name in that row. Comparing the set of ids
+  // across the whole table is not enough: the first seeded employee is id 1,
+  // so hardcoding every form to 1 produced the same set and passed.
+  const byName = new Map(db.prepare(
+    'SELECT e.id, e.name FROM work w JOIN employees e ON e.id = w.employee_id WHERE w.shift_id = ?')
+    .all(sent).map((r) => [r.name, r.id]));
+  const rows = table.split('<details class="bs-srow"').slice(1);
+  assert.strictEqual(rows.length, onShift, `${onShift} rows`);
+  for (const r of rows) {
+    const name = (r.match(/class="bs-sr-n">([^<]+)</) || [])[1];
+    const id = Number((r.match(/name="employee_id" value="(\d+)"/) || [])[1]);
+    assert.ok(name && byName.has(name), `the row names somebody real: ${name}`);
+    assert.strictEqual(id, byName.get(name), `${name}'s editor posts ${name}'s id, not ${id}`);
+  }
 });
 
 test('the shared pool shows what it holds and who it splits to', async () => {
@@ -198,4 +218,96 @@ test('a sent shift is still fully editable', async () => {
   assert.ok(h.includes(`action="/shifts/${sent}/server"`), 'still editable');
   assert.ok(h.includes(`action="/shifts/${sent}/delete"`), 'still deletable');
   assert.match(h, /Emails sent/i, 'while saying it has gone out');
+});
+
+
+test('the money fields are typed, not stepped', async () => {
+  const { sent } = module.exports;
+  const h = await html(`/shifts/${sent}`);
+  const table = h.slice(h.indexOf('bs-srows'), h.indexOf('bs-sheet-note'));
+  // A number input's spinner arrows are a pixel-hunt on a laptop and useless
+  // on a phone, and every value here is money or hours typed in full.
+  assert.ok(!/class="bs-inline"[\s\S]*?type="number"/.test(table), 'no spinner inputs');
+  assert.match(table, /inputmode="decimal"/, 'but a numeric keypad on a phone');
+});
+
+test('kitchen and coffee are broken out per person', async () => {
+  const { sent, people } = module.exports;
+  const h = await html(`/shifts/${sent}`);
+  const head = h.slice(h.indexOf('bs-shead'), h.indexOf('bs-srows'));
+  assert.match(head, /Kitchen/, 'kitchen has its own column');
+  assert.match(head, /Coffee/, 'and so does coffee');
+
+  // The seed gives Sandra food only. Both figures must come from her own row,
+  // not from a combined total.
+  const w = new Database(DB);
+  w.prepare('UPDATE server_sales SET food_cents = 80000, coffee_cents = 40000 WHERE shift_id = ? AND employee_id = ?')
+    .run(sent, people.sandra);
+  w.close();
+  const h2 = await html(`/shifts/${sent}`);
+  // Inside the table. Her name also appears in the tip-pool list, and slicing
+  // from the first match reads the wrong part of the page entirely.
+  const t2 = h2.slice(h2.indexOf('bs-srows'), h2.indexOf('bs-sheet-note'));
+  const start = t2.indexOf('Sandra Moyer');
+  assert.ok(start > -1, 'she has a row');
+  const row = t2.slice(start, t2.indexOf('</summary>', start));
+  assert.match(row, /\$800\.00/, `kitchen shows on its own: ${row.replace(/<[^>]+>/g, ' ').trim()}`);
+  assert.match(row, /\$400\.00/, 'and coffee separately');
+  assert.ok(!/\$1,200\.00/.test(row), 'not lumped into one total');
+});
+
+test('a column nobody uses does not draw', async () => {
+  const { sent } = module.exports;
+  // Alcohol is $0 on every service. A permanently empty column teaches you to
+  // stop reading the row.
+  const h = await html(`/shifts/${sent}`);
+  const head = h.slice(h.indexOf('bs-shead'), h.indexOf('bs-srows'));
+  assert.ok(!/Alcohol/.test(head), 'no alcohol column while nobody rings any');
+
+  const w = new Database(DB);
+  w.prepare('UPDATE server_sales SET alcohol_cents = 5000 WHERE shift_id = ?').run(sent);
+  w.close();
+  try {
+    const h2 = await html(`/shifts/${sent}`);
+    const head2 = h2.slice(h2.indexOf('bs-shead'), h2.indexOf('bs-srows'));
+    assert.match(head2, /Alcohol/, 'and it appears the moment somebody does');
+  } finally {
+    const w2 = new Database(DB);
+    w2.prepare('UPDATE server_sales SET alcohol_cents = 0 WHERE shift_id = ?').run(sent);
+    w2.close();
+  }
+});
+
+test('the ledger groups days into weeks and totals each one', async () => {
+  // Spread across three calendar weeks, or one block satisfies "it groups"
+  // and the grouping is never actually exercised.
+  const w = new Database(DB);
+  const made = [9, 16, 23].map((d) => w.prepare(
+    "INSERT INTO shifts (date, daypart, status, total_food_cents) VALUES (?, 'cafe', 'emailed', 50000)")
+    .run(back(d)).lastInsertRowid);
+  w.close();
+  try {
+    const h = await html('/shifts');
+    // Counted WITHIN the newest month. Across the page, one block per month
+    // already reaches three, so a version that never split a month passed.
+    const first = h.slice(h.indexOf('class="bs-month"'), h.indexOf('bs-month bs-month-old'));
+    const blocks = (first.match(/class="bs-week"/g) || []).length;
+
+    const monday = (d) => { const t = new Date(d + 'T00:00:00'); t.setDate(t.getDate() - ((t.getDay() + 6) % 7)); return t.toISOString().slice(0, 10); };
+    const month = new Date().toISOString().slice(0, 7);
+    // Every shift in that month, not the first six — the rows behind the
+    // "earlier days" fold render their own week blocks and are in this slice.
+    const shown = db.prepare("SELECT date FROM shifts WHERE date LIKE ?").all(month + '%');
+    const want = new Set(shown.map((r) => monday(r.date))).size;
+    assert.strictEqual(blocks, want, `${want} distinct weeks in view, got ${blocks} blocks`);
+    assert.strictEqual((first.match(/week of [A-Z][a-z]{2} \d+/g) || []).length, blocks,
+      'and each one says which week it is');
+    // The subtotal is the point — "how did last week do" had no answer before.
+    const wk = h.slice(h.indexOf('bs-week-f'), h.indexOf('bs-week-f') + 300);
+    assert.match(wk, /\$[\d,]+\.\d{2}/, 'with its own total');
+  } finally {
+    const w2 = new Database(DB);
+    for (const id of made) w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
+    w2.close();
+  }
 });
