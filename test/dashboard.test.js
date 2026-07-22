@@ -673,12 +673,12 @@ test('the index reaches every section, and the account', async () => {
   assert.match(sheet, /bs-index-title">Index</);
 });
 
-test('the bottom bar says Dashboard, and Sales rather than Cash', async () => {
+test('the bottom bar says Home, and Sales rather than Cash', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
   const html = await (await as(owner, '/')).text();
   const bar = html.slice(html.indexOf('class="bs-bottom"'), html.indexOf('bs-index-sheet'));
-  assert.match(bar, />Dashboard</, 'the front page is called what the index calls it');
-  assert.ok(!/>Today</.test(bar));
+  assert.match(bar, />Home</);
+  assert.ok(!/>Today</.test(bar) && !/>Dashboard</.test(bar));
   assert.match(bar, /href="\/sales"/);
   assert.ok(!/href="\/cash"/.test(bar), 'cash is in the index, not the bar');
 });
@@ -722,4 +722,27 @@ test('the index keeps its account block in view while the sections scroll', asyn
   assert.match(idx, /class="bs-index-brand"><b>ZWIN<\/b>/, 'the wordmark is on it');
   // The account block is outside the scroller.
   assert.ok(idx.indexOf('bs-index-me') > idx.indexOf('</div>'), 'the account block follows the scroller');
+});
+
+
+test('a phone gets one door to the account, and the day it is', async () => {
+  const owner = await login({ password: 'dash-owner-pw' });
+  const html = await (await as(owner, '/')).text();
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
+
+  // The account lives in the Index on a phone — name, role, Settings, Users,
+  // Billing and Sign out, all of it. A second door to the same room costs a
+  // control on a bar with room for four.
+  assert.match(mob, /\.bs-masthead \.bs-acct \{[^}]*display:\s*none/, 'no avatar on the phone bar');
+
+  // On a desktop there is no Index, so the popover is the only route to
+  // Settings and Sign out and must not be hidden with it.
+  assert.ok(!/^\.bs-acct \{[^}]*display:\s*none/m.test(css), 'the popover survives on a desktop');
+  assert.match(html, /class="bs-acct"[\s\S]{0,700}href="\/logout"/, 'and still holds sign out');
+
+  // The masthead drops the date below 900px, so the one screen you check first
+  // thing had nothing on it saying what day it is.
+  assert.match(html, /class="bs-greet-d">[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}</,
+    'the greeting carries the day and date');
 });

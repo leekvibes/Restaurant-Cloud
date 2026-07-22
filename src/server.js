@@ -820,7 +820,7 @@ app.get('/', (req, res) => {
     <div class="bs-page">
       <div class="bs-head">
         <div class="bs-headwrap">
-          <p class="bs-greet">${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}</p>
+          <p class="bs-greet">${greeting(now)}${me && me.name && !me.master ? `, ${esc(me.name.split(' ')[0])}` : ''}<span class="bs-greet-d">${now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</span></p>
           <div class="bs-bb" id="bs-bb" data-n="${billboard.length}">
             ${billboard.map((m, i) => `<h1 class="bs-headline bs-bb-i${i === 0 ? ' on' : ''}">${m}</h1>`).join('')}
           </div>

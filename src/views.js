@@ -442,7 +442,7 @@ function subNav(path) {
  * of the chrome.
  */
 const BOTTOM = [
-  ['/', '▤', 'Dashboard'],
+  ['/', '▤', 'Home'],
   ['/shifts', '≡', 'Shifts'],
   ['/sales', '$', 'Sales'],
   ['/c/invoices', '▦', 'Invoices'],
