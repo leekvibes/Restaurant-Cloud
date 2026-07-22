@@ -584,3 +584,219 @@ body {
   .bs-notice-t .bs-act { margin-left: 0; flex-basis: 100%; }
 }
 .bs-sep { color: var(--faint); }
+
+/* ===========================================================================
+   SHIFTS — the ledger
+   ======================================================================== */
+.bs-subline { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
+
+/* --- stat strip ----------------------------------------------------------- */
+.bs-strip {
+  display: flex; align-items: flex-start; gap: 0;
+  margin-top: 22px; padding: 20px 0;
+  border-top: 1px solid var(--field-border); border-bottom: 1px solid var(--field-border);
+}
+.bs-strip-c { flex: 1; display: grid; gap: 3px; padding: 0 26px; min-width: 0; }
+.bs-strip-c:first-child { padding-left: 0; }
+.bs-strip-c + .bs-strip-c { border-left: 1px solid var(--rule); }
+.bs-strip-l { font-size: 13px; color: var(--secondary); }
+.bs-strip-c .bs-stat { font-size: 26px; }
+.bs-strip-s { font-size: 12.5px; color: var(--muted); }
+.bs-strip-note {
+  align-self: center; text-align: right; padding-left: 26px;
+  font-size: 12px; color: var(--faint); white-space: nowrap;
+}
+
+/* --- open right now ------------------------------------------------------- */
+.bs-open { display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px;
+  padding: 4px 0; border-bottom: 1px solid var(--field-border); }
+.bs-open-r {
+  display: flex; align-items: baseline; gap: 9px; padding: 13px 0;
+  font-size: 13px; color: var(--muted);
+}
+.bs-open-r b { font-size: 14.5px; font-weight: 600; color: var(--headline); }
+.bs-open-r .bs-act { margin-left: auto; }
+.bs-open-d { width: 8px; height: 8px; border-radius: 50% !important; background: var(--positive); flex-shrink: 0; }
+.bs-open-d.review { background: var(--warning); }
+
+/* --- filter line ---------------------------------------------------------- */
+.bs-filter {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 16px 0 6px;
+}
+.bs-filter-l { font-size: 13px; color: var(--muted); margin-right: 5px; }
+.bs-fchip {
+  border: 0; background: none; cursor: pointer; padding: 5px 9px;
+  font-family: var(--sans); font-size: 13px; color: var(--secondary);
+}
+.bs-fchip:hover { color: var(--ink); }
+.bs-fchip.on { color: var(--ink); font-weight: 600; }
+.bs-filter-sp { flex: 1; }
+.bs-ytab { padding: 5px 8px; font-size: 12.5px; color: var(--muted); }
+.bs-ytab.on { color: var(--ink); font-weight: 600; border-bottom: 2px solid var(--ink); }
+.bs-search-inline {
+  border: 1px solid var(--field-border); background: var(--surface);
+  padding: 6px 10px; font-family: var(--sans); font-size: 12.5px;
+  color: var(--ink); min-width: 210px;
+}
+
+/* --- the month ledger ----------------------------------------------------- */
+.bs-month { margin-top: 26px; }
+.bs-month-h, .bs-month-old > summary {
+  display: flex; align-items: baseline; gap: 14px;
+  padding-bottom: 9px; border-bottom: 1px solid var(--ink);
+}
+.bs-month-old > summary { list-style: none; cursor: pointer; padding-top: 4px; }
+.bs-month-old > summary::-webkit-details-marker { display: none; }
+.bs-month-meta { font-size: 13px; color: var(--muted); }
+.bs-month-meta b { font-weight: 500; }
+.bs-month-meta .ok { color: var(--positive); }
+.bs-month-meta .warn { color: var(--warning); }
+.bs-month-tot {
+  margin-left: auto; font-family: var(--mono); font-size: 14px;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.bs-month-tot b { font-weight: 600; color: var(--headline); }
+.bs-month-old > summary .bs-act { margin-left: 0; }
+
+.bs-lhead, .bs-lr {
+  display: grid;
+  grid-template-columns: 74px 1fr 116px 118px 104px 78px 60px 24px;
+  align-items: baseline; gap: 0 12px;
+}
+.bs-lhead {
+  padding: 11px 0 8px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-lhead .r, .bs-lr-n { text-align: right; }
+.bs-lr { padding: 11px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-lr:hover { background: var(--row-hover); }
+.bs-lr-d { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.bs-lr-s { font-size: 14px; font-weight: 600; color: var(--headline); }
+.bs-lr-st { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: var(--muted); }
+.bs-lr-st.sent { color: var(--positive); }
+.bs-lr-st.review { color: var(--danger); }
+.bs-lr-st.ready { color: var(--accent); }
+.bs-lr-st.open { color: var(--positive); }
+.bs-lr-st.empty { color: var(--faint); }
+.bs-lr-n {
+  font-family: var(--mono); font-size: 13px; color: var(--headline);
+  font-variant-numeric: tabular-nums;
+}
+.bs-lr-n.muted { color: var(--muted); }
+.bs-lr-miss { display: block; font-style: normal; font-size: 11px; color: var(--danger); }
+.bs-lr-go { color: var(--faint); text-align: right; }
+.bs-lr:hover .bs-lr-go { color: var(--accent); }
+
+@media (max-width: 1100px) {
+  .bs-strip { flex-wrap: wrap; gap: 18px 0; }
+  .bs-strip-c { flex: 1 1 44%; }
+  .bs-strip-c:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .bs-strip-note { flex-basis: 100%; text-align: left; padding-left: 0; }
+  .bs-open { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  /* The ledger keeps its shape but sheds the columns a phone cannot carry.
+     Nothing is lost — hours and staff are on the shift itself. */
+  .bs-lhead, .bs-lr { grid-template-columns: 62px 1fr 92px 100px 20px; }
+  .bs-lhead span:nth-child(5), .bs-lhead span:nth-child(6), .bs-lhead span:nth-child(7),
+  .bs-lr span:nth-child(5), .bs-lr span:nth-child(6), .bs-lr span:nth-child(7) { display: none; }
+  .bs-month-tot { flex-basis: 100%; margin-left: 0; }
+  .bs-month-h, .bs-month-old > summary { flex-wrap: wrap; gap: 4px 12px; }
+  .bs-strip-c { flex-basis: 100%; }
+  .bs-strip-c + .bs-strip-c { border-left: 0; border-top: 1px solid var(--rule); padding-top: 14px; }
+}
+
+/* ===========================================================================
+   SHIFT SHEET
+   ======================================================================== */
+.bs-back { display: inline-block; margin-bottom: 6px; font-size: 13px; }
+.bs-sheet .bs-headline { max-width: none; }
+.bs-status { margin: 8px 0 0; font-size: 13.5px; color: var(--muted); }
+.bs-status-w {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; margin-right: 7px;
+}
+.bs-status-w.ok { color: var(--positive); }
+.bs-status-w.warn { color: var(--warning); }
+.bs-status-w.ready { color: var(--accent); }
+.bs-stat.ok { color: var(--positive); }
+.bs-stat.bad { color: var(--danger); }
+.bs-em { font-style: normal; color: var(--faint); }
+
+.bs-cols2 { display: grid; grid-template-columns: 1fr 330px; margin-top: 4px; }
+.bs-cols2 > .bs-col:first-child { padding-left: 0; padding-right: 30px; border-right: 1px solid var(--field-border); }
+.bs-cols2 > .bs-col:last-child { padding-right: 0; padding-left: 30px; border-left: 0; }
+.bs-sheet-acts { font-size: 13px; }
+.bs-split-h { margin-top: 26px; }
+.bs-sheet-note { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+
+/* --- who was on ----------------------------------------------------------- */
+.bs-shead, .bs-sr {
+  display: grid; grid-template-columns: 1fr 84px 96px 92px 62px 74px 52px;
+  align-items: baseline; gap: 0 12px;
+}
+.bs-shead {
+  padding: 12px 0 8px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bs-shead .r, .bs-sr-f { text-align: right; }
+.bs-sr { padding: 12px 0; border-bottom: 1px dotted var(--rule-dotted); }
+.bs-sr:hover { background: var(--row-hover); }
+.bs-sr-n { font-size: 14px; font-weight: 600; color: var(--headline); }
+.bs-sr-r { font-size: 13px; color: var(--muted); }
+.bs-sr-f {
+  font-family: var(--mono); font-size: 13px; color: var(--headline);
+  font-variant-numeric: tabular-nums;
+}
+.bs-sr-f.miss { color: var(--warning); }
+.bs-sr-e {
+  border: 0; background: none; cursor: pointer; text-align: right;
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--accent);
+}
+.bs-sr-e:hover { color: var(--accent-hover); }
+
+/* --- the disclosures that hold every form the old workspace had ----------- */
+.bs-x { border-top: 1px solid var(--rule); margin-top: 2px; }
+.bs-x > summary {
+  list-style: none; cursor: pointer; padding: 13px 0;
+  font-size: 13px; font-weight: 500; color: var(--secondary);
+}
+.bs-x > summary::-webkit-details-marker { display: none; }
+.bs-x > summary::before { content: '▸ '; color: var(--faint); font-size: 10px; }
+.bs-x[open] > summary::before { content: '▾ '; }
+.bs-x > summary:hover { color: var(--ink); }
+.bs-x-danger > summary { color: var(--danger); }
+.bs-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px; padding: 4px 0 20px; align-items: end;
+}
+.bs-form label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.bs-form input, .bs-form select {
+  border: 1px solid var(--field-border); background: var(--surface);
+  padding: 8px 10px; font-family: var(--sans); font-size: 13px; color: var(--ink);
+}
+.bs-form > p { grid-column: 1 / -1; margin: 0; }
+.bs-danger { border-color: var(--danger); color: var(--danger); }
+.bs-danger:hover { background: var(--danger); color: var(--paper); }
+
+@media (max-width: 1100px) {
+  .bs-cols2 { grid-template-columns: 1fr; }
+  .bs-cols2 > .bs-col:first-child { padding-right: 0; border-right: 0; }
+  .bs-cols2 > .bs-col:last-child {
+    padding-left: 0; margin-top: 28px; padding-top: 6px;
+    border-top: 1px solid var(--field-border);
+  }
+}
+@media (max-width: 760px) {
+  /* Wage and role fold away; both are on the person's own record. */
+  .bs-shead, .bs-sr { grid-template-columns: 1fr 84px 74px 56px 50px; }
+  .bs-shead span:nth-child(2), .bs-sr .bs-sr-r,
+  .bs-shead span:nth-child(6), .bs-sr .bs-sr-f:nth-of-type(4) { display: none; }
+}
+
+/* The sheet has Preview & send in its header; the old sticky bar repeated it
+   at the foot in the previous shell. One is enough. */
+.bs .stickybar { display: none; }
