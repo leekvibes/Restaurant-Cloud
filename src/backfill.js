@@ -119,6 +119,31 @@ function ensureTrainingPosition() {
   return 'ok';
 }
 
+/**
+ * 11 July: the roles were corrected in the sheet — Esther served, Eunji bussed
+ * — and the rates were left where they were. So Esther carried $15 on a shift
+ * she served (her other server days are $7) and Eunji carried $7 on one she
+ * bussed (her other busser days are $10).
+ *
+ * The data file is fixed, which covers a fresh import. This covers the
+ * databases that already have it, since the backfill is marker-guarded and
+ * will not run again. Idempotent: it only touches a row that still holds the
+ * wrong rate, so it is a no-op everywhere else.
+ */
+function fixJul11Wages() {
+  const rows = db.prepare(`SELECT w.rowid AS rid, e.name, w.role, w.hourly_rate_cents AS rate
+    FROM work w JOIN employees e ON e.id = w.employee_id JOIN shifts s ON s.id = w.shift_id
+    WHERE s.date = '2026-07-11' AND s.daypart = 'cafe'`).all();
+  const set = db.prepare('UPDATE work SET hourly_rate_cents = ? WHERE rowid = ?');
+  const fixed = [];
+  for (const r of rows) {
+    const who = String(r.name).toLowerCase();
+    if (who.startsWith('esther') && r.role === 'server' && r.rate === 1500) { set.run(700, r.rid); fixed.push('Esther $15.00 -> $7.00'); }
+    if (who.startsWith('eunji') && r.role === 'busser' && r.rate === 700) { set.run(1000, r.rid); fixed.push('Eunji $7.00 -> $10.00'); }
+  }
+  return fixed;
+}
+
 /** The policy version the backfilled services are stamped with. */
 function historicPolicy() {
   const found = db.prepare(
@@ -252,4 +277,4 @@ function run(opts = {}) {
   }
 }
 
-module.exports = { run, apply, ensureTrainingPosition, toDecimalHours, canon, FIXES, ROLE, HISTORIC_RULES, MARKER, done, loadData, money, isHhmm };
+module.exports = { run, apply, ensureTrainingPosition, fixJul11Wages, toDecimalHours, canon, FIXES, ROLE, HISTORIC_RULES, MARKER, done, loadData, money, isHhmm };

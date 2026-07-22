@@ -370,8 +370,16 @@ test('per-shift wages are kept, not flattened to one rate per person', () => {
   const esther = db.prepare("SELECT id FROM employees WHERE LOWER(name) = 'esther'").get();
   const rates = db.prepare('SELECT DISTINCT hourly_rate_cents c FROM work WHERE employee_id = ? ORDER BY c').all(esther.id).map((r) => r.c);
   assert.deepStrictEqual(rates, [700, 1500]);
-  const server7 = db.prepare("SELECT COUNT(*) n FROM work WHERE employee_id = ? AND role='server' AND hourly_rate_cents=700").get(esther.id).n;
-  assert.strictEqual(server7, 6, 'the six server days are the $7 ones');
+  // The rule, not a count: the rate follows the role. Every day she serves is
+  // $7 and every day she does not is $15. Asserting "six" instead meant the
+  // 11 July correction — which made it seven — read as a regression.
+  const byRole = db.prepare(`SELECT role, hourly_rate_cents c, COUNT(*) n FROM work
+    WHERE employee_id = ? GROUP BY role, c`).all(esther.id);
+  for (const r of byRole) {
+    assert.strictEqual(r.c, r.role === 'server' ? 700 : 1500,
+      `${r.n} ${r.role} day(s) at ${r.c}c`);
+  }
+  assert.ok(byRole.some((r) => r.role === 'server'), 'she does serve');
 });
 
 test('training hours are paid but stay out of the tip pools', () => {
@@ -484,4 +492,53 @@ test('a backfilled day is standing on server sales, not a POS total', () => {
 
   const withServer = db.prepare(`SELECT COUNT(DISTINCT shift_id) n FROM server_sales`).get().n;
   assert.strictEqual(withServer, 68, 'and 68 carry what servers rang');
+});
+
+// --- the 11 July correction -----------------------------------------------------
+
+test('11 July pays the rate that matches the role', () => {
+  // The roles were corrected in the sheet — Esther served, Eunji bussed — and
+  // the rates were left where they were. Esther carried $15 on a shift she
+  // served (her other server days are $7) and Eunji carried $7 on one she
+  // bussed (her other busser days are $10).
+  const day = days.find((d) => d.date === '2026-07-11');
+  const esther = day.staff.find((s) => s.name.toLowerCase() === 'esther');
+  const eunji = day.staff.find((s) => s.name.toLowerCase() === 'eunji');
+  assert.strictEqual(esther.role, 'Server');
+  assert.strictEqual(esther.wage, 700, 'the server rate, as on every other day she served');
+  assert.ok(eunji.role.startsWith('Busser'));
+  assert.strictEqual(eunji.wage, 1000, 'the busser rate, as on every other day she bussed');
+});
+
+test('the repair reaches a database the import already ran on, once', () => {
+  // The backfill is marker-guarded and will not run again, so a correction to
+  // the data file alone would never reach the database that already has it.
+  const sh = db.prepare("SELECT id FROM shifts WHERE date = '2026-07-11' AND daypart = 'cafe'").get();
+  assert.ok(sh, 'the service is there');
+
+  // Put the wrong rates back, then let the repair find them.
+  const setBy = db.prepare(`UPDATE work SET hourly_rate_cents = ? WHERE shift_id = ?
+    AND employee_id = (SELECT id FROM employees WHERE LOWER(name) LIKE ?)`);
+  setBy.run(1500, sh.id, 'esther%');
+  setBy.run(700, sh.id, 'eunji%');
+
+  const first = BF.fixJul11Wages();
+  assert.strictEqual(first.length, 2, `both rows corrected, got ${JSON.stringify(first)}`);
+  assert.strictEqual(BF.fixJul11Wages().length, 0, 'and running it again does nothing');
+
+  const rate = (like) => db.prepare(`SELECT hourly_rate_cents c FROM work
+    WHERE shift_id = ? AND employee_id = (SELECT id FROM employees WHERE LOWER(name) LIKE ?)`).get(sh.id, like).c;
+  assert.strictEqual(rate('esther%'), 700);
+  assert.strictEqual(rate('eunji%'), 1000);
+});
+
+test('hours are not reported to fourteen decimal places', () => {
+  const { rows, totals } = require('../src/reports').aggregatePayroll('2026-07-04', '2026-07-17');
+  // 9.02 + 9.15 + 9.4 in binary floating point is 27.569999999999997.
+  for (const r of rows) {
+    assert.strictEqual(r.hours, Math.round(r.hours * 100) / 100, `${r.name}: ${r.hours}`);
+    assert.strictEqual(r.wk1Hours, Math.round(r.wk1Hours * 100) / 100);
+    assert.strictEqual(r.wk2Hours, Math.round(r.wk2Hours * 100) / 100);
+  }
+  assert.strictEqual(totals.hours, Math.round(totals.hours * 100) / 100, `${totals.hours}`);
 });

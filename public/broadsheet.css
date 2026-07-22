@@ -1154,3 +1154,31 @@ body {
    screen rather than another row in the list. */
 .bs-index-me { margin-top: 0; padding-top: 16px; }
 .bs-index-scroll { padding-bottom: 8px; }
+
+/* --- one person's payroll -------------------------------------------------- */
+.bs-back { display: inline-block; margin-bottom: 10px; font-size: 13px; color: var(--accent); }
+.bs-paygrid { margin-bottom: 4px; }
+.bs-inline-range { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; }
+.bs-inline-range input {
+  padding: 6px 9px; border: 1px solid var(--field-border);
+  background: var(--surface); color: var(--ink);
+  font-family: var(--mono); font-size: 12px;
+}
+.bs-inline-range span { font-size: 12px; color: var(--muted); }
+.bs-btn-sm {
+  border: 1px solid var(--ink); background: var(--surface); color: var(--ink);
+  padding: 6px 12px; cursor: pointer; font-family: var(--sans); font-size: 12.5px; font-weight: 500;
+}
+.bs-btn-sm:hover { background: var(--ink); color: var(--paper); }
+.bs-payhead, .bs-payrow { grid-template-columns: 92px 78px 1fr 68px 92px 96px 108px 28px; }
+.bs-payrow .bs-lr-s.muted { color: var(--muted); }
+/* The payroll table's name cell is a link now. */
+a.person { text-decoration: none; color: inherit; }
+a.person:hover span:last-child { color: var(--accent); text-decoration: underline; }
+
+@media (max-width: 900px) {
+  .bs-payhead, .bs-payrow { grid-template-columns: 78px 1fr 64px 86px 96px 24px; }
+  .bs-payhead span:nth-child(2), .bs-payrow .bs-lr-s:first-of-type { display: none; }
+  .bs-payhead span:nth-child(6), .bs-payrow .bs-lr-n:nth-of-type(3) { display: none; }
+  .bs-inline-range { margin-left: 0; flex-basis: 100%; }
+}

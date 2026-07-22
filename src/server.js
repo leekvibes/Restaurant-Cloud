@@ -2597,6 +2597,90 @@ app.post('/payroll/send', async (req, res) => {
     : `Mail isn't connected, so ${out.previewed} previews were written instead.${problems}`, !!out.errors.length);
 });
 
+/**
+ * One person, one period, shift by shift.
+ *
+ * Everything here is the same aggregation the payroll table runs — the detail
+ * rows it already builds, filtered to one employee. No second calculation, so
+ * the breakdown cannot disagree with the row it opened from.
+ */
+app.get('/payroll/:employeeId', (req, res) => {
+  const id = Number(req.params.employeeId);
+  const emp = q.allEmployees.all().find((e) => e.id === id);
+  if (!emp) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1 class="bs-headline">No such person</h1></div>'));
+
+  const cur = currentPeriod();
+  const justEnded = recentPeriods(2)[1];
+  // "All time" means from the first shift on record to the last.
+  const span = db.prepare('SELECT MIN(date) a, MAX(date) b FROM shifts').get();
+  const all = req.query.range === 'all';
+  const from = all ? (span.a || justEnded.start) : (req.query.from || justEnded.start);
+  const to = all ? (span.b || justEnded.end) : (req.query.to || justEnded.end);
+
+  const { rows, detail } = aggregatePayroll(from, to);
+  const me = rows.find((r) => r.employeeId === id);
+  const mine = detail.filter((d) => d.employeeId === id)
+    .sort((a, b) => (b.date + b.daypart).localeCompare(a.date + a.daypart));
+
+  const cell = (label, value, sub) =>
+    `<div class="bs-figcell"><span class="bs-figlabel">${label}</span><span class="bs-stat">${value}</span>${sub ? `<span class="bs-figsub">${sub}</span>` : ''}</div>`;
+
+  const ranges = [
+    ['This period', cur.start, cur.end],
+    ['Last period', justEnded.start, justEnded.end],
+    ['All time', span.a, span.b],
+  ];
+
+  res.send(layout(`${emp.name} · payroll`, `
+    ${flash(req)}
+    <div class="bs-page">
+      <a class="bs-back" href="/payroll?from=${from}&to=${to}">← Payroll</a>
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <p class="bs-greet">${esc(from)} — ${esc(to)}<span class="bs-greet-d">${mine.length} shift${mine.length === 1 ? '' : 's'}</span></p>
+          <h1 class="bs-headline">${esc(emp.name)}</h1>
+        </div>
+      </div>
+
+      <div class="bs-filter">
+        <span class="bs-filter-l">Range:</span>
+        ${ranges.map(([label, a, b]) => a ? `<a class="bs-fchip${from === a && to === b ? ' on' : ''}"
+          href="/payroll/${id}?from=${a}&to=${b}">${label}</a>` : '').join('')}
+        <form class="bs-inline-range" method="get" action="/payroll/${id}">
+          <input type="date" name="from" value="${esc(from)}"><span>to</span>
+          <input type="date" name="to" value="${esc(to)}">
+          <button class="bs-btn-sm" type="submit">Go</button>
+        </form>
+      </div>
+
+      ${me ? `<div class="bs-grid2 bs-paygrid">
+        ${cell('Hours', me.hours, `${me.wk1Hours} + ${me.wk2Hours} by week`)}
+        ${cell('Wages', money(me.wage), esc(me.roles))}
+        ${cell('Card tip payout', money(me.paycheckTips), 'goes on the paycheck')}
+        ${cell('Take-home', money(me.takeHome), me.cashHome || me.weeklyCash ? `plus ${money(me.cashHome + me.weeklyCash)} in cash` : 'wages + card tips')}
+      </div>` : '<p class="bs-clear">Nothing worked in this range.</p>'}
+
+      ${mine.length ? `
+      <div class="bs-sec-h"><span class="bs-kicker">Shift by shift</span></div>
+      <div class="bs-lhead bs-payhead">
+        <span>Date</span><span>Service</span><span>Role</span>
+        <span class="r">Hours</span><span class="r">Wage</span><span class="r">Tips kept</span><span class="r">On the check</span><span></span>
+      </div>
+      <div class="bs-lrows">
+        ${mine.map((d) => `<a class="bs-lr bs-payrow" href="/shifts/${d.shiftId}">
+          <span class="bs-lr-d">${esc(whenOf(d.date))}</span>
+          <span class="bs-lr-s">${esc(dp(d.daypart))}</span>
+          <span class="bs-lr-s muted">${esc(d.role)}</span>
+          <span class="bs-lr-n">${(Math.round(d.hours * 100) / 100).toFixed(2)}</span>
+          <span class="bs-lr-n">${money(d.wage)}</span>
+          <span class="bs-lr-n muted">${d.tipsKept ? money(d.tipsKept) : '—'}</span>
+          <span class="bs-lr-n">${money(d.paycheck)}</span>
+          <span class="bs-lr-go">→</span>
+        </a>`).join('')}
+      </div>` : ''}
+    </div>`));
+});
+
 app.get('/payroll', (req, res) => {
   // Default to the period that just ended — the one you're about to run —
   // rather than a rolling 14 days, which is never an actual pay period.
@@ -2608,7 +2692,7 @@ app.get('/payroll', (req, res) => {
 
   const body = rows.map((r) => `
     <tr>
-      <td><div class="person"><span class="avatar">${r.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}</span><span>${esc(r.name)}</span></div>
+      <td><a class="person" href="/payroll/${r.employeeId}?from=${from}&to=${to}"><span class="avatar">${r.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}</span><span>${esc(r.name)}</span></a>
         <div class="sub" style="margin-left:40px">${esc(r.roles)}</div></td>
       <td class="num">${r.shifts}</td>
       <td class="num"><b>${r.hours}</b></td>
@@ -7833,6 +7917,11 @@ mountModules(app);
 if (process.env.ZWIN_SKIP_BACKFILL !== '1') {
   try {
     const BACKFILL = require('./backfill');
+    // A one-row correction that has to reach databases the backfill already
+    // ran on. Idempotent and outside the marker, so it applies once and then
+    // finds nothing to do.
+    const fixed = BACKFILL.fixJul11Wages();
+    if (fixed.length) console.log(`\n  Backfill: corrected 11 Jul rates — ${fixed.join(', ')}.`);
     const out = BACKFILL.run();
     if (out.ran) {
       const r = out.report;

@@ -134,7 +134,7 @@ function aggregatePayroll(from, to) {
       const paycheck = p.tipsKept - p.cashTips;
       rec.roles.add('server'); rec.hours += p.hours; rec.wage += wage; rec[wk] += p.hours;
       rec.paycheckTips += paycheck; rec.cashHome += p.cashTips; rec.tipsEarned += p.tipsKept; rec.shifts += 1;
-      detail.push({ date: sh.date, daypart: sh.daypart, name: p.name, role: 'server', hours: p.hours,
+      detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: 'server', hours: p.hours,
         wage, cardTips: p.cardTips, cashTips: p.cashTips, tipout: p.tipoutTotal, tipsKept: p.tipsKept, paycheck });
     }
     for (const p of r.support) {
@@ -147,23 +147,31 @@ function aggregatePayroll(from, to) {
       rec.paycheckTips += p.tipShare + poolPaycheck;   // role tip-out + card pool → paycheck
       rec.weeklyCash += poolCash;                      // jar + to-go cash → handed out
       rec.tipsEarned += p.tipShare + (p.poolShare || 0); rec.shifts += 1;
-      detail.push({ date: sh.date, daypart: sh.daypart, name: p.name, role: p.role, hours: p.hours,
+      detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: p.role, hours: p.hours,
         wage, cardTips: 0, cashTips: 0, tipout: 0, tipsKept: p.tipShare + (p.poolShare || 0), paycheck: p.tipShare + poolPaycheck });
     }
   }
 
   // Derived per-person columns for running payroll.
+  // Hours are the one figure here that is not an integer. Adding 9.02 + 9.15
+  // + 9.4 in binary floating point lands on 106.55000000000001, and a payroll
+  // page that reports somebody's fortnight to fourteen decimal places is a
+  // payroll page nobody trusts. Rounded once, where the totals are built.
+  const hrs = (n) => Math.round(n * 100) / 100;
+
   const rows = [...people.values()].sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
     const cashTips = r.cashHome + r.weeklyCash;   // shown for reference only
     // Take-home = what actually lands on the paycheck. Cash is excluded
     // because they already walked out with it.
-    return { ...r, roles: [...r.roles].join(', '), cashTips, takeHome: r.wage + r.paycheckTips };
+    return { ...r, roles: [...r.roles].join(', '), cashTips, takeHome: r.wage + r.paycheckTips,
+      hours: hrs(r.hours), wk1Hours: hrs(r.wk1Hours), wk2Hours: hrs(r.wk2Hours) };
   });
   const sum = (k) => rows.reduce((t, r) => t + r[k], 0);
   const totals = {
-    shifts: sum('shifts'), hours: sum('hours'), wage: sum('wage'), paycheckTips: sum('paycheckTips'),
+    shifts: sum('shifts'), hours: hrs(sum('hours')), wage: sum('wage'), paycheckTips: sum('paycheckTips'),
     cashHome: sum('cashHome'), weeklyCash: sum('weeklyCash'), cashTips: sum('cashTips'),
-    takeHome: sum('takeHome'), tipsEarned: sum('tipsEarned'), wk1Hours: sum('wk1Hours'), wk2Hours: sum('wk2Hours'),
+    takeHome: sum('takeHome'), tipsEarned: sum('tipsEarned'),
+    wk1Hours: hrs(sum('wk1Hours')), wk2Hours: hrs(sum('wk2Hours')),
   };
 
   return { rows, totals, detail, shiftCount: shifts.length, midDate };

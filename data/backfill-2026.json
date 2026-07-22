@@ -6134,7 +6134,7 @@
     "name": "Esther",
     "role": "Server",
     "hours": 9.02,
-    "wage": 1500,
+    "wage": 700,
     "tipOutShare": 20350,
     "counterShare": 0
    },
@@ -6182,7 +6182,7 @@
     "name": "Eunji",
     "role": "Busser/Dishwasher",
     "hours": 6.93,
-    "wage": 700,
+    "wage": 1000,
     "tipOutShare": 3164,
     "counterShare": 1154
    }
