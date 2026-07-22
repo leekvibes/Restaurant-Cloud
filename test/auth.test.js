@@ -246,3 +246,102 @@ test('a wrong password is refused, and a forged cookie gets nothing', async () =
   const forged = '1.' + (Date.now() + 8.64e7) + '.deadbeefdeadbeefdeadbeefdeadbeef';
   assert.strictEqual((await as(forged, '/payroll')).status, 302, 'forged token rejected');
 });
+
+// ---------------------------------------------------------------------------
+// The sign-in page's appearance, and the stylesheet it depends on.
+//
+// /login was the last screen still on the old look — a white card with a 20px
+// radius and a drop shadow, floating on solid blue — and it was the only thing
+// still holding the `.tips-*` rules alive. Moving it onto the staff portal's
+// shell made those rules dead, and deleting dead CSS is where the damage
+// happens: an earlier attempt at exactly this deleted rules the page still
+// needed, and the check that was supposed to catch it was written wrong and
+// reported nothing either way.
+//
+// So the guard is the honest direction: whatever these pages emit must have a
+// rule somewhere in the stylesheets they load.
+// ---------------------------------------------------------------------------
+
+const fs = require('node:fs');
+
+/** Every class name that has at least one rule across the linked stylesheets. */
+function styledClasses() {
+  const css = ['styles.css', 'broadsheet.css', 'staff.css']
+    .map((f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8')).join('\n');
+  // Comments blanked length-preserving, so a comment can never read as a
+  // selector — that mistake is what deleted live rules the first time.
+  const noc = css.replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+  const out = new Set();
+  for (const rule of noc.matchAll(/([^{}]+)\{[^{}]*\}/g)) {
+    const sel = rule[1].trim();
+    if (!sel) continue;
+    for (const c of sel.matchAll(/\.([a-zA-Z0-9_-]+)/g)) out.add(c[1]);
+  }
+  return out;
+}
+
+/** Classes in the markup, ignoring <script> bodies — a class attribute built
+ *  from a template literal is not a class, and counting it as one produces
+ *  nonsense like `.'+(out?'out':'in')+'`. */
+function emittedClasses(html) {
+  const markup = html.replace(/<script[\s\S]*?<\/script>/g, '');
+  const out = new Set();
+  for (const m of markup.matchAll(/class="([^"]+)"/g)) {
+    for (const c of m[1].split(/\s+/)) if (c) out.add(c);
+  }
+  return out;
+}
+
+test('the sign-in page is on the broadsheet shell, not the old card', async () => {
+  const html = await (await get('/login')).text();
+  assert.match(html, /<div class="tp">/, 'the staff portal shell');
+  assert.match(html, /class="tp-h">Sign in\./, 'a serif headline');
+  assert.match(html, /class="tp-go"[^>]*form="signin"/, 'a full-width button reaching the form by id');
+  for (const dead of ['tips-screen', 'tips-card', 'tips-title', 'tips-lead', 'tips-error',
+    'tips-field', 'tips-in', 'tips-hint', 'tips-submit']) {
+    assert.ok(!emittedClasses(html).has(dead), `.${dead} is gone from the markup`);
+  }
+});
+
+test('the old sign-in styles are gone from the stylesheet too', () => {
+  // Left behind, they are 11 rules nothing can ever match, and the next person
+  // reading styles.css has to work out which of two sign-in designs is live.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  assert.ok(!/\.tips-/.test(css), 'no .tips-* rules remain');
+});
+
+test('every class the staff-facing pages emit has a rule behind it', async () => {
+  // Scoped to the two pages this change touched. The rest of the app has a
+  // handful of long-standing unstyled classes; widening this test would mean
+  // fixing those, which is a different job.
+  const styled = styledClasses();
+  const pages = ['/login', '/login?bad=1', '/tips'];
+  const bare = [];
+  let seen = 0;
+  for (const p of pages) {
+    const res = await get(p);
+    assert.strictEqual(res.status, 200, `${p} renders`);
+    const emitted = emittedClasses(await res.text());
+    assert.ok(emitted.size > 8, `${p} emitted ${emitted.size} classes`);
+    seen += emitted.size;
+    for (const c of emitted) if (!styled.has(c)) bare.push(`${p}: .${c}`);
+  }
+  assert.ok(seen > 40, `checked ${seen} class uses`);
+  assert.deepStrictEqual(bare, [], 'a class with no rule means CSS was deleted that a page still needs');
+});
+
+test('signing in still works, and still cannot be pointed off-site', async () => {
+  // The markup changed; the handler did not. Proving that is the point.
+  const bad = await post('/login', { password: 'wrong', next: '/payroll' });
+  assert.strictEqual(bad.status, 302);
+  assert.match(bad.headers.get('location'), /^\/login\?bad=1/, 'back to the form, flagged');
+  assert.ok(!(bad.headers.get('set-cookie') || '').includes('rc_auth='), 'and no session handed out');
+
+  const ok = await post('/login', { password: 'test-manager-password', next: '/payroll' });
+  assert.strictEqual(ok.status, 302);
+  assert.strictEqual(ok.headers.get('location'), '/payroll', 'sent where you were going');
+  assert.match(ok.headers.get('set-cookie') || '', /rc_auth=/, 'with a session');
+
+  const away = await post('/login', { password: 'test-manager-password', next: 'https://evil.example' });
+  assert.strictEqual(away.headers.get('location'), '/', 'an off-site next is ignored');
+});

@@ -183,25 +183,46 @@ app.use((req, res, next) => {
 app.get('/login', (req, res) => {
   if (!APP_PASSWORD) return res.redirect('/');
   const bad = req.query.bad === '1';
+  // The last screen on the old look — a white card with a 20px radius and a
+  // drop shadow, floating on solid blue. Rebuilt on the staff portal's shell,
+  // which is the right reference: both are one centred column, one task, often
+  // on a phone. The submit sits outside the <form> and reaches it by id, so it
+  // can live in the sticky footer the way the report's does.
   res.send(layout('Sign in', `
-    <div class="tips-screen">
-      <div class="tips-card">
-        <div style="text-align:center;margin-bottom:6px"><img src="/static/logo.png" alt="" width="56" height="56" style="border-radius:16px"></div>
-        <div class="tips-title" style="text-align:center">${esc(RESTAURANT)}</div>
-        <div class="tips-lead" style="text-align:center">Back-office sign-in. Staff logging tips don't need this — they use the tips link.</div>
-        ${bad ? '<div class="tips-error">That email and password don\'t match. Try again.</div>' : ''}
-        <form method="post" action="/login">
+    <div class="tp">
+      <div class="tp-top">
+        <span class="tp-mark">${esc(markOf(RESTAURANT))}</span>
+        <div class="tp-who">
+          <div class="tp-brand">${esc(RESTAURANT)}</div>
+          <div class="tp-name">Back office</div>
+        </div>
+      </div>
+
+      <div class="tp-body">
+        <h1 class="tp-h">Sign in.</h1>
+        <p class="tp-lead">Staff logging tips don't need this &mdash; they use the tips link.</p>
+        ${bad ? '<div class="tp-err">That email and password don\'t match. Try again.</div>' : ''}
+
+        <form method="post" action="/login" id="signin">
           <input type="hidden" name="next" value="${esc(req.query.next || '/')}">
-          <label class="tips-field">Email
-            <input name="email" class="tips-in" type="email" autocomplete="username" autofocus placeholder="you@restaurant.com">
-            <span class="tips-hint">Leave blank if you sign in with the owner password.</span>
-          </label>
-          <label class="tips-field">Password
-            <input name="password" class="tips-in" type="password" autocomplete="current-password" required>
-          </label>
-          <button class="tips-submit" type="submit">Sign in →</button>
+          <div class="tp-field">
+            <label class="tp-label" for="li-email">Email</label>
+            <input class="tp-in" id="li-email" name="email" type="email"
+              autocomplete="username" autofocus placeholder="you@restaurant.com">
+            <p class="tp-help">Leave blank if you sign in with the owner password.</p>
+          </div>
+          <div class="tp-field">
+            <label class="tp-label" for="li-pass">Password</label>
+            <input class="tp-in" id="li-pass" name="password" type="password"
+              autocomplete="current-password" required>
+          </div>
         </form>
       </div>
+
+      <div class="tp-foot">
+        <button class="tp-go" type="submit" form="signin">Sign in &rarr;</button>
+      </div>
+      <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
     </div>`, { bare: true }));
 });
 
