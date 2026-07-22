@@ -5236,7 +5236,7 @@ app.get('/c/invoices', (req, res) => {
   }
   const months = [...byMonth.keys()].sort().reverse();
 
-  const monthBlocks = months.map((m) => {
+  const monthBlocks = months.map((m, idx) => {
     const list = byMonth.get(m).slice().sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || '') || b.id - a.id);
     const sts = list.map((r) => invStatus(r));
     const paid = sts.filter((s) => s.key === 'paid').length;
