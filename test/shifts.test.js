@@ -290,13 +290,19 @@ test('the ledger groups days into weeks and totals each one', async () => {
     const h = await html('/shifts');
     // Counted WITHIN the newest month. Across the page, one block per month
     // already reaches three, so a version that never split a month passed.
-    const first = h.slice(h.indexOf('class="bs-month"'), h.indexOf('bs-month bs-month-old'));
+    // From the first month to the second. This used to slice to
+    // 'bs-month bs-month-old', a class that no longer exists — indexOf returned
+    // -1, the slice ran to the end of the document, and it counted the week
+    // blocks of every month on the page.
+    const a = h.indexOf('class="bs-month"');
+    const b = h.indexOf('class="bs-month"', a + 1);
+    const first = h.slice(a, b === -1 ? undefined : b);
     const blocks = (first.match(/class="bs-week"/g) || []).length;
 
     const monday = (d) => { const t = new Date(d + 'T00:00:00'); t.setDate(t.getDate() - ((t.getDay() + 6) % 7)); return t.toISOString().slice(0, 10); };
     const month = new Date().toISOString().slice(0, 7);
-    // Every shift in that month, not the first six — the rows behind the
-    // "earlier days" fold render their own week blocks and are in this slice.
+    // Every shift in that month. A month renders all of its days now — there
+    // is no "earlier days" fold inside one any more.
     const shown = db.prepare("SELECT date FROM shifts WHERE date LIKE ?").all(month + '%');
     const want = new Set(shown.map((r) => monday(r.date))).size;
     assert.strictEqual(blocks, want, `${want} distinct weeks in view, got ${blocks} blocks`);
@@ -310,4 +316,24 @@ test('the ledger groups days into weeks and totals each one', async () => {
     for (const id of made) w2.prepare('DELETE FROM shifts WHERE id = ?').run(id);
     w2.close();
   }
+});
+
+test('every month starts closed, and opening one shows all of its days', async () => {
+  const h = await html('/shifts');
+
+  // You arrive looking for a stretch of days, so the page opens as a list of
+  // months you can take in at once and you go into the one you want.
+  const months = h.match(/<details class="bs-month" data-month[^>]*>/g) || [];
+  assert.ok(months.length >= 1, 'months are rendered');
+  assert.ok(months.every((m) => !/\bopen\b/.test(m)), `none opens by default: ${months.join(' ')}`);
+
+  // And every one is the same control — the newest used to be a plain section
+  // with no way to shut it while the rest were disclosures with "open ▸".
+  assert.strictEqual((h.match(/bs-month-go/g) || []).length, months.length,
+    'each carries the same affordance');
+  assert.ok(!h.includes('bs-month-old'), 'there is one code path, not two');
+
+  // An open month shows everything in it. The inner "N earlier days" fold was
+  // a second click to reach what the first one asked for.
+  assert.ok(!/earlier day/.test(h), 'no fold inside a month');
 });

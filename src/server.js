@@ -958,7 +958,7 @@ app.get('/shifts', (req, res) => {
       </a>`).join('')}
     </div>` : '';
 
-  const monthBlocks = months.map((m, idx) => {
+  const monthBlocks = months.map((m) => {
     const list = byMonth.get(m);
     const sales = sum(list, ({ x }) => shiftSales(x));
     const tips = sum(list, ({ x }) => x.tips);
@@ -1011,33 +1011,22 @@ app.get('/shifts', (req, res) => {
       </a>`;
     };
 
-    // The newest month opens as a ledger; earlier ones are a single ruled line
-    // you expand. Ninety days of services rendered flat is what this replaces.
-    if (idx === 0) {
-      const first = list.slice(0, 6), rest = list.slice(6);
-      return `<details class="bs-month" data-month open>
-        <summary class="bs-month-h">
-          <span class="bs-kicker">${esc(label)}</span>
-          <span class="bs-month-meta">${list.length} shift${list.length === 1 ? '' : 's'} · ${Math.round(hrs).toLocaleString('en-US')} hrs ·
-            ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
-          <span class="bs-month-tot"><b>${money(sales)}</b> + ${money(tips)} tips</span>
-        </summary>
-        <div class="bs-lhead">
-          <span>Date</span><span>Service</span><span>Status</span>
-          <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
-        </div>
-        <div class="bs-lrows">${weekBlock(first)}</div>
-        ${rest.length ? `<details class="bs-fold"><summary>${rest.length} earlier day${rest.length === 1 ? '' : 's'} <span aria-hidden="true">show ▾</span></summary>
-          <div class="bs-lrows">${weekBlock(rest)}</div></details>` : ''}
-      </details>`;
-    }
-    return `<details class="bs-month bs-month-old" data-month>
-      <summary>
+    // Every month starts closed and every month behaves the same. You arrive
+    // looking for a particular stretch of days, so the page opens as a list of
+    // months you can take in at once — total, hours, how many are unsent — and
+    // you go into the one you want.
+    //
+    // An open month shows all of its days. Folding the first six and hiding
+    // the rest behind "N earlier days" made sense when the newest month opened
+    // by default; now it is a second click to reach what the first one asked
+    // for. The week rules are what keep a thirty-day month scannable.
+    return `<details class="bs-month" data-month>
+      <summary class="bs-month-h">
         <span class="bs-kicker">${esc(label)}</span>
         <span class="bs-month-meta">${list.length} shift${list.length === 1 ? '' : 's'} · ${Math.round(hrs).toLocaleString('en-US')} hrs ·
           ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
-        <span class="bs-month-tot"><b>${money(sales)}</b></span>
-        <span class="bs-act">open ▸</span>
+        <span class="bs-month-tot"><b>${money(sales)}</b>${tips ? ` + ${money(tips)} tips` : ''}</span>
+        <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
       </summary>
       <div class="bs-lhead">
         <span>Date</span><span>Service</span><span>Status</span>
@@ -5163,7 +5152,7 @@ app.get('/c/invoices', (req, res) => {
   }
   const months = [...byMonth.keys()].sort().reverse();
 
-  const monthBlocks = months.map((m, idx) => {
+  const monthBlocks = months.map((m) => {
     const list = byMonth.get(m).slice().sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || '') || b.id - a.id);
     const sts = list.map((r) => invStatus(r));
     const paid = sts.filter((s) => s.key === 'paid').length;

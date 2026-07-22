@@ -1073,3 +1073,14 @@ body {
 .bs-index-acct a { color: var(--accent); text-decoration: none; }
 .bs-index-acct a.danger { color: var(--danger); font-weight: 500; }
 .bs-index-acct span { color: var(--faint); }
+
+/* Every month is the same control now, so the affordance is on all of them.
+   It reads "open" when shut and "close" when not — a chevron that only ever
+   points one way is a chevron you stop looking at. */
+.bs-month-go { margin-left: 18px; white-space: nowrap; font-size: 12.5px; }
+.bs-month[open] > .bs-month-h .bs-month-go span { transform: rotate(90deg); display: inline-block; }
+.bs-month[open] > .bs-month-h .bs-month-go { color: var(--muted); }
+.bs-month[open] > .bs-month-h .bs-month-go::before { content: 'close '; }
+.bs-month[open] > .bs-month-h .bs-month-go { font-size: 0; }
+.bs-month[open] > .bs-month-h .bs-month-go::before,
+.bs-month[open] > .bs-month-h .bs-month-go span { font-size: 12.5px; }
