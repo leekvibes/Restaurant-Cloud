@@ -476,7 +476,14 @@ function groupRows(rows) {
   const out = { review: [], likelyNew: [], charges: [] };
   for (const r of rows || []) {
     if (r.fee && !r.match) out.charges.push(r);
-    else if (r.confidence === 'medium') out.review.push(r);
+    // Anything with a product behind it goes to the confirm pile, whether the
+    // matcher is sure or only close. A confident line normally never reaches
+    // here — auto-import took it when the invoice was saved — but one can, if
+    // the product it matches was created afterwards. Those used to fall into
+    // "likely new", which offers a tick box that CREATES a product, so
+    // confirming one would have made a second copy of the thing it already
+    // matched.
+    else if (r.confidence === 'medium' || (r.confidence === 'high' && r.match)) out.review.push(r);
     else out.likelyNew.push(r);
   }
   return out;
@@ -500,7 +507,11 @@ function groupRows(rows) {
  */
 function pendingCount(rows, done) {
   const seen = done || new Set();
-  return (rows || []).filter((r) => !seen.has(r.i) && !r.fee).length;
+  // The charge test is `fee && !match`, exactly as groupRows sorts them — not
+  // a bare `fee`. A line the reader called a charge but which matches a real
+  // product is offered on the screen, so it has to be counted here too, or the
+  // list would advertise less work than the screen shows.
+  return (rows || []).filter((r) => !seen.has(r.i) && !(r.fee && !r.match)).length;
 }
 
 /**

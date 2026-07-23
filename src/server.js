@@ -429,7 +429,12 @@ const dashQ = {
   // An invoice whose lines were read but never imported. The read is the
   // cheap half; the products only move when somebody confirms the matches,
   // so an invoice sitting here is cost data the app has and isn't using.
-  unimported: db.prepare(`SELECT id, invoice_number, amount_cents FROM m_invoices
+  // Candidates only. Whether an invoice really has work left cannot be asked in
+  // SQL — it depends on scoring each line against the product list as it stands
+  // right now — so this narrows to the ones worth scoring and the caller counts
+  // them properly. ai_lines and imported_idx come along for that.
+  unimported: db.prepare(`SELECT id, invoice_number, amount_cents, ai_lines, imported_idx, vendor_id
+    FROM m_invoices
     WHERE ai_lines IS NOT NULL AND ai_lines <> '' AND ai_lines <> '[]'
       AND COALESCE(lines_imported, 0) = 0 ORDER BY invoice_date DESC LIMIT 20`),
 };
@@ -573,7 +578,7 @@ app.get('/', (req, res) => {
       if (st.key === 'overdue') push('red', 'invoices', `Invoice ${i.invoice_number || '#' + i.id} — ${st.label}`, money(i.amount_cents), `/c/invoices`);
       else if (st.key === 'soon') due('invoices', `Invoice ${i.invoice_number || '#' + i.id}`, `${st.label} · ${money(i.amount_cents)}`, '/c/invoices');
     }
-    for (const i of dashQ.unimported.all()) {
+    for (const i of invoicesNeedingReview()) {
       push('blue', 'invoices', `Invoice ${i.invoice_number || '#' + i.id} — lines not imported`,
         `${money(i.amount_cents)} read but product costs unchanged`, `/c/invoices/${i.id}/import`);
     }
@@ -687,7 +692,7 @@ app.get('/', (req, res) => {
     }
   }
   if (may('trackers')) {
-    const waiting = dashQ.unimported.all();
+    const waiting = invoicesNeedingReview();
     if (waiting.length) notice('todo', 'invoices', `${waiting.length} invoice${waiting.length === 1 ? '' : 's'} awaiting review`,
       'Lines have been read but the product costs have not been updated.',
       'Review lines', waiting.length === 1 ? `/c/invoices/${waiting[0].id}/import` : '/c/invoices');
@@ -6089,12 +6094,33 @@ const needsProductReview = (r) => !!r.ai_lines && r.ai_lines !== '[]' && !r.line
  * "Review 12 product lines" for an invoice where ten went in on save and one
  * was a delivery fee: three times the work that was really waiting.
  */
-function pendingOnInvoice(inv) {
+function pendingOnInvoice(inv, products) {
   let lines = [];
   try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { return 0; }
   if (!lines.length) return 0;
-  const rows = reviewRows(lines, prodQ.plain.all(), inv.vendor_id ? Number(inv.vendor_id) : null);
+  const list = products || prodQ.plain.all();
+  const rows = reviewRows(lines, list, inv.vendor_id ? Number(inv.vendor_id) : null);
   return pendingCount(rows, importedIdx(inv));
+}
+
+/**
+ * The invoices that genuinely still have product work on them.
+ *
+ * The dashboard used to take the query above at face value: any invoice whose
+ * lines had been read and never stamped. That flags an invoice whose every
+ * line is a delivery charge, and one whose lines all went in but whose stamp
+ * never landed — telling you to go and review something the review screen then
+ * says is finished. A notice you cannot act on is worse than no notice, so the
+ * count is the same one the list and the screen use.
+ *
+ * The product list is read once and shared across the candidates rather than
+ * re-read per invoice.
+ */
+function invoicesNeedingReview() {
+  const candidates = dashQ.unimported.all();
+  if (!candidates.length) return [];
+  const products = prodQ.plain.all();
+  return candidates.filter((i) => pendingOnInvoice(i, products) > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -8983,7 +9009,17 @@ app.get('/c/invoices/:id/import', (req, res) => {
   // to skip and still import nothing — but a delivery fee the reader mistook
   // for a line item was invisible and unfixable, so they are shown, folded
   // away, and overridable.
-  const rows = allRows.filter((r) => !done.has(r.i) && r.confidence !== 'high');
+  //
+  // Only `done` decides what is off this screen. There used to be a second
+  // test, `confidence !== 'high'`, on the grounds that confident lines went in
+  // when the invoice was saved — but the lines that went in are in `done`
+  // already, so all that test could ever exclude was a confident line which
+  // had NOT been imported. Those exist: a line scores against the product list
+  // as it is now, so one that matched nothing at save time becomes a confident
+  // match the moment somebody creates that product from another invoice. The
+  // list counted it as work, this screen hid it, and the two disagreed —
+  // "Review 1 product line" opening onto "Nothing left to decide".
+  const rows = allRows.filter((r) => !done.has(r.i));
   const vendors = invQ.vendors.all();
   const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
 

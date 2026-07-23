@@ -182,8 +182,14 @@ test('a decision on a late line is not silently dropped', async () => {
     { description: 'Qqx Zeta Widget', qty: 1, unit_price: 11, total: 11 },
     { description: 'Qqx Omega Widget', qty: 1, unit_price: 12, total: 12 },
   ];
-  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, ai_lines)
-    VALUES ('2026-02-02', ?, 3300, 'Unpaid', ?)`).run(String(vend.id), JSON.stringify(lines)).lastInsertRowid;
+  // Line 0 is marked already imported, which is the state auto-import leaves an
+  // invoice in. The fixture used to skip this and rely on the screen hiding
+  // confident lines instead — so it passed for the wrong reason, and stopped
+  // proving anything the moment a confident line could legitimately still be
+  // waiting. Saying it outright is what the test claims to be about.
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, ai_lines, imported_idx)
+    VALUES ('2026-02-02', ?, 3300, 'Unpaid', ?, '[0]')`)
+    .run(String(vend.id), JSON.stringify(lines)).lastInsertRowid;
   db.close();
 
   const html = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
@@ -1090,4 +1096,101 @@ test('the overlay names the products step when a read carries line items', async
   // And only then — a read with no items leaves the plain label.
   assert.match(html, /if \(d\.line_items && d\.line_items\.length\)/,
     'gated on the read actually having produced line items');
+});
+
+// ---------------------------------------------------------------------------
+// No false review notices.
+//
+// Three surfaces claimed product work: the invoice list, the panel's "Review N
+// product lines" button, and the dashboard. Each computed it differently, so
+// an invoice could be advertised as needing review and then open onto "Nothing
+// left to decide". A notice you cannot act on is worse than no notice.
+// ---------------------------------------------------------------------------
+
+/** The state that produced the bug: a line that matched nothing when the
+ *  invoice was saved, and matches a product created later from another one. */
+async function orphanInvoice(num) {
+  const db = new Database(DB);
+  const vend = db.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-12-10', ?, 31536, 'Paid', ?, ?)`)
+    .run(String(vend.id), num, JSON.stringify([
+      { description: 'Qqx Orphan Coffee Beans', code: 'ORPH-1', qty: 2, unit_price: 157.68, total: 315.36 },
+    ])).lastInsertRowid;
+  // The product appears afterwards, exactly as importing another invoice would
+  // create it — so the line re-scores as a confident match, un-imported.
+  db.prepare(`INSERT INTO products (name, category, vendor_id, unit, sku)
+    VALUES ('Qqx Orphan Coffee Beans', 'Coffee', ?, 'case', 'ORPH-1')`).run(Number(vend.id));
+  db.close();
+  return id;
+}
+
+test('a confident line that was never imported is offered, not hidden', async () => {
+  const id = await orphanInvoice('ORPHAN-1');
+  const screen = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+
+  assert.ok(!/Nothing left to decide/.test(screen),
+    'the screen does not claim to be finished while a line is still out');
+  assert.match(screen, /Qqx Orphan Coffee Beans/, 'the line is on the screen');
+  // And in the confirm pile, with its match — not in "likely new", whose tick
+  // box creates a product and would duplicate the one it already matches.
+  assert.match(screen, /Needs your decision/, 'it is offered as a match to confirm');
+  assert.match(screen, /Looks like <b>Qqx Orphan Coffee Beans/, 'naming the product it matches');
+});
+
+test('the list and the import screen never disagree about what is left', async () => {
+  const db = new Database(DB, { readonly: true });
+  const invs = db.prepare(`SELECT * FROM m_invoices
+    WHERE ai_lines IS NOT NULL AND ai_lines <> '' AND ai_lines <> '[]'`).all();
+  db.close();
+  assert.ok(invs.length >= 3, `there are invoices with lines to check (${invs.length})`);
+
+  for (const inv of invs) {
+    const panel = await (await fetch(`${BASE}/c/invoices/${inv.id}/panel`)).text();
+    const claimed = Number((panel.match(/Review (\d+) product line/) || [])[1] || 0);
+    const screen = await (await fetch(`${BASE}/c/invoices/${inv.id}/import`)).text();
+    const finished = /Nothing left to decide|All products imported/.test(screen);
+    // The direction that matters: the list must never send you to a screen
+    // that has nothing for you.
+    assert.ok(!(claimed > 0 && finished),
+      `invoice ${inv.id} (${inv.invoice_number}): the list offers ${claimed} to review `
+      + 'and the screen says there is nothing — that is the false notice');
+
+    // The reverse is only a disagreement on an invoice nobody has answered
+    // yet. Once it is marked reviewed — by importing, or by "Skip, don't
+    // import" — the list goes quiet on purpose while the lines stay on the
+    // screen for anyone who opens it deliberately. That is "stop asking me",
+    // not "the lines are gone".
+    if (claimed === 0 && !inv.lines_imported) {
+      assert.ok(finished,
+        `invoice ${inv.id}: unanswered, the list counts nothing, yet the screen has work`);
+    }
+  }
+});
+
+test('an invoice of nothing but charges is not advertised anywhere', async () => {
+  const db0 = new Database(DB);
+  const vend = db0.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  const id = db0.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-12-11', ?, 850, 'Paid', 'FEEONLY-1', ?)`)
+    .run(String(vend.id), JSON.stringify([{ description: 'Delivery charge', total: 8.5 }])).lastInsertRowid;
+  db0.close();
+
+  const panel = await (await fetch(`${BASE}/c/invoices/${id}/panel`)).text();
+  assert.ok(!/Review \d+ product line/.test(panel), 'the list does not offer a review');
+
+  const screen = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+  assert.match(screen, /Nothing left to decide|All products imported/, 'and the screen agrees');
+
+  // The dashboard used to take "has lines, never stamped" at face value, which
+  // is exactly this invoice.
+  const home = await (await fetch(`${BASE}/`)).text();
+  const n = Number((home.match(/(\d+) invoices? awaiting review/) || [])[1] || 0);
+  const db = new Database(DB, { readonly: true });
+  const loose = db.prepare(`SELECT COUNT(*) n FROM m_invoices
+    WHERE ai_lines IS NOT NULL AND ai_lines <> '' AND ai_lines <> '[]'
+      AND COALESCE(lines_imported, 0) = 0`).get().n;
+  db.close();
+  assert.ok(n < loose,
+    `the dashboard counts real work (${n}), not every unstamped invoice (${loose})`);
 });
