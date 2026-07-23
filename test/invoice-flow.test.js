@@ -1005,3 +1005,89 @@ test('an invoice read with lines still lands on the import screen', async () => 
   assert.match(to, /\/import/, 'it goes to the import screen');
   assert.match(to, /2 lines need a decision/, 'and says how much is waiting');
 });
+
+// ---------------------------------------------------------------------------
+// "None of these" — leaving the product list alone.
+//
+// Some invoices are an accounting record and nothing more; the operator does
+// not track the items on them. Before this there was no way to say so: the
+// uncertain lines carry a `required` select, so the form would not submit
+// until each was set to Skip by hand, and the invoice sat on the list saying
+// "review" with no plain way to clear it.
+// ---------------------------------------------------------------------------
+
+test('skip-all marks an invoice reviewed and imports nothing', async () => {
+  const db0 = new Database(DB);
+  const vend = db0.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  // A medium line (required select) and a new line — the exact shape that
+  // blocked a plain submit.
+  const id = db0.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-11-20', ?, 4200, 'Unpaid', 'SKIPALL-1', ?)`)
+    .run(String(vend.id), JSON.stringify([
+      { description: 'Roma tomatoes', pack_size: '1 L', qty: 1, unit_price: 10, total: 10 },
+      { description: 'Qqx Brand New Line', qty: 1, unit_price: 32, total: 32 },
+    ])).lastInsertRowid;
+  const before = db0.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(id).n;
+  db0.close();
+
+  // The screen shows the button, and it opts out of validation and posts the flag.
+  const screen = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+  assert.match(screen, /name="skip_all" value="1"[^>]*formnovalidate|formnovalidate[^>]*name="skip_all"/,
+    'the skip button bypasses the required selects and posts skip_all');
+
+  const res = await post(`/c/invoices/${id}/import`, { skip_all: '1' });
+  assert.strictEqual(res.status, 302);
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /nothing added to products/i,
+    'and says nothing was imported');
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare('SELECT * FROM m_invoices WHERE id = ?').get(id);
+  const after = db.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(id).n;
+  db.close();
+  assert.ok(inv.lines_imported, 'the invoice is marked reviewed, so the list stops asking');
+  assert.strictEqual(after, before, 'and not one purchase was written');
+});
+
+test('an invoice cleared by skip-all no longer shows a review action', async () => {
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'SKIPALL-1'").get();
+  db.close();
+  // The list flag: ai_lines present, not empty, and lines_imported set → done.
+  const flagged = !!inv.ai_lines && inv.ai_lines !== '[]' && !inv.lines_imported;
+  assert.ok(!flagged, 'the list no longer flags it for review');
+
+  const panel = await (await fetch(`${BASE}/c/invoices/${inv.id}/panel`)).text();
+  assert.ok(!/Review \d+ product line/.test(panel), 'and the panel offers no review it cannot complete');
+});
+
+test('skip-all does not disturb what was already imported', async () => {
+  // It marks the invoice reviewed without touching imported_idx, so a later
+  // "undo" still knows exactly what auto-import put in.
+  const db0 = new Database(DB);
+  const vend = db0.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  const id = db0.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines, imported_idx)
+    VALUES ('2026-11-21', ?, 5000, 'Unpaid', 'SKIPALL-2', ?, ?)`)
+    .run(String(vend.id), JSON.stringify([{ description: 'Whatever', qty: 1, unit_price: 50, total: 50 }]),
+      JSON.stringify([0])).lastInsertRowid;
+  db0.close();
+
+  await post(`/c/invoices/${id}/import`, { skip_all: '1' });
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare('SELECT imported_idx, lines_imported FROM m_invoices WHERE id = ?').get(id);
+  db.close();
+  assert.strictEqual(inv.imported_idx, '[0]', 'the record of what was imported is left intact');
+  assert.ok(inv.lines_imported, 'while the review flag is cleared');
+});
+
+test('the overlay names the products step when a read carries line items', async () => {
+  // The step was always there — save an invoice with lines and you land on the
+  // import screen. The button now says so, so the option to do it right away is
+  // visible rather than a redirect that arrives unannounced.
+  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  assert.match(html, /sv\.textContent = 'Save & add products'/,
+    'the save button becomes "Save & add products" once lines are read');
+  // And only then — a read with no items leaves the plain label.
+  assert.match(html, /if \(d\.line_items && d\.line_items\.length\)/,
+    'gated on the read actually having produced line items');
+});

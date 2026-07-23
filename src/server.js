@@ -6783,6 +6783,12 @@ function captureScript(kinds) {
         if (d.line_items && d.line_items.length) {
           panel().querySelector('.cap-ailines').value = JSON.stringify(d.line_items);
           lines(d.line_items, d.total);
+          // Saying so on the button: this invoice carries items, and saving it
+          // leads straight into deciding which become products. The step was
+          // always there — this makes the option visible rather than a
+          // redirect that arrives unannounced.
+          var sv = el('cap-save');
+          if (sv) sv.textContent = 'Save & add products';
         }
       } else if (kind === 'expense') {
         set('name', d.name, low);
@@ -9139,6 +9145,11 @@ app.get('/c/invoices/:id/import', (req, res) => {
           </div>
           <div class="sticky-acts">
             <a class="btn btn-ghost" href="/c/invoices">Cancel</a>
+            ${/* The way out for an invoice whose items you do not want on the
+                   product list. formnovalidate so the uncertain lines' required
+                   selects do not block it; skip_all so the server imports
+                   nothing and just marks the invoice reviewed. */''}
+            <button class="btn btn-ghost" type="submit" name="skip_all" value="1" formnovalidate>Skip — don't import</button>
             ${/* One text node, not four. .btn is a flex row with a gap, so
                    "Import ", <span>0</span>, " line", <span>s</span> came out
                    spaced as "Import 0 line s". */''}
@@ -9242,6 +9253,21 @@ function importScript() {
 app.post('/c/invoices/:id/import', (req, res) => {
   const inv = invQ.one.get(Number(req.params.id));
   if (!inv) return res.status(404).end();
+
+  // "None of these — I don't want to track them." Some invoices are an
+  // accounting record and nothing more: the operator has no interest in the
+  // items on the product list. Without this the only way to clear the "review"
+  // flag was to set every uncertain line to Skip by hand — and the uncertain
+  // ones carry a `required` select, so the form would not even submit until
+  // each had been touched. This is the plain way to say done: import nothing,
+  // keep anything already imported, and stop the invoice asking. It leaves
+  // imported_idx alone, so a later "undo" still knows what auto-import put in.
+  if (req.body.skip_all === '1') {
+    db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(inv.id);
+    return res.redirect('/c/invoices?msg=' + encodeURIComponent(
+      'Marked reviewed — nothing added to products.'));
+  }
+
   // Confident lines are already in from the save, so a whole-invoice refusal
   // would block the leftovers. Duplicates are avoided per line instead.
   const seen = importedIdx(inv);
