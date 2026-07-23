@@ -302,6 +302,20 @@ ${cols}
 // these turned a SCAN into a SEARCH, or removed a temporary b-tree sort. None
 // of them changes a result — an index cannot, it only changes how the same
 // rows are found.
+// idx_inv_vendor was first shipped as a single-column expression index. It is
+// being widened to carry the sort keys, but CREATE INDEX IF NOT EXISTS keeps
+// whatever already has that name — so a database from the earlier version would
+// hold onto the narrow one and never gain the ordering. Drop it once, only when
+// it is the old shape, so the CREATE below rebuilds the full index. A database
+// that never had it, or already has the three-column version, is untouched.
+try {
+  const hasInvoices = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='m_invoices'").get();
+  if (hasInvoices) {
+    const keys = db.prepare('PRAGMA index_info(idx_inv_vendor)').all().length;
+    if (keys > 0 && keys < 3) db.exec('DROP INDEX idx_inv_vendor;');
+  }
+} catch (e) { console.error('[index] idx_inv_vendor migration skipped:', e.message); }
+
 db.exec(`
   -- The invoice ledger is read a year at a time, newest first.
   CREATE INDEX IF NOT EXISTS idx_inv_date ON m_invoices (invoice_date DESC);
@@ -311,7 +325,17 @@ db.exec(`
   -- as CAST(vendor_id AS INTEGER). A plain index on the column cannot serve
   -- that: the cast has to be indexed, not the column. This is why the vendor
   -- page scanned the whole table once per vendor.
-  CREATE INDEX IF NOT EXISTS idx_inv_vendor ON m_invoices (CAST(vendor_id AS INTEGER));
+  --
+  -- The sort keys ride along after the filter. The vendor detail page reads one
+  -- vendor's invoices "ORDER BY invoice_date DESC, id DESC", and with only the
+  -- cast indexed it found the vendor's rows by index but still sorted them in a
+  -- temporary b-tree. Carrying (invoice_date DESC, id DESC) in the same index,
+  -- in that order after the vendor key, lets the ordered slice come straight
+  -- off the index with no sort. The leading column is unchanged, so the
+  -- filter-only callers — the grouped vendor rollup and the single-vendor
+  -- count — use it exactly as before.
+  CREATE INDEX IF NOT EXISTS idx_inv_vendor
+    ON m_invoices (CAST(vendor_id AS INTEGER), invoice_date DESC, id DESC);
 
   -- Unpaid and overdue, which is a small slice of a large table and the one
   -- the dashboard asks for on every load. Partial, because a full index on
@@ -322,8 +346,23 @@ db.exec(`
   -- Both lists are read in date order, and both were sorting the whole table
   -- in a temp b-tree to do it.
   CREATE INDEX IF NOT EXISTS idx_exp_date ON m_expenses (spent_on DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS idx_doc_date ON m_documents (doc_date DESC);
+
+  -- The documents list orders by COALESCE(doc_date, created_at) DESC, id DESC —
+  -- a filed date is not always the date typed on the paper, so it falls back to
+  -- when the row was created. The index has to be on that whole expression, not
+  -- on doc_date alone: an index on doc_date cannot order by COALESCE(doc_date,
+  -- created_at), so the old idx_doc_date was never used and the list still
+  -- scanned and sorted in a temp b-tree. Indexing the ordering expression
+  -- itself lets the rows come back already in order. (The query returns every
+  -- document — no filter — so the plan reads the index end to end; that read is
+  -- the work, and it is no longer followed by a sort.)
+  CREATE INDEX IF NOT EXISTS idx_doc_order ON m_documents (COALESCE(doc_date, created_at) DESC, id DESC);
 `);
+
+// The documents index used to be idx_doc_date on doc_date alone, which the real
+// query could never use. A database that ran the earlier version still carries
+// it — dead weight maintained on every write and never read. Drop it once.
+db.exec('DROP INDEX IF EXISTS idx_doc_date;');
 
 // ---------------------------------------------------------------------------
 // Helpers
