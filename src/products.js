@@ -163,32 +163,71 @@ const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').tr
 
 // Everything the list and detail pages show, derived per product. `window` is
 // an ISO date: purchases on or after it count toward `spend_window`.
+/**
+ * A product with everything derived from its purchase history.
+ *
+ * Still derived on read — nothing about price or spend is stored, which is the
+ * decision this whole file rests on. What changed is the shape: this used to
+ * be thirteen correlated subqueries, each re-reading product_purchases for one
+ * product, so a list of four hundred products issued five thousand two hundred
+ * of them. It is now one grouped pass for the aggregates and one windowed pass
+ * for the newest priced line, joined on.
+ *
+ * The figures are identical. That is not an assertion — old and new were run
+ * side by side over the whole catalogue and compared column by column, at four
+ * hundred products and again at sixteen hundred, and every value matched. The
+ * test below pins the two that are easy to get subtly wrong.
+ *
+ * prior_price deserves a note. It is the average of every priced purchase
+ * EXCEPT the newest one, which the old query expressed by re-finding the
+ * newest and excluding its id — running the same lookup twice. The same number
+ * falls out of (sum - newest) / (n - 1), and is NULL when there is only one
+ * priced purchase, because the average of nothing is not zero.
+ */
 const ROLLUP = `
+  WITH agg AS (
+    SELECT product_id,
+      COUNT(*) AS buys,
+      SUM(total_cents) AS spend_all,
+      SUM(CASE WHEN purchased_on >= @from_month THEN total_cents ELSE 0 END) AS spend_month,
+      SUM(CASE WHEN purchased_on >= @from_year  THEN total_cents ELSE 0 END) AS spend_year,
+      MAX(purchased_on) AS last_on,
+      MIN(purchased_on) AS first_on,
+      -- CASE rather than a WHERE, so one pass serves both the priced figures
+      -- and the counts that include unpriced lines. MIN/MAX/AVG skip NULLs.
+      MIN(CASE WHEN unit_price_cents > 0 THEN unit_price_cents END) AS low_price,
+      MAX(CASE WHEN unit_price_cents > 0 THEN unit_price_cents END) AS high_price,
+      AVG(CASE WHEN unit_price_cents > 0 THEN unit_price_cents END) AS avg_raw,
+      SUM(CASE WHEN unit_price_cents > 0 THEN unit_price_cents ELSE 0 END) AS priced_sum,
+      SUM(CASE WHEN unit_price_cents > 0 THEN 1 ELSE 0 END) AS priced_n
+    FROM product_purchases
+    GROUP BY product_id
+  ),
+  newest AS (
+    -- The most recent priced purchase per product. Ordered by date then id, so
+    -- two deliveries on one day resolve the same way they always did.
+    SELECT product_id, unit_price_cents AS last_price FROM (
+      SELECT product_id, unit_price_cents,
+        ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY purchased_on DESC, id DESC) AS rn
+      FROM product_purchases
+      WHERE unit_price_cents > 0
+    ) WHERE rn = 1
+  )
   SELECT p.*,
-    (SELECT COUNT(*)            FROM product_purchases x WHERE x.product_id = p.id) AS buys,
-    (SELECT COALESCE(SUM(x.total_cents), 0) FROM product_purchases x WHERE x.product_id = p.id) AS spend_all,
-    (SELECT COALESCE(SUM(x.total_cents), 0) FROM product_purchases x
-       WHERE x.product_id = p.id AND x.purchased_on >= @from_month) AS spend_month,
-    (SELECT COALESCE(SUM(x.total_cents), 0) FROM product_purchases x
-       WHERE x.product_id = p.id AND x.purchased_on >= @from_year) AS spend_year,
-    (SELECT MAX(x.purchased_on) FROM product_purchases x WHERE x.product_id = p.id) AS last_on,
-    (SELECT MIN(x.purchased_on) FROM product_purchases x WHERE x.product_id = p.id) AS first_on,
-    (SELECT MIN(x.unit_price_cents) FROM product_purchases x WHERE x.product_id = p.id AND x.unit_price_cents > 0) AS low_price,
-    (SELECT MAX(x.unit_price_cents) FROM product_purchases x WHERE x.product_id = p.id AND x.unit_price_cents > 0) AS high_price,
-    (SELECT ROUND(AVG(x.unit_price_cents)) FROM product_purchases x WHERE x.product_id = p.id AND x.unit_price_cents > 0) AS avg_price,
-    -- Newest priced purchase, and the average of everything before it. The
-    -- trend is one against the other, so a single delivery at an odd price
-    -- doesn't read as a trend on its own.
-    (SELECT x.unit_price_cents FROM product_purchases x
-       WHERE x.product_id = p.id AND x.unit_price_cents > 0
-       ORDER BY x.purchased_on DESC, x.id DESC LIMIT 1) AS last_price,
-    (SELECT ROUND(AVG(y.unit_price_cents)) FROM product_purchases y
-       WHERE y.product_id = p.id AND y.unit_price_cents > 0
-         AND y.id <> (SELECT x.id FROM product_purchases x
-                        WHERE x.product_id = p.id AND x.unit_price_cents > 0
-                        ORDER BY x.purchased_on DESC, x.id DESC LIMIT 1)) AS prior_price,
-    (SELECT v.name FROM m_vendors v WHERE v.id = p.vendor_id) AS vendor_name
-  FROM products p`;
+    COALESCE(a.buys, 0)        AS buys,
+    COALESCE(a.spend_all, 0)   AS spend_all,
+    COALESCE(a.spend_month, 0) AS spend_month,
+    COALESCE(a.spend_year, 0)  AS spend_year,
+    a.last_on, a.first_on, a.low_price, a.high_price,
+    ROUND(a.avg_raw) AS avg_price,
+    n.last_price,
+    CASE WHEN a.priced_n > 1
+      THEN ROUND((a.priced_sum - n.last_price) * 1.0 / (a.priced_n - 1)) END AS prior_price,
+    v.name AS vendor_name
+  FROM products p
+  LEFT JOIN agg a    ON a.product_id = p.id
+  LEFT JOIN newest n ON n.product_id = p.id
+  LEFT JOIN m_vendors v ON v.id = p.vendor_id`;
 
 const q = {
   all: db.prepare(`${ROLLUP} ORDER BY p.name COLLATE NOCASE`),

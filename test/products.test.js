@@ -354,3 +354,100 @@ test('likely duplicates are found with the same engine used on invoices', () => 
       'and something unrelated is not');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The rollup's shape.
+//
+// These figures used to come from thirteen correlated subqueries, one set per
+// product; they now come from one grouped pass and one windowed pass. The
+// numbers are meant to be identical, and were compared column by column across
+// a seeded catalogue before the change shipped — but a seeded comparison is a
+// one-off, and this file is what stops the two drifting later.
+//
+// The cases below are the ones where a rewrite goes subtly wrong: the average
+// that excludes the newest price, a product with exactly one purchase, and a
+// product with none at all.
+// ---------------------------------------------------------------------------
+
+test('prior price is the average of everything except the newest', () => {
+  scratch(() => {
+    const p = makeProduct('Rollup prior');
+    buy(p, '2026-07-01', 1000);
+    buy(p, '2026-07-02', 2000);
+    buy(p, '2026-07-03', 3000);   // newest — excluded from prior
+    const r = q.one.get({ ...ARGS, id: p });
+    assert.strictEqual(r.last_price, 3000, 'newest is the last price');
+    assert.strictEqual(r.prior_price, 1500, 'and prior is the mean of 1000 and 2000, not of all three');
+    assert.strictEqual(r.avg_price, 2000, 'while the plain average does include it');
+  });
+});
+
+test('two purchases on one day resolve by id, newest last', () => {
+  // The window orders by date then id. Same-day deliveries are ordinary, and
+  // getting the tiebreak wrong silently reverses which price is "current".
+  scratch(() => {
+    const p = makeProduct('Rollup sameday');
+    buy(p, '2026-07-01', 1000);
+    buy(p, '2026-07-05', 4000);
+    buy(p, '2026-07-05', 5000);   // later id, same day
+    const r = q.one.get({ ...ARGS, id: p });
+    assert.strictEqual(r.last_price, 5000, 'the later row of the same day wins');
+    assert.strictEqual(r.prior_price, 2500, 'and the rest average without it');
+  });
+});
+
+test('one purchase has no prior to compare against', () => {
+  scratch(() => {
+    const p = makeProduct('Rollup single');
+    buy(p, '2026-07-01', 1200);
+    const r = q.one.get({ ...ARGS, id: p });
+    assert.strictEqual(r.last_price, 1200);
+    assert.strictEqual(r.prior_price, null, 'the average of nothing is nothing, not zero');
+    assert.strictEqual(trendOf(r), null, 'so there is no trend to show');
+  });
+});
+
+test('a product nobody has bought reads as zero, not as null', () => {
+  // The old query wrapped each sum in COALESCE. A join has to put those zeroes
+  // back, or every page dividing by spend starts producing NaN.
+  scratch(() => {
+    const p = makeProduct('Rollup unbought');
+    const r = q.one.get({ ...ARGS, id: p });
+    assert.strictEqual(r.buys, 0);
+    assert.strictEqual(r.spend_all, 0);
+    assert.strictEqual(r.spend_month, 0);
+    assert.strictEqual(r.spend_year, 0);
+    assert.strictEqual(r.last_price, null, 'but a price it never had is absent, not zero');
+    assert.strictEqual(r.last_on, null);
+  });
+});
+
+test('unpriced deliveries count as purchases but not as prices', () => {
+  // A line with no unit price still happened and still cost money. It must
+  // reach buys and spend, and stay out of low/high/average.
+  scratch(() => {
+    const p = makeProduct('Rollup unpriced');
+    buy(p, '2026-07-01', 0, 1);
+    buy(p, '2026-07-02', 800);
+    const r = q.one.get({ ...ARGS, id: p });
+    assert.strictEqual(r.buys, 2, 'both deliveries counted');
+    assert.strictEqual(r.low_price, 800, 'the zero is not the cheapest price');
+    assert.strictEqual(r.high_price, 800);
+    assert.strictEqual(r.avg_price, 800, 'nor does it drag the average down');
+  });
+});
+
+test('the month and year windows only count what falls inside them', () => {
+  scratch(() => {
+    const p = makeProduct('Rollup windows');
+    buy(p, '2025-12-31', 1000);   // before both
+    buy(p, '2026-02-01', 2000);   // inside the year, before the month
+    buy(p, '2026-07-15', 3000);   // inside both
+    const r = q.one.get({ ...ARGS, id: p });
+    assert.strictEqual(r.spend_all, 6000, 'everything ever');
+    assert.strictEqual(r.spend_year, 5000, 'this year only');
+    assert.strictEqual(r.spend_month, 3000, 'this month only');
+    assert.strictEqual(r.first_on, '2025-12-31', 'and the span covers all of it');
+    assert.strictEqual(r.last_on, '2026-07-15');
+  });
+});

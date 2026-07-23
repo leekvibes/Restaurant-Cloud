@@ -7864,6 +7864,14 @@ const vendQ = {
   // number — rows written by different paths hold "1" or "1.0".
   stats: db.prepare(`SELECT COUNT(*) n, MAX(invoice_date) last, COALESCE(SUM(amount_cents),0) spend
                      FROM m_invoices WHERE CAST(vendor_id AS INTEGER) = ?`),
+  // The same rollup for every vendor at once. The list page asked for it one
+  // vendor at a time, which is one query per row — fine at ten vendors, forty
+  // queries at forty, and every one of them a full scan of the invoice table
+  // before idx_inv_vendor existed. Grouped here so the page costs one read
+  // whatever the vendor list grows to.
+  allStats: db.prepare(`SELECT CAST(vendor_id AS INTEGER) AS vid, COUNT(*) n,
+                          MAX(invoice_date) last, COALESCE(SUM(amount_cents),0) spend
+                        FROM m_invoices GROUP BY CAST(vendor_id AS INTEGER)`),
   invoices: db.prepare(`SELECT * FROM m_invoices WHERE CAST(vendor_id AS INTEGER) = ?
                         ORDER BY invoice_date DESC, id DESC LIMIT 12`),
 };
@@ -7871,7 +7879,13 @@ const vendQ = {
 const hasContact = (v) => !!(v.phone || v.email || v.rep_name);
 
 app.get('/c/vendors', (req, res) => {
-  const rows = vendQ.all.all().map((v) => ({ ...v, ...vendQ.stats.get(v.id) }));
+  // One grouped read rather than one per vendor. A vendor with no invoices has
+  // no row in the rollup and keeps the zeroes the per-vendor query returned.
+  const stats = new Map(vendQ.allStats.all().map((r) => [Number(r.vid), r]));
+  const rows = vendQ.all.all().map((v) => {
+    const s = stats.get(Number(v.id));
+    return { ...v, n: s ? s.n : 0, last: s ? s.last : null, spend: s ? s.spend : 0 };
+  });
   const active = rows.filter((v) => !yes(v.inactive));
   const cats = [...new Set(active.map((v) => v.category || 'Other'))];
   const noContact = rows.filter((v) => !yes(v.inactive) && !hasContact(v));

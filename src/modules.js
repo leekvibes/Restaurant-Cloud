@@ -286,6 +286,46 @@ ${cols}
 }
 
 // ---------------------------------------------------------------------------
+// Indexes for the collections that grow without bound.
+//
+// The registry creates tables but never indexed them, so every list page read
+// these by full scan. That is invisible on a demo database and is the thing
+// that decays first: a restaurant filing twenty invoices a week has four
+// thousand of them inside four years, and each is a row SQLite has to touch to
+// answer "show me this year" or "what has this vendor billed".
+//
+// Only the three that accumulate are indexed. Expirations, equipment, contacts
+// and the rest hold tens of rows and stay faster unindexed than they would be
+// with a b-tree to maintain on every write.
+//
+// Verified with EXPLAIN QUERY PLAN against three years of seeded data: each of
+// these turned a SCAN into a SEARCH, or removed a temporary b-tree sort. None
+// of them changes a result — an index cannot, it only changes how the same
+// rows are found.
+db.exec(`
+  -- The invoice ledger is read a year at a time, newest first.
+  CREATE INDEX IF NOT EXISTS idx_inv_date ON m_invoices (invoice_date DESC);
+
+  -- vendor_id is TEXT here — the registry types every column TEXT — and rows
+  -- written by different paths hold "1" or "1.0", so every caller compares it
+  -- as CAST(vendor_id AS INTEGER). A plain index on the column cannot serve
+  -- that: the cast has to be indexed, not the column. This is why the vendor
+  -- page scanned the whole table once per vendor.
+  CREATE INDEX IF NOT EXISTS idx_inv_vendor ON m_invoices (CAST(vendor_id AS INTEGER));
+
+  -- Unpaid and overdue, which is a small slice of a large table and the one
+  -- the dashboard asks for on every load. Partial, because a full index on
+  -- status would be almost entirely 'Paid' rows nobody looks up this way, and
+  -- "status <> 'Paid'" cannot use an ordinary index at all.
+  CREATE INDEX IF NOT EXISTS idx_inv_open ON m_invoices (due_date) WHERE status <> 'Paid';
+
+  -- Both lists are read in date order, and both were sorting the whole table
+  -- in a temp b-tree to do it.
+  CREATE INDEX IF NOT EXISTS idx_exp_date ON m_expenses (spent_on DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_doc_date ON m_documents (doc_date DESC);
+`);
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 const resolveOptions = (f) => (typeof f.options === 'function' ? f.options() : (f.options || []).map((o) => (typeof o === 'object' ? o : { value: o, label: o })));
