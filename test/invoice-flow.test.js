@@ -737,3 +737,69 @@ test('the panel offers the delete, and says what it will take', async () => {
     'and the confirm says so before you agree to it');
   assert.match(panel, /uploaded file is kept/, 'and that the original is not destroyed');
 });
+
+test('an invoice photographed front and back files as both', async () => {
+  // The reader was always handed every page. The save kept the first, so a
+  // two-page invoice was filed as its front and the back was gone.
+  const fd = new FormData();
+  Object.entries({ amount: '88.00', vendor_id: String(VENDOR), invoice_date: '2026-10-02',
+    invoice_number: 'BLD-PAGES-1', category: 'Food', status: 'Unpaid', ai_status: 'manual' })
+    .forEach(([k, v]) => fd.set(k, v));
+  for (const n of ['front', 'back']) {
+    fd.append('file', new Blob([Buffer.from(n)], { type: 'image/jpeg' }), `${n}.jpg`);
+  }
+  const res = await fetch(`${BASE}/c/invoices`, { method: 'POST', body: fd, redirect: 'manual' });
+  assert.strictEqual(res.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'BLD-PAGES-1'").get();
+  db.close();
+
+  const { pagesOf } = require('../src/modules');
+  const pages = pagesOf(inv);
+  assert.strictEqual(pages.length, 2, 'both sides are on the invoice');
+  assert.strictEqual(pages[0], inv.file, 'and the front is still `file`');
+
+  const panel = await (await fetch(`${BASE}/c/invoices/${inv.id}/panel`)).text();
+  assert.match(panel, /2 pages/, 'the panel says there are two');
+  const links = [...panel.matchAll(/href="\/uploads\/([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(pages.every((p) => links.includes(p)), 'and both are reachable, not just the front');
+});
+
+test('a duplicate question does not cost you the pages while you answer it', async () => {
+  // The confirm step re-posts the form. It carries the files it already has by
+  // name — and it has to carry all of them, or saying "save it anyway" quietly
+  // reduces a two-page invoice to page one.
+  const fd = new FormData();
+  Object.entries({ amount: '88.00', vendor_id: String(VENDOR), invoice_date: '2026-10-02',
+    invoice_number: 'BLD-PAGES-1', category: 'Food', status: 'Unpaid', ai_status: 'manual' })
+    .forEach(([k, v]) => fd.set(k, v));
+  for (const n of ['front2', 'back2']) {
+    fd.append('file', new Blob([Buffer.from(n)], { type: 'image/jpeg' }), `${n}.jpg`);
+  }
+  const asked = await fetch(`${BASE}/c/invoices`, { method: 'POST', body: fd, redirect: 'manual' });
+  assert.strictEqual(asked.status, 200, 'it is questioned as a duplicate — the precondition');
+  const html = await asked.text();
+
+  const kept = (html.match(/name="kept_pages" value="([^"]*)"/) || [])[1];
+  assert.ok(kept, 'the form carries the pages it already has');
+  assert.strictEqual(kept.split(',').filter(Boolean).length, 2,
+    `both pages are carried, not just the first (${kept})`);
+
+  // Answer it the way the page does.
+  const body = new URLSearchParams();
+  for (const [, k, v] of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) body.set(k, v);
+  body.set('dup_ok', '1');
+  const saved = await fetch(`${BASE}/c/invoices`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+  });
+  assert.strictEqual(saved.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const all = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'BLD-PAGES-1' ORDER BY id").all();
+  db.close();
+  const { pagesOf } = require('../src/modules');
+  assert.strictEqual(all.length, 2, 'the override filed it');
+  assert.strictEqual(pagesOf(all[1]).length, 2, 'with both its pages intact');
+});

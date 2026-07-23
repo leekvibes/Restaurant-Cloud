@@ -73,7 +73,8 @@ const MODULES = [
       { name: 'paid_with', label: 'Paid with', type: 'select',
         options: ['Their own money', 'Company card', 'Company cash', 'Drawer cash', 'Other'] },
       { name: 'reimbursed_on', label: 'Paid back on', type: 'date' },
-      { name: 'file', label: 'Receipt photo', type: 'file', list: true },
+      { name: 'file', label: 'Receipt photo', type: 'file', list: true, multiple: true },
+      { name: 'pages', label: 'Pages', type: 'pages', pagesOf: 'file' },
       { name: 'notes', label: 'Notes', type: 'textarea' },
     ],
   },
@@ -182,7 +183,8 @@ const MODULES = [
       // see the note above DOC_SCHEMA in reader.js for why.
       { name: 'reference', label: 'Reference', type: 'text' },
       { name: 'summary', label: 'What it is', type: 'textarea' },
-      { name: 'file', label: 'File', type: 'file', required: true, list: true },
+      { name: 'file', label: 'File', type: 'file', required: true, list: true, multiple: true },
+      { name: 'pages', label: 'Pages', type: 'pages', pagesOf: 'file' },
       { name: 'notes', label: 'Notes', type: 'textarea' },
       { name: 'ai_status', label: 'Entered by', type: 'text' },
     ],
@@ -244,6 +246,28 @@ function sqlType(f) {
   if (f.type === 'money') return 'INTEGER DEFAULT 0';
   if (f.type === 'number') return 'REAL';
   return 'TEXT';
+}
+
+/**
+ * Every page of a document, as JSON, alongside the single `file` that has
+ * always been there.
+ *
+ * A photographed lease is eight pictures, not one. The reader was already
+ * given all of them — it is the storing that kept page one and dropped the
+ * rest.
+ *
+ * Deliberately additive. `file` still holds the first page and every existing
+ * link, thumbnail and download in the app goes on reading it without knowing
+ * this exists; a row saved before today, or by the generic edit form, has no
+ * `pages` at all and falls back to exactly what it did before.
+ */
+function pagesOf(row) {
+  if (!row) return [];
+  try {
+    const a = JSON.parse(row.pages || 'null');
+    if (Array.isArray(a) && a.length) return a.filter((x) => typeof x === 'string' && x);
+  } catch { /* not JSON — fall through to the single file */ }
+  return row.file ? [row.file] : [];
 }
 for (const m of MODULES) {
   const cols = m.fields.map((f) => `  ${f.name} ${sqlType(f)}`).join(',\n');
@@ -315,10 +339,11 @@ function renderInput(f, row) {
     // Required only when there's nothing on file yet — otherwise leaving it
     // blank keeps whatever is already attached.
     const need = f.required && !has ? ' required' : '';
+    const multi = f.multiple ? ' multiple' : '';
     const current = has
-      ? `<span class="file-current">Attached: <a href="/uploads/${esc(cur)}" target="_blank">open</a> — choosing a file replaces it</span>`
+      ? `<span class="file-current">Attached: <a href="/uploads/${esc(cur)}" target="_blank">open</a> — choosing ${f.multiple ? 'files replaces them' : 'a file replaces it'}</span>`
       : '';
-    return `<input type="file" name="${f.name}"${need}>${current}`;
+    return `<input type="file" name="${f.name}"${need}${multi}>${current}`;
   }
   if (f.type === 'money') return `<input name="${f.name}" type="number" step="0.01" min="0"${req} placeholder="0.00" value="${has ? (Number(cur) / 100).toFixed(2) : ''}">`;
   const map = { date: 'date', number: 'number', url: 'url', tel: 'tel', email: 'email' };
@@ -379,7 +404,8 @@ function mountModules(app) {
     const emptyCols = listFields.length + (m.flag ? 1 : 0) + 1;
 
     const isMultipart = m.fields.some((f) => f.type === 'file');
-    const formFields = m.fields.map((f) => `<label>${esc(f.label)} ${renderInput(f)}</label>`).join('');
+    const formFields = m.fields.filter((f) => f.type !== 'pages')
+      .map((f) => `<label>${esc(f.label)} ${renderInput(f)}</label>`).join('');
 
     const vendorHint = m.slug === 'vendors'
       ? '<p class="muted">Tip: don\'t paste real passwords here — store the username and note where the password lives (your password manager). This file isn\'t encrypted.</p>'
@@ -423,7 +449,15 @@ function mountModules(app) {
     if (!m) return res.status(404).end();
     const data = {};
     for (const f of m.fields) {
-      if (f.type === 'file') {
+      if (f.type === 'pages') {
+        // Only when there is more than one. A single-page upload leaves the row
+        // exactly as it would have been before any of this existed — `file`
+        // and nothing else — so one page has one representation, not two.
+        const all = (req.files || []).filter((x) => x.fieldname === f.pagesOf && x.filename);
+        data[f.name] = all.length > 1 ? JSON.stringify(all.map((x) => x.filename)) : null;
+      } else if (f.type === 'file') {
+        // The first page stays in `file`, which is what the rest of the app
+        // reads. Every page is kept by the `pages` field beside it.
         const file = (req.files || []).find((x) => x.fieldname === f.name);
         data[f.name] = file ? file.filename : null;
       } else if (f.type === 'money') {
@@ -483,7 +517,7 @@ function mountModules(app) {
       <a class="back" href="/c/${m.slug}/${row.id}">← ${esc(rowTitle(m, row))}</a>
       <h1>Edit ${esc(rowTitle(m, row))}</h1>
       <form method="post" action="/c/${m.slug}/${row.id}" class="card form grid"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
-        ${m.fields.map((f) => `<label>${esc(f.label)} ${renderInput(f, row)}</label>`).join('')}
+        ${m.fields.filter((f) => f.type !== 'pages').map((f) => `<label>${esc(f.label)} ${renderInput(f, row)}</label>`).join('')}
         <button class="btn btn-primary" type="submit">Save changes</button>
       </form>
       <p class="muted"><a href="/c/${m.slug}/${row.id}">Cancel</a></p>
@@ -498,7 +532,14 @@ function mountModules(app) {
 
     const data = { id: row.id };
     for (const f of m.fields) {
-      if (f.type === 'file') {
+      if (f.type === 'pages') {
+        // Replacing a five-page scan with one photo has to clear the other
+        // four, or the row keeps pointing at pages of a document it no longer
+        // holds. Uploading nothing at all keeps what is there.
+        const all = (req.files || []).filter((x) => x.fieldname === f.pagesOf && x.filename);
+        data[f.name] = all.length ? (all.length > 1 ? JSON.stringify(all.map((x) => x.filename)) : null)
+          : row[f.name];
+      } else if (f.type === 'file') {
         const file = (req.files || []).find((x) => x.fieldname === f.name && x.filename);
         // No new upload means keep the existing attachment, not clear it.
         data[f.name] = file ? file.filename : row[f.name];
@@ -552,4 +593,4 @@ function expiringSoon() {
   return out.sort((a, b) => a.days - b.days).slice(0, 6);
 }
 
-module.exports = { mountModules, MODULES, expiringSoon };
+module.exports = { mountModules, MODULES, expiringSoon, pagesOf };

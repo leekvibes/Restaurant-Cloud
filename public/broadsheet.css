@@ -2268,3 +2268,14 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-dr-c { grid-area: kind; }
   .bs-dr + .bs-sr-e, .bs-dr .bs-sr-e { display: none; }
 }
+
+/* Page numbers on a multi-page scan. One page keeps the plain Open/Download
+   pair; several get a numbered strip, because "Open original" that silently
+   opens page one of eight is worse than no link. */
+.bs-pages { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bs-pages-l { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--faint); }
+.bs-pages .bs-act { min-width: 22px; text-align: center; padding: 1px 5px;
+  border: 1px solid var(--rule); font-family: var(--mono); font-size: 12px; }
+.bs-pages .bs-act:hover { border-color: var(--ink); }
+.fld-hint { display: block; font-size: 11.5px; color: var(--muted); margin-top: 4px; }

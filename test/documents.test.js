@@ -220,3 +220,95 @@ test('the drawer files a document with the reader switched off entirely', async 
     assert.match(html, new RegExp(`name="${f}"`), `${f} can be typed by hand`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Multi-page.
+//
+// The reader was always given every page. It was the storing that kept page
+// one and dropped the rest, so an eight-page lease filed as its cover sheet.
+// ---------------------------------------------------------------------------
+
+/** File a document as several photographed pages, the way the drawer posts. */
+async function filePages(fields, count) {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+  for (let i = 0; i < count; i++) {
+    fd.append('file', new Blob([Buffer.from(`%PDF-1.4 page ${i + 1}`)], { type: 'application/pdf' }), `p${i + 1}.pdf`);
+  }
+  return fetch(`${BASE}/c/documents`, { method: 'POST', body: fd, redirect: 'manual' });
+}
+
+test('every page of a photographed lease is kept, not just the first', async () => {
+  const res = await filePages({ title: 'Lease — all pages', category: 'Lease', issuer: 'Landlord' }, 5);
+  assert.strictEqual(res.status, 302);
+
+  const d = rows().find((x) => x.title === 'Lease — all pages');
+  const { pagesOf } = require('../src/modules');
+  const pages = pagesOf(d);
+  assert.strictEqual(pages.length, 5, 'all five pages are on the row');
+  assert.strictEqual(pages[0], d.file, 'and the first is still `file`, which the rest of the app reads');
+
+  // Each is a real, distinct file — not the same one listed five times.
+  const seen = new Set();
+  for (let i = 0; i < pages.length; i++) {
+    const onDisk = path.join(UPLOADS, pages[i]);
+    assert.ok(fs.existsSync(onDisk), `page ${i + 1} is on disk`);
+    assert.strictEqual(fs.readFileSync(onDisk).toString(), `%PDF-1.4 page ${i + 1}`,
+      `page ${i + 1} holds page ${i + 1}, in order`);
+    seen.add(pages[i]);
+  }
+  assert.strictEqual(seen.size, 5, 'five distinct files, not one repeated');
+});
+
+/**
+ * One document's row from the ledger.
+ *
+ * Scoped to the rows container on purpose: the strip at the top names whatever
+ * is due next, so searching the whole page for a title can land in a summary
+ * cell and slice a block that is not a row at all.
+ */
+function rowFor(html, title) {
+  const ledger = html.slice(html.indexOf('bs-srows docs'));
+  const at = ledger.indexOf(title);
+  if (at === -1) return '';
+  return ledger.slice(ledger.lastIndexOf('<details', at), ledger.indexOf('</details>', at));
+}
+
+test('the page it shows is numbered, so nobody opens page one thinking it is all of it', async () => {
+  const html = await (await fetch(`${BASE}/c/documents`)).text();
+  const block = rowFor(html, 'Lease — all pages');
+  assert.match(block, /5 pages/, 'it says how many there are');
+  const links = [...block.matchAll(/href="\/uploads\/([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(new Set(links).size >= 5, `every page is reachable (${new Set(links).size} distinct)`);
+});
+
+test('a single-page document is untouched by any of this', async () => {
+  // The ordinary case has to keep reading exactly as it did: one file, Open
+  // and Download, no page strip and no count.
+  const one = rows().find((x) => x.title && x.title.startsWith('Form 941'));
+  assert.ok(one, 'the 941 filed earlier is one page — the precondition');
+  const { pagesOf } = require('../src/modules');
+  assert.deepStrictEqual(pagesOf(one), [one.file], 'it reads as exactly its one file');
+  assert.strictEqual(one.pages, null, 'and stores no page list at all');
+
+  const html = await (await fetch(`${BASE}/c/documents`)).text();
+  const block = rowFor(html, 'Form 941');
+  assert.ok(block, 'the row is on the page');
+  assert.ok(!/\d+ pages/.test(block), 'no page count on a one-page document');
+  assert.match(block, /Download/, 'and the plain download it always had');
+});
+
+test('a row saved before any of this existed still opens', async () => {
+  // Every document already on disk has file set and pages null. pagesOf has to
+  // answer for those without a migration touching them.
+  const db = new Database(DB);
+  db.prepare("INSERT INTO m_documents (title, category, file) VALUES ('Old filing', 'Other', 'legacy.pdf')").run();
+  db.close();
+  const { pagesOf } = require('../src/modules');
+  const old = rows().find((x) => x.title === 'Old filing');
+  assert.strictEqual(old.pages, null, 'no page list, as it would have been');
+  assert.deepStrictEqual(pagesOf(old), ['legacy.pdf'], 'and it still reads as its one file');
+  assert.deepStrictEqual(pagesOf({ file: null, pages: null }), [], 'nothing attached reads as nothing');
+  assert.deepStrictEqual(pagesOf({ file: 'a.pdf', pages: 'not json' }), ['a.pdf'],
+    'and a corrupt page list falls back rather than throwing');
+});

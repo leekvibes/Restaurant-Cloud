@@ -115,6 +115,10 @@ if (!invCols.includes('lines_imported')) db.exec("ALTER TABLE m_invoices ADD COL
 // different pack sizes, and keying on the words would silently hide the
 // second one once the first had gone in.
 if (!invCols.includes('imported_idx')) db.exec('ALTER TABLE m_invoices ADD COLUMN imported_idx TEXT');
+// Every page of a photographed invoice, as JSON. `file` still holds the first,
+// so nothing that reads it needs to know this is here — see pagesOf() in
+// modules.js.
+if (!invCols.includes('pages')) db.exec('ALTER TABLE m_invoices ADD COLUMN pages TEXT');
 
 // --- one-time migration from the par-level tracker --------------------------
 // m_par is left on disk untouched. It is small, it is the only copy of what

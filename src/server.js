@@ -10,7 +10,7 @@ const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, canWrite, navAllowed } = require('./views');
-const { mountModules, MODULES } = require('./modules');
+const { mountModules, MODULES, pagesOf } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
@@ -5856,8 +5856,8 @@ const invQ = {
   // it on the import screen. It is not shown on the invoice itself — invoices
   // stay an accounting record.
   add: db.prepare(`INSERT INTO m_invoices
-    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, payment_method, file, notes, ai_status, ai_confidence, ai_lines)
-    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @payment_method, @file, @notes, @ai_status, @ai_confidence, @ai_lines)`),
+    (invoice_date, due_date, vendor_id, invoice_number, amount_cents, subtotal_cents, tax_cents, category, status, payment_method, file, pages, notes, ai_status, ai_confidence, ai_lines)
+    VALUES (@invoice_date, @due_date, @vendor_id, @invoice_number, @amount_cents, @subtotal_cents, @tax_cents, @category, @status, @payment_method, @file, @pages, @notes, @ai_status, @ai_confidence, @ai_lines)`),
   vendors: db.prepare('SELECT id, name FROM m_vendors ORDER BY name'),
   addVendor: db.prepare('INSERT INTO m_vendors (name) VALUES (?)'),
 };
@@ -5942,8 +5942,7 @@ function invoicePanel(r, vName) {
                   const bought = prodQ.purchasesForInvoice.all(r.id).length;
                   return `<a class="bs-act bs-ivdone" href="/c/invoices/${r.id}/import">${bought ? 'Products imported ✓' : 'No products to import'}</a>`;
                 })()}
-              ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open original →</a>
-                          <a class="bs-act" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
+              ${pageLinks(r)}
               ${r.vendor_id ? `<a class="bs-act" href="/c/vendors/${Number(r.vendor_id)}">Vendor →</a>` : ''}
               ${/* Last, and quiet. The confirm names what actually goes: an
                     invoice whose lines were imported is also a set of purchase
@@ -6155,8 +6154,7 @@ app.get('/c/documents', (req, res) => {
           </div>
           ${r.notes ? `<div class="bs-ivnote">${esc(r.notes)}</div>` : ''}
           <div class="bs-ivacts">
-            ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open →</a>
-                        <a class="bs-act" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
+            ${pageLinks(r, 'Open')}
             <a class="bs-btn-sm" href="/c/documents/${r.id}/edit">Edit</a>
             ${canWrite() ? `<form method="post" action="/c/documents/${r.id}/delete" class="bs-ivdel"
               onsubmit="return confirm('Delete ${esc((r.title || 'this document').replace(/'/g, ''))}? The uploaded file is kept.')">
@@ -6310,7 +6308,7 @@ function documentDrawer() {
         </div>
         <label class="fld">What it is <textarea name="summary" id="d_summary" rows="2" placeholder="One line"></textarea></label>
         <label class="fld">Notes <textarea name="notes" rows="2" placeholder="Optional"></textarea></label>
-        <input type="file" name="file" id="docfile" accept="image/*,application/pdf" hidden required>
+        <input type="file" name="file" id="docfile" accept="image/*,application/pdf" hidden required multiple>
         <input type="hidden" name="ai_status" id="d_ai_status" value="manual">
         <div class="drawer-f">
           <button class="btn btn-ghost" type="button" onclick="docDrawer(false)">Cancel</button>
@@ -6336,12 +6334,11 @@ function documentDrawerScript() {
       var files = [].slice.call(pick.files || []);
       if (!files.length) return;
 
-      // The first file is what gets filed. The rest are extra pages for the
-      // reader — the form stores one file, and quietly keeping only page one
-      // of an eight-page lease would be worse than saying so.
-      var dt = new DataTransfer(); dt.items.add(files[0]); keep.files = dt.files;
-      say('<b>Reading ' + files.length + (files.length === 1 ? ' file' : ' files') + '…</b>' +
-        (files.length > 1 ? '<span>Only the first is stored — the rest are read for context.</span>' : ''), 'busy');
+      // Every page is filed, and every page is read. The first is the one
+      // the row shows; the rest are behind it.
+      var dt = new DataTransfer(); files.forEach(function (f) { dt.items.add(f); }); keep.files = dt.files;
+      say('<b>Reading ' + files.length + (files.length === 1 ? ' page' : ' pages') + '…</b>' +
+        (files.length > 1 ? '<span>All ' + files.length + ' are kept and read as one document.</span>' : ''), 'busy');
 
       var fd = new FormData();
       files.forEach(function (f) { fd.append('scan', f); });
@@ -6469,7 +6466,7 @@ app.get('/c/expenses', (req, res) => {
                 <input type="hidden" name="undo" value="1">
                 <button class="bs-btn-sm" type="submit">Not paid back after all</button></form>` : ''}
               <a class="bs-btn-sm" href="/c/expenses/${r.id}/edit">Edit</a>
-              ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open receipt →</a>` : ''}
+              ${pageLinks(r, 'Open receipt')}
             </div>
           </div>
         </div>
@@ -6676,8 +6673,11 @@ function expenseDrawer(today) {
           </select></label>
         </div>
         <datalist id="exp-people">${names.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+        ${/* A Costco receipt is a metre long and gets photographed in three.
+                 Every shot is kept; the first is the one the row shows. */''}
         <label class="fld">Receipt photo
-          <input name="file" type="file" accept="image/*,application/pdf" capture="environment"></label>
+          <input name="file" type="file" accept="image/*,application/pdf" capture="environment" multiple>
+          <span class="fld-hint">Several photos of one receipt is fine — take them all.</span></label>
         <label class="fld">Notes <textarea name="notes" rows="2" placeholder="Optional"></textarea></label>
         <div class="drawer-f">
           <button class="btn btn-ghost" type="button" onclick="expDrawer(false)">Cancel</button>
@@ -7092,7 +7092,9 @@ function invoiceDrawer(vendors, today) {
           <span class="fld"></span>
         </div>
         <label class="fld">Notes <textarea name="notes" id="inv-notes" rows="2" placeholder="Optional"></textarea></label>
-        <input type="file" name="file" id="inv-file" hidden>
+        ${/* Every page, not just the first. An invoice photographed front and
+               back was being filed as its front. */''}
+        <input type="file" name="file" id="inv-file" hidden multiple>
         <div class="drawer-f">
           <button class="btn btn-ghost" type="button" onclick="invBack()">Back</button>
           <button class="btn btn-primary" type="submit">Save invoice</button>
@@ -7135,10 +7137,11 @@ function invoiceDrawerScript() {
   function invPick(files) {
     if (!files || !files.length) return;
     invFiles = files;
-    // Carry the actual file into the save, so the original stays attached to
+    // Carry the actual files into the save, so the original stays attached to
     // the record — the extraction is a convenience, the document is the proof.
+    // All of them: a two-page invoice read as one has to file as one.
     var dt = new DataTransfer();
-    dt.items.add(files[0]);
+    for (var f = 0; f < files.length; f++) dt.items.add(files[f]);
     document.getElementById('inv-file').files = dt.files;
 
     invShow('inv-working');
@@ -7326,6 +7329,26 @@ app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
 });
 
 /**
+ * Every page of a scan, as links.
+ *
+ * One page renders as it always did — Open / Download — so nothing changes for
+ * the ordinary case. More than one and it says how many there are and offers
+ * each, because "Open original" on an eight-page lease that silently opens
+ * page one is worse than no link at all.
+ */
+function pageLinks(row, label = 'Open original') {
+  const pages = pagesOf(row);
+  if (!pages.length) return '';
+  if (pages.length === 1) {
+    return `<a class="bs-act" href="/uploads/${esc(pages[0])}" target="_blank">${label} →</a>
+            <a class="bs-act" href="/uploads/${esc(pages[0])}" download>Download</a>`;
+  }
+  return `<span class="bs-pages"><span class="bs-pages-l">${pages.length} pages</span>${
+    pages.map((f, i) => `<a class="bs-act" href="/uploads/${esc(f)}" target="_blank">${i + 1}</a>`).join('')
+  }</span>`;
+}
+
+/**
  * An invoice already on file that this one may be a second copy of.
  *
  * Two signals, and the difference between them matters. A vendor's own invoice
@@ -7394,7 +7417,7 @@ app.post('/c/invoices/:id/delete', (req, res) => {
     `Invoice deleted${bought.length ? `, and ${bought.length} purchase${bought.length === 1 ? '' : 's'} removed from your product history` : ''}.`));
 });
 
-app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
+app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
   const total = toCents(req.body.amount);
   if (!total) return res.redirect('/c/invoices?err=1&msg=' + encodeURIComponent('An invoice needs a total.'));
 
@@ -7402,8 +7425,13 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
   // question below so answering it does not mean picking the file again —
   // sanitised to a bare filename because it comes back from a form, and a
   // path is not a filename.
-  const uploaded = req.file ? req.file.filename
-    : (String(req.body.kept_file || '').match(/^[A-Za-z0-9][A-Za-z0-9._-]*$/) || [null])[0];
+  const shot = (req.files || []).map((f) => f.filename);
+  const safe = (v) => (String(v || '').match(/^[A-Za-z0-9][A-Za-z0-9._-]*$/) || [null])[0];
+  // Kept through the duplicate question below by name. Both of them: answering
+  // it must not quietly reduce a four-page invoice to its first page.
+  const keptPages = String(req.body.kept_pages || '').split(',').map(safe).filter(Boolean);
+  const pages = shot.length ? shot : keptPages;
+  const uploaded = pages[0] || null;
 
   const invDate = String(req.body.invoice_date || '').slice(0, 10) || null;
   const dup = req.body.dup_ok === '1' ? null : duplicateInvoice({
@@ -7422,7 +7450,7 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
       payment_method: req.body.payment_method, notes: req.body.notes,
       ai_status: req.body.ai_status, ai_confidence: req.body.ai_confidence,
       ai_snapshot: req.body.ai_snapshot, ai_lines: req.body.ai_lines,
-      kept_file: uploaded || '',
+      kept_pages: pages.join(','),
     }).map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(String(v == null ? '' : v))}">`).join('');
     const vn = dup.row.vendor_id
       ? (invQ.vendors.all().find((v) => Number(v.id) === Number(dup.row.vendor_id)) || {}).name : null;
@@ -7510,6 +7538,8 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
     status: req.body.status === 'Paid' ? 'Paid' : 'Unpaid',
     payment_method: PAY_METHODS.includes(req.body.payment_method) ? req.body.payment_method : null,
     file: uploaded,
+    // The first page is `file`, as it always was. Every page is here beside it.
+    pages: pages.length > 1 ? JSON.stringify(pages) : null,
     notes: String(req.body.notes || '').trim() || null,
     ai_status: aiStatus,
     ai_confidence: String(req.body.ai_confidence || '').trim() || null,

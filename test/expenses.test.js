@@ -190,3 +190,40 @@ test('the receipt column says which ones still need photographing', async () => 
   assert.strictEqual((html.match(/bs-pip none/g) || []).length, without, 'and marks each of them');
   assert.strictEqual((html.match(/bs-pip has/g) || []).length, withFile, 'and the ones that have one');
 });
+
+test('a receipt too long for one photo is kept as every photo', async () => {
+  // A Costco receipt is a metre long. It gets photographed in three, and all
+  // three are the receipt — keeping the first was keeping the top third.
+  const fd = new FormData();
+  Object.entries({ name: 'Monthly Costco run', where_bought: 'Costco', category: 'Supplies',
+    amount_cents: '412.60', spent_on: '2026-07-22', paid_by: 'Ana Ortiz', paid_with: 'Company card' })
+    .forEach(([k, v]) => fd.set(k, v));
+  for (let i = 0; i < 3; i++) {
+    fd.append('file', new Blob([Buffer.from(`shot ${i + 1}`)], { type: 'image/jpeg' }), `r${i + 1}.jpg`);
+  }
+  const res = await fetch(`${BASE}/c/expenses`, { method: 'POST', body: fd, redirect: 'manual' });
+  assert.strictEqual(res.status, 302);
+
+  const { pagesOf } = require('../src/modules');
+  const r = rows().find((x) => x.name === 'Monthly Costco run');
+  const pages = pagesOf(r);
+  assert.strictEqual(pages.length, 3, 'all three photos are kept');
+  assert.strictEqual(pages[0], r.file, 'the first is the one the row shows');
+  pages.forEach((f, i) => {
+    assert.strictEqual(fs.readFileSync(path.join(UPLOADS, f)).toString(), `shot ${i + 1}`,
+      `photo ${i + 1} is photo ${i + 1}, in the order they were taken`);
+  });
+
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const at = html.indexOf('Monthly Costco run');
+  const block = html.slice(html.lastIndexOf('<details', at), html.indexOf('</details>', at));
+  assert.match(block, /3 pages/, 'and the row says there are three');
+});
+
+test('the one-photo receipt is exactly as it was', async () => {
+  const one = rows().find((x) => x.name === 'Two bags of ice');
+  assert.ok(one && one.file, 'the ice receipt is one photo — the precondition');
+  assert.strictEqual(one.pages, null, 'it stores no page list');
+  const { pagesOf } = require('../src/modules');
+  assert.deepStrictEqual(pagesOf(one), [one.file], 'and reads as its single file');
+});
