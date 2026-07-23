@@ -290,3 +290,66 @@ test('who paid is never guessed from a receipt', async () => {
     'and paid_with says why it stays empty unless printed');
   assert.ok(EXPENSE_SCHEMA.properties.paid_with.enum.includes(''), 'so "" is a valid answer');
 });
+
+// ---------------------------------------------------------------------------
+// What a row is called.
+//
+// A ledger is scanned for where the money went — Costco, Mighty Bread, Home
+// Depot — and what was in the bag is the detail you open the row for. The row
+// used to lead with the description and trail the shop in faint type, which is
+// the wrong way round for scanning a column of spend.
+// ---------------------------------------------------------------------------
+
+/** The whole <details> block for one expense row. */
+function rowOf(html, needle) {
+  const at = html.indexOf(needle);
+  if (at === -1) return '';
+  const from = html.lastIndexOf('<details', at);
+  return html.slice(from, html.indexOf('</details>', at));
+}
+/** Just its summary line — the row as it reads before you open it. */
+function summaryOf(html, needle) {
+  const block = rowOf(html, needle);
+  return block.slice(0, block.indexOf('</summary>'));
+}
+
+test('the row is headed by the shop, and the description is inside it', async () => {
+  await logExpense({ name: 'Baguettes, croissants and pastries', where_bought: 'Mighty Bread Grab & Go',
+    category: 'Groceries', amount_cents: '45.64', spent_on: '2026-08-01',
+    paid_by: 'Ana Ortiz', paid_with: 'Company card' });
+
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const summary = summaryOf(html, 'Mighty Bread Grab &amp; Go');
+  assert.ok(summary, 'the row is on the page');
+  assert.match(summary, /class="bs-xr-w">Mighty Bread Grab &amp; Go</,
+    'the shop is what the row is called');
+  assert.ok(!/Baguettes, croissants and pastries/.test(summary),
+    'and the description is not competing with it on the summary line');
+
+  // It is not lost — it is one click away, labelled.
+  assert.match(rowOf(html, 'Mighty Bread Grab &amp; Go'),
+    /What was bought<\/span><b>Baguettes, croissants and pastries<\/b>/,
+    'the detail says what was actually bought');
+});
+
+test('an expense with no shop still has a name on the row', async () => {
+  // Where is optional — a parking meter has no merchant. Leading with a blank
+  // row would be worse than leading with the description.
+  await logExpense({ name: 'Parking for the produce run', category: 'Travel',
+    amount_cents: '18.00', spent_on: '2026-08-02', paid_by: 'Rosa Diaz', paid_with: 'Their own money' });
+
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const summary = summaryOf(html, 'Parking for the produce run');
+  assert.match(summary, /class="bs-xr-w">Parking for the produce run</,
+    'it falls back to the description rather than rendering an empty row');
+});
+
+test('moving the description off the row does not make it unsearchable', async () => {
+  // The row no longer shows what was bought, so the search index is the only
+  // thing keeping "croissants" able to find it.
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const summary = summaryOf(html, 'Mighty Bread Grab &amp; Go');
+  const search = (summary.match(/data-search="([^"]*)"/) || [])[1] || '';
+  assert.match(search, /baguettes, croissants and pastries/, 'the description is still searchable');
+  assert.match(search, /mighty bread/, 'and so is the shop');
+});

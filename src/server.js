@@ -7121,8 +7121,12 @@ app.get('/c/expenses', (req, res) => {
         data-who="${esc((r.paid_by || '').toLowerCase())}" data-search="${esc(search)}">
         <summary class="bs-sr bs-xr">
           <span class="bs-xr-d">${esc(niceDate(r.spent_on))}</span>
-          <span class="bs-xr-w">${esc(r.name || 'Something')}${
-            r.where_bought ? `<u>${esc(r.where_bought)}</u>` : ''}</span>
+          ${/* The shop, not the shopping list. A ledger is scanned for where
+                 the money went — "Mighty Bread", "Costco", "Home Depot" — and
+                 what was actually in the bag is the detail you open the row
+                 for. Falls back to the description when there is no merchant,
+                 so a row is never blank. */''}
+          <span class="bs-xr-w">${esc(r.where_bought || r.name || 'Something')}</span>
           <span class="bs-xr-c">${esc(r.category || '—')}</span>
           <span class="bs-xr-p">${esc(r.paid_by || '—')}${
             owe ? '<i class="bs-tag warn">owed back</i>'
@@ -7143,7 +7147,10 @@ app.get('/c/expenses', (req, res) => {
               <div class="bs-ivf"><span>Amount</span><b>${money(r.amount_cents || 0)}</b></div>
               <div class="bs-ivf"><span>Who paid</span><b>${esc(r.paid_by || '—')}</b></div>
               <div class="bs-ivf"><span>Paid with</span><b>${esc(r.paid_with || '—')}</b></div>
-              <div class="bs-ivf"><span>Where</span><b>${esc(r.where_bought || '—')}</b></div>
+              ${/* What was bought moves here, where the row title used to send
+                     you looking for the shop. "Where" is not repeated: it is
+                     the headline of the row you just opened. */''}
+              <div class="bs-ivf"><span>What was bought</span><b>${esc(r.name || '—')}</b></div>
               <div class="bs-ivf"><span>Paid back</span><b>${r.reimbursed_on ? esc(niceDate(r.reimbursed_on)) : '<i class="bs-em">not yet</i>'}</b></div>
             </div>
             ${r.notes ? `<div class="bs-ivnote">${esc(r.notes)}</div>` : ''}
