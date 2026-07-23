@@ -358,3 +358,32 @@ test('the login screen installs the manager app, not the tip form', async () => 
   assert.ok(!/manifest-tips/.test(html), 'not the staff one');
   assert.match(html, /apple-mobile-web-app-title" content="ZWIN"/, 'and it is named ZWIN on the home screen');
 });
+
+test('the login screen loads the stylesheet its markup depends on', async () => {
+  // This shipped broken. Splitting `bare` from `staff` fixed /login installing
+  // as the tip form, but the stylesheet was keyed on the new flag — and
+  // /login is bare without being staff, so it lost staff.css entirely and
+  // rendered as raw browser defaults on a navy background.
+  //
+  // The whole suite stayed green through it, because every assertion asked
+  // what the markup SAID and none asked whether the page could be seen. A page
+  // that emits classes with no stylesheet behind them is a broken page.
+  const html = await (await get('/login')).text();
+
+  const sheets = [...html.matchAll(/href="\/static\/([a-z-]+\.css)/g)].map((m) => m[1]);
+  const classes = new Set();
+  for (const m of html.replace(/<script[\s\S]*?<\/script>/g, '').matchAll(/class="([^"]+)"/g)) {
+    for (const c of m[1].split(/\s+/)) if (c) classes.add(c);
+  }
+
+  // Every class the page emits must be defined in a sheet the page loads.
+  const css = sheets
+    .map((f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const orphans = [...classes].filter((c) => !new RegExp(`\\.${c.replace(/[-]/g, '\\-')}(?![\\w-])`).test(css));
+
+  assert.ok(classes.size > 5, `the page emits ${classes.size} classes`);
+  assert.deepStrictEqual(orphans, [],
+    `these classes have no rule in any stylesheet the page loads (${sheets.join(', ')})`);
+});

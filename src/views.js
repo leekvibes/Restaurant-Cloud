@@ -642,20 +642,27 @@ const viewerNote = () => (canWrite() ? '' :
 
 /** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
 function head(title, opts = {}) {
-  // `bare` means "no app chrome" and `staff` means "this is the staff portal".
-  // They were one flag, so /login — which is bare but is the MANAGER app —
-  // served the tips manifest. Its start_url is /tips, so adding the login
-  // screen to a home screen produced a shortcut that opened the tip form.
-  // Two flags, because they are two questions.
+  // Three questions, not one, and they do not have the same answer:
+  //
+  //   bare  — no app chrome, and the page is built on the .tp-* shell, so it
+  //           needs staff.css. True for /login AND the staff portal.
+  //   staff — this is the staff portal, so it installs as the tips app.
+  //           True for the portal only.
+  //
+  // These were a single flag. Splitting them fixed /login installing as the
+  // tip form, but keying the STYLESHEET on `staff` then left /login with no
+  // styles at all — it uses .tp-* markup and lost the file that defines it.
+  // The sheet follows `bare`; the identity follows `staff`.
   const staff = !!opts.staff;
+  const tpShell = !!opts.bare;
   return `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
     <title>${esc(title)} · ${esc(staff ? RESTAURANT : APP_NAME)}</title>
     <link rel="stylesheet" href="/static/fonts.css?v=${BUILD}">
     <link rel="stylesheet" href="/static/styles.css?v=${BUILD}">
     <link rel="stylesheet" href="/static/broadsheet.css?v=${BUILD}">
-    ${staff ? `<link rel="stylesheet" href="/static/staff.css?v=${BUILD}">` : ''}
+    ${tpShell ? `<link rel="stylesheet" href="/static/staff.css?v=${BUILD}">` : ''}
     <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
-    <meta name="theme-color" content="${staff ? '#f7eee0' : '#ffffff'}">
+    <meta name="theme-color" content="${tpShell ? '#f7eee0' : '#ffffff'}">
     <link rel="icon" href="/static/${staff ? 'tips-' : ''}icon-192.png?v=${BUILD}">
     <link rel="apple-touch-icon" href="/static/${staff ? 'tips-' : ''}apple-touch-icon.png?v=${BUILD}">
     <meta name="apple-mobile-web-app-capable" content="yes">
