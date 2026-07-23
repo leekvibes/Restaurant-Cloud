@@ -25,7 +25,7 @@ const CH = require('./charts');
 // the column and died on startup on one that didn't. Which is every fresh
 // deploy. test/boot.test.js now covers exactly this.
 const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
-  learnAlias, mergeProducts, likelyDuplicates } = require('./products');
+  learnAlias, mergeProducts, likelyDuplicates, groupRows, nearMisses, aliasIndex } = require('./products');
 // Same reason as products above: cash.js creates cash_recon and adds its
 // columns, and the dashboard alert below reads them.
 const CASH = require('./cash');
@@ -5923,7 +5923,7 @@ function invoicePanel(r, vName) {
                     to the import screen. The lines themselves stay off here —
                     an invoice is an accounting record. */
                 r.lines_imported ? `<a class="btn btn-sm btn-ghost" href="/c/invoices/${r.id}/import">Products imported ✓</a>`
-                : r.ai_lines ? `<a class="btn btn-sm btn-primary" href="/c/invoices/${r.id}/import">Import products</a>` : ''}
+                : r.ai_lines ? `<a class="btn btn-sm btn-primary" href="/c/invoices/${r.id}/import">Review ${lineCount(r)} product line${lineCount(r) === 1 ? '' : 's'}</a>` : ''}
               ${r.file ? `<a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" target="_blank">Open original</a>
                           <a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
               ${r.vendor_id ? `<a class="btn btn-sm btn-ghost" href="/c/vendors/${Number(r.vendor_id)}">Vendor</a>` : ''}
@@ -5955,6 +5955,18 @@ function aiBadge(row) {
       : { label: 'AI read', cls: 'ai-ok', title: 'Read by AI with high confidence' };
   }
   return { label: 'Manual', cls: 'ai-man', title: 'Entered by hand' };
+}
+
+/**
+ * How many line items the reader found on an invoice.
+ *
+ * Deliberately a count of the stored JSON and not a re-match: scoring every
+ * line of every invoice against every product, to draw a list, would get
+ * slower with every invoice ever filed. The list says how much is waiting;
+ * the import screen is where the real work happens.
+ */
+function lineCount(inv) {
+  try { return JSON.parse(inv.ai_lines || '[]').length; } catch { return 0; }
 }
 
 app.get('/c/invoices', (req, res) => {
@@ -6023,7 +6035,8 @@ app.get('/c/invoices', (req, res) => {
         data-vendor="${esc(String(r.vendor_id || ''))}" data-amt="${(r.amount_cents || 0) / 100}"
         data-date="${esc(r.invoice_date || '')}" data-due="${esc(r.due_date || '')}"
         data-vname="${esc(vn.toLowerCase())}" data-added="${esc(String(r.created_at || ''))}"
-        data-search="${esc(search)}" style="--c:${c.color};--ct:${c.tint}">
+        data-search="${esc(search)}" data-review="${r.ai_lines && !r.lines_imported ? '1' : '0'}"
+        style="--c:${c.color};--ct:${c.tint}">
         <summary class="inv-row">
           <span class="inv-dot"></span>
           <span class="inv-vendor">${esc(vn)}</span>
@@ -6055,6 +6068,8 @@ app.get('/c/invoices', (req, res) => {
       </details>`;
   }).join('');
 
+  // Read but not yet imported — the queue an operator actually works through.
+  const needsReview = rows.filter((r) => r.ai_lines && !r.lines_imported).length;
   const usedCats = [...new Set(rows.map((r) => r.category || 'Other'))];
   const usedVendors = vendors.filter((v) => rows.some((r) => Number(r.vendor_id) === Number(v.id)));
 
@@ -6092,6 +6107,7 @@ app.get('/c/invoices', (req, res) => {
       <button class="fchip" data-f="status" data-v="unpaid" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Unpaid</button>
       <button class="fchip" data-f="status" data-v="overdue" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Overdue</button>
       <button class="fchip" data-f="status" data-v="paid" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Paid</button>
+      ${needsReview ? `<button class="fchip" data-f="review" data-v="1" style="--c:#7c3aed;--ct:#f5f3ff"><i class="fdot"></i>Needs product review<span class="fcount">${needsReview}</span></button>` : ''}
       ${usedCats.map((c) => { const cc = invCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}</button>`; }).join('')}
     </div>`;
 
@@ -6127,6 +6143,7 @@ app.get('/c/invoices', (req, res) => {
         function pass(el) {
           if (mode === 'status' && el.getAttribute('data-status') !== val) return false;
           if (mode === 'cat' && el.getAttribute('data-cat') !== val) return false;
+          if (mode === 'review' && el.getAttribute('data-review') !== val) return false;
           if (vendor && el.getAttribute('data-vendor') !== vendor) return false;
           if (amt) {
             var a = parseFloat(el.getAttribute('data-amt')) || 0, p = amt.split('-');
@@ -7584,8 +7601,11 @@ app.get('/c/invoices/:id/import', (req, res) => {
   // screen is only what a person still has to decide — showing the rest again
   // would be asking twice for the same answer.
   const done = importedIdx(inv);
-  const rows = allRows.filter((r) => !done.has(r.i)
-    && (r.confidence === 'medium' || (r.confidence === 'low' && !r.fee)));
+  // Charges used to be dropped from this screen altogether. They still default
+  // to skip and still import nothing — but a delivery fee the reader mistook
+  // for a line item was invisible and unfixable, so they are shown, folded
+  // away, and overridable.
+  const rows = allRows.filter((r) => !done.has(r.i) && r.confidence !== 'high');
   const vendors = invQ.vendors.all();
   const vName = new Map(vendors.map((v) => [Number(v.id), v.name]));
 
@@ -7599,7 +7619,14 @@ app.get('/c/invoices/:id/import', (req, res) => {
       </div>
     </div>`;
 
-  if (!rows.length && already.length) {
+  // Charges are on the screen now, but they are not work: they import nothing
+  // and default to skip. An invoice whose only leftovers are a delivery fee is
+  // finished, and should say so rather than showing a to-do list that cannot
+  // be completed.
+  const gAll = groupRows(rows);
+  const outstanding = gAll.review.length + gAll.likelyNew.length;
+
+  if (!outstanding && already.length) {
     return res.send(layout('Import products', `${head}
       <div class="attn attn-ok"><div class="attn-h">${icon('policy')} All products imported</div>
         <p>${already.length} line${already.length === 1 ? '' : 's'} from this invoice ${already.length === 1 ? 'is' : 'are'} in your product history. Nothing else needs a decision.</p></div>
@@ -7613,35 +7640,51 @@ app.get('/c/invoices/:id/import', (req, res) => {
         <button class="btn btn-danger btn-sm" type="submit">Undo this import</button></form>`));
   }
 
-  if (!rows.length) {
+  if (!outstanding) {
     return res.send(layout('Import products', `${head}
       <div class="empty2"><div class="empty2-t">${allRows.length ? 'Nothing left to decide' : 'No line items on this invoice'}</div>
         <div class="empty2-s">The reader either couldn't make out the item table, or this invoice was entered by hand. You can still add purchases from a product's own page.</div>
         <a class="btn" href="/c/products">Go to Products</a></div>`));
   }
 
-  const matched = rows.filter((r) => r.confidence === 'high').length;
-  const ask = rows.filter((r) => r.confidence === 'medium').length;
-  const skipped = rows.filter((r) => r.action === 'skip').length;
-  const CONF = {
-    high: { cls: 'ok', label: 'confident' },
-    medium: { cls: 'ask', label: 'not sure' },
-    low: { cls: 'new', label: 'new' },
-  };
-  const body = rows.map((r) => {
-    const c = CONF[r.confidence];
-    const facts = [r.code ? `#${esc(r.code)}` : '', r.brand ? esc(r.brand) : '', r.pack_size ? esc(r.pack_size) : '']
-      .filter(Boolean).join(' · ');
+  const g = gAll;
+  const aliases = aliasIndex();
+  const skipped = g.charges.length;
+
+  // Reasons the matcher already produced, as chips rather than a comma list —
+  // "different pack size" is the whole answer to "why is this uncertain", and
+  // it was being truncated into prose.
+  const WHY_TONE = (t) => (/^different|likely duplicate/.test(t) ? ' why-warn'
+    : /^same|matches|% of the words/.test(t) ? ' why-ok' : '');
+  const whyChips = (why) => (why || []).slice(0, 4)
+    .map((t) => `<span class="why${WHY_TONE(t)}">${esc(t)}</span>`).join('');
+
+  const facts = (r) => [r.code ? `#${esc(r.code)}` : '', r.brand ? esc(r.brand) : '', r.pack_size ? esc(r.pack_size) : '']
+    .filter(Boolean).join(' · ');
+
+  const line = (r, opts = {}) => {
+    // Near-misses only for lines about to become a new product: that is the
+    // only moment a duplicate gets created.
+    const near = opts.warnDupes
+      ? nearMisses({ desc: r.desc, code: r.code, brand: r.brand, pack_size: r.pack_size,
+          unit: r.unit, vendor_id: inv.vendor_id ? Number(inv.vendor_id) : null }, products, aliases)
+      : [];
     return `
-    <div class="iline${r.confidence === 'medium' ? ' iline-ask' : ''}">
+    <div class="iline${opts.ask ? ' iline-ask' : ''}${near.length ? ' iline-dupe' : ''}" data-row="${r.i}">
       <div class="iline-l">
-        <div class="iline-d">${esc(r.desc)}</div>
-        <div class="iline-m">${facts ? facts + ' · ' : ''}${r.qty ? `${r.qty}${r.unit ? ' ' + esc(r.unit) : ''} · ` : ''}${r.unit_price_cents ? money(r.unit_price_cents) + ' each · ' : ''}<b>${money(r.total_cents)}</b></div>
-        ${r.match ? `<div class="iline-why">${r.confidence === 'high' ? 'Matched' : 'Looks like'} <b>${esc(r.match.name)}</b>${r.why.length ? ` — ${esc(r.why.slice(0, 3).join(', '))}` : ''}</div>` : ''}
+        <div class="iline-d">${esc(r.desc) || '<i>no description</i>'}</div>
+        <div class="iline-m">${facts(r) ? facts(r) + ' · ' : ''}${r.qty ? `${r.qty}${r.unit ? ' ' + esc(r.unit) : ''} · ` : ''}${r.unit_price_cents ? money(r.unit_price_cents) + ' each · ' : ''}<b>${money(r.total_cents)}</b></div>
+        ${r.match ? `<div class="iline-why"><span class="iline-sug">Looks like <b>${esc(r.match.name)}</b></span>${whyChips(r.why)}</div>` : ''}
+        ${near.length ? `<div class="iline-dup">
+          <b>Already have something close</b> — creating this makes a second record.
+          ${near.map((d) => `<label class="dupopt">
+            <input type="radio" name="pick_${r.i}" data-picks="${d.product.id}">
+            <span>Use <b>${esc(d.product.name)}</b></span>${whyChips(d.why)}</label>`).join('')}
+        </div>` : ''}
       </div>
       <div class="iline-r">
-        <select name="action_${r.i}" class="minisel iline-act"${r.confidence === 'medium' ? ' required' : ''}>
-          ${r.confidence === 'medium' ? '<option value="" selected>Choose…</option>' : ''}
+        <select name="action_${r.i}" class="minisel iline-act"${opts.ask ? ' required' : ''}>
+          ${opts.ask ? '<option value="" selected>Choose…</option>' : ''}
           <option value="match"${r.action === 'match' ? ' selected' : ''}${r.match ? '' : ' disabled'}>Add to existing</option>
           <option value="create"${r.action === 'create' ? ' selected' : ''}>Create new product</option>
           <option value="skip"${r.action === 'skip' ? ' selected' : ''}>Skip</option>
@@ -7658,23 +7701,107 @@ app.get('/c/invoices/:id/import', (req, res) => {
         <input type="hidden" name="total_${r.i}" value="${r.total_cents}">
         <input type="hidden" name="price_${r.i}" value="${r.unit_price_cents || ''}">
         ${r.fee && !r.match ? '<span class="iline-tag fee">not a product</span>'
-          : `<span class="iline-tag ${c.cls}">${c.label}</span>`}
+          : opts.ask ? '<span class="iline-tag ask">not sure</span>'
+          : '<span class="iline-tag new">new</span>'}
       </div>
     </div>`;
-  }).join('');
+  };
 
+  // Bulk actions only ever set the same <select> values a person would click,
+  // so the form posts exactly what it always did and the server is untouched.
+  const group = (key, title, sub, list, opts, bulk) => (list.length ? `
+    <section class="igroup" data-group="${key}">
+      <div class="igroup-h">
+        <span class="igroup-t">${title}</span>
+        <span class="igroup-n">${list.length}</span>
+        ${bulk ? `<button type="button" class="btn btn-sm btn-ghost ibulk" data-group="${key}" data-set="${bulk.set}">${bulk.label}</button>` : ''}
+      </div>
+      ${sub ? `<p class="igroup-s">${sub}</p>` : ''}
+      <div class="ilines">${list.map((r) => line(r, opts)).join('')}</div>
+    </section>` : '');
+
+  const body = [
+    group('review', 'Needs your decision', 'A close but uncertain match. Nothing here imports until you choose.',
+      g.review, { ask: true }, { set: 'match', label: 'Accept all suggested matches' }),
+    group('new', 'Likely new products', 'No existing product came close. These will be created.',
+      g.likelyNew, { warnDupes: true }, { set: 'create', label: 'Create all' }),
+    group('charges', 'Charges and fees', 'Read from the invoice but not stock — skipped unless you say otherwise.',
+      g.charges, {}, { set: 'skip', label: 'Skip all' }),
+  ].join('');
+
+  const ask = g.review.length;
   res.send(layout('Import products', `${head}
-    <div class="attn ${ask ? 'attn-soft' : 'attn-ok'}"><div class="attn-h">${icon('invoices')} ${rows.length} line${rows.length === 1 ? '' : 's'} read${matched ? `, ${matched} matched confidently` : ''}${ask ? `, ${ask} need${ask === 1 ? 's' : ''} a decision` : ''}${skipped ? `, ${skipped} look${skipped === 1 ? 's' : ''} like a charge` : ''}</div>
-      <p>${already.length ? `${already.length} confident line${already.length === 1 ? ' was' : 's were'} imported automatically when you saved. ` : ''}${ask ? `The ${ask === 1 ? 'highlighted line is' : 'highlighted lines are'} a close but uncertain match — pick what to do with ${ask === 1 ? 'it' : 'them'} before importing. ` : ''}Nothing else is saved until you press Import.</p></div>
-    <form method="post" action="/c/invoices/${inv.id}/import">
+    <div class="attn ${ask ? 'attn-soft' : 'attn-ok'}"><div class="attn-h">${icon('invoices')} ${
+      ask ? `${ask} line${ask === 1 ? '' : 's'} need${ask === 1 ? 's' : ''} your decision`
+          : `${rows.length} line${rows.length === 1 ? '' : 's'} left to import`}</div>
+      <p>${already.length ? `${already.length} confident line${already.length === 1 ? ' was' : 's were'} imported automatically when you saved. ` : ''}${
+        g.likelyNew.length ? `${g.likelyNew.length} look${g.likelyNew.length === 1 ? 's' : ''} new. ` : ''}${
+        skipped ? `${skipped} look${skipped === 1 ? 's' : ''} like a charge and will be skipped. ` : ''}Nothing is saved until you press Import.</p></div>
+    <form method="post" action="/c/invoices/${inv.id}/import" id="importform">
       <input type="hidden" name="count" value="${rows.length}">
-      <div class="ilines">${body}</div>
+      <input type="hidden" name="idx" value="${rows.map((r) => r.i).join(',')}">
+      ${body}
       <div class="stickybar">
         <a class="btn btn-ghost" href="/c/invoices">Cancel</a>
-        <button class="btn btn-primary" type="submit">Import ${rows.length - skipped} line${rows.length - skipped === 1 ? '' : 's'}</button>
+        <button class="btn btn-primary" type="submit">Import <span id="impn">${rows.length - skipped}</span> line<span id="imps">${rows.length - skipped === 1 ? '' : 's'}</span></button>
       </div>
-    </form>`));
+    </form>
+    ${importScript()}`));
 });
+
+/**
+ * Bulk actions and the live count.
+ *
+ * Everything here sets the value of a <select> that is already on the page —
+ * the same thing a person does by hand. The form posts exactly the fields it
+ * always did, so the server never learns that a button was involved and the
+ * import logic is untouched.
+ */
+function importScript() {
+  return `<script>
+  (function () {
+    var form = document.getElementById('importform');
+    if (!form) return;
+
+    function recount() {
+      var n = 0;
+      form.querySelectorAll('select.iline-act').forEach(function (sel) {
+        if (sel.value === 'match' || sel.value === 'create') n++;
+      });
+      var el = document.getElementById('impn'), s = document.getElementById('imps');
+      if (el) el.textContent = n;
+      if (s) s.textContent = n === 1 ? '' : 's';
+    }
+
+    form.addEventListener('click', function (e) {
+      var b = e.target.closest('.ibulk');
+      if (!b) return;
+      var scope = form.querySelector('[data-group="' + b.dataset.group + '"]');
+      if (!scope) return;
+      scope.querySelectorAll('select.iline-act').forEach(function (sel) {
+        // Never choose "add to existing" where there is nothing to add it to.
+        var opt = sel.querySelector('option[value="' + b.dataset.set + '"]');
+        if (opt && !opt.disabled) sel.value = b.dataset.set;
+      });
+      recount();
+    });
+
+    // The duplicate radios are a shortcut for "match, and use this product".
+    form.addEventListener('change', function (e) {
+      if (e.target.matches('.dupopt input[type="radio"]')) {
+        var row = e.target.closest('[data-row]');
+        var act = row.querySelector('select.iline-act');
+        var prod = row.querySelector('select[name^="product_"]');
+        if (act) act.value = 'match';
+        if (prod) prod.value = e.target.dataset.picks;
+      }
+      if (e.target.matches('select.iline-act')) recount();
+    });
+
+    recount();
+  })();
+  </script>`;
+}
 
 app.post('/c/invoices/:id/import', (req, res) => {
   const inv = invQ.one.get(Number(req.params.id));
@@ -7682,14 +7809,27 @@ app.post('/c/invoices/:id/import', (req, res) => {
   // Confident lines are already in from the save, so a whole-invoice refusal
   // would block the leftovers. Duplicates are avoided per line instead.
   const seen = importedIdx(inv);
+  // Which lines this form actually carried.
+  //
+  // The fields are named for the line's index in the WHOLE invoice —
+  // action_3, action_7 — because that is what `seen` is keyed on. The loop
+  // used to run 0..count-1, where count was the number of rows on screen. The
+  // two only line up when the reviewable lines happen to be the first ones, so
+  // any decision on a line past that position was read as undefined and thrown
+  // away: the operator chose, pressed Import, and was told "Imported 0 lines".
+  //
+  // The form now states its indexes. `count` is still honoured for a page that
+  // was already open when this shipped, so nobody loses a screen of work.
+  const listed = String(req.body.idx || '').split(',').map(Number).filter(Number.isInteger);
   const n = Number(req.body.count) || 0;
+  const indexes = listed.length ? listed : Array.from({ length: n }, (_, i) => i);
   const vendorId = inv.vendor_id ? Number(inv.vendor_id) : null;
   const on = inv.invoice_date || isoDate(startOfToday());
 
   const touchedProducts = new Set();
   const run = db.transaction(() => {
     let added = 0, created = 0;
-    for (let i = 0; i < n; i++) {
+    for (const i of indexes) {
       const action = req.body[`action_${i}`];
       if (action !== 'match' && action !== 'create') continue;
       const desc = (req.body[`desc_${i}`] || '').trim();

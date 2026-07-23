@@ -2563,3 +2563,38 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   background: var(--surface-2); border: 1px solid var(--line); }
 .sp-note b { font-size: 13px; font-weight: 650; color: var(--ink); }
 .sp-note i { font-style: normal; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+
+/* --- Import review: grouped, with the matcher's reasons on show ----------- */
+/* The reasons already existed in the data and were being flattened into a
+   truncated sentence. "different pack size" IS the answer to "why is this
+   uncertain", so it gets to be a thing you can see at a glance. */
+.igroup { margin: 18px 0 0; }
+.igroup-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 0 0 8px; border-bottom: 1px solid var(--line-2); }
+.igroup-t { font-size: 14px; font-weight: 700; color: var(--ink); }
+.igroup-n { font-size: 12px; font-weight: 600; color: var(--text-2);
+  background: var(--surface-2); border-radius: 999px; padding: 1px 8px; }
+.igroup-h .ibulk { margin-left: auto; }
+.igroup-s { margin: 8px 0 0; font-size: 13px; color: var(--text-2); }
+
+.why { display: inline-block; margin: 0 4px 0 0; padding: 1px 7px;
+  border-radius: 999px; font-size: 11.5px; line-height: 1.7;
+  background: var(--surface-2); color: var(--text-2); }
+.why-ok   { background: #e7f6ed; color: #1a7a3c; }
+.why-warn { background: #fdecec; color: #9a2c1d; }
+.iline-sug { margin-right: 6px; }
+
+/* A line about to become a new product that looks like one we already have. */
+.iline-dupe { border-left: 3px solid #9a5b12; }
+.iline-dup { margin-top: 8px; padding: 8px 10px; background: #fdf4e6;
+  border-radius: 8px; font-size: 13px; color: var(--ink); }
+.dupopt { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; cursor: pointer; }
+.dupopt input { margin: 0; }
+
+@media (max-width: 700px) {
+  .igroup-h { gap: 6px; }
+  .igroup-h .ibulk { margin-left: 0; flex-basis: 100%; }
+  .iline-dup { font-size: 12.5px; }
+  .dupopt { align-items: flex-start; }
+}

@@ -422,6 +422,44 @@ function reviewRows(lines, products, vendorId) {
   });
 }
 
+/**
+ * Sort review rows into the buckets an operator actually works in.
+ *
+ * Classification only — it re-scores nothing and decides nothing. The `action`
+ * each row carries is exactly what reviewRows() set, so what the form submits
+ * is unchanged.
+ */
+function groupRows(rows) {
+  const out = { review: [], likelyNew: [], charges: [] };
+  for (const r of rows || []) {
+    if (r.fee && !r.match) out.charges.push(r);
+    else if (r.confidence === 'medium') out.review.push(r);
+    else out.likelyNew.push(r);
+  }
+  return out;
+}
+
+/**
+ * Products close enough to a line to be worth a second look, but not close
+ * enough for the matcher to offer them.
+ *
+ * A line scoring below MED is treated as new, which is the conservative call
+ * and stays that way — this does not change it. It only says so out loud: at
+ * 40-59 there is often an existing product with a different pack size or a
+ * missing brand, and creating a second record for it is the duplicate the
+ * merge tool exists to clean up. Cheaper to notice before it is made.
+ */
+const WARN = 40;
+function nearMisses(line, products, aliasesByProduct, limit = 3) {
+  const list = products || q.plain.all();
+  const aliases = aliasesByProduct || aliasIndex();
+  return list
+    .map((p) => ({ product: p, ...scoreMatch(line, p, aliases.get(p.id) || []) }))
+    .filter((r) => r.score >= WARN && r.score < MED)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 // ---------------------------------------------------------------------------
 // MERGE — two records for one product, joined without losing a single line.
 //
@@ -567,6 +605,6 @@ const needsPackInfo = () => q.plain.all().filter((p) => {
 module.exports = {
   q, CATEGORIES, norm, trendOf, reviewRows,
   matchProduct, matchLine, scoreMatch, aliasIndex, learnAlias,
-  mergeProducts, likelyDuplicates, HIGH, MED,
+  mergeProducts, likelyDuplicates, groupRows, nearMisses, HIGH, MED, WARN,
   priceOf, costFor, costableUnits, needsPackInfo,
 };

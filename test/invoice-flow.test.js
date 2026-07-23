@@ -126,7 +126,18 @@ test('the import screen offers only what still needs deciding', async () => {
   // Asking again about a line that is already in would be asking twice.
   const shown = [...html.matchAll(/iline-d">(.*?)<\/div>/g)].map((m) => m[1]);
   assert.ok(!shown.includes('Roma tomatoes'), 'an imported line is not shown again');
-  assert.ok(!shown.includes('Fuel surcharge'), 'and a charge is never offered');
+
+  // Charges ARE now listed, in their own group. This used to assert they were
+  // hidden. Hiding them meant a delivery fee the reader mistook for a line
+  // item — or a real product it mistook for a fee — was invisible and could
+  // not be corrected. What matters is not that they are unseen but that they
+  // stay OUT of the import unless somebody says otherwise, so that is what is
+  // asserted now: shown, grouped, and defaulted to skip.
+  assert.ok(shown.includes('Fuel surcharge'), 'a charge is visible');
+  assert.match(html, /Charges and fees/, 'in its own group');
+  const feeRow = html.slice(html.indexOf('Fuel surcharge'));
+  const sel = feeRow.slice(feeRow.indexOf('<select'), feeRow.indexOf('</select>'));
+  assert.match(sel, /value="skip" selected/, 'and it defaults to skip, so nothing imports by itself');
 });
 
 test('re-saving does not double-count a delivery', async () => {
@@ -151,4 +162,115 @@ test('re-saving does not double-count a delivery', async () => {
   const after = db.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(id).n;
   db.close();
   assert.strictEqual(after, before, 'no duplicate purchase rows');
+});
+
+test('a decision on a late line is not silently dropped', async () => {
+  // The bug this covers shipped and was live.
+  //
+  // Field names carry the line's index in the WHOLE invoice — action_3,
+  // action_7 — because that is what the imported-index set is keyed on. The
+  // handler looped 0..count-1, where count was the number of rows ON SCREEN.
+  // Those only coincide when the reviewable lines are the first ones. In the
+  // ordinary case — early lines auto-imported, later ones needing a decision —
+  // the operator chose, pressed Import, and the choice was read as undefined
+  // and thrown away.
+  const db = new Database(DB);
+  const vend = db.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  // Two lines the matcher cannot place, at indexes 1 and 2, behind one it can.
+  const lines = [
+    { description: 'Roma tomatoes', qty: 1, unit_price: 10, total: 10 },
+    { description: 'Qqx Zeta Widget', qty: 1, unit_price: 11, total: 11 },
+    { description: 'Qqx Omega Widget', qty: 1, unit_price: 12, total: 12 },
+  ];
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, ai_lines)
+    VALUES ('2026-02-02', ?, 3300, 'Unpaid', ?)`).run(String(vend.id), JSON.stringify(lines)).lastInsertRowid;
+  db.close();
+
+  const html = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+  const idx = (html.match(/name="idx" value="([^"]*)"/) || [])[1];
+  assert.ok(idx, 'the form states which lines it carries');
+  const carried = idx.split(',').map(Number);
+  assert.ok(Math.max(...carried) >= carried.length,
+    `this only proves anything when an index runs past the row count: ${idx}`);
+
+  // Decide on every line the form offered, exactly as the screen would post.
+  const body = new URLSearchParams({ count: String(carried.length), idx });
+  for (const i of carried) {
+    body.set(`action_${i}`, 'create');
+    body.set(`desc_${i}`, lines[i].description);
+    body.set(`total_${i}`, String(Math.round(lines[i].total * 100)));
+    body.set(`qty_${i}`, String(lines[i].qty));
+  }
+  const res = await fetch(`${BASE}/c/invoices/${id}/import`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  assert.strictEqual(res.status, 302);
+
+  const after = new Database(DB, { readonly: true });
+  const got = after.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(id).n;
+  after.close();
+  assert.strictEqual(got, carried.length,
+    `every decision was recorded, not just the ones at a low index (got ${got} of ${carried.length})`);
+});
+
+test('the import screen groups the work and shows why a line is uncertain', async () => {
+  const db = new Database(DB, { readonly: true });
+  const id = db.prepare("SELECT id FROM m_invoices WHERE ai_lines LIKE '%Olive Oil%' ORDER BY id DESC LIMIT 1").get().id;
+  db.close();
+  const html = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+
+  // Groups only render when they have something in it — this invoice's
+  // leftovers are all uncertain matches, so "likely new" correctly does not
+  // appear here. Asserting it did was asserting a group can never be empty.
+  assert.match(html, /Needs your decision/, 'uncertain lines have their own group');
+
+  // The invoice made by the previous test is all unmatchable lines, so that
+  // is where the "new" group has to show up.
+  const db2 = new Database(DB, { readonly: true });
+  const newish = db2.prepare("SELECT id FROM m_invoices WHERE ai_lines LIKE '%Qqx%' ORDER BY id DESC LIMIT 1").get();
+  db2.close();
+  if (newish) {
+    const h2 = await (await fetch(`${BASE}/c/invoices/${newish.id}/import`)).text();
+    // It may already be imported by the test above, in which case there is
+    // nothing left to group — only assert when rows are actually offered.
+    if (/class="iline/.test(h2)) assert.match(h2, /Likely new products/, 'new lines get their own group');
+  }
+  // The reasons were already computed and were being flattened into truncated
+  // prose. They are the answer to "why is this uncertain".
+  assert.match(html, /class="why/, 'the matcher\'s reasons are on the row');
+
+  // Bulk actions must only ever set a control a person could set by hand.
+  assert.match(html, /class="btn btn-sm btn-ghost ibulk"/, 'there are bulk actions');
+  assert.ok(!/name="bulk/.test(html), 'and they post no field of their own');
+
+  // A bulk button does what its label says. "Skip all" wired to `create`
+  // would import every delivery fee on the invoice with one click, and the
+  // label would still read Skip — the mistake nobody would look for.
+  const SAFE = { review: 'match', new: 'create', charges: 'skip' };
+  const bulks = [...html.matchAll(/data-group="([a-z]+)" data-set="([a-z]+)"/g)];
+  assert.ok(bulks.length, 'the bulk buttons declare what they set');
+  for (const [, group, set] of bulks) {
+    assert.strictEqual(set, SAFE[group], `the ${group} bulk action sets ${SAFE[group]}, not ${set}`);
+  }
+});
+
+test('creating a new product warns when something close already exists', () => {
+  // Below the match threshold the app treats a line as new — the conservative
+  // call, and unchanged. This only says so out loud, because that is exactly
+  // where duplicates get made.
+  const P = require('../src/products');
+  const products = P.q.plain.all();
+  const target = products.find((p) => /olive oil/i.test(p.name)) || products[0];
+  assert.ok(target, 'there is a product to be close to');
+
+  const near = P.nearMisses({ desc: target.name + ' 12/1L', code: null, brand: null,
+    pack_size: '12/1L', unit: 'case', vendor_id: null }, products);
+  assert.ok(Array.isArray(near), 'it returns candidates');
+  for (const n of near) {
+    assert.ok(n.score >= P.WARN && n.score < P.MED,
+      `a warning is only for the gap between "new" and "offered": ${n.score}`);
+    assert.ok(Array.isArray(n.why), 'and says why it is close');
+  }
 });
