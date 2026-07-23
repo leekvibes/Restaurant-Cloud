@@ -6228,6 +6228,14 @@ function captureOverlay(kinds, args) {
         ${capField({ name: 'category', label: 'Category', type: 'select', options: INV_CATS, value: 'Food' })}
         ${capField({ name: 'subtotal', label: 'Subtotal', type: 'money' })}
         ${capField({ name: 'tax', label: 'Tax', type: 'money' })}
+        ${/* These three were on the old drawer and were dropped when it became
+              this overlay. Status decides whether an invoice ever appears as
+              owed, payment method is how the books reconcile it, and notes is
+              where "short two cases, credit promised" goes. None of them can
+              be reconstructed later from the paper. */''}
+        ${capField({ name: 'status', label: 'Status', type: 'select', options: ['Unpaid', 'Paid'], value: 'Unpaid' })}
+        ${capField({ name: 'payment_method', label: 'Paid how', type: 'select', options: ['', ...PAY_METHODS] })}
+        ${capField({ name: 'notes', label: 'Notes', wide: true, placeholder: 'Anything worth remembering about this delivery' })}
       </div>
       <div class="cap-lines" id="cap-lines" hidden></div>
       <p class="cap-note">Everything ZWIN read is editable — click any value. Amber fields are worth
@@ -6339,7 +6347,11 @@ function captureOverlay(kinds, args) {
             <input type="hidden" name="ai_lines" class="cap-ailines">
             <input type="hidden" name="ai_confidence" class="cap-aiconf">
             <input type="hidden" name="vendor_id" class="cap-vendorid">
-            <input type="hidden" name="status" value="Unpaid">
+            ${/* What the reader said, before anybody touched it. The save
+                  handler compares the posted figures against this to decide
+                  between "read by AI" and "read, then corrected" — without it
+                  that check silently always says unchanged. */''}
+            <input type="hidden" name="ai_snapshot" class="cap-snap">
           </form>`).join('')}
         </div>
       </div>
@@ -6696,7 +6708,14 @@ function captureScript(kinds) {
         .then(function (j) {
           showForm();
           if (j.error) { note(j.error); return; }
-          fill(j.data || {});
+          // Two shapes in the wild: the documents and expenses readers answer
+          // {ok, data}, and the invoice reader — which predates them — answers
+          // the fields flat alongside its vendor match and line tally. Reading
+          // only j.data meant every invoice read landed as an empty object and
+          // filled nothing, while the "read by ZWIN" pill still appeared.
+          var d = j.data || j;
+          if (!d || !Object.keys(d).length) { note('Nothing could be read off that. Type it in — the file is still attached.'); return; }
+          fill(d);
           el('cap-pill').hidden = false;
         })
         .catch(function (e) { showForm(); note('Could not read it — ' + e.message + '. Type it in; the file is still attached.'); });
@@ -6741,9 +6760,19 @@ function captureScript(kinds) {
       var low = d.confidence === 'low' || d.confidence === 'medium';
       panel().querySelector('.cap-ai').value = 'ai';
       if (d.confidence) panel().querySelector('.cap-aiconf').value = d.confidence;
+      var snap = panel().querySelector('.cap-snap');
+      if (snap) {
+        // Same five fields, same order, as the save handler re-joins to compare.
+        snap.value = [d.total || '', d.subtotal || '', d.tax || '',
+          d.vendor_id || '', d.category || ''].join('|');
+      }
 
       if (kind === 'invoice') {
-        set('vendor_name', d.vendor_name, low);
+        // The endpoint already matched the read name against the vendor list.
+        // Prefer its match, so "SYSCO FOODS INC" fills as the vendor actually
+        // on file rather than creating a near-duplicate of it on save.
+        set('vendor_name', d.matched_vendor || d.vendor_name, low);
+        if (d.vendor_id) panel().querySelector('.cap-vendorid').value = d.vendor_id;
         set('invoice_number', d.invoice_number, low);
         set('invoice_date', d.invoice_date, low);
         set('due_date', d.due_date, low);

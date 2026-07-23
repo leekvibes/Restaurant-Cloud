@@ -895,3 +895,113 @@ test('the duplicate check sees the typed vendor, not a blank one', async () => {
   assert.strictEqual(again.status, 200, 'the second is questioned');
   assert.match(await again.text(), /already have this invoice/i, 'as the same paper twice');
 });
+
+// ---------------------------------------------------------------------------
+// What the capture overlay must carry.
+//
+// Two regressions happened here at once when the drawer became an overlay, and
+// neither was visible from the server: the read filled nothing, and three
+// fields quietly stopped existing. Both are shaped like "the page still looks
+// right", which is why they are pinned rather than eyeballed.
+// ---------------------------------------------------------------------------
+
+test('the overlay offers every field the save handler reads', async () => {
+  // Dropping one loses information that cannot be recovered from the paper
+  // later — status decides whether an invoice ever shows as owed, payment
+  // method is how the books reconcile it, notes is where "short two cases,
+  // credit promised" goes.
+  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  const needed = ['amount', 'subtotal', 'tax', 'invoice_date', 'due_date', 'invoice_number',
+    'category', 'status', 'payment_method', 'notes', 'vendor_name', 'vendor_id',
+    'ai_status', 'ai_confidence', 'ai_lines', 'ai_snapshot', 'file'];
+  for (const f of needed) {
+    assert.match(html, new RegExp(`name="${f}"`), `${f} can be sent from the overlay`);
+  }
+  // And exactly one control per name, or the server receives an array.
+  for (const f of ['status', 'amount', 'notes']) {
+    const n = (html.match(new RegExp(`name="${f}"`, 'g')) || []).length;
+    assert.strictEqual(n, 1, `${f} is posted once, not ${n} times`);
+  }
+});
+
+test('the reader fill accepts the shape the invoice endpoint actually returns', async () => {
+  // /c/invoices/read predates the documents and expenses readers and answers
+  // its fields flat, alongside its vendor match. The newer two answer
+  // {ok, data}. Reading only j.data meant every invoice read filled nothing
+  // while still showing "read by ZWIN" — the failure looked like a success.
+  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  assert.match(html, /j\.data \|\| j/, 'both shapes are handled');
+  assert.match(html, /matched_vendor \|\| d\.vendor_name/,
+    'and the vendor already matched on the server is preferred over the raw read');
+});
+
+test('an invoice saved with every field keeps every field', async () => {
+  const res = await post('/c/invoices', {
+    amount: '36.88', subtotal: '36.88', tax: '0', vendor_name: 'Qqx Overlay Bakery',
+    invoice_number: 'OV-1', invoice_date: '2026-12-01', due_date: '2026-12-31',
+    category: 'Food', status: 'Paid', payment_method: 'ACH',
+    notes: 'Short two cases, credit promised', ai_status: 'manual',
+  });
+  assert.strictEqual(res.status, 302);
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'OV-1'").get();
+  db.close();
+  assert.strictEqual(inv.status, 'Paid', 'a paid invoice files as paid, not as owed');
+  assert.strictEqual(inv.payment_method, 'ACH');
+  assert.strictEqual(inv.notes, 'Short two cases, credit promised');
+  assert.strictEqual(inv.subtotal_cents, 3688);
+});
+
+test('the snapshot is what tells a corrected read from an untouched one', async () => {
+  // The save handler re-joins the posted figures and compares them against
+  // ai_snapshot to choose between "read by AI" and "read, then corrected".
+  // With no snapshot posted that comparison silently always says unchanged.
+  const same = await post('/c/invoices', {
+    amount: '50.00', subtotal: '50.00', tax: '', vendor_name: 'Qqx Snapshot Co',
+    invoice_number: 'SNAP-1', invoice_date: '2026-12-02', category: 'Food',
+    ai_status: 'ai', ai_snapshot: '50.00|50.00|||Food',
+  });
+  assert.strictEqual(same.status, 302);
+
+  const edited = await post('/c/invoices', {
+    amount: '61.00', subtotal: '50.00', tax: '', vendor_name: 'Qqx Snapshot Co',
+    invoice_number: 'SNAP-2', invoice_date: '2026-12-03', category: 'Food',
+    ai_status: 'ai', ai_snapshot: '50.00|50.00|||Food',
+  });
+  assert.strictEqual(edited.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const a = db.prepare("SELECT ai_status FROM m_invoices WHERE invoice_number = 'SNAP-1'").get();
+  const b = db.prepare("SELECT ai_status FROM m_invoices WHERE invoice_number = 'SNAP-2'").get();
+  db.close();
+  assert.strictEqual(a.ai_status, 'ai', 'untouched stays "read by AI"');
+  assert.strictEqual(b.ai_status, 'ai_edited', 'a changed total is "read, then corrected"');
+
+  // The half above only proves the server compares correctly. The overlay has
+  // to actually stamp what was read, in the same five fields and the same
+  // order the handler re-joins — a snapshot of empty strings compares equal to
+  // nothing and every read would report itself untouched.
+  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  const built = html.match(/snap\.value = \[([^\]]+)\]/);
+  assert.ok(built, 'the overlay builds a snapshot');
+  for (const part of ['d.total', 'd.subtotal', 'd.tax', 'd.vendor_id', 'd.category']) {
+    assert.ok(built[1].includes(part), `it is built from ${part}, as the handler expects`);
+  }
+});
+
+test('an invoice read with lines still lands on the import screen', async () => {
+  // The whole point of reading the lines. If the overlay stops carrying
+  // ai_lines, the save succeeds, the products never import, and nothing says so.
+  const res = await post('/c/invoices', {
+    amount: '36.88', vendor_name: 'Qqx Overlay Bakery', invoice_number: 'OV-LINES',
+    invoice_date: '2026-12-04', category: 'Food', status: 'Unpaid', ai_status: 'ai',
+    ai_lines: JSON.stringify([
+      { description: 'Qqx Ciabatta Roll', qty: 1, unit_price: 8.99, total: 8.99 },
+      { description: 'Qqx Rosemary Focaccia', qty: 1, unit_price: 10.6, total: 10.6 },
+    ]),
+  });
+  assert.strictEqual(res.status, 302);
+  const to = decodeURIComponent(res.headers.get('location') || '');
+  assert.match(to, /\/import/, 'it goes to the import screen');
+  assert.match(to, /2 lines need a decision/, 'and says how much is waiting');
+});
