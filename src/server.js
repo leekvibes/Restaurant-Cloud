@@ -14,7 +14,7 @@ const { mountModules, MODULES, pagesOf } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
-const { readReport, readInvoice, readDocument } = require('./reader');
+const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const MX = require('./metrics');
 const CH = require('./charts');
@@ -6077,6 +6077,17 @@ function docState(r) {
 // the file, and reaching for it from here reads it before it exists.
 const docScan = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
+app.post('/c/expenses/read', docScan.array('scan', 8), async (req, res) => {
+  try {
+    if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
+    const data = await readExpense(req.files);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error('[reader] receipt read failed:', e.message);
+    res.json({ error: e.code === 'NO_KEY' ? e.message : `Could not read that — ${e.message}` });
+  }
+});
+
 app.post('/c/documents/read', docScan.array('scan', 8), async (req, res) => {
   try {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
@@ -6087,6 +6098,602 @@ app.post('/c/documents/read', docScan.array('scan', 8), async (req, res) => {
     res.json({ error: e.code === 'NO_KEY' ? e.message : `Could not read that — ${e.message}` });
   }
 });
+
+// ---------------------------------------------------------------------------
+// CAPTURE
+//
+// One way in, for an invoice, a document or an expense: drop the paper, watch
+// it read, confirm it against the paper. An overlay rather than a route,
+// because the list behind it stays mounted — Cancel and Save put you back on
+// the row you were looking at, with your filter and your scroll, which a page
+// navigation cannot do without rebuilding both.
+//
+// The three kinds share the shell, the reading state and the document viewer,
+// and differ only in the fields they confirm and where they post. That is the
+// whole reason it is one component: the flow is identical, so a fix to it is
+// one fix rather than three that drift.
+// ---------------------------------------------------------------------------
+
+/** A field in the confirm panel. `read` marks it as something the AI filled. */
+const capField = (o) => `
+  <div class="cap-f${o.wide ? ' wide' : ''}" data-f="${o.name}">
+    <label class="cap-lab" for="cap_${o.name}">${esc(o.label)}<span class="cap-mark" data-for="${o.name}"></span></label>
+    ${o.type === 'select'
+      ? `<select id="cap_${o.name}" name="${o.name}">${o.options.map((c) => `<option${c === o.value ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>`
+      : o.type === 'money'
+        ? `<div class="cap-money"><input id="cap_${o.name}" name="${o.name}" type="number" step="0.01" min="0" placeholder="0.00"${o.required ? ' required' : ''}></div>`
+        : `<input id="cap_${o.name}" name="${o.name}" type="${o.type || 'text'}"${o.value ? ` value="${esc(o.value)}"` : ''}${o.placeholder ? ` placeholder="${esc(o.placeholder)}"` : ''}${o.required ? ' required' : ''}${o.list ? ` list="${o.list}"` : ''}>`}
+  </div>`;
+
+/**
+ * The overlay, for whichever kinds this page can add.
+ *
+ * @param kinds  'invoice' | 'document' | 'expense', in the order the toggle shows them
+ */
+function captureOverlay(kinds, args) {
+  const vendors = invQ.vendors.all();
+  const people = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
+  const today = args.today;
+
+  const panels = {
+    invoice: `
+      <div class="cap-kick">Invoice details</div>
+      <div class="cap-grid">
+        ${capField({ name: 'vendor_name', label: 'Vendor', list: 'cap-vendors', placeholder: 'Who billed you' })}
+        ${capField({ name: 'invoice_number', label: 'Invoice no.', placeholder: 'As printed' })}
+        ${capField({ name: 'invoice_date', label: 'Date', type: 'date', value: today })}
+        ${capField({ name: 'due_date', label: 'Due date', type: 'date' })}
+        ${capField({ name: 'amount', label: 'Total', type: 'money', required: true })}
+        ${capField({ name: 'category', label: 'Category', type: 'select', options: INV_CATS, value: 'Food' })}
+        ${capField({ name: 'subtotal', label: 'Subtotal', type: 'money' })}
+        ${capField({ name: 'tax', label: 'Tax', type: 'money' })}
+      </div>
+      <div class="cap-lines" id="cap-lines" hidden></div>
+      <p class="cap-note">Everything ZWIN read is editable — click any value. Amber fields are worth
+        a glance before saving. Line items are matched to Products after you save.</p>
+      <datalist id="cap-vendors">${vendors.map((v) => `<option value="${esc(v.name)}"></option>`).join('')}</datalist>`,
+
+    expense: `
+      <div class="cap-kick">What was bought</div>
+      <div class="cap-grid">
+        ${capField({ name: 'name', label: 'What was bought', required: true, wide: true, placeholder: 'Bag of ice, Costco run' })}
+        ${capField({ name: 'amount_cents', label: 'Amount', type: 'money', required: true })}
+        ${capField({ name: 'spent_on', label: 'Date', type: 'date', value: today })}
+        ${capField({ name: 'where_bought', label: 'Where', placeholder: 'Costco, Home Depot' })}
+        ${capField({ name: 'category', label: 'Category', type: 'select', options: EXP_CATS, value: 'Groceries' })}
+        ${capField({ name: 'paid_by', label: 'Who paid', required: true, list: 'cap-people', placeholder: 'Name' })}
+        ${capField({ name: 'paid_with', label: 'Paid with', type: 'select', options: EXP_PAID })}
+      </div>
+      <p class="cap-note">A receipt does not say whose card it was, so ZWIN leaves “paid with” alone —
+        set it yourself, because that is what decides whether somebody is owed the money back.</p>
+      <datalist id="cap-people">${people.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>`,
+
+    document: `
+      <div class="cap-kick">What this is</div>
+      <div class="cap-grid">
+        ${capField({ name: 'title', label: 'Title', required: true, wide: true, placeholder: 'Form 941 — Q1 2026' })}
+        ${capField({ name: 'issuer', label: 'Who it is from', placeholder: 'IRS, Gusto, landlord' })}
+        ${capField({ name: 'category', label: 'Kind', type: 'select', options: DOC_CATS, value: 'Other' })}
+        ${capField({ name: 'doc_date', label: 'Date on it', type: 'date' })}
+        ${capField({ name: 'reference', label: 'Reference', placeholder: 'Form or policy no.' })}
+        ${capField({ name: 'period_start', label: 'Covers from', type: 'date' })}
+        ${capField({ name: 'period_end', label: 'Covers to', type: 'date' })}
+        ${capField({ name: 'expires_on', label: 'Expires / renews', type: 'date' })}
+        ${capField({ name: 'action_by', label: 'Something due by', type: 'date' })}
+        ${capField({ name: 'summary', label: 'What it is', wide: true, placeholder: 'One line' })}
+      </div>
+      <p class="cap-note">Identifiers are deliberately not read — no tax ID, account or card number
+        reaches the database. They stay in the file, which is kept exactly as you uploaded it.</p>`,
+  };
+
+  const LABEL = { invoice: 'Vendor invoice', expense: 'Expense · receipt', document: 'Document' };
+  const SAVE = { invoice: 'Save invoice', expense: 'Save expense', document: 'File it' };
+  const ACTION = { invoice: '/c/invoices', expense: '/c/expenses', document: '/c/documents' };
+
+  return `
+  <div class="cap-scrim" data-cap-close></div>
+  <div class="cap-wrap" role="dialog" aria-modal="true" aria-label="Add a document" data-cap>
+    <div class="cap-card">
+      <div class="cap-head">
+        <a class="cap-back" href="#" data-cap-close>← Back</a>
+        <h2 class="cap-title" id="cap-title">Add an invoice or expense</h2>
+        <span class="cap-pill" id="cap-pill" hidden>Read by ZWIN · confirm each field</span>
+        <div class="cap-acts">
+          <a class="bs-btn-sm" href="#" data-cap-close>Cancel</a>
+          <button class="bs-btn" type="submit" form="cap-form" id="cap-save" hidden>Save</button>
+        </div>
+      </div>
+
+      ${/* Step one. The type toggle only appears where more than one kind can
+            be added from this page — a page that adds one thing should not ask
+            which thing. */''}
+      <div class="cap-body" id="cap-step-drop">
+        ${kinds.length > 1 ? `<div class="cap-toggle" role="group" aria-label="What are you adding">
+          ${kinds.map((k, i) => `<button type="button" data-kind="${k}" aria-pressed="${i === 0}">${LABEL[k]}</button>`).join('')}
+        </div>` : ''}
+        <div class="cap-drop" id="cap-drop">
+          <div class="cap-drop-i">${icon('documents')}</div>
+          <p class="cap-drop-t">Drop a PDF or photo here</p>
+          <p class="cap-drop-s" id="cap-drop-s">ZWIN reads the vendor, invoice number, date and line items
+            so you just confirm. Or start blank and type it in.</p>
+          <div class="cap-drop-b">
+            <button class="bs-btn cap-primary" type="button" id="cap-choose">Choose a file</button>
+            <button class="bs-btn-sm" type="button" id="cap-photo">Take a photo</button>
+            ${/* Not offered where the file IS the record. An invoice or an
+                   expense can be typed from memory; a document with no
+                   document is a title with nothing behind it. */''}
+            ${kinds.every((k) => k === 'document') ? ''
+              : '<button class="bs-btn-sm" type="button" id="cap-manual">Enter manually</button>'}
+          </div>
+          <p class="cap-fmt">PDF · JPG · PNG · HEIC — up to 20MB</p>
+        </div>
+      </div>
+
+      ${/* Steps two and three are one layout: the document arrives, the right
+            side reads, then the right side becomes the form. Keeping them in
+            one node is what stops the document jumping when the read lands. */''}
+      <div class="cap-work" id="cap-step-work" hidden>
+        <div class="cap-doc">
+          <div class="cap-doc-bar">
+            <span id="cap-docname">—</span>
+            <span class="cap-tool">
+              <button type="button" id="cap-zoom">+ zoom</button>
+              <button type="button" id="cap-rotate">⟳ rotate</button>
+              <button type="button" id="cap-replace">⇪ replace</button>
+            </span>
+          </div>
+          <div class="cap-sheet" id="cap-sheet"><span class="cap-none">No document — typed in by hand</span></div>
+        </div>
+        <div class="cap-fields">
+          <div id="cap-reading" hidden>
+            <div class="cap-read"><span class="cap-spin"></span><span id="cap-reading-t">Reading it…</span></div>
+            <div class="cap-skel"></div><div class="cap-skel"></div><div class="cap-skel"></div>
+            <p class="cap-note">You can start typing now — it won't overwrite what you touch.</p>
+          </div>
+          ${kinds.map((k) => `<form method="post" action="${ACTION[k]}" enctype="multipart/form-data"
+            class="cap-panel" data-panel="${k}" id="${k === kinds[0] ? 'cap-form' : `cap-form-${k}`}" hidden>
+            ${panels[k]}
+            <input type="file" name="file" class="cap-file" hidden multiple>
+            <input type="hidden" name="ai_status" class="cap-ai" value="manual">
+            <input type="hidden" name="ai_lines" class="cap-ailines">
+            <input type="hidden" name="ai_confidence" class="cap-aiconf">
+            <input type="hidden" name="vendor_id" class="cap-vendorid">
+            <input type="hidden" name="status" value="Unpaid">
+          </form>`).join('')}
+        </div>
+      </div>
+    </div>
+  </div>
+  <input type="file" id="cap-pick" accept="image/*,application/pdf" multiple hidden>
+  <input type="file" id="cap-pick-cam" accept="image/*" capture="environment" multiple hidden>
+  <div class="cap-toast" id="cap-toast"><span class="tag">Saved ✓</span><span id="cap-toast-t"></span></div>
+  <datalist id="cap-empty"></datalist>`;
+}
+
+/**
+ * The overlay's behaviour.
+ *
+ * Written against the DOM the component above emits. Two rules shape most of
+ * it: the document is never blocked on the read, and the read never overwrites
+ * a field somebody has touched — the whole promise of "you can start typing
+ * now" is that typing wins.
+ */
+/**
+ * Logging an expense that has no document.
+ *
+ * The big dropzone asks the wrong question for a bag of ice: there is often no
+ * receipt worth scanning, and making somebody dismiss a document-first screen
+ * to type four fields is friction for its own sake. So a compact modal with
+ * the fields to hand — and a receipt tile big enough to actually hit, rather
+ * than the native file button, which on a phone is a 20px sliver.
+ *
+ * The photo is optional here and the tile says so. Where the overlay is for
+ * "read this for me", this is for "I already know what it says".
+ */
+function quickExpense(today) {
+  const people = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
+  return `
+  <div class="cap-scrim" data-qx-close></div>
+  <div class="cap-wrap" role="dialog" aria-modal="true" aria-label="Log an expense" data-qx>
+    <div class="cap-card cap-quick">
+      <div class="cap-head">
+        <div>
+          <h2 class="cap-title">Log an expense</h2>
+          <p class="bs-subline" style="margin:2px 0 0">Something bought without an invoice.</p>
+        </div>
+        <div class="cap-acts"><a class="bs-btn-sm" href="#" data-qx-close aria-label="Close">✕</a></div>
+      </div>
+      <form method="post" action="/c/expenses" enctype="multipart/form-data" id="qx-form">
+        <div class="cap-body">
+          <div>
+            <div class="cap-grid">
+              <div class="cap-f wide"><label class="cap-lab" for="qx_name">What was bought</label>
+                <input id="qx_name" name="name" required placeholder="Bag of ice, Costco run"></div>
+              <div class="cap-f"><label class="cap-lab" for="qx_amt">Amount</label>
+                <div class="cap-money"><input id="qx_amt" name="amount_cents" type="number" step="0.01" min="0" required placeholder="0.00"></div></div>
+              <div class="cap-f"><label class="cap-lab" for="qx_date">Date</label>
+                <input id="qx_date" name="spent_on" type="date" value="${today}" required></div>
+              <div class="cap-f"><label class="cap-lab" for="qx_where">Where</label>
+                <input id="qx_where" name="where_bought" placeholder="Costco, Home Depot"></div>
+              <div class="cap-f"><label class="cap-lab" for="qx_cat">Category</label>
+                <select id="qx_cat" name="category">${EXP_CATS.map((c) => `<option${c === 'Groceries' ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
+              <div class="cap-f"><label class="cap-lab" for="qx_who">Who paid</label>
+                <input id="qx_who" name="paid_by" required list="qx-people" placeholder="Name"></div>
+              <div class="cap-f"><label class="cap-lab" for="qx_with">Paid with</label>
+                <select id="qx_with" name="paid_with">${EXP_PAID.map((c) => `<option>${c}</option>`).join('')}</select></div>
+            </div>
+            <datalist id="qx-people">${people.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+          </div>
+          <div>
+            <span class="cap-lab">Receipt photo</span>
+            <label class="cap-tile" id="qx-tile">
+              <input type="file" name="file" id="qx-file" accept="image/*,application/pdf" capture="environment" multiple hidden>
+              <span class="cap-tile-p" id="qx-plus">+</span>
+              <span class="cap-tile-t" id="qx-tile-t">Add a photo</span>
+              <span class="cap-tile-s">drag in · or take one</span>
+            </label>
+          </div>
+        </div>
+        <div class="cap-foot">
+          <a class="bs-btn-sm" href="#" data-qx-close>Cancel</a>
+          <button class="bs-btn" type="submit">Save expense</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+function quickExpenseScript() {
+  return `<script>
+  (function () {
+    var wrap = document.querySelector('[data-qx]');
+    if (!wrap) return;
+    var was = null;
+    window.capQuick = function () {
+      was = document.activeElement;
+      document.body.classList.add('cap-open', 'qx-open');
+      setTimeout(function () { var f = document.getElementById('qx_name'); if (f) f.focus(); }, 60);
+    };
+    function close() {
+      document.body.classList.remove('cap-open', 'qx-open');
+      if (was && was.focus) was.focus();
+    }
+    wrap.parentNode.querySelectorAll('[data-qx-close]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.preventDefault(); close(); });
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && document.body.classList.contains('qx-open')) { e.preventDefault(); close(); }
+    });
+
+    // The tile shows what you attached. A dashed box that looks identical
+    // before and after is a box people press twice.
+    var tile = document.getElementById('qx-tile');
+    var file = document.getElementById('qx-file');
+    function shown() {
+      var n = (file.files || []).length;
+      if (!n) return;
+      document.getElementById('qx-tile-t').textContent = n === 1 ? file.files[0].name : n + ' photos attached';
+      var f = file.files[0];
+      if (/^image\\//.test(f.type)) {
+        var img = tile.querySelector('img') || document.createElement('img');
+        img.alt = 'The receipt you attached';
+        img.src = URL.createObjectURL(f);
+        var plus = document.getElementById('qx-plus');
+        if (plus) plus.replaceWith(img); else if (!img.parentNode) tile.prepend(img);
+      }
+    }
+    file.addEventListener('change', shown);
+    ['dragenter', 'dragover'].forEach(function (t) {
+      tile.addEventListener(t, function (e) { e.preventDefault(); tile.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (t) {
+      tile.addEventListener(t, function (e) { e.preventDefault(); tile.classList.remove('over'); });
+    });
+    tile.addEventListener('drop', function (e) {
+      e.preventDefault();
+      var dt = new DataTransfer();
+      [].slice.call(e.dataTransfer.files).forEach(function (f) { dt.items.add(f); });
+      file.files = dt.files; shown();
+    });
+
+    document.getElementById('qx-form').addEventListener('submit', function () {
+      try { sessionStorage.setItem('cap-saved', 'expense'); } catch (err) { /* private mode */ }
+    });
+  })();
+  </script>`;
+}
+
+function captureScript(kinds) {
+  return `<script>
+  (function () {
+    var wrap = document.querySelector('[data-cap]');
+    if (!wrap) return;
+    var KINDS = ${JSON.stringify(kinds)};
+    var kind = KINDS[0];
+    var files = [];
+    var touched = {};          // fields the person has edited — never overwritten
+    var lastFocus = null;
+    var rot = 0, zoom = 1;
+
+    var READ_URL = { invoice: '/c/invoices/read', expense: '/c/expenses/read', document: '/c/documents/read' };
+    var READING = { invoice: 'Reading the invoice…', expense: 'Reading the receipt…', document: 'Reading the document…' };
+    var TITLE = { invoice: 'Reviewing a new invoice', expense: 'Reviewing a receipt', document: 'Reviewing a document' };
+    var SAVE = { invoice: 'Save invoice', expense: 'Save expense', document: 'File it' };
+    var HINT = {
+      invoice: 'ZWIN reads the vendor, invoice number, date and line items so you just confirm. Or start blank and type it in.',
+      expense: 'ZWIN reads what it was, where, how much and when. Or start blank and type it in.',
+      document: 'ZWIN reads the title, who sent it and the dates that matter. Or start blank and type it in.'
+    };
+
+    var el = function (id) { return document.getElementById(id); };
+    var panel = function (k) { return wrap.querySelector('[data-panel="' + (k || kind) + '"]'); };
+
+    // --- opening and closing ------------------------------------------------
+    function open(k) {
+      lastFocus = document.activeElement;
+      if (k) setKind(k);
+      document.body.classList.remove('qx-open');
+      document.body.classList.add('cap-open');
+      var b = el('cap-choose'); if (b) setTimeout(function () { b.focus(); }, 60);
+    }
+    function close() {
+      document.body.classList.remove('cap-open', 'qx-open');
+      reset();
+      if (lastFocus && lastFocus.focus) lastFocus.focus();
+    }
+    function reset() {
+      files = []; touched = {}; rot = 0; zoom = 1;
+      el('cap-step-drop').hidden = false;
+      el('cap-step-work').hidden = true;
+      el('cap-save').hidden = true;
+      el('cap-pill').hidden = true;
+      el('cap-title').textContent = 'Add ' + (KINDS.length > 1 ? 'an invoice or expense' : KINDS[0] === 'document' ? 'a document' : 'an expense');
+      el('cap-sheet').innerHTML = '<span class="cap-none">No document — typed in by hand</span>';
+      el('cap-docname').textContent = '—';
+      wrap.querySelectorAll('.cap-panel').forEach(function (f) { f.reset(); f.hidden = true; });
+      wrap.querySelectorAll('.cap-mark').forEach(function (m) { m.textContent = ''; });
+      wrap.querySelectorAll('.cap-f').forEach(function (f) { f.classList.remove('warn'); });
+      var lines = el('cap-lines'); if (lines) { lines.hidden = true; lines.innerHTML = ''; }
+    }
+    window.capOpen = open;
+
+    wrap.parentNode.querySelectorAll('[data-cap-close]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.preventDefault(); close(); });
+    });
+    document.addEventListener('keydown', function (e) {
+      if (!document.body.classList.contains('cap-open')) return;
+      if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+      if (e.key !== 'Tab') return;
+      // Focus stays in the overlay: behind it is a list that is still there and
+      // still tabbable, and falling into it is how a modal stops being one.
+      var f = wrap.querySelectorAll('a[href], button:not([hidden]), input:not([type=hidden]), select, textarea');
+      var live = [].filter.call(f, function (x) { return x.offsetParent !== null && !x.disabled; });
+      if (!live.length) return;
+      var first = live[0], last = live[live.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+
+    // --- which kind ----------------------------------------------------------
+    function setKind(k) {
+      kind = k;
+      wrap.querySelectorAll('[data-kind]').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.dataset.kind === k));
+      });
+      var s = el('cap-drop-s'); if (s) s.textContent = HINT[k];
+      var sv = el('cap-save'); if (sv) { sv.textContent = SAVE[k]; sv.setAttribute('form', panel(k).id); }
+    }
+    wrap.querySelectorAll('[data-kind]').forEach(function (b) {
+      b.addEventListener('click', function () { setKind(b.dataset.kind); });
+    });
+
+    // --- picking a file ------------------------------------------------------
+    el('cap-choose').addEventListener('click', function () { el('cap-pick').click(); });
+    el('cap-photo').addEventListener('click', function () { el('cap-pick-cam').click(); });
+    var manual = el('cap-manual');
+    if (manual) manual.addEventListener('click', function () { toWork(); showForm(); });
+    ['cap-pick', 'cap-pick-cam'].forEach(function (id) {
+      el(id).addEventListener('change', function () { take(this.files); this.value = ''; });
+    });
+    var dz = el('cap-drop');
+    ['dragenter', 'dragover'].forEach(function (t) {
+      dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (t) {
+      dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.remove('over'); });
+    });
+    dz.addEventListener('drop', function (e) { take(e.dataTransfer.files); });
+    el('cap-replace').addEventListener('click', function () { el('cap-pick').click(); });
+
+    function toWork() {
+      el('cap-step-drop').hidden = true;
+      el('cap-step-work').hidden = false;
+      el('cap-title').textContent = TITLE[kind];
+      el('cap-save').hidden = false;
+      el('cap-save').textContent = SAVE[kind];
+      el('cap-save').setAttribute('form', panel().id);
+    }
+    function showForm() {
+      el('cap-reading').hidden = true;
+      wrap.querySelectorAll('.cap-panel').forEach(function (f) { f.hidden = f.dataset.panel !== kind; });
+    }
+
+    function take(picked) {
+      var list = [].slice.call(picked || []);
+      if (!list.length) return;
+      files = list;
+      toWork();
+
+      // The document goes up first and on its own. Whatever the reader does or
+      // fails to do, the paper is on screen and the form underneath it works.
+      preview(list);
+      // Every page rides into the save, not just the first.
+      var dt = new DataTransfer();
+      list.forEach(function (f) { dt.items.add(f); });
+      panel().querySelector('.cap-file').files = dt.files;
+
+      el('cap-reading').hidden = false;
+      el('cap-reading-t').textContent = READING[kind];
+      wrap.querySelectorAll('.cap-panel').forEach(function (f) { f.hidden = true; });
+      el('cap-pill').hidden = true;
+
+      var fd = new FormData();
+      list.forEach(function (f) { fd.append('scan', f); });
+      fetch(READ_URL[kind], { method: 'POST', body: fd })
+        .then(function (r) {
+          if (!r.ok) return r.text().then(function (t) { throw new Error(t.slice(0, 120) || r.status); });
+          return r.json();
+        })
+        .then(function (j) {
+          showForm();
+          if (j.error) { note(j.error); return; }
+          fill(j.data || {});
+          el('cap-pill').hidden = false;
+        })
+        .catch(function (e) { showForm(); note('Could not read it — ' + e.message + '. Type it in; the file is still attached.'); });
+    }
+
+    function note(msg) {
+      var p = panel().querySelector('.cap-note');
+      if (p) { p.textContent = msg; p.style.color = 'var(--negative)'; }
+    }
+
+    function preview(list) {
+      var f = list[0];
+      el('cap-docname').textContent = f.name + (list.length > 1 ? ' · 1 of ' + list.length : '');
+      var url = URL.createObjectURL(f);
+      el('cap-sheet').innerHTML = /pdf/i.test(f.type)
+        ? '<iframe src="' + url + '" title="The document"></iframe>'
+        : '<img alt="The document you uploaded" src="' + url + '">';
+      applyView();
+    }
+    function applyView() {
+      var m = el('cap-sheet').querySelector('img');
+      if (m) m.style.transform = 'rotate(' + rot + 'deg) scale(' + zoom + ')';
+    }
+    el('cap-rotate').addEventListener('click', function () { rot = (rot + 90) % 360; applyView(); });
+    el('cap-zoom').addEventListener('click', function () { zoom = zoom >= 2 ? 1 : zoom + 0.5; applyView(); });
+
+    // --- what the reader found ----------------------------------------------
+    // Typing wins. A field somebody has edited is theirs, and a read that
+    // landed a moment later must not take it back.
+    function set(name, value, low) {
+      if (value === undefined || value === null || value === '' || value === 0) return;
+      if (touched[name]) return;
+      var f = panel().querySelector('[name="' + name + '"]');
+      if (!f) return;
+      f.value = value;
+      var mark = panel().querySelector('.cap-mark[data-for="' + name + '"]');
+      if (mark) mark.innerHTML = low ? ' <span class="chk">· check this</span>' : ' <span class="ok">✓ read</span>';
+      if (low) { var box = f.closest('.cap-f'); if (box) box.classList.add('warn'); }
+    }
+
+    function fill(d) {
+      var low = d.confidence === 'low' || d.confidence === 'medium';
+      panel().querySelector('.cap-ai').value = 'ai';
+      if (d.confidence) panel().querySelector('.cap-aiconf').value = d.confidence;
+
+      if (kind === 'invoice') {
+        set('vendor_name', d.vendor_name, low);
+        set('invoice_number', d.invoice_number, low);
+        set('invoice_date', d.invoice_date, low);
+        set('due_date', d.due_date, low);
+        set('amount', d.total, low);
+        set('subtotal', d.subtotal, low);
+        set('tax', d.tax, low);
+        set('category', d.category, low);
+        if (d.line_items && d.line_items.length) {
+          panel().querySelector('.cap-ailines').value = JSON.stringify(d.line_items);
+          lines(d.line_items, d.total);
+        }
+      } else if (kind === 'expense') {
+        set('name', d.name, low);
+        set('where_bought', d.where_bought, low);
+        set('amount_cents', d.total, low);
+        set('spent_on', d.spent_on, low);
+        set('category', d.category, low);
+        set('paid_with', d.paid_with, low);
+      } else {
+        set('title', d.title, low);
+        set('issuer', d.issuer, low);
+        set('category', d.category, low);
+        set('doc_date', d.doc_date, low);
+        set('reference', d.reference, low);
+        set('period_start', d.period_start, low);
+        set('period_end', d.period_end, low);
+        set('expires_on', d.expires_on, low);
+        set('action_by', d.action_by, low);
+        set('summary', d.summary, low);
+      }
+    }
+
+    // What was read off the item table, and whether it adds up. The match
+    // status is deliberately not claimed here — matching happens on save,
+    // against the product list, and saying "matched" before that has run would
+    // be a guess dressed as a fact.
+    function lines(items, total) {
+      var box = el('cap-lines');
+      if (!box) return;
+      var sum = 0;
+      var rows = items.map(function (l) {
+        sum += Number(l.total) || 0;
+        return '<div class="cap-line"><span class="cap-line-d">' + String(l.description || '')
+          .replace(/[<>&]/g, '') + '</span><span class="cap-line-q">' + (l.qty ? '×' + l.qty : '')
+          + '</span><span class="cap-line-a">$' + (Number(l.total) || 0).toFixed(2) + '</span></div>';
+      }).join('');
+      var off = Math.abs(sum - (Number(total) || 0)) > 0.02;
+      box.innerHTML = '<div class="cap-kick" style="margin:0;padding:9px 13px;border-bottom:1px solid var(--field-b,#d3c6ac)">'
+        + 'Lines read · ' + items.length + '</div>' + rows
+        + '<div class="cap-recon"><span>Lines total vs. ' + (off ? 'invoice — check' : 'invoice') + '</span>'
+        + '<b class="' + (off ? 'off' : 'ok') + '">$' + sum.toFixed(2) + (off ? '' : ' ✓') + '</b></div>';
+      box.hidden = false;
+    }
+
+    // --- typing wins ---------------------------------------------------------
+    wrap.addEventListener('input', function (e) {
+      var f = e.target.closest('.cap-f');
+      if (!f || !e.target.name) return;
+      touched[e.target.name] = true;
+      var mark = wrap.querySelector('.cap-mark[data-for="' + e.target.name + '"]');
+      if (mark) mark.textContent = '';
+      f.classList.remove('warn');
+      var ai = panel().querySelector('.cap-ai');
+      if (ai && ai.value === 'ai') ai.value = 'ai_edited';
+    });
+
+    // --- saving --------------------------------------------------------------
+    // A normal form post. The overlay is a nicer way to fill the same form the
+    // server has always taken, and keeping the post ordinary is what lets the
+    // duplicate check, the auto-import and every guard behind them keep working
+    // untouched. Where you were is restored on the way back.
+    wrap.addEventListener('submit', function (e) {
+      // The file is the record for a document. There is no manual door into
+      // this form, but a form can still be submitted with the field emptied.
+      if (kind === 'document' && !(panel().querySelector('.cap-file').files || []).length) {
+        e.preventDefault();
+        note('A document needs the file itself — drop it in above.');
+        return;
+      }
+      try { sessionStorage.setItem('cap-saved', kind); } catch (err) { /* private mode */ }
+      var s = el('cap-save'); if (s) { s.disabled = true; s.textContent = 'Saving…'; }
+    });
+
+    try {
+      var was = sessionStorage.getItem('cap-saved');
+      if (was) {
+        sessionStorage.removeItem('cap-saved');
+        var t = el('cap-toast');
+        if (t) {
+          el('cap-toast-t').textContent = was === 'invoice' ? 'Invoice added.'
+            : was === 'expense' ? 'Expense logged.' : 'Document filed.';
+          t.classList.add('on');
+          setTimeout(function () { t.classList.remove('on'); }, 4000);
+        }
+      }
+    } catch (e) { /* private mode */ }
+  })();
+  </script>`;
+}
 
 app.get('/c/documents', (req, res) => {
   const all = db.prepare('SELECT * FROM m_documents ORDER BY COALESCE(doc_date, created_at) DESC, id DESC').all();
@@ -6200,7 +6807,7 @@ app.get('/c/documents', (req, res) => {
         <p class="bs-hero-s">${canWrite()
           ? 'Upload a PDF or a photo and it reads the title, who sent it and the dates that matter — including the one it runs out on. You confirm before anything is filed.'
           : 'Once the owner files documents, they show up here.'}</p>
-        ${canWrite() ? '<button class="bs-btn" type="button" onclick="docDrawer(true)">File the first one</button>' : ''}
+        ${canWrite() ? '<button class="bs-btn" type="button" onclick="capOpen()">File the first one</button>' : ''}
       </div>`;
 
   const headline = all.length
@@ -6218,14 +6825,14 @@ app.get('/c/documents', (req, res) => {
           <h1 class="bs-headline">${headline}</h1>
           <p class="bs-subline">Leases, tax filings, licences and letters. The file is kept as you uploaded it.</p>
         </div>
-        ${canWrite() ? '<button class="bs-btn" type="button" onclick="docDrawer(true)">File a document</button>' : ''}
+        ${canWrite() ? '<button class="bs-btn" type="button" onclick="capOpen()">File a document</button>' : ''}
       </div>
       ${all.length ? strip : ''}
       ${all.length ? toolbar : ''}
       ${body}
       <div class="bs-blank" id="dnone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
     </div>
-    ${canWrite() ? documentDrawer() : ''}
+    ${canWrite() ? captureOverlay(['document'], { today: isoDate(startOfToday()) }) : ''}
     <script>
       (function () {
         var q = '', mode = 'all', val = '';
@@ -6264,113 +6871,10 @@ app.get('/c/documents', (req, res) => {
         });
       })();
     </script>
-    ${canWrite() ? documentDrawerScript() : ''}`));
+    ${canWrite() ? captureScript(['document']) : ''}`));
 });
 
-function documentDrawer() {
-  return `
-    <div class="drawer-scrim" onclick="docDrawer(false)"></div>
-    <aside class="drawer" id="doc-drawer" aria-label="File a document">
-      <div class="drawer-h">
-        <div><div class="drawer-t">File a document</div>
-          <div class="drawer-s">A PDF or a photo. It reads it; you confirm it.</div></div>
-        <button class="drawer-x" type="button" onclick="docDrawer(false)" aria-label="Close">✕</button>
-      </div>
-      <form method="post" action="/c/documents" enctype="multipart/form-data" class="drawer-b" id="docform">
-        <div class="scanbox">
-          <label class="scanpick">
-            <input type="file" id="docscan" accept="image/*,application/pdf" multiple hidden>
-            <span class="scanpick-b">Choose a PDF or photo</span>
-            <span class="scanpick-s">Up to 8 pages of one document</span>
-          </label>
-          <div id="docread" class="scanstate" hidden></div>
-        </div>
-        ${/* The reader fills these in; they stay editable, and the form works
-              with the reader switched off entirely. */''}
-        <label class="fld">Title <input name="title" id="d_title" required placeholder="Form 941 — Q1 2026"></label>
-        <div class="fld-row">
-          <label class="fld">Who it is from <input name="issuer" id="d_issuer" placeholder="IRS, Gusto, landlord…"></label>
-          <label class="fld">Kind <select name="category" id="d_category">
-            ${DOC_CATS.map((c) => `<option${c === 'Other' ? ' selected' : ''}>${c}</option>`).join('')}
-          </select></label>
-        </div>
-        <div class="fld-row">
-          <label class="fld">Date on it <input name="doc_date" id="d_doc_date" type="date"></label>
-          <label class="fld">Reference <input name="reference" id="d_reference" placeholder="Form or policy number"></label>
-        </div>
-        <div class="fld-row">
-          <label class="fld">Covers from <input name="period_start" id="d_period_start" type="date"></label>
-          <label class="fld">Covers to <input name="period_end" id="d_period_end" type="date"></label>
-        </div>
-        <div class="fld-row">
-          <label class="fld">Expires / renews on <input name="expires_on" id="d_expires_on" type="date"></label>
-          <label class="fld">Something due by <input name="action_by" id="d_action_by" type="date"></label>
-        </div>
-        <label class="fld">What it is <textarea name="summary" id="d_summary" rows="2" placeholder="One line"></textarea></label>
-        <label class="fld">Notes <textarea name="notes" rows="2" placeholder="Optional"></textarea></label>
-        <input type="file" name="file" id="docfile" accept="image/*,application/pdf" hidden required multiple>
-        <input type="hidden" name="ai_status" id="d_ai_status" value="manual">
-        <div class="drawer-f">
-          <button class="btn btn-ghost" type="button" onclick="docDrawer(false)">Cancel</button>
-          <button class="btn btn-primary" type="submit">File it</button>
-        </div>
-      </form>
-    </aside>`;
-}
 
-function documentDrawerScript() {
-  return `<script>
-  function docDrawer(open) { document.body.classList.toggle('drawer-open', !!open); }
-  (function () {
-    var pick = document.getElementById('docscan');
-    var keep = document.getElementById('docfile');
-    var out = document.getElementById('docread');
-    if (!pick) return;
-
-    function say(html, cls) { out.hidden = false; out.className = 'scanstate ' + (cls || ''); out.innerHTML = html; }
-    function set(id, v) { var el = document.getElementById(id); if (el && v) el.value = v; }
-
-    pick.addEventListener('change', async function () {
-      var files = [].slice.call(pick.files || []);
-      if (!files.length) return;
-
-      // Every page is filed, and every page is read. The first is the one
-      // the row shows; the rest are behind it.
-      var dt = new DataTransfer(); files.forEach(function (f) { dt.items.add(f); }); keep.files = dt.files;
-      say('<b>Reading ' + files.length + (files.length === 1 ? ' page' : ' pages') + '…</b>' +
-        (files.length > 1 ? '<span>All ' + files.length + ' are kept and read as one document.</span>' : ''), 'busy');
-
-      var fd = new FormData();
-      files.forEach(function (f) { fd.append('scan', f); });
-      try {
-        var r = await fetch('/c/documents/read', { method: 'POST', body: fd });
-        var j = await r.json();
-        if (j.error) { say('<b>Filled in by hand</b><span>' + j.error + '</span>', 'warn'); return; }
-        var d = j.data || {};
-        set('d_title', d.title); set('d_issuer', d.issuer); set('d_reference', d.reference);
-        set('d_doc_date', d.doc_date); set('d_period_start', d.period_start); set('d_period_end', d.period_end);
-        set('d_expires_on', d.expires_on); set('d_action_by', d.action_by); set('d_summary', d.summary);
-        if (d.category) { var c = document.getElementById('d_category'); if (c) c.value = d.category; }
-        document.getElementById('d_ai_status').value = 'ai';
-        say('<b>Read it' + (d.confidence === 'low' ? ' — but not clearly' : '') + '</b>' +
-          '<span>Check the dates before you file it. Identifiers are deliberately not read.</span>',
-          d.confidence === 'low' ? 'warn' : 'ok');
-      } catch (e) {
-        say('<b>Could not reach the reader</b><span>Fill it in by hand — the file still uploads.</span>', 'warn');
-      }
-    });
-
-    // Corrected after the read is a different state from read-and-kept.
-    ['d_title', 'd_issuer', 'd_doc_date', 'd_expires_on', 'd_action_by', 'd_summary'].forEach(function (id) {
-      var el = document.getElementById(id);
-      if (el) el.addEventListener('input', function () {
-        var st = document.getElementById('d_ai_status');
-        if (st && st.value === 'ai') st.value = 'ai_edited';
-      });
-    });
-  })();
-  </script>`;
-}
 
 app.get('/c/expenses', (req, res) => {
   const all = db.prepare('SELECT * FROM m_expenses ORDER BY spent_on DESC, id DESC').all();
@@ -6535,7 +7039,7 @@ app.get('/c/expenses', (req, res) => {
         <p class="bs-hero-s">${canWrite()
           ? 'Everything bought without an invoice behind it. Log it with a photo of the receipt and who paid, and the money somebody is owed stops being something they have to remember to ask for.'
           : 'Once the owner logs expenses, they show up here.'}</p>
-        ${canWrite() ? `<button class="bs-btn" type="button" onclick="expDrawer(true)">Log the first expense</button>` : ''}
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="capQuick()">Log the first expense</button>` : ''}
       </div>`);
 
   const headline = all.length
@@ -6552,14 +7056,15 @@ app.get('/c/expenses', (req, res) => {
           <p class="bs-subline">Anything bought outside an invoice. Bills from a vendor belong on
             <a class="bs-act" href="/c/invoices">Invoices</a>.</p>
         </div>
-        ${canWrite() ? `<button class="bs-btn" type="button" onclick="expDrawer(true)">Log an expense</button>` : ''}
+        ${canWrite() ? `<button class="bs-btn-sm" type="button" onclick="capOpen()">Scan a receipt</button>
+          <button class="bs-btn" type="button" onclick="capQuick()">Log an expense</button>` : ''}
       </div>
       ${all.length ? strip : ''}
       ${all.length ? toolbar : ''}
       ${body}
       <div class="bs-blank" id="xnone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
     </div>
-    ${canWrite() ? expenseDrawer(today) : ''}
+    ${canWrite() ? captureOverlay(['expense'], { today }) + quickExpense(today) : ''}
     <script>
       (function () {
         var q = '', mode = 'all', val = '';
@@ -6611,7 +7116,7 @@ app.get('/c/expenses', (req, res) => {
         });
       })();
     </script>
-    ${canWrite() ? expenseDrawerScript() : ''}`));
+    ${canWrite() ? captureScript(['expense']) + quickExpenseScript() : ''}`));
 });
 
 /**
@@ -6631,71 +7136,7 @@ app.post('/c/expenses/:id/reimburse', (req, res) => {
   res.redirect('/c/expenses?msg=' + encodeURIComponent(undo ? 'Marked as still owed.' : 'Marked paid back.'));
 });
 
-/**
- * The drawer.
- *
- * It posts to /c/expenses, which the generic module handler already answers —
- * it writes every field and stores the receipt. Nothing here is a second copy
- * of that: the form is the good version of the same form.
- */
-function expenseDrawer(today) {
-  const names = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
-  return `
-    <div class="drawer-scrim" onclick="expDrawer(false)"></div>
-    <aside class="drawer" id="exp-drawer" aria-label="Log an expense">
-      <div class="drawer-h">
-        <div><div class="drawer-t">Log an expense</div>
-          <div class="drawer-s">Something bought without an invoice.</div></div>
-        <button class="drawer-x" type="button" onclick="expDrawer(false)" aria-label="Close">✕</button>
-      </div>
-      <form method="post" action="/c/expenses" enctype="multipart/form-data" class="drawer-b">
-        <label class="fld">What was bought
-          <input name="name" required placeholder="Bag of ice, Costco run, tap washer"></label>
-        <div class="fld-row">
-          <label class="fld">Amount <input name="amount_cents" type="number" step="0.01" min="0" required placeholder="0.00"></label>
-          <label class="fld">Date <input name="spent_on" type="date" required value="${today}"></label>
-        </div>
-        <div class="fld-row">
-          <label class="fld">Where <input name="where_bought" placeholder="Costco, Home Depot…"></label>
-          <label class="fld">Category <select name="category">
-            ${EXP_CATS.map((c) => `<option${c === 'Groceries' ? ' selected' : ''}>${c}</option>`).join('')}
-          </select></label>
-        </div>
-        <div class="fld-row">
-          ${/* A list rather than a menu: it is usually a member of staff, and
-                sometimes it is you, or a friend of the restaurant who is not
-                in the staff table and never will be. A menu would make those
-                people unrecordable. */''}
-          <label class="fld">Who paid
-            <input name="paid_by" required list="exp-people" placeholder="Name"></label>
-          <label class="fld">Paid with <select name="paid_with">
-            ${EXP_PAID.map((c) => `<option>${c}</option>`).join('')}
-          </select></label>
-        </div>
-        <datalist id="exp-people">${names.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-        ${/* A Costco receipt is a metre long and gets photographed in three.
-                 Every shot is kept; the first is the one the row shows. */''}
-        <label class="fld">Receipt photo
-          <input name="file" type="file" accept="image/*,application/pdf" capture="environment" multiple>
-          <span class="fld-hint">Several photos of one receipt is fine — take them all.</span></label>
-        <label class="fld">Notes <textarea name="notes" rows="2" placeholder="Optional"></textarea></label>
-        <div class="drawer-f">
-          <button class="btn btn-ghost" type="button" onclick="expDrawer(false)">Cancel</button>
-          <button class="btn btn-primary" type="submit">Save expense</button>
-        </div>
-      </form>
-    </aside>`;
-}
 
-function expenseDrawerScript() {
-  return `<script>
-  function expDrawer(open) {
-    document.body.classList.toggle('drawer-open', !!open);
-    var d = document.getElementById('exp-drawer');
-    if (d && open) { var f = d.querySelector('input[name="name"]'); if (f) setTimeout(function () { f.focus(); }, 120); }
-  }
-  </script>`;
-}
 
 app.get('/c/invoices', (req, res) => {
   const all = invQ.all.all();
@@ -6897,7 +7338,7 @@ app.get('/c/invoices', (req, res) => {
         <p class="bs-hero-s">${canWrite()
           ? 'Vendor, dates, amounts and category are read for you — you only check the numbers. The original stays attached to the record.'
           : 'Once the owner uploads invoices, they show up here.'}</p>
-        ${canWrite() ? `<button class="bs-btn" type="button" onclick="invDrawer(true)">Add the first invoice</button>
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="capOpen()">Add the first invoice</button>
         <div class="bs-hero-w"><span>Take a photo</span><span>Upload a PDF</span><span>Drag &amp; drop</span></div>` : ''}
       </div>`);
 
@@ -6919,14 +7360,14 @@ app.get('/c/invoices', (req, res) => {
             ? 'Photograph or drop an invoice and it reads the details for you. What you buy is on <a class="bs-act" href="/c/products">Products</a>.'
             : 'Every invoice on file, with the original attached.'}</p>
         </div>
-        ${canWrite() ? `<button class="bs-btn" type="button" onclick="invDrawer(true)">Add invoice</button>` : ''}
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="capOpen()">Add invoice</button>` : ''}
       </div>
       ${all.length ? strip : ''}
       ${all.length ? toolbar : ''}
       ${body}
       <div class="bs-blank" id="inone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
     </div>
-    ${canWrite() ? invoiceDrawer(vendors, today) : ''}
+    ${canWrite() ? captureOverlay(['invoice', 'expense'], { today }) : ''}
     <script>
       // Filters combine, and sorting reorders within each month rather than
       // flattening the grouping — the month totals are the point of the page.
@@ -7006,7 +7447,7 @@ app.get('/c/invoices', (req, res) => {
           .catch(function () { box.innerHTML = '<div class="panel-empty">Could not load that invoice.</div>'; });
       }, true);
     </script>
-    ${canWrite() ? invoiceDrawerScript() : ''}`));
+    ${canWrite() ? captureScript(['invoice', 'expense']) : ''}`));
 });
 
 const INV_CATS = Object.keys(INV_CATEGORIES);
@@ -7014,281 +7455,7 @@ const INV_CATS = Object.keys(INV_CATEGORIES);
 // invoice and nowhere near Products.
 const PAY_METHODS = ['Cash', 'Check', 'ACH', 'Credit card', 'Auto pay', 'Other'];
 
-/** Upload → analysing → review. One drawer, three states. */
-function invoiceDrawer(vendors, today) {
-  return `
-    <div class="drawer-scrim" onclick="invDrawer(false)"></div>
-    <aside class="drawer drawer-wide" id="inv-drawer" aria-label="Upload invoice">
-      <div class="drawer-h">
-        <div><div class="drawer-t">Add an invoice</div><div class="drawer-s" id="inv-step-s">Drop it in and the details fill themselves.</div></div>
-        <button class="drawer-x" type="button" onclick="invDrawer(false)" aria-label="Close">✕</button>
-      </div>
 
-      <!-- 1. capture -->
-      <div class="drawer-b" id="inv-capture">
-        <div class="dropzone" id="inv-drop">
-          <div class="dz-ico">${icon('invoices')}</div>
-          <div class="dz-t">Drag an invoice here</div>
-          <div class="dz-s">Photo or PDF · several pages of one invoice is fine</div>
-          <div class="dz-btns">
-            <label class="btn btn-primary">Take photo
-              <input type="file" accept="image/*" capture="environment" hidden onchange="invPick(this.files)"></label>
-            <label class="btn">Choose file
-              <input type="file" accept="image/*,application/pdf" multiple hidden onchange="invPick(this.files)"></label>
-          </div>
-          ${process.env.ANTHROPIC_API_KEY ? '' : '<div class="dz-warn">Reading needs an ANTHROPIC_API_KEY in .env. You can still enter one by hand below.</div>'}
-        </div>
-        <button class="link dz-manual" type="button" onclick="invManual()">Or enter it by hand →</button>
-      </div>
-
-      <!-- 2. analysing -->
-      <div class="drawer-b inv-hide" id="inv-working">
-        <div class="analyse">
-          <div class="analyse-doc">
-            <div class="analyse-scan"></div>
-            ${icon('invoices')}
-          </div>
-          <div class="analyse-t">Reading the invoice…</div>
-          <div class="analyse-s" id="inv-working-s">Finding the vendor, dates and totals</div>
-        </div>
-      </div>
-
-      <!-- 3. review -->
-      <form method="post" action="/c/invoices" enctype="multipart/form-data" class="drawer-b inv-hide" id="inv-review">
-        <div class="ai-note inv-hide" id="inv-ai-note"></div>
-        <input type="hidden" name="upload_token" id="inv-token">
-        <input type="hidden" name="ai_status" id="inv-ai-status" value="manual">
-        <input type="hidden" name="ai_confidence" id="inv-ai-conf" value="">
-        <input type="hidden" name="ai_snapshot" id="inv-ai-snap" value="">
-        <input type="hidden" name="ai_lines" id="inv-ai-lines" value="">
-        <label class="fld">Vendor
-          <select name="vendor_id" id="inv-vendor">
-            <option value="">— choose —</option>
-            ${vendors.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
-          </select>
-          <span class="fldhint inv-hide" id="inv-newvendor"></span>
-        </label>
-        <div class="fld-row">
-          <label class="fld">Invoice date <input name="invoice_date" id="inv-date" type="date" value="${today}"></label>
-          <label class="fld">Due date <input name="due_date" id="inv-due" type="date"></label>
-        </div>
-        <label class="fld">Invoice # <input name="invoice_number" id="inv-num" placeholder="Optional"></label>
-        <div class="fld-row3">
-          <label class="fld">Subtotal <input name="subtotal" id="inv-sub" type="number" step="0.01" placeholder="0.00"></label>
-          <label class="fld">Tax <input name="tax" id="inv-tax" type="number" step="0.01" placeholder="0.00"></label>
-          <label class="fld">Total <input name="amount" id="inv-total" type="number" step="0.01" placeholder="0.00" required></label>
-        </div>
-        <div class="totalcheck inv-hide" id="inv-check"></div>
-        <div class="aisum inv-hide" id="inv-sum"></div>
-        <div class="fld-row">
-          <label class="fld">Category <select name="category" id="inv-cat">${INV_CATS.map((c) => `<option>${c}</option>`).join('')}</select></label>
-          <label class="fld">Status <select name="status" id="inv-status"><option>Unpaid</option><option>Paid</option></select></label>
-        </div>
-        <div class="fld-row">
-          <label class="fld">Paid by <select name="payment_method" id="inv-pay">
-            <option value="">—</option>
-            ${PAY_METHODS.map((m) => `<option>${m}</option>`).join('')}
-          </select></label>
-          <span class="fld"></span>
-        </div>
-        <label class="fld">Notes <textarea name="notes" id="inv-notes" rows="2" placeholder="Optional"></textarea></label>
-        ${/* Every page, not just the first. An invoice photographed front and
-               back was being filed as its front. */''}
-        <input type="file" name="file" id="inv-file" hidden multiple>
-        <div class="drawer-f">
-          <button class="btn btn-ghost" type="button" onclick="invBack()">Back</button>
-          <button class="btn btn-primary" type="submit">Save invoice</button>
-        </div>
-      </form>
-    </aside>`;
-}
-
-function invoiceDrawerScript() {
-  return `<script>
-  var invFiles = null;
-  function invShow(step) {
-    ['inv-capture', 'inv-working', 'inv-review'].forEach(function (id) {
-      document.getElementById(id).classList.toggle('inv-hide', id !== step);
-    });
-    var s = document.getElementById('inv-step-s');
-    s.textContent = step === 'inv-review' ? 'Check the numbers, then save.'
-      : step === 'inv-working' ? 'This takes a few seconds.'
-      : 'Drop it in and the details fill themselves.';
-  }
-  function invDrawer(open) {
-    document.body.classList.toggle('drawer-open', !!open);
-    if (open) invShow('inv-capture');
-  }
-  function invBack() { invShow('inv-capture'); }
-  function invManual() { document.getElementById('inv-ai-note').classList.add('inv-hide'); invShow('inv-review'); }
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') invDrawer(false); });
-
-  var dz = document.getElementById('inv-drop');
-  if (dz) {
-    ['dragenter', 'dragover'].forEach(function (t) {
-      dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.add('dz-over'); });
-    });
-    ['dragleave', 'drop'].forEach(function (t) {
-      dz.addEventListener(t, function (e) { e.preventDefault(); dz.classList.remove('dz-over'); });
-    });
-    dz.addEventListener('drop', function (e) { invPick(e.dataTransfer.files); });
-  }
-
-  function invPick(files) {
-    if (!files || !files.length) return;
-    invFiles = files;
-    // Carry the actual files into the save, so the original stays attached to
-    // the record — the extraction is a convenience, the document is the proof.
-    // All of them: a two-page invoice read as one has to file as one.
-    var dt = new DataTransfer();
-    for (var f = 0; f < files.length; f++) dt.items.add(files[f]);
-    document.getElementById('inv-file').files = dt.files;
-
-    invShow('inv-working');
-    var fd = new FormData();
-    for (var i = 0; i < files.length; i++) fd.append('scan', files[i]);
-    var msgs = ['Finding the vendor, dates and totals', 'Checking subtotal against tax', 'Working out the category'];
-    var mi = 0;
-    var tick = setInterval(function () {
-      mi = (mi + 1) % msgs.length;
-      document.getElementById('inv-working-s').textContent = msgs[mi];
-    }, 1600);
-
-    fetch('/c/invoices/read', { method: 'POST', body: fd })
-      .then(function (r) {
-        // Not every refusal is JSON. A view-only account gets a plain-text 403,
-        // and calling .json() on it threw straight into the catch below — which
-        // then blamed the file for a permissions problem.
-        if (!r.ok) {
-          return r.text().then(function (t) {
-            if (r.status === 403) throw new Error(t || 'This account is view-only, so it cannot upload invoices.');
-            if (r.status === 401) throw new Error('Your session has expired. Sign in again and retry.');
-            if (r.status === 413) throw new Error('That file is too large to upload.');
-            throw new Error('The server refused that upload (' + r.status + ').');
-          });
-        }
-        return r.json();
-      })
-      .then(function (d) {
-        clearInterval(tick);
-        if (d.error) { invFail(d.error); return; }
-        invFill(d);
-        invShow('inv-review');
-      })
-      .catch(function (e) {
-        clearInterval(tick);
-        invFail((e && e.message) || 'Something went wrong reading that file.');
-      });
-  }
-
-  function invFail(msg) {
-    var n = document.getElementById('inv-ai-note');
-    n.className = 'ai-note ai-note-bad';
-    n.textContent = msg + (/view-only|view only|expired/i.test(msg) ? ''
-      : ' Enter the details by hand below — the file is still attached.');
-    invShow('inv-review');
-  }
-
-  function invFill(d) {
-    var set = function (id, v) { if (v !== undefined && v !== null && v !== '') document.getElementById(id).value = v; };
-    set('inv-date', d.invoice_date); set('inv-due', d.due_date); set('inv-num', d.invoice_number);
-    set('inv-sub', d.subtotal); set('inv-tax', d.tax); set('inv-total', d.total);
-    set('inv-cat', d.category); set('inv-notes', d.notes);
-    if (d.vendor_id) document.getElementById('inv-vendor').value = d.vendor_id;
-
-    var nv = document.getElementById('inv-newvendor');
-    if (!d.vendor_id && d.vendor_name) {
-      // Offer to create it right here — walking off to the Vendors page to add
-      // one would mean abandoning a half-finished invoice.
-      nv.innerHTML = '<span class="vdet"><i>Detected vendor</i><b>' + d.vendor_name.replace(/[<>&]/g, '') + '</b>' +
-        '<em>not in your vendor list yet</em></span>' +
-        '<button type="button" class="btn btn-sm btn-primary" id="inv-addvendor">＋ Create vendor</button>';
-      nv.className = 'vconfirm vconfirm-new';
-      document.getElementById('inv-addvendor').onclick = function () {
-        var b = this; b.textContent = 'Adding…'; b.disabled = true;
-        // urlencoded, not FormData: this route has no multipart parser, and
-        // multipart would arrive with an empty body.
-        fetch('/c/vendors/quick', {
-          method: 'POST',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ name: d.vendor_name, category: 'Other' }).toString(),
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (out) {
-            if (out.error) { b.textContent = out.error; return; }
-            var sel = document.getElementById('inv-vendor');
-            var opt = document.createElement('option');
-            opt.value = out.id; opt.textContent = out.name; opt.selected = true;
-            sel.appendChild(opt);
-            nv.innerHTML = '<span class="vdet"><i>Vendor</i><b>' + out.name.replace(/[<>&]/g, '') +
-              '</b><em>created and selected — add their details later under Vendors</em></span><span class="vtick">✓</span>';
-            nv.className = 'vconfirm vconfirm-ok';
-          })
-          .catch(function () { b.textContent = 'Could not add it — pick a vendor instead.'; });
-      };
-    } else if (d.vendor_id && d.matched_vendor) {
-      nv.innerHTML = '<span class="vdet"><i>Detected vendor</i><b>' + d.matched_vendor.replace(/[<>&]/g, '') +
-        '</b><em>matched one you already use</em></span><span class="vtick">✓</span>';
-      nv.className = 'vconfirm vconfirm-ok';
-    } else { nv.className = 'fldhint inv-hide'; }
-
-    // Say when the parts don't add up, rather than presenting one confident
-    // total. Getting this wrong is silent, so it should never be silent.
-    var chk = document.getElementById('inv-check');
-    var sub = parseFloat(d.subtotal) || 0, tax = parseFloat(d.tax) || 0, tot = parseFloat(d.total) || 0;
-    if (sub && Math.abs((sub + tax) - tot) > 0.02) {
-      chk.textContent = 'Subtotal + tax = ' + (sub + tax).toFixed(2) + ', but the total reads ' + tot.toFixed(2) + '. Check which is right.';
-      chk.classList.remove('inv-hide');
-    } else { chk.classList.add('inv-hide'); }
-
-    // What the read actually found, before anything is saved. The point is
-    // confidence: a total on its own looks the same whether the reader
-    // understood the invoice or guessed at it.
-    var sum = document.getElementById('inv-sum');
-    var t = d.tally || {};
-    var bits = [];
-    bits.push((d.matched_vendor ? 'Vendor matched' : d.vendor_name ? 'Vendor detected' : 'No vendor read'));
-    bits.push(sub && Math.abs((sub + tax) - tot) <= 0.02 ? 'Total checks out against subtotal + tax'
-      : tot ? 'Total read' : 'No total read');
-    if (t.lines) {
-      bits.push(t.lines + ' product line' + (t.lines === 1 ? '' : 's') + ' detected');
-      if (t.matched) bits.push(t.matched + ' matched to products you already buy');
-      if (t.asks) bits.push(t.asks + ' need a quick look');
-      if (t.fresh) bits.push(t.fresh + ' new product' + (t.fresh === 1 ? '' : 's'));
-      if (t.fees) bits.push(t.fees + ' charge' + (t.fees === 1 ? '' : 's') + ' ignored');
-      bits.push(t.asks || t.fresh ? 'Products import after saving' : 'Products import automatically on save');
-    } else if (d.lines_error) {
-      // The header read fine and the line read didn't. Say so plainly: the
-      // invoice is complete, it just won't fill Products by itself.
-      bits.push('Product lines could not be read — the invoice still saves');
-      bits.push('Add its products from the Products page if you need them');
-    } else {
-      bits.push('No product lines on this invoice — it still saves');
-    }
-    var lowRead = (d.confidence || '') === 'low' || !!d.lines_error;
-    sum.className = 'aisum' + (lowRead ? ' aisum-warn' : '');
-    sum.innerHTML = '<div class="aisum-h">' + (lowRead ? 'Read, but check it' : 'Read successfully') + '</div>' +
-      '<ul>' + bits.map(function (b) { return '<li>' + b + '</li>'; }).join('') + '</ul>';
-
-    document.getElementById('inv-ai-status').value = 'ai';
-    document.getElementById('inv-ai-conf').value = d.confidence || '';
-    // Snapshot what the AI said, so the save can tell whether you changed it.
-    document.getElementById('inv-ai-snap').value = [d.total, d.subtotal, d.tax, d.vendor_id || '', d.category || ''].join('|');
-    // Carried to the save as JSON, then reviewed on the import screen. Not
-    // shown in the drawer: the invoice form is for the numbers the books need.
-    document.getElementById('inv-ai-lines').value = JSON.stringify(d.line_items || []);
-
-    var n = document.getElementById('inv-ai-note');
-    n.className = 'ai-note' + (d.confidence === 'low' ? ' ai-note-bad' : d.confidence === 'medium' ? ' ai-note-warn' : '');
-    n.textContent = d.confidence === 'low'
-      ? 'Read with low confidence — check every field before saving.'
-      : d.confidence === 'medium'
-      ? 'Read, but check the amounts.'
-      : 'Read it. Check the total, then save.';
-    n.classList.remove('inv-hide');
-  }
-  </script>`;
-}
 
 // The AI step: returns JSON for the drawer to fill in. Kept separate from the
 // save so a failed read never costs you the upload.
@@ -7433,9 +7600,22 @@ app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
   const pages = shot.length ? shot : keptPages;
   const uploaded = pages[0] || null;
 
+  // The capture overlay types the vendor rather than picking an id — a name
+  // read off the paper is what it has, and asking somebody to find it in a
+  // menu is asking them to do the matching by hand. Resolve it here: the same
+  // fuzzy match the reader's preview uses, and a new vendor if it is genuinely
+  // new, because an invoice filed against nobody drops out of vendor totals,
+  // out of the duplicate check, and out of alias matching on its own products.
+  let vendorId = req.body.vendor_id ? Number(req.body.vendor_id) : null;
+  const typedVendor = String(req.body.vendor_name || '').trim();
+  if (!vendorId && typedVendor) {
+    const hit = matchVendor(typedVendor);
+    vendorId = hit ? Number(hit.id) : Number(invQ.addVendor.run(typedVendor.slice(0, 80)).lastInsertRowid);
+  }
+
   const invDate = String(req.body.invoice_date || '').slice(0, 10) || null;
   const dup = req.body.dup_ok === '1' ? null : duplicateInvoice({
-    vendorId: req.body.vendor_id, number: req.body.invoice_number,
+    vendorId, number: req.body.invoice_number,
     date: invDate, amountCents: total,
   });
   if (dup) {
@@ -7445,7 +7625,7 @@ app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
     const keep = Object.entries({
       amount: req.body.amount, subtotal: req.body.subtotal, tax: req.body.tax,
       invoice_date: req.body.invoice_date, due_date: req.body.due_date,
-      vendor_id: req.body.vendor_id, invoice_number: req.body.invoice_number,
+      vendor_id: vendorId || '', invoice_number: req.body.invoice_number,
       category: req.body.category, status: req.body.status,
       payment_method: req.body.payment_method, notes: req.body.notes,
       ai_status: req.body.ai_status, ai_confidence: req.body.ai_confidence,
@@ -7529,7 +7709,7 @@ app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
   invQ.add.run({
     invoice_date: String(req.body.invoice_date || '').slice(0, 10) || null,
     due_date: String(req.body.due_date || '').slice(0, 10) || null,
-    vendor_id: req.body.vendor_id ? String(Number(req.body.vendor_id)) : null,
+    vendor_id: vendorId ? String(vendorId) : null,
     invoice_number: String(req.body.invoice_number || '').trim() || null,
     amount_cents: total,
     subtotal_cents: toCents(req.body.subtotal),

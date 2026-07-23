@@ -222,7 +222,10 @@ test('a view-only account is not offered writes it cannot perform', async () => 
 test('the owner still gets every write control', async () => {
   const owner = await login({ password: 'test-manager-password' });
   const html = await (await as(owner, '/c/invoices')).text();
-  assert.ok(html.includes('invDrawer(true)'), 'upload is offered');
+  // The control moved from a drawer to the capture overlay; what matters is
+  // that a writer is offered a way in and the overlay is actually on the page.
+  assert.ok(html.includes('capOpen()'), 'upload is offered');
+  assert.ok(html.includes('data-cap'), 'and the overlay it opens is rendered');
   assert.ok(!/bs-notice-k">View only</.test(html), 'and no view-only notice');
 });
 

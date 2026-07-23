@@ -803,3 +803,95 @@ test('a duplicate question does not cost you the pages while you answer it', asy
   assert.strictEqual(all.length, 2, 'the override filed it');
   assert.strictEqual(pagesOf(all[1]).length, 2, 'with both its pages intact');
 });
+
+// ---------------------------------------------------------------------------
+// The capture overlay.
+//
+// The drawer became an overlay over the list: drop the paper, watch it read,
+// confirm it against the paper. The tests here are about the contract the
+// overlay posts under, not its looks — the layout is verified in a browser,
+// but what must never drift is that it still posts the same form the server
+// has always taken.
+// ---------------------------------------------------------------------------
+
+test('the overlay posts the same forms the server already takes', async () => {
+  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  assert.match(html, /data-cap/, 'the overlay is on the page, not a route away');
+  assert.match(html, /action="\/c\/invoices"[^>]*enctype="multipart\/form-data"/, 'invoices post to invoices');
+  assert.match(html, /action="\/c\/expenses"[^>]*enctype="multipart\/form-data"/,
+    'and an expense can be added from here too, to its own endpoint');
+  // Every field the invoice route reads has somewhere to come from.
+  for (const f of ['amount', 'invoice_date', 'due_date', 'invoice_number', 'category',
+    'subtotal', 'tax', 'ai_status', 'ai_lines', 'file']) {
+    assert.match(html, new RegExp(`name="${f}"`), `${f} is posted`);
+  }
+  assert.match(html, /name="file"[^>]*multiple/, 'and every page of it');
+});
+
+test('a vendor typed on the paper becomes the vendor on the invoice', async () => {
+  // The overlay types a vendor instead of picking an id — a name read off the
+  // paper is what it has. Filed against nobody, an invoice drops out of vendor
+  // totals, out of the duplicate check and out of alias matching.
+  const db0 = new Database(DB, { readonly: true });
+  const before = db0.prepare('SELECT COUNT(*) n FROM m_vendors').get().n;
+  const known = db0.prepare('SELECT name FROM m_vendors LIMIT 1').get().name;
+  db0.close();
+  assert.ok(known, 'there is a vendor already on file — the precondition');
+
+  // Loosely typed: different case and spacing from what is stored.
+  const messy = known.toUpperCase().replace(/ /g, '  ');
+  assert.notStrictEqual(messy, known, 'and it is genuinely typed differently');
+  const res = await post('/c/invoices', {
+    amount: '12.00', vendor_name: messy, invoice_date: '2026-11-01',
+    invoice_number: 'CAP-V1', category: 'Food', ai_status: 'manual',
+  });
+  assert.strictEqual(res.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'CAP-V1'").get();
+  const after = db.prepare('SELECT COUNT(*) n FROM m_vendors').get().n;
+  const vendor = db.prepare('SELECT name FROM m_vendors WHERE id = ?').get(Number(inv.vendor_id));
+  db.close();
+  assert.ok(inv.vendor_id, 'the invoice has a vendor');
+  assert.strictEqual(vendor.name, known, 'the one already on file, matched through the mess');
+  assert.strictEqual(after, before, 'and no duplicate vendor was created for it');
+});
+
+test('a vendor nobody has billed from before is created, not dropped', async () => {
+  const db0 = new Database(DB, { readonly: true });
+  const before = db0.prepare('SELECT COUNT(*) n FROM m_vendors').get().n;
+  db0.close();
+
+  const res = await post('/c/invoices', {
+    amount: '18.00', vendor_name: 'Qqx Brand New Supplier', invoice_date: '2026-11-02',
+    invoice_number: 'CAP-V2', category: 'Food', ai_status: 'manual',
+  });
+  assert.strictEqual(res.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'CAP-V2'").get();
+  const after = db.prepare('SELECT COUNT(*) n FROM m_vendors').get().n;
+  const vendor = db.prepare('SELECT name FROM m_vendors WHERE id = ?').get(Number(inv.vendor_id));
+  db.close();
+  assert.strictEqual(after, before + 1, 'exactly one vendor was added');
+  assert.strictEqual(vendor.name, 'Qqx Brand New Supplier', 'named as it was typed');
+  assert.ok(inv.vendor_id, 'and the invoice is filed against it');
+});
+
+test('the duplicate check sees the typed vendor, not a blank one', async () => {
+  // Resolving the vendor after the duplicate check would have meant every
+  // typed-vendor invoice comparing as "no vendor" — so two invoices from
+  // different suppliers on the same day for the same amount would collide,
+  // and two from the SAME supplier would not be caught by number.
+  const first = await post('/c/invoices', {
+    amount: '77.00', vendor_name: 'Qqx Brand New Supplier', invoice_date: '2026-11-03',
+    invoice_number: 'CAP-DUP-X', category: 'Food', ai_status: 'manual',
+  });
+  assert.strictEqual(first.status, 302);
+  const again = await post('/c/invoices', {
+    amount: '77.00', vendor_name: 'Qqx Brand New Supplier', invoice_date: '2026-11-03',
+    invoice_number: 'CAP-DUP-X', category: 'Food', ai_status: 'manual',
+  });
+  assert.strictEqual(again.status, 200, 'the second is questioned');
+  assert.match(await again.text(), /already have this invoice/i, 'as the same paper twice');
+});

@@ -208,17 +208,29 @@ test('the reader endpoint answers rather than throwing when there is no key', as
   assert.match(j.error, /ANTHROPIC_API_KEY|Could not read/, `and says what went wrong: ${j.error}`);
 });
 
-test('the drawer files a document with the reader switched off entirely', async () => {
+test('the capture overlay files a document with the reader switched off entirely', async () => {
   // The reader is a convenience. If it is down, or there is no key, or the
-  // scan is unreadable, the cabinet still has to work.
+  // scan is unreadable, the cabinet still has to work — so the panel behind it
+  // is a plain form that posts on its own.
   const html = await (await fetch(`${BASE}/c/documents`)).text();
   assert.match(html, /action="\/c\/documents"[^>]*enctype="multipart\/form-data"/,
     'the form posts on its own');
   assert.match(html, /name="title"[^>]*required/, 'a title is required whoever typed it');
-  assert.match(html, /id="docfile"[^>]*required|required[^>]*id="docfile"/, 'and a file');
   for (const f of ['issuer', 'doc_date', 'period_start', 'period_end', 'expires_on', 'action_by', 'reference', 'summary']) {
     assert.match(html, new RegExp(`name="${f}"`), `${f} can be typed by hand`);
   }
+});
+
+test('a document cannot be filed without the document', async () => {
+  // The file IS the record here, unlike an invoice or an expense, both of
+  // which can honestly be typed from memory. So the manual door is not offered
+  // at all on this page — there is nothing to file without it.
+  const html = await (await fetch(`${BASE}/c/documents`)).text();
+  assert.ok(!/id="cap-manual"/.test(html), 'no "enter manually" on Documents');
+  assert.match(html, /id="cap-choose"/, 'the way in is the file itself');
+  // And the invoice page, where typing it from memory is legitimate, keeps it.
+  const inv = await (await fetch(`${BASE}/c/invoices`)).text();
+  assert.match(inv, /id="cap-manual"/, 'an invoice can still be entered by hand');
 });
 
 // ---------------------------------------------------------------------------

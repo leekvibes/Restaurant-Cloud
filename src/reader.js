@@ -381,6 +381,72 @@ function scrubIdentifiers(data) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// EXPENSES
+//
+// A till receipt, not an invoice. There is no vendor account, no invoice
+// number and usually no line worth keeping — what is wanted is what it was,
+// where, how much and when, so the person who paid does not have to type it
+// one-handed in a car park.
+//
+// Scrubbed like a document, and for a sharper reason: a card receipt prints
+// the last four digits, sometimes more, and an auth code that looks like an
+// account number. None of that belongs in the database.
+// ---------------------------------------------------------------------------
+const EXPENSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string', description: 'What was bought, in a few words, as a person would write it on the expense: "Bag of ice", "Cleaning supplies", "Coffee filters and cups". Not the shop name, and not a full item list.' },
+    where_bought: { type: 'string', description: 'The shop or merchant, e.g. "Costco", "Home Depot". "" if not shown.' },
+    total: { type: 'number', description: 'The amount actually paid, including tax — the grand total at the foot, not the subtotal. Plain number, no currency symbol.' },
+    spent_on: { type: 'string', description: 'The date on the receipt, YYYY-MM-DD. "" if not shown.' },
+    category: { type: 'string', enum: ['Groceries', 'Ice', 'Supplies', 'Cleaning', 'Repairs', 'Equipment', 'Kitchen', 'Bar', 'Office', 'Travel', 'Other'] },
+    paid_with: { type: 'string', enum: ['', 'Their own money', 'Company card', 'Company cash', 'Drawer cash', 'Other'], description: 'Only if the receipt actually says how it was paid — "CASH" or a card line. Otherwise "", because who owns the card is not on the receipt and guessing it wrong creates a debt that is not owed.' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low if the photo is cut off, creased or unreadable, or if you had to choose between competing totals' },
+    notes: { type: 'string', description: 'One short line only if something is odd — a total that does not add up, a second receipt in shot. "" normally.' },
+  },
+  required: ['name', 'total', 'category', 'confidence'],
+  additionalProperties: false,
+};
+
+const EXPENSE_PROMPT =
+  'This is a till receipt for something bought for a restaurant — a shop run, a hardware part, a bag of ice.\n' +
+  'TOTAL: the amount actually paid at the foot of the receipt, including tax. Not the subtotal, and not a single line. ' +
+  'If the receipt shows change given, the total is still what was rung up, not the cash tendered.\n' +
+  'NAME: a few words describing what was bought, the way somebody would write it in an expense log. If there are many items, summarise them ' +
+  '("Cleaning supplies", "Produce and dry goods") rather than listing them.\n' +
+  'PAID WITH: only if it is printed. A card receipt does not say whose card it is, so leave it "" unless the receipt itself is explicit.\n' +
+  'PRIVACY: never return a card number or any part of one, an auth or approval code, a loyalty or member number, or a phone number, in ANY field. ' +
+  'They are on the receipt and that is where they stay.\n' +
+  'If several photos are provided they are one receipt, photographed in pieces — read them as one and give one total.';
+
+/**
+ * Read a till receipt.
+ *
+ * Same shape as readDocument: one call, and a failure is survivable because
+ * the form behind it still works by hand.
+ *
+ * @param {Array<{buffer:Buffer, mimetype:string}>} files  images and/or PDFs
+ */
+async function readExpense(files) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    const e = new Error('No ANTHROPIC_API_KEY set — add one to .env to enable receipt reading.');
+    e.code = 'NO_KEY';
+    throw e;
+  }
+  const client = new Anthropic();
+  try {
+    const data = await askJSON(client, invoiceContent(files), EXPENSE_PROMPT, EXPENSE_SCHEMA, 1024);
+    return scrubIdentifiers(data);
+  } catch (apiErr) {
+    if (apiErr instanceof SyntaxError) throw new Error('Could not read that receipt — try a clearer photo, or type it in.');
+    throw invoiceError(apiErr);
+  }
+}
+
+module.exports.readExpense = readExpense;
+module.exports.EXPENSE_SCHEMA = EXPENSE_SCHEMA;
+
 module.exports.readDocument = readDocument;
 module.exports.DOC_SCHEMA = DOC_SCHEMA;
 module.exports.scrubIdentifiers = scrubIdentifiers;
