@@ -44,8 +44,25 @@ const page = async (cookie) => {
 
 // Today is fixed relative to the server's clock, so the seed is written
 // backwards from it rather than to literal dates that would age out.
-const iso = (d) => d.toISOString().slice(0, 10);
-const back = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return iso(d); };
+// The app reckons business dates in America/New_York — TZ is set on Render and
+// pinned in the test script — so the tests have to reckon them there too.
+//
+// These used to build dates out of toISOString(), which is UTC. Every evening
+// between 8pm New York and midnight the two are on different calendar days, so
+// a shift seeded for "today" landed on the app's tomorrow and every
+// today/this-week assertion failed until morning. The suite was green in the
+// day and red at night, which is worse than either.
+const iso = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+// Anchored at midday UTC on today's New York date, then stepped whole days.
+// Noon sits far from both boundaries, so this never slips across a day — or a
+// DST change — the way subtracting hours from "now" can. Correct however the
+// suite is invoked, not just when TZ happens to be set.
+const back = (n) => {
+  const d = new Date(`${iso(new Date())}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+};
 
 test.before(async () => {
   Database = require('better-sqlite3');

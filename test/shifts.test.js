@@ -29,8 +29,25 @@ const html = async (p) => {
   assert.strictEqual(r.status, 200, `${p} must render`);
   return r.text();
 };
-const iso = (d) => d.toISOString().slice(0, 10);
-const back = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return iso(d); };
+// The app reckons business dates in America/New_York — TZ is set on Render and
+// pinned in the test script — so the tests have to reckon them there too.
+//
+// These used to build dates out of toISOString(), which is UTC. Every evening
+// between 8pm New York and midnight the two are on different calendar days, so
+// a shift seeded for "today" landed on the app's tomorrow and every
+// today/this-week assertion failed until morning. The suite was green in the
+// day and red at night, which is worse than either.
+const iso = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+// Anchored at midday UTC on today's New York date, then stepped whole days.
+// Noon sits far from both boundaries, so this never slips across a day — or a
+// DST change — the way subtracting hours from "now" can. Correct however the
+// suite is invoked, not just when TZ happens to be set.
+const back = (n) => {
+  const d = new Date(`${iso(new Date())}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+};
 
 test.before(async () => {
   Database = require('better-sqlite3');
@@ -299,8 +316,14 @@ test('the ledger groups days into weeks and totals each one', async () => {
     const first = h.slice(a, b === -1 ? undefined : b);
     const blocks = (first.match(/class="bs-week"/g) || []).length;
 
-    const monday = (d) => { const t = new Date(d + 'T00:00:00'); t.setDate(t.getDate() - ((t.getDay() + 6) % 7)); return t.toISOString().slice(0, 10); };
-    const month = new Date().toISOString().slice(0, 7);
+    // Same Monday-start week the app uses, anchored at midday UTC so the
+    // arithmetic cannot slide a day either side of a boundary.
+    const monday = (d) => {
+      const t = new Date(`${d}T12:00:00Z`);
+      t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7));
+      return t.toISOString().slice(0, 10);
+    };
+    const month = back(0).slice(0, 7);   // this month in New York, not in UTC
     // Every shift in that month. A month renders all of its days now — there
     // is no "earlier days" fold inside one any more.
     const shown = db.prepare("SELECT date FROM shifts WHERE date LIKE ?").all(month + '%');
