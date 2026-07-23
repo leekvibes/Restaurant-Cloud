@@ -911,3 +911,39 @@ test('the app icon is the wordmark, white on black', () => {
     assert.ok(m.icons.some((i) => i.purpose === 'maskable'), `${f}: has a maskable icon`);
   }
 });
+
+test('the manager app and the staff portal are two separate installs', async () => {
+  // Adding the login screen to a home screen produced a shortcut that opened
+  // the tip form. One `bare` flag was answering two questions — "no app
+  // chrome" and "this is the staff portal" — and /login is the first without
+  // being the second, so it served the tips manifest, whose start_url is
+  // /tips.
+  const manifestOf = (html) => (html.match(/rel="manifest" href="([^"]+)"/) || [])[1];
+  const touchIconOf = (html) => (html.match(/rel="apple-touch-icon" href="([^"?]+)/) || [])[1];
+
+  // The dashboard stands in for the login screen here: /login only renders
+  // when APP_PASSWORD is set, and this fixture runs open. The login screen
+  // itself is asserted in auth.test.js, which does set one.
+  const dash = await (await fetch(`${BASE}/`, { redirect: 'manual' })).text();
+  const tips = await (await fetch(`${BASE}/tips`, { redirect: 'manual' })).text();
+  const login = dash;
+
+  assert.strictEqual(manifestOf(dash), '/manifest.webmanifest',
+    'a manager page installs the manager app');
+  assert.strictEqual(manifestOf(tips), '/manifest-tips.webmanifest',
+    'and the tip form installs the staff portal');
+
+  // iOS takes the home-screen icon from the page rather than the manifest, so
+  // sharing one here is what would make the two indistinguishable on a phone.
+  assert.notStrictEqual(touchIconOf(login), touchIconOf(tips),
+    'the two installs do not share an icon');
+
+  const read = (f) => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'));
+  const mgr = read('manifest.webmanifest');
+  const staff = read('manifest-tips.webmanifest');
+  assert.strictEqual(mgr.start_url, '/', 'the manager app opens on the dashboard');
+  assert.strictEqual(staff.start_url, '/tips', 'the staff portal opens on the tip form');
+  assert.notStrictEqual(mgr.name, staff.name, 'and they are named apart');
+  const srcs = (m) => m.icons.map((i) => i.src).sort().join();
+  assert.notStrictEqual(srcs(mgr), srcs(staff), 'with their own icon sets');
+});

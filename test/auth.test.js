@@ -345,3 +345,16 @@ test('signing in still works, and still cannot be pointed off-site', async () =>
   const away = await post('/login', { password: 'test-manager-password', next: 'https://evil.example' });
   assert.strictEqual(away.headers.get('location'), '/', 'an off-site next is ignored');
 });
+
+test('the login screen installs the manager app, not the tip form', async () => {
+  // /login is rendered "bare" — no app chrome — and that flag was also being
+  // read as "this is the staff portal", so it served manifest-tips, whose
+  // start_url is /tips. Adding the login screen to a home screen produced a
+  // shortcut that opened the tip form. This only shows up where APP_PASSWORD
+  // is set, which is why it lives here.
+  const html = await (await get('/login')).text();
+  assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/,
+    'the manager manifest, so the shortcut opens the dashboard');
+  assert.ok(!/manifest-tips/.test(html), 'not the staff one');
+  assert.match(html, /apple-mobile-web-app-title" content="ZWIN"/, 'and it is named ZWIN on the home screen');
+});

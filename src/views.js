@@ -642,7 +642,12 @@ const viewerNote = () => (canWrite() ? '' :
 
 /** Shared <head> bits: fonts, icons, PWA manifest, theme colour. */
 function head(title, opts = {}) {
-  const staff = !!opts.bare;
+  // `bare` means "no app chrome" and `staff` means "this is the staff portal".
+  // They were one flag, so /login — which is bare but is the MANAGER app —
+  // served the tips manifest. Its start_url is /tips, so adding the login
+  // screen to a home screen produced a shortcut that opened the tip form.
+  // Two flags, because they are two questions.
+  const staff = !!opts.staff;
   return `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
     <title>${esc(title)} · ${esc(staff ? RESTAURANT : APP_NAME)}</title>
     <link rel="stylesheet" href="/static/fonts.css?v=${BUILD}">
@@ -651,8 +656,8 @@ function head(title, opts = {}) {
     ${staff ? `<link rel="stylesheet" href="/static/staff.css?v=${BUILD}">` : ''}
     <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
     <meta name="theme-color" content="${staff ? '#f7eee0' : '#ffffff'}">
-    <link rel="icon" href="/static/icon-192.png">
-    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+    <link rel="icon" href="/static/${staff ? 'tips-' : ''}icon-192.png?v=${BUILD}">
+    <link rel="apple-touch-icon" href="/static/${staff ? 'tips-' : ''}apple-touch-icon.png?v=${BUILD}">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'black-translucent' : 'default'}">
     <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : APP_NAME}">

@@ -2151,7 +2151,7 @@ app.get('/tips', (req, res) => {
         </div>
         <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
       </div>`;
-    return res.send(layout('Recorded', body, { bare: true }));
+    return res.send(layout('Recorded', body, { bare: true, staff: true }));
   }
 
   // Sign in. Nobody's name is on the page until a PIN is verified, so an open
@@ -2209,7 +2209,7 @@ app.get('/tips', (req, res) => {
       <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
     </div>
     ${pinScript()}`;
-  res.send(layout('Log your tips', body, { bare: true }));
+  res.send(layout('Log your tips', body, { bare: true, staff: true }));
 });
 
 /**
@@ -2438,7 +2438,7 @@ function tipsFormPage(emp, opts = {}) {
       <div class="tp-build" data-when="1">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
     </div>
     ${reportScript()}`;
-  return layout('Log your tips', body, { bare: true });
+  return layout('Log your tips', body, { bare: true, staff: true });
 }
 
 /** 2026-07-22 → "07 / 22 / 2026", the way the mock reads a date back. */
