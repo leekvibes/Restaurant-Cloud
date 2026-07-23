@@ -749,3 +749,74 @@ test('the group labels are legible, not fine print', () => {
   assert.ok(weight >= 700, `group labels are bold, got ${weight}`);
   assert.ok(size >= 10, `and readable, got ${size}px`);
 });
+
+test('a phone gets no tab strip at all — band or sub-nav', () => {
+  // This regressed once already and shipped. The 900px block hides .bs-band,
+  // but the twitch fix later added a bare `.bs-band { display: grid }` further
+  // down the file. Same single-class specificity, so source order handed every
+  // phone the grid back and the strip returned above every screen.
+  //
+  // So the check is not "a hide rule exists" — it is "the LAST rule that sets
+  // display on .bs-band under 900px hides it". That is the thing that was
+  // false while a hide rule sat in the file looking correct.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+
+  const lastDisplayFor = (cls) => {
+    let winner = null;
+    // Walk every rule in order. A bare rule always applies; a rule inside a
+    // max-width query applies at 375px only if the breakpoint is >= 375.
+    for (const m of css.matchAll(/(@media[^{]*\{)|([^{}@]+)\{([^{}]*)\}/g)) {
+      if (m[1]) { const w = /max-width:\s*(\d+)px/.exec(m[1]); currentMax = w ? Number(w[1]) : null; continue; }
+      const sel = (m[2] || '').trim(); const body = m[3] || '';
+      if (!sel || !new RegExp(`\\.${cls}(?![\\w-])`).test(sel)) continue;
+      if (!/display:\s*([a-z-]+)/.test(body)) continue;
+      if (currentMax !== null && currentMax < 375) continue;
+      winner = /display:\s*([a-z-]+)/.exec(body)[1];
+    }
+    return winner;
+  };
+  let currentMax = null;
+  assert.strictEqual(lastDisplayFor('bs-band'), 'none', 'the band is hidden on a phone by the last rule that speaks');
+  assert.match(css, /\.bs-subnav[^{]*\{[^}]*display:\s*none|\.bs-band,\s*\.bs-subnav \{[^}]*display:\s*none/,
+    'and so is the sub-nav');
+});
+
+test('the mobile dashboard leads with the last service', () => {
+  // Order on a phone: last service, the week, attention, the record. The
+  // columns become display:contents so the blocks themselves are the grid
+  // items — without that, `order` has nothing to act on.
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const stacked = [...css.matchAll(/@media \(max-width: 1180px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
+  assert.match(stacked, /\.bs-cols3 > \.bs-col \{[^}]*display:\s*contents/,
+    'the columns stop being boxes so their blocks can be reordered');
+
+  const orderOf = (cls) => {
+    // \s* not a literal space — the declarations are aligned in the source and
+    // `.bs-dblk-rec  {` has two, which a single-space pattern misses.
+    const m = new RegExp(`\\.bs-dblk-${cls}\\s*\\{([^}]*)\\}`).exec(stacked);
+    assert.ok(m, `.bs-dblk-${cls} is ordered`);
+    return Number(/order:\s*(\d+)/.exec(m[1])[1]);
+  };
+  assert.deepStrictEqual(
+    [orderOf('last'), orderOf('week'), orderOf('attn'), orderOf('rec')],
+    [1, 2, 3, 4],
+    'last service · the week · attention · the record',
+  );
+});
+
+test('the staff portal starts below the phone status bar', async () => {
+  // viewport-fit=cover lets the page paint the full screen, including the
+  // strip the clock and battery sit in. The footer reserved the bottom inset
+  // from the start; the top never did, so the restaurant name and "Not you?"
+  // drew underneath the clock on every iPhone.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  for (const bar of ['.tp-top', '.tp-navbar']) {
+    const m = new RegExp(`\\${bar}\\s*\\{([^}]*)\\}`).exec(css);
+    assert.ok(m, `${bar} exists`);
+    assert.match(m[1], /padding:\s*calc\([^)]*env\(safe-area-inset-top\)/,
+      `${bar} reserves the status bar`);
+  }
+  // Both staff screens use one of those two bars, so both are covered.
+  const signin = await (await fetch(`${BASE}/tips`, { redirect: 'manual' })).text();
+  assert.match(signin, /class="tp-top"/, 'the PIN screen uses the inset bar');
+});

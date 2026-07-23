@@ -634,9 +634,21 @@ body {
 .bs-rec-w { color: var(--faint); white-space: nowrap; }
 
 @media (max-width: 1180px) {
+  /* The columns stop being boxes so their blocks become the grid items, which
+     is what lets a phone reorder them. Each block opens with its own ruled
+     kicker, so the old divider between columns is not needed — the margin
+     carries the separation. */
   .bs-cols3 { grid-template-columns: 1fr; }
-  .bs-col { padding: 0; border: 0 !important; }
-  .bs-col + .bs-col { border-top: 1px solid var(--field-border) !important; margin-top: 28px; padding-top: 6px; }
+  .bs-cols3 > .bs-col { display: contents; }
+  .bs-dblk { margin-top: 30px; }
+
+  /* Last service first: on a phone the answer to "how did we just do" beats
+     the to-do list, and attention moves under the week's numbers. */
+  .bs-dblk-last { order: 1; margin-top: 0; }
+  .bs-dblk-week { order: 2; }
+  .bs-dblk-attn { order: 3; }
+  .bs-dblk-rec  { order: 4; }
+
   .bs-headline { max-width: none; }
 }
 @media (max-width: 760px) {
@@ -1149,8 +1161,10 @@ body {
 @media (max-width: 900px) {
   /* .bs-band is the banded nav that replaced .bs-nav — the old selector was
      left behind by the rebuild and the tab strip came back on every phone,
-     which is the third copy of the same list. */
-  .bs-nav, .bs-band { display: none; }
+     which is the third copy of the same list.
+     .bs-subnav goes with them: it was the strip still visible on a phone, and
+     a phone navigates from the bottom bar and the Index. */
+  .bs-nav, .bs-band, .bs-subnav { display: none; }
   .bs-sub { border-top: 0; }
 }
 
@@ -1679,6 +1693,15 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-band { display: grid; }
 .bs-band-c, .bs-band-x { grid-area: 1 / 1; }
 
+/* Restated here, after the display:grid above. The phone hide lives in the
+   900px block far earlier in this file, and `display: grid` is the same
+   single-class specificity — so source order handed every phone the grid and
+   the tab strip came back. Hiding it again from below the declaration that
+   was beating it. */
+@media (max-width: 900px) {
+  .bs-band { display: none; }
+}
+
 .bs-band-c { transition: opacity .16s ease; }
 .bs-band.open .bs-band-c { opacity: 0; pointer-events: none; }
 
@@ -1701,7 +1724,11 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 }
 
 /* --- the groups ---------------------------------------------------------- */
-.bs-band-x { display: flex; gap: 40px; flex-wrap: wrap; }
+/* Centred, not left-packed. Six groups wrap onto two lines and the short
+   second one (Team, Tasks & logs) sat alone against the left edge, reading as
+   a mistake rather than a continuation. Centring each line balances it under
+   the row above. */
+.bs-band-x { display: flex; gap: 40px 44px; flex-wrap: wrap; justify-content: center; }
 .bs-bandg { display: grid; gap: 6px; align-content: start; }
 /* The group names carry the whole structure of the expanded state, so they
    read as headings rather than as fine print: heavier, a shade larger, and in

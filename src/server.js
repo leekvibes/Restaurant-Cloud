@@ -836,6 +836,8 @@ app.get('/', (req, res) => {
     <div class="bs-sec-h bs-rec-h"><span class="bs-kicker">The record</span></div>
     ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}`;
 
+  const dblk = (cls, inner) => (inner ? `<section class="bs-dblk bs-dblk-${cls}">${inner}</section>` : '');
+
   const bodyHtml = `
     ${flash(req)}
     <div class="bs-page">
@@ -848,10 +850,16 @@ app.get('/', (req, res) => {
         </div>
         <span class="bs-headmeta">${esc(headMeta)}</span>
       </div>
+      <!-- Each block is wrapped so a phone can reorder them without the desktop
+           columns moving. On a wide screen these wrappers style nothing; below
+           1180px the columns become display:contents and the wrappers are the
+           grid items, ordered last service · the week · attention · the record.
+           Wrapped only when it has content, so an absent block leaves no stray
+           gap in the stack. -->
       <div class="bs-cols3">
-        <div class="bs-col">${attnBlock}</div>
-        <div class="bs-col">${weekBand}</div>
-        <div class="bs-col">${lastBand}${record}</div>
+        <div class="bs-col">${dblk('attn', attnBlock)}</div>
+        <div class="bs-col">${dblk('week', weekBand)}</div>
+        <div class="bs-col">${dblk('last', lastBand)}${dblk('rec', record)}</div>
       </div>
     </div>`;
 

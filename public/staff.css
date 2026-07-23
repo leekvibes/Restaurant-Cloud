@@ -51,9 +51,14 @@ body.bare {
 .tp [hidden], .tp[hidden] { display: none !important; }
 
 /* --- the bar across the top ---------------------------------------------- */
+/* The <meta viewport> carries viewport-fit=cover, which lets the page paint
+   the full screen — including the strip the clock, signal and battery sit in.
+   The footer already reserved safe-area-inset-bottom; the top never did, so on
+   an iPhone the restaurant name and "Not you?" drew underneath the status bar.
+   Reserving the inset starts the bar below it, the way every other app does. */
 .tp-top {
   display: flex; align-items: center; gap: 13px;
-  padding: 16px 20px 15px;
+  padding: calc(16px + env(safe-area-inset-top)) 20px 15px;
   border-bottom: 2px solid var(--ink);
 }
 .tp-mark {
@@ -78,7 +83,8 @@ body.bare {
 /* Step 2 swaps the identity bar for a back/title/count one. */
 .tp-navbar {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
-  padding: 14px 20px; border-bottom: 2px solid var(--ink);
+  padding: calc(14px + env(safe-area-inset-top)) 20px 14px;
+  border-bottom: 2px solid var(--ink);
 }
 .tp-navbar .tp-back {
   justify-self: start; background: none; border: 0; padding: 6px 4px; cursor: pointer;
