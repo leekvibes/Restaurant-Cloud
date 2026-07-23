@@ -2618,3 +2618,10 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
 @media (max-width: 700px) {
   .ipick { flex: 1; justify-content: center; padding: 11px 12px; }
 }
+
+/* Cancel and Import sit together at the right of the bar. */
+.sticky-acts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+@media (max-width: 820px) {
+  .sticky-acts { width: 100%; }
+  .sticky-acts .btn { flex: 1; justify-content: center; }
+}

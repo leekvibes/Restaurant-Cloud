@@ -7839,9 +7839,20 @@ app.get('/c/invoices/:id/import', (req, res) => {
       <input type="hidden" name="count" value="${rows.length}">
       <input type="hidden" name="idx" value="${rows.map((r) => r.i).join(',')}">
       ${body}
-      <div class="stickybar">
-        <a class="btn btn-ghost" href="/c/invoices">Cancel</a>
-        <button class="btn btn-primary" type="submit">Import <span id="impn">0</span> line<span id="imps">s</span></button>
+      <div class="stickybar stickybar-keep">
+        <div class="sticky-in">
+          <div class="sticky-txt">
+            <b><span id="impn2">0</span> selected</b>
+            <span>Nothing is saved until you press Import.</span>
+          </div>
+          <div class="sticky-acts">
+            <a class="btn btn-ghost" href="/c/invoices">Cancel</a>
+            ${/* One text node, not four. .btn is a flex row with a gap, so
+                   "Import ", <span>0</span>, " line", <span>s</span> came out
+                   spaced as "Import 0 line s". */''}
+            <button class="btn btn-primary" type="submit"><span id="impbtn">Import 0 lines</span></button>
+          </div>
+        </div>
       </div>
     </form>
     ${importScript()}`));
@@ -7875,9 +7886,10 @@ function importScript() {
         if (sel.value === 'match' || sel.value === 'create') n++;
       });
       form.querySelectorAll('.ipick-b').forEach(function (cb) { if (cb.checked) n++; });
-      var el = document.getElementById('impn'), s = document.getElementById('imps');
-      if (el) el.textContent = n;
-      if (s) s.textContent = n === 1 ? '' : 's';
+      var b = document.getElementById('impbtn');
+      if (b) b.textContent = 'Import ' + n + ' line' + (n === 1 ? '' : 's');
+      var el2 = document.getElementById('impn2');
+      if (el2) el2.textContent = n;
     }
 
     form.addEventListener('click', function (e) {

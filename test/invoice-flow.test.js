@@ -519,7 +519,7 @@ test('a new product is a tick box, and nothing is ticked to begin with', async (
 
   // Unticked boxes post nothing at all, and a missing action is already read
   // as skip — which is why none of this needed the import handler to change.
-  assert.match(html, /Import <span id="impn">0<\/span>/, 'so the button opens at nothing selected');
+  assert.match(html, /id="impbtn">Import 0 lines</, 'so the button opens at nothing selected');
   assert.match(html, /data-group="new" data-toggle="1"/, 'with one button to take all seven');
 });
 
@@ -580,4 +580,28 @@ test('the product menu appears only where there is a product to choose', async (
     assert.match(lineBlock(html, i), /Looks like <b>/,
       `line ${i} offers a product menu, so it must have a suggested match to change`);
   }
+});
+
+test('the import screen has a visible way to submit', async () => {
+  // This screen shipped with no usable Import button. The button was in the
+  // markup the whole time — a blanket `.bs .stickybar { display: none }`,
+  // written to stop the shift sheet repeating its header action at the foot,
+  // hid it. The shift sheet had a second copy to fall back on. This screen did
+  // not, so its only way to submit was invisible and no test noticed, because
+  // the element was present and every assertion was about markup.
+  const { id } = await newLinesInvoice('BLD-SUBMIT-1', ['Zzq Kiln Mitt']);
+  const html = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+
+  const bar = html.slice(html.indexOf('class="stickybar'), html.indexOf('</form>'));
+  assert.ok(bar, 'there is an action bar');
+  assert.match(bar, /type="submit"/, 'with a submit button in it');
+  assert.match(bar, /id="impbtn">Import/, 'that says what it will do');
+
+  // Present is not the same as visible. The bar has to carry the class that
+  // opts it out of the hiding, and the stylesheet has to still honour it.
+  assert.match(bar, /class="stickybar stickybar-keep"/,
+    'and the bar opts out of the blanket hide — without this it is invisible');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css, /\.bs\s+\.stickybar\.stickybar-keep\s*\{[^}]*display:\s*block/,
+    'the stylesheet still un-hides an opted-out bar');
 });

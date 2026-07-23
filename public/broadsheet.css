@@ -946,8 +946,17 @@ body {
    this block's grid never applied while its display:none rules still did. */
 
 /* The sheet has Preview & send in its header; the old sticky bar repeated it
-   at the foot in the previous shell. One is enough. */
+   at the foot in the previous shell. One is enough.
+
+   Blanket, though, and it was not the only sticky bar in the app: it also hid
+   the Import button at the foot of the invoice import screen, which has no
+   header copy of it to fall back on. That screen's only way to submit was
+   invisible. A bar has to opt out of the hiding now, so the next one added
+   does not disappear on the day it ships. */
 .bs .stickybar { display: none; }
+.bs .stickybar.stickybar-keep { display: block; }
+.bs .stickybar-keep .sticky-in { background: var(--panel, var(--paper));
+  border: 1px solid var(--rule); border-radius: 0; box-shadow: none; }
 
 /* ===========================================================================
    BILLBOARD — the masthead line, rotating
