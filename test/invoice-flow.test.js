@@ -248,12 +248,16 @@ test('the import screen groups the work and shows why a line is uncertain', asyn
   // A bulk button does what its label says. "Skip all" wired to `create`
   // would import every delivery fee on the invoice with one click, and the
   // label would still read Skip — the mistake nobody would look for.
-  const SAFE = { review: 'match', new: 'create', charges: 'skip' };
+  const SAFE = { review: 'match', charges: 'skip' };
   const bulks = [...html.matchAll(/data-group="([a-z]+)" data-set="([a-z]+)"/g)];
   assert.ok(bulks.length, 'the bulk buttons declare what they set');
   for (const [, group, set] of bulks) {
     assert.strictEqual(set, SAFE[group], `the ${group} bulk action sets ${SAFE[group]}, not ${set}`);
   }
+  // The new-products button is a tick-box toggle, so it carries no data-set and
+  // the loop above skips it — which is how it quietly stopped being covered at
+  // all when it changed. Its own shape is asserted here instead.
+  assert.ok(!/data-group="new" data-set=/.test(html), 'the new-products button no longer sets a menu');
 });
 
 test('creating a new product warns when something close already exists', () => {
@@ -451,5 +455,129 @@ test('invoices stamped under the old rule are repaired on boot', async () => {
     assert.ok(mark, 'it records that it ran, so it is not a cost on every boot');
   } finally {
     second.kill();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Choosing which new products to create.
+//
+// Every line the matcher could not place arrived pre-set to "Create new
+// product" in a menu, and the only bulk action was Create all. Wanting one of
+// seven meant hunting down six menus and changing each. And a second menu sat
+// on every row listing the whole product catalogue — on these rows "Add to
+// existing" is rendered disabled, so it was a question that could not be
+// answered and did not apply.
+// ---------------------------------------------------------------------------
+
+/** The markup for one line on the import screen. */
+function lineBlock(html, i) {
+  const at = html.indexOf(`data-row="${i}"`);
+  if (at === -1) return '';
+  const from = html.lastIndexOf('<div class="iline', at);
+  const next = html.indexOf('data-row="', at + 10);
+  // The last row has no row after it — bounded by the end of its group, or it
+  // swallows the rest of the page and every assertion below reads the wrong
+  // markup.
+  const end = next === -1 ? html.indexOf('</section>', at) : html.lastIndexOf('<div class="iline', next);
+  return html.slice(from, end === -1 ? undefined : end);
+}
+
+async function newLinesInvoice(num, descs) {
+  const db = new Database(DB);
+  const vend = db.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-08-08', ?, 7000, 'Unpaid', ?, ?)`).run(String(vend.id), num,
+    JSON.stringify(descs.map((d, n) => ({ description: d, qty: 1, unit_price: 10 + n, total: 10 + n }))))
+    .lastInsertRowid;
+  db.close();
+  return { id, html: await (await fetch(`${BASE}/c/invoices/${id}/import`)).text() };
+}
+
+const LOUISA = ['Zzq Amber Tumbler', 'Zzq Basil Crate', 'Zzq Copper Ladle',
+  'Zzq Dune Napkin', 'Zzq Ember Tongs', 'Zzq Flint Whisk', 'Zzq Gilt Straw'];
+
+test('a new product is a tick box, and nothing is ticked to begin with', async () => {
+  const { html } = await newLinesInvoice('BLD-PICK-1', LOUISA);
+
+  // Precondition: these have to be the unmatched kind, or the tick box is not
+  // what would render and this test proves nothing.
+  assert.match(html, /Likely new products/, 'they read as new products');
+
+  for (let i = 0; i < LOUISA.length; i++) {
+    const row = lineBlock(html, i);
+    assert.ok(row, `line ${i} is on the screen`);
+    assert.match(row, new RegExp(`type="checkbox" name="action_${i}" value="create"`),
+      `line ${i} is a tick box`);
+    // The tag itself, not the row: a row may also hold the "create it as new
+    // anyway" radio, which is checked on purpose.
+    const box = (row.match(/<input type="checkbox"[^>]*>/) || [''])[0];
+    assert.ok(!/checked/.test(box),
+      `line ${i} starts unticked — the whole complaint was seven arriving already chosen`);
+    assert.ok(!new RegExp(`select name="product_${i}"`).test(row),
+      `line ${i} has no product menu: it has no match, so "Add to existing" is disabled and the menu answers nothing`);
+  }
+
+  // Unticked boxes post nothing at all, and a missing action is already read
+  // as skip — which is why none of this needed the import handler to change.
+  assert.match(html, /Import <span id="impn">0<\/span>/, 'so the button opens at nothing selected');
+  assert.match(html, /data-group="new" data-toggle="1"/, 'with one button to take all seven');
+});
+
+test('ticking one line of seven creates exactly that one', async () => {
+  const { id, html } = await newLinesInvoice('BLD-PICK-2', LOUISA);
+  const idx = (html.match(/name="idx" value="([^"]*)"/) || [])[1];
+  assert.strictEqual(idx, '0,1,2,3,4,5,6', 'the form carries all seven lines');
+
+  const before = new Database(DB, { readonly: true });
+  const had = before.prepare('SELECT COUNT(*) n FROM products').get().n;
+  before.close();
+
+  // Exactly what a browser posts when one box of seven is ticked: the six
+  // unticked ones contribute no action field whatsoever.
+  const body = new URLSearchParams({ count: '7', idx });
+  for (let i = 0; i < LOUISA.length; i++) {
+    body.set(`desc_${i}`, LOUISA[i]);
+    body.set(`total_${i}`, String(1000 + i * 100));
+    body.set(`qty_${i}`, '1');
+  }
+  body.set('action_2', 'create');            // Copper Ladle, and nothing else
+
+  const res = await fetch(`${BASE}/c/invoices/${id}/import`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  assert.strictEqual(res.status, 302);
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /Imported 1 line, 1 new product\./,
+    'and it says so');
+
+  const db = new Database(DB, { readonly: true });
+  const now = db.prepare('SELECT name FROM products').all().map((r) => r.name);
+  const bought = db.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(id).n;
+  db.close();
+
+  assert.ok(now.includes('Zzq Copper Ladle'), 'the one that was ticked exists');
+  for (const other of LOUISA.filter((d) => d !== 'Zzq Copper Ladle')) {
+    assert.ok(!now.includes(other), `${other} was not ticked and must not have been created`);
+  }
+  assert.strictEqual(now.length, had + 1, 'exactly one product came out of seven lines');
+  assert.strictEqual(bought, 1, 'and one purchase, not seven');
+});
+
+test('the product menu appears only where there is a product to choose', async () => {
+  // The uncertain group is the one place picking a product means anything:
+  // there, a match exists and you may want a different one.
+  const db = new Database(DB, { readonly: true });
+  const id = db.prepare("SELECT id FROM m_invoices WHERE invoice_number = 'BLD-COUNT-1'").get().id;
+  db.close();
+  const html = await (await fetch(`${BASE}/c/invoices/${id}/import`)).text();
+
+  assert.match(html, /Needs your decision/, 'this invoice has uncertain lines — the precondition');
+  assert.match(html, /class="minisel iline-prod"/, 'which do get a product menu');
+
+  // Every product menu on the page belongs to a row that has a match to change.
+  for (const [, i] of html.matchAll(/select name="product_(\d+)"/g)) {
+    assert.match(lineBlock(html, i), /Looks like <b>/,
+      `line ${i} offers a product menu, so it must have a suggested match to change`);
   }
 });

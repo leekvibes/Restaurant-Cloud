@@ -2598,3 +2598,23 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .iline-dup { font-size: 12.5px; }
   .dupopt { align-items: flex-start; }
 }
+
+/* The tick box on a "likely new" line.
+   A checkbox rather than a menu, because the only two answers are yes and no,
+   and a menu reading "Create new product" looks like a decision already taken
+   rather than one waiting for you. Sized for a thumb: the hit area is the
+   whole label, not the 13px box. */
+.ipick { display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 7px 12px 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2); font-size: 13px; font-weight: 600; color: var(--muted);
+  user-select: none; white-space: nowrap; }
+.ipick:hover { border-color: var(--primary-400); color: var(--text); }
+.ipick input { width: 17px; height: 17px; margin: 0; accent-color: var(--primary-600); flex: none; }
+/* Ticked reads as chosen at a glance — the whole point of the group is
+   scanning which ones you picked without reading each row. */
+.ipick:has(input:checked) { background: var(--primary-100); border-color: var(--primary-400); color: var(--primary-700); }
+.iline:has(.ipick input:checked) { background: var(--primary-50, var(--surface-2)); }
+
+@media (max-width: 700px) {
+  .ipick { flex: 1; justify-content: center; padding: 11px 12px; }
+}

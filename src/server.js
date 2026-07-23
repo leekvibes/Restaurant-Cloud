@@ -7755,18 +7755,39 @@ app.get('/c/invoices/:id/import', (req, res) => {
           ${near.map((d) => `<label class="dupopt">
             <input type="radio" name="pick_${r.i}" data-picks="${d.product.id}">
             <span>Use <b>${esc(d.product.name)}</b></span>${whyChips(d.why)}</label>`).join('')}
+          ${/* Without a way back, picking one of these was a one-way door. */''}
+          <label class="dupopt"><input type="radio" name="pick_${r.i}" data-picks="" checked>
+            <span>Create it as new anyway</span></label>
         </div>` : ''}
       </div>
       <div class="iline-r">
-        <select name="action_${r.i}" class="minisel iline-act"${opts.ask ? ' required' : ''}>
+        ${/* A tick, not a dropdown, where the only two answers are yes and no.
+              These lines have no match — "Add to existing" was rendered
+              disabled on every one of them — so the dropdown was really a
+              two-item menu that read like a decision already taken: it said
+              "Create new product" whether or not you had looked at it. Six
+              lines you did not want were six menus to hunt down and change.
+
+              Unticked posts no action_N at all, which the handler already
+              treats exactly as skip, so nothing here needed a server change
+              and the box works with no JavaScript at all. */''}
+        ${opts.pick ? `<label class="ipick">
+          <input type="checkbox" name="action_${r.i}" value="create" class="ipick-b">
+          <span class="ipick-t">Create</span></label>
+          ${near.length ? `<input type="hidden" name="product_${r.i}" value="">` : ''}`
+        : `<select name="action_${r.i}" class="minisel iline-act"${opts.ask ? ' required' : ''}>
           ${opts.ask ? '<option value="" selected>Choose…</option>' : ''}
           <option value="match"${r.action === 'match' ? ' selected' : ''}${r.match ? '' : ' disabled'}>Add to existing</option>
           <option value="create"${r.action === 'create' ? ' selected' : ''}>Create new product</option>
           <option value="skip"${r.action === 'skip' ? ' selected' : ''}>Skip</option>
-        </select>
-        <select name="product_${r.i}" class="minisel">
-          ${products.map((p) => `<option value="${p.id}"${r.match && r.match.id === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
-        </select>
+        </select>`}
+        ${/* Which product to add it to — only ever meaningful when there is a
+              product to add it to. It used to render on every row, listing the
+              whole catalogue next to lines that had no match and could not be
+              matched, so it read as a question with no bearing on anything. */''}
+        ${r.match && !opts.pick ? `<select name="product_${r.i}" class="minisel iline-prod">
+          ${products.map((p) => `<option value="${p.id}"${r.match.id === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>` : ''}
         <input type="hidden" name="desc_${r.i}" value="${esc(r.desc)}">
         <input type="hidden" name="code_${r.i}" value="${esc(r.code || '')}">
         <input type="hidden" name="brand_${r.i}" value="${esc(r.brand || '')}">
@@ -7789,7 +7810,9 @@ app.get('/c/invoices/:id/import', (req, res) => {
       <div class="igroup-h">
         <span class="igroup-t">${title}</span>
         <span class="igroup-n">${list.length}</span>
-        ${bulk ? `<button type="button" class="btn btn-sm btn-ghost ibulk" data-group="${key}" data-set="${bulk.set}">${bulk.label}</button>` : ''}
+        ${bulk ? (bulk.toggle
+          ? `<button type="button" class="btn btn-sm btn-ghost ibulk" data-group="${key}" data-toggle="1">${bulk.label}</button>`
+          : `<button type="button" class="btn btn-sm btn-ghost ibulk" data-group="${key}" data-set="${bulk.set}">${bulk.label}</button>`) : ''}
       </div>
       ${sub ? `<p class="igroup-s">${sub}</p>` : ''}
       <div class="ilines">${list.map((r) => line(r, opts)).join('')}</div>
@@ -7798,8 +7821,8 @@ app.get('/c/invoices/:id/import', (req, res) => {
   const body = [
     group('review', 'Needs your decision', 'A close but uncertain match. Nothing here imports until you choose.',
       g.review, { ask: true }, { set: 'match', label: 'Accept all suggested matches' }),
-    group('new', 'Likely new products', 'No existing product came close. These will be created.',
-      g.likelyNew, { warnDupes: true }, { set: 'create', label: 'Create all' }),
+    group('new', 'Likely new products', 'No existing product came close. Tick the ones you want in Products — nothing here is created unless you tick it.',
+      g.likelyNew, { warnDupes: true, pick: true }, { toggle: true, label: 'Select all' }),
     group('charges', 'Charges and fees', 'Read from the invoice but not stock — skipped unless you say otherwise.',
       g.charges, {}, { set: 'skip', label: 'Skip all' }),
   ].join('');
@@ -7810,7 +7833,7 @@ app.get('/c/invoices/:id/import', (req, res) => {
       ask ? `${ask} line${ask === 1 ? '' : 's'} need${ask === 1 ? 's' : ''} your decision`
           : `${rows.length} line${rows.length === 1 ? '' : 's'} left to import`}</div>
       <p>${already.length ? `${already.length} confident line${already.length === 1 ? ' was' : 's were'} imported automatically when you saved. ` : ''}${
-        g.likelyNew.length ? `${g.likelyNew.length} look${g.likelyNew.length === 1 ? 's' : ''} new. ` : ''}${
+        g.likelyNew.length ? `${g.likelyNew.length} look${g.likelyNew.length === 1 ? 's' : ''} new — tick the ones you want. ` : ''}${
         skipped ? `${skipped} look${skipped === 1 ? 's' : ''} like a charge and will be skipped. ` : ''}Nothing is saved until you press Import.</p></div>
     <form method="post" action="/c/invoices/${inv.id}/import" id="importform">
       <input type="hidden" name="count" value="${rows.length}">
@@ -7818,7 +7841,7 @@ app.get('/c/invoices/:id/import', (req, res) => {
       ${body}
       <div class="stickybar">
         <a class="btn btn-ghost" href="/c/invoices">Cancel</a>
-        <button class="btn btn-primary" type="submit">Import <span id="impn">${rows.length - skipped}</span> line<span id="imps">${rows.length - skipped === 1 ? '' : 's'}</span></button>
+        <button class="btn btn-primary" type="submit">Import <span id="impn">0</span> line<span id="imps">s</span></button>
       </div>
     </form>
     ${importScript()}`));
@@ -7838,11 +7861,20 @@ function importScript() {
     var form = document.getElementById('importform');
     if (!form) return;
 
+    // Only ever show the product menu when there is a product to choose. On a
+    // row set to create or skip it is answering a question nobody asked.
+    function syncProd(sel) {
+      var row = sel.closest('[data-row]');
+      var prod = row && row.querySelector('.iline-prod');
+      if (prod) prod.style.display = sel.value === 'match' ? '' : 'none';
+    }
+
     function recount() {
       var n = 0;
       form.querySelectorAll('select.iline-act').forEach(function (sel) {
         if (sel.value === 'match' || sel.value === 'create') n++;
       });
+      form.querySelectorAll('.ipick-b').forEach(function (cb) { if (cb.checked) n++; });
       var el = document.getElementById('impn'), s = document.getElementById('imps');
       if (el) el.textContent = n;
       if (s) s.textContent = n === 1 ? '' : 's';
@@ -7853,11 +7885,20 @@ function importScript() {
       if (!b) return;
       var scope = form.querySelector('[data-group="' + b.dataset.group + '"]');
       if (!scope) return;
-      scope.querySelectorAll('select.iline-act').forEach(function (sel) {
-        // Never choose "add to existing" where there is nothing to add it to.
-        var opt = sel.querySelector('option[value="' + b.dataset.set + '"]');
-        if (opt && !opt.disabled) sel.value = b.dataset.set;
-      });
+      if (b.dataset.toggle) {
+        // Select all, then clear — the same button, because after ticking
+        // everything the next thing anyone wants is to untick everything.
+        var boxes = scope.querySelectorAll('.ipick-b');
+        var every = boxes.length && [].every.call(boxes, function (c) { return c.checked; });
+        boxes.forEach(function (c) { c.checked = !every; });
+        b.textContent = every ? 'Select all' : 'Clear all';
+      } else {
+        scope.querySelectorAll('select.iline-act').forEach(function (sel) {
+          // Never choose "add to existing" where there is nothing to add it to.
+          var opt = sel.querySelector('option[value="' + b.dataset.set + '"]');
+          if (opt && !opt.disabled) { sel.value = b.dataset.set; syncProd(sel); }
+        });
+      }
       recount();
     });
 
@@ -7865,14 +7906,29 @@ function importScript() {
     form.addEventListener('change', function (e) {
       if (e.target.matches('.dupopt input[type="radio"]')) {
         var row = e.target.closest('[data-row]');
+        var picks = e.target.dataset.picks;
         var act = row.querySelector('select.iline-act');
-        var prod = row.querySelector('select[name^="product_"]');
-        if (act) act.value = 'match';
-        if (prod) prod.value = e.target.dataset.picks;
+        var box = row.querySelector('.ipick-b');
+        var prod = row.querySelector('[name^="product_"]');
+        if (prod) prod.value = picks;
+        // On a tick-box row the box IS the action, so the choice moves its
+        // value rather than a menu's: ticked and "match" adds to the product
+        // you picked, ticked and "create" makes a new one.
+        if (box) {
+          box.value = picks ? 'match' : 'create';
+          if (picks) box.checked = true;
+          var t = row.querySelector('.ipick-t');
+          if (t) t.textContent = picks ? 'Use existing' : 'Create';
+        } else if (act) {
+          act.value = 'match';
+          syncProd(act);
+        }
       }
-      if (e.target.matches('select.iline-act')) recount();
+      if (e.target.matches('select.iline-act')) { syncProd(e.target); recount(); }
+      if (e.target.matches('.ipick-b')) recount();
     });
 
+    form.querySelectorAll('select.iline-act').forEach(syncProd);
     recount();
   })();
   </script>`;
