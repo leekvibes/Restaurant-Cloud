@@ -5945,6 +5945,18 @@ function invoicePanel(r, vName) {
               ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open original →</a>
                           <a class="bs-act" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
               ${r.vendor_id ? `<a class="bs-act" href="/c/vendors/${Number(r.vendor_id)}">Vendor →</a>` : ''}
+              ${/* Last, and quiet. The confirm names what actually goes: an
+                    invoice whose lines were imported is also a set of purchase
+                    records, and somebody deleting a duplicate should be told
+                    that before it happens, not after. */''}
+              ${canWrite() ? (() => {
+                const n = prodQ.purchasesForInvoice.all(r.id).length;
+                const what = `${vName ? esc(vName.get(Number(r.vendor_id)) || 'this invoice') : 'this invoice'}${r.invoice_number ? ' ' + esc(r.invoice_number) : ''}`;
+                return `<form method="post" action="/c/invoices/${r.id}/delete" class="bs-ivdel"
+                  onsubmit="return confirm('Delete ${what} for ${money(r.amount_cents || 0)}?${
+                    n ? ` ${n} purchase${n === 1 ? '' : 's'} will be removed from your product history.` : ''} The uploaded file is kept.')">
+                  <button class="bs-act danger" type="submit">Delete invoice</button></form>`;
+              })() : ''}
             </div>
           </div>
         </div>`;
@@ -6386,6 +6398,22 @@ app.get('/c/invoices', (req, res) => {
     ${statCell(`Spend in ${esc(year)}`, brief(yearSpend), `${rows.length} invoice${rows.length === 1 ? '' : 's'}`)}
   </section>`;
 
+  // Two invoices that would have stopped each other at the door. Grouped
+  // rather than compared pairwise so a third copy joins the same pile, and
+  // keyed exactly the way the save-time check is keyed — a chip that found a
+  // different set of duplicates than the gate blocks would be its own bug.
+  const dupKeys = new Map();
+  for (const r of rows) {
+    const v = Number(r.vendor_id || 0);
+    const n = normNum(r.invoice_number);
+    const key = n ? `n:${v}:${n}`
+      : (r.invoice_date && r.amount_cents) ? `d:${v}:${r.invoice_date}:${r.amount_cents}` : null;
+    if (!key) continue;
+    if (!dupKeys.has(key)) dupKeys.set(key, []);
+    dupKeys.get(key).push(r.id);
+  }
+  const dupIds = new Set([...dupKeys.values()].filter((g) => g.length > 1).flat());
+
   // --- month groups -------------------------------------------------------
   const byMonth = new Map();
   for (const r of rows) {
@@ -6418,7 +6446,7 @@ app.get('/c/invoices', (req, res) => {
         data-vendor="${esc(String(r.vendor_id || ''))}" data-amt="${(r.amount_cents || 0) / 100}"
         data-date="${esc(r.invoice_date || '')}" data-due="${esc(r.due_date || '')}"
         data-vname="${esc(vn.toLowerCase())}" data-added="${esc(String(r.created_at || ''))}"
-        data-search="${esc(search)}" data-review="${rev ? '1' : '0'}"
+        data-search="${esc(search)}" data-review="${rev ? '1' : '0'}" data-dupe="${dupIds.has(r.id) ? '1' : '0'}"
         style="--c:${c.color}">
         <summary class="bs-sr bs-ir">
           <span class="bs-ir-v"><i class="bs-catdot"></i>${esc(vn)}${r.invoice_number ? `<u>${esc(r.invoice_number)}</u>` : ''}</span>
@@ -6478,6 +6506,7 @@ app.get('/c/invoices', (req, res) => {
         <button class="fchip" data-f="status" data-v="overdue"><i class="bs-pip overdue"></i>Overdue</button>
         <button class="fchip" data-f="status" data-v="paid"><i class="bs-pip paid"></i>Paid</button>
         ${needsReview ? `<button class="fchip" data-f="review" data-v="1"><i class="bs-pip rev"></i>To review <b>${needsReview}</b></button>` : ''}
+        ${dupIds.size ? `<button class="fchip" data-f="dupe" data-v="1"><i class="bs-pip dupe"></i>Possible duplicates <b>${dupIds.size}</b></button>` : ''}
       </div>
       <details class="fsheet" id="invfilter">
         <summary class="fs-btn">Sort &amp; filter <span class="fs-caret">▾</span></summary>
@@ -6568,6 +6597,7 @@ app.get('/c/invoices', (req, res) => {
           if (mode === 'status' && el.getAttribute('data-status') !== val) return false;
           if (mode === 'cat' && el.getAttribute('data-cat') !== val) return false;
           if (mode === 'review' && el.getAttribute('data-review') !== val) return false;
+          if (mode === 'dupe' && el.getAttribute('data-dupe') !== val) return false;
           if (vendor && el.getAttribute('data-vendor') !== vendor) return false;
           if (amt) {
             var a = parseFloat(el.getAttribute('data-amt')) || 0, p = amt.split('-');
@@ -6956,9 +6986,137 @@ app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
   }
 });
 
+/**
+ * An invoice already on file that this one may be a second copy of.
+ *
+ * Two signals, and the difference between them matters. A vendor's own invoice
+ * number is unique by definition — the same number from the same vendor twice
+ * is the same piece of paper, not a coincidence. Without a number, the same
+ * vendor billing the same amount on the same day is very probably one delivery
+ * entered twice, but it is not certain: two identical small deliveries in a day
+ * do happen. So one says "this is", the other says "this looks like", and
+ * neither refuses the save.
+ *
+ * Deliberately not matched on the file: two photographs of the same invoice are
+ * different bytes, and the same PDF re-saved is different bytes again. It would
+ * miss the case that actually happens.
+ */
+const normNum = (v) => String(v || '').trim().toLowerCase().replace(/[\s._\/-]/g, '');
+function duplicateInvoice({ vendorId, number, date, amountCents, exceptId }) {
+  const rows = db.prepare('SELECT * FROM m_invoices').all()
+    .filter((r) => Number(r.id) !== Number(exceptId));
+  const v = vendorId ? Number(vendorId) : null;
+  const n = normNum(number);
+  if (n) {
+    const hit = rows.find((r) => normNum(r.invoice_number) === n
+      && Number(r.vendor_id || 0) === Number(v || 0));
+    if (hit) return { row: hit, certain: true, why: `invoice number ${String(number).trim()}` };
+  }
+  if (date && amountCents) {
+    const hit = rows.find((r) => r.invoice_date === date
+      && Number(r.amount_cents) === Number(amountCents)
+      && Number(r.vendor_id || 0) === Number(v || 0));
+    if (hit) return { row: hit, certain: false, why: 'the same vendor, day and total' };
+  }
+  return null;
+}
+
+/**
+ * Delete an invoice — and the purchases it put into your product history.
+ *
+ * The generic delete removes the row and nothing else. For most collections
+ * that is the whole story; for an invoice it is not. Importing its lines wrote
+ * purchase records, and those are what every product's last-paid price, average
+ * and trend are built from. Deleting only the invoice would leave them behind,
+ * still counting, pointing at an invoice that no longer exists — and the
+ * duplicate you deleted would go on inflating what you appear to spend.
+ *
+ * The uploaded file stays on disk. It is the only copy of the original, there
+ * is no backup, and unlinking it is the one step here that cannot be undone.
+ */
+app.post('/c/invoices/:id/delete', (req, res) => {
+  if (!canWrite()) return res.status(403).end();
+  const id = Number(req.params.id);
+  const inv = invQ.one.get(id);
+  if (!inv) return res.status(404).end();
+
+  const bought = prodQ.purchasesForInvoice.all(id);
+  const touched = [...new Set(bought.map((b) => Number(b.product_id)))];
+  db.transaction(() => {
+    prodQ.clearInvoice.run(id);
+    db.prepare('DELETE FROM m_invoices WHERE id = ?').run(id);
+  })();
+  // Every dish built on those products is now costed from one fewer purchase.
+  if (touched.length) {
+    try { MENU.recalcForProducts(touched, 'invoice'); }
+    catch (e) { console.error('[menu] recalc after invoice delete failed:', e.message); }
+  }
+  res.redirect('/c/invoices?msg=' + encodeURIComponent(
+    `Invoice deleted${bought.length ? `, and ${bought.length} purchase${bought.length === 1 ? '' : 's'} removed from your product history` : ''}.`));
+});
+
 app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
   const total = toCents(req.body.amount);
   if (!total) return res.redirect('/c/invoices?err=1&msg=' + encodeURIComponent('An invoice needs a total.'));
+
+  // The file multer has already written. Carried by name through the duplicate
+  // question below so answering it does not mean picking the file again —
+  // sanitised to a bare filename because it comes back from a form, and a
+  // path is not a filename.
+  const uploaded = req.file ? req.file.filename
+    : (String(req.body.kept_file || '').match(/^[A-Za-z0-9][A-Za-z0-9._-]*$/) || [null])[0];
+
+  const invDate = String(req.body.invoice_date || '').slice(0, 10) || null;
+  const dup = req.body.dup_ok === '1' ? null : duplicateInvoice({
+    vendorId: req.body.vendor_id, number: req.body.invoice_number,
+    date: invDate, amountCents: total,
+  });
+  if (dup) {
+    // Asked, not refused. The reason this is a question is that the answer is
+    // sometimes yes: a vendor really can bill the same amount on the same day
+    // twice, and a flat block would leave no way to file the second one.
+    const keep = Object.entries({
+      amount: req.body.amount, subtotal: req.body.subtotal, tax: req.body.tax,
+      invoice_date: req.body.invoice_date, due_date: req.body.due_date,
+      vendor_id: req.body.vendor_id, invoice_number: req.body.invoice_number,
+      category: req.body.category, status: req.body.status,
+      payment_method: req.body.payment_method, notes: req.body.notes,
+      ai_status: req.body.ai_status, ai_confidence: req.body.ai_confidence,
+      ai_snapshot: req.body.ai_snapshot, ai_lines: req.body.ai_lines,
+      kept_file: uploaded || '',
+    }).map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(String(v == null ? '' : v))}">`).join('');
+    const vn = dup.row.vendor_id
+      ? (invQ.vendors.all().find((v) => Number(v.id) === Number(dup.row.vendor_id)) || {}).name : null;
+    return res.send(layout('Already have this one?', `
+      <div class="bs-page">
+        <div class="bs-head"><div class="bs-headwrap">
+          <a class="bs-act" href="/c/invoices">← Invoices</a>
+          <h1 class="bs-headline">${dup.certain ? 'You already have this invoice.' : 'This looks like one you already have.'}</h1>
+          <p class="bs-subline">Matched on ${esc(dup.why)}. ${dup.certain
+            ? 'An invoice number is unique to the vendor, so this is almost certainly the same piece of paper twice.'
+            : 'Not certain — a vendor can bill the same amount twice in a day. Worth a look before you file it.'}</p>
+        </div></div>
+        <section class="bs-panel bs-dupcmp">
+          <div class="bs-dupc">
+            <div class="bs-kicker">Already filed</div>
+            <b>${esc(vn || 'No vendor')}${dup.row.invoice_number ? ' · ' + esc(dup.row.invoice_number) : ''}</b>
+            <span>${esc(niceDate(dup.row.invoice_date))} · ${money(dup.row.amount_cents || 0)} · ${esc(dup.row.status || '')}</span>
+            <a class="bs-act" href="/c/invoices#inv-${dup.row.id}">Open the one you have →</a>
+          </div>
+          <div class="bs-dupc new">
+            <div class="bs-kicker">Trying to save</div>
+            <b>${esc(req.body.invoice_number || 'No number')}</b>
+            <span>${esc(niceDate(invDate))} · ${money(total)}</span>
+            ${uploaded ? '<span class="bs-em">the file you just uploaded is kept either way</span>' : ''}
+          </div>
+        </section>
+        <form method="post" action="/c/invoices" class="bs-dupacts">
+          ${keep}<input type="hidden" name="dup_ok" value="1">
+          <a class="bs-btn-sm" href="/c/invoices">Don't save it</a>
+          <button class="bs-btn" type="submit">Save it anyway</button>
+        </form>
+      </div>`));
+  }
 
   // Read-and-kept and read-then-corrected are different states: the first still
   // wants a glance, the second has already had one.
@@ -7012,7 +7170,7 @@ app.post('/c/invoices', invoiceUpload.single('file'), (req, res) => {
     category: INV_CATS.includes(req.body.category) ? req.body.category : 'Other',
     status: req.body.status === 'Paid' ? 'Paid' : 'Unpaid',
     payment_method: PAY_METHODS.includes(req.body.payment_method) ? req.body.payment_method : null,
-    file: req.file ? req.file.filename : null,
+    file: uploaded,
     notes: String(req.body.notes || '').trim() || null,
     ai_status: aiStatus,
     ai_confidence: String(req.body.ai_confidence || '').trim() || null,

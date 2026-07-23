@@ -605,3 +605,135 @@ test('the import screen has a visible way to submit', async () => {
   assert.match(css, /\.bs\s+\.stickybar\.stickybar-keep\s*\{[^}]*display:\s*block/,
     'the stylesheet still un-hides an opted-out bar');
 });
+
+// ---------------------------------------------------------------------------
+// Two copies of one invoice, and the way out.
+//
+// The same invoice was uploaded twice and there was no way to remove either.
+// Both halves of that matter: catching it at the door, and — because it has
+// already happened — being able to delete one without leaving its purchases
+// behind, still counting toward what you appear to spend.
+// ---------------------------------------------------------------------------
+
+const INV = {
+  amount: '210.00', vendor_id: String(VENDOR), invoice_date: '2026-09-09',
+  invoice_number: 'BLD-DUP-1', category: 'Food', status: 'Unpaid', ai_status: 'manual',
+};
+
+test('the same invoice number from the same vendor is stopped and questioned', async () => {
+  const first = await post('/c/invoices', INV);
+  assert.strictEqual(first.status, 302, 'the first one files without comment');
+
+  const second = await post('/c/invoices', INV);
+  assert.strictEqual(second.status, 200, 'the second one does not just save');
+  const html = await second.text();
+  assert.match(html, /You already have this invoice/, 'it says so plainly');
+  assert.match(html, /invoice number BLD-DUP-1/, 'and what it matched on');
+  assert.match(html, /Save it anyway/, 'without refusing — a number can be reused by mistake');
+
+  const db = new Database(DB, { readonly: true });
+  const n = db.prepare("SELECT COUNT(*) n FROM m_invoices WHERE invoice_number = 'BLD-DUP-1'").get().n;
+  db.close();
+  assert.strictEqual(n, 1, 'and nothing was written while the question was open');
+});
+
+test('answering "save it anyway" files it, because sometimes it really is two', async () => {
+  const res = await post('/c/invoices', { ...INV, dup_ok: '1' });
+  assert.strictEqual(res.status, 302);
+  const db = new Database(DB, { readonly: true });
+  const n = db.prepare("SELECT COUNT(*) n FROM m_invoices WHERE invoice_number = 'BLD-DUP-1'").get().n;
+  db.close();
+  assert.strictEqual(n, 2, 'the operator overruled it and that was honoured');
+});
+
+test('with no invoice number, the same vendor day and total is only a maybe', async () => {
+  const noNum = { amount: '64.00', vendor_id: String(VENDOR), invoice_date: '2026-09-10',
+    category: 'Food', status: 'Unpaid', ai_status: 'manual' };
+  assert.strictEqual((await post('/c/invoices', noNum)).status, 302);
+
+  const again = await post('/c/invoices', noNum);
+  assert.strictEqual(again.status, 200, 'the second is questioned');
+  const html = await again.text();
+  assert.match(html, /looks like one you already have/i, 'but hedged, not asserted');
+  assert.ok(!/You already have this invoice\./.test(html), 'because two identical deliveries in a day do happen');
+  assert.match(html, /same vendor, day and total/, 'and it says what it went on');
+});
+
+test('a different day, or a different total, is not a duplicate', async () => {
+  const base = { amount: '64.00', vendor_id: String(VENDOR), invoice_date: '2026-09-10',
+    category: 'Food', status: 'Unpaid', ai_status: 'manual' };
+  // This is the assertion that keeps the check from being useless by being
+  // eager: if everything looks like a duplicate, nobody can file anything.
+  assert.strictEqual((await post('/c/invoices', { ...base, invoice_date: '2026-09-11' })).status, 302,
+    'same total, next day — files without a question');
+  assert.strictEqual((await post('/c/invoices', { ...base, amount: '64.01' })).status, 302,
+    'same day, a cent apart — files without a question');
+});
+
+test('the list can find the duplicates already filed', async () => {
+  const html = await (await fetch(`${BASE}/c/invoices?y=2026`)).text();
+  assert.match(html, /Possible duplicates/, 'there is a way to filter to them');
+  const flagged = [...html.matchAll(/data-dupe="1"/g)].length;
+  // Exactly the two BLD-DUP-1 rows. The no-number pair above never became a
+  // pair: its second copy was questioned and not saved, which is the check
+  // doing its job — counting it here would have been counting a bug.
+  const db = new Database(DB, { readonly: true });
+  const copies = db.prepare("SELECT COUNT(*) n FROM m_invoices WHERE invoice_number = 'BLD-DUP-1'").get().n;
+  const total = db.prepare("SELECT COUNT(*) n FROM m_invoices WHERE invoice_date LIKE '2026-%'").get().n;
+  db.close();
+  assert.strictEqual(copies, 2, 'there are two copies on file — the precondition');
+  assert.ok(total > copies, 'alongside invoices that are not duplicates of anything');
+  assert.strictEqual(flagged, 2, `both copies are marked, and nothing else is (found ${flagged})`);
+  assert.match(html, /Possible duplicates <b>2<\/b>/, 'and the chip counts them');
+});
+
+test('deleting an invoice takes its purchases out of the product history', async () => {
+  // The generic delete removes the row and nothing else. For an invoice that
+  // is not the whole story: importing its lines wrote purchase records, and
+  // those are what last-paid, average and trend are built from. Left behind,
+  // the duplicate you deleted goes on inflating what you appear to spend.
+  const res = await post('/c/invoices', {
+    amount: '135.30', vendor_id: String(VENDOR), invoice_date: '2026-09-14',
+    invoice_number: 'BLD-DEL-1', category: 'Food', status: 'Unpaid', ai_status: 'ai',
+    ai_lines: JSON.stringify([LINES[0]]),
+  });
+  assert.strictEqual(res.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'BLD-DEL-1'").get();
+  const bought = db.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(inv.id).n;
+  const totalBefore = db.prepare('SELECT COUNT(*) n FROM product_purchases').get().n;
+  db.close();
+  assert.strictEqual(bought, 1, 'its line imported on save — the precondition');
+
+  const del = await post(`/c/invoices/${inv.id}/delete`, {});
+  assert.strictEqual(del.status, 302);
+  assert.match(decodeURIComponent(del.headers.get('location') || ''), /1 purchase.*removed/,
+    'and it says what went with it');
+
+  const after = new Database(DB, { readonly: true });
+  const gone = after.prepare('SELECT COUNT(*) n FROM m_invoices WHERE id = ?').get(inv.id).n;
+  const orphans = after.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(inv.id).n;
+  const totalAfter = after.prepare('SELECT COUNT(*) n FROM product_purchases').get().n;
+  const products = after.prepare("SELECT COUNT(*) n FROM products WHERE name = 'Roma tomatoes'").get().n;
+  after.close();
+
+  assert.strictEqual(gone, 0, 'the invoice is deleted');
+  assert.strictEqual(orphans, 0, 'and nothing of it is left pointing at an invoice that does not exist');
+  assert.strictEqual(totalAfter, totalBefore - 1, 'exactly its own purchases went, and no others');
+  assert.strictEqual(products, 1, 'the product itself stays — it is bought from other invoices too');
+});
+
+test('the panel offers the delete, and says what it will take', async () => {
+  const db = new Database(DB, { readonly: true });
+  const withLines = db.prepare(`SELECT i.id FROM m_invoices i
+    WHERE (SELECT COUNT(*) FROM product_purchases p WHERE p.invoice_id = i.id) > 0 LIMIT 1`).get();
+  db.close();
+  assert.ok(withLines, 'an invoice with purchases exists — the precondition');
+
+  const panel = await (await fetch(`${BASE}/c/invoices/${withLines.id}/panel`)).text();
+  assert.match(panel, /action="\/c\/invoices\/\d+\/delete"/, 'the panel can delete');
+  assert.match(panel, /purchase.? will be removed from your product history/,
+    'and the confirm says so before you agree to it');
+  assert.match(panel, /uploaded file is kept/, 'and that the original is not destroyed');
+});

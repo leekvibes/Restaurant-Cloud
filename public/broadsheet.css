@@ -2203,3 +2203,25 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-xr-r { grid-area: rec; }
   .bs-xr .bs-sr-e { display: none; }
 }
+
+/* Two copies of one invoice, and the way out of it. */
+.bs-pip.dupe { background: var(--negative); }
+.bs-srow[data-dupe="1"] .bs-ir-v > u::after {
+  content: 'possible duplicate'; margin-left: 8px; font-family: var(--mono);
+  font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--negative); border: 1px solid var(--negative); padding: 1px 5px;
+}
+.bs-act.danger { color: var(--negative); }
+.bs-ivdel { margin: 0 0 0 auto; }
+.bs-dupcmp { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.bs-dupc { padding: 18px 20px; display: flex; flex-direction: column; gap: 4px; }
+.bs-dupc + .bs-dupc { border-left: 1px solid var(--rule); }
+.bs-dupc b { font-size: 15px; color: var(--headline); }
+.bs-dupc span { font-size: 13px; color: var(--secondary); }
+.bs-dupc .bs-act { margin-top: 6px; }
+.bs-dupacts { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 18px; }
+@media (max-width: 700px) {
+  .bs-dupcmp { grid-template-columns: 1fr; }
+  .bs-dupc + .bs-dupc { border-left: 0; border-top: 1px solid var(--rule); }
+  .bs-dupacts .bs-btn, .bs-dupacts .bs-btn-sm { flex: 1; text-align: center; }
+}
