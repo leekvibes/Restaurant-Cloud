@@ -227,3 +227,66 @@ test('the one-photo receipt is exactly as it was', async () => {
   const { pagesOf } = require('../src/modules');
   assert.deepStrictEqual(pagesOf(one), [one.file], 'and reads as its single file');
 });
+
+// ---------------------------------------------------------------------------
+// Reading the receipt.
+//
+// The reader itself is not called here — that would need a key, a network and
+// somebody's bill. What is asserted is the wiring around it: that the endpoint
+// exists and answers rather than throwing, that the modal which takes a photo
+// is the modal that sends it to be read, and that every field the reader fills
+// has somewhere to say it was read.
+// ---------------------------------------------------------------------------
+
+test('the receipt reader answers rather than throwing when there is no key', async () => {
+  // The suite runs without ANTHROPIC_API_KEY, which is the same shape as a key
+  // that expired in production. It has to come back as a sentence the modal
+  // can print, not a 500 that leaves a spinner turning.
+  const fd = new FormData();
+  fd.set('scan', new Blob([Buffer.from('%PDF-1.4 receipt')], { type: 'application/pdf' }), 'r.pdf');
+  const res = await fetch(`${BASE}/c/expenses/read`, { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 200, 'it answers');
+  const j = await res.json();
+  assert.ok(j.error, 'with an error the modal can show');
+  assert.match(j.error, /ANTHROPIC_API_KEY|Could not read/, `and says what went wrong: ${j.error}`);
+});
+
+test('the modal that takes a receipt is the one that sends it to be read', async () => {
+  // Attaching a photo and having nothing happen was the complaint. The photo
+  // tile and the read call have to be in the same place.
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(html, /id="qx-file"/, 'the quick modal takes a photo');
+  assert.match(html, /'\/c\/expenses\/read'/, 'and the page posts one to be read');
+  // Every field the reader fills needs a mark to report into, or a read lands
+  // silently and looks like the fields were always that way.
+  for (const f of ['name', 'amount_cents', 'spent_on', 'where_bought', 'category']) {
+    assert.match(html, new RegExp(`class="cap-mark" data-for="${f}"`), `${f} can say it was read`);
+  }
+  // Defined is not called. The original complaint was a photo tile that
+  // accepted a receipt and did nothing with it, and a reader that exists but
+  // is never invoked looks identical from the outside.
+  assert.match(html, /function read\(\)/, 'a read function exists');
+  assert.match(html, /\bread\(\);/, 'and something actually calls it');
+  assert.match(html, /file\.addEventListener\('change', shown\)/, 'when a photo is attached');
+});
+
+test('a read never takes back a field somebody typed', async () => {
+  // The promise made on screen is "keep typing, it will not overwrite what you
+  // touch". Both the modal and the scan overlay have to keep it.
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const guards = html.match(/if \(touched\[name\]\) return;/g) || [];
+  assert.strictEqual(guards.length, 2,
+    `both the quick modal and the capture overlay guard typed fields (found ${guards.length})`);
+  assert.match(html, /touched\[e\.target\.name\] = true/, 'and both record what was touched');
+});
+
+test('who paid is never guessed from a receipt', async () => {
+  // A card receipt does not say whose card it is. Filling it in would invent a
+  // debt to a named person, which is the one field on this page that decides
+  // whether the restaurant owes somebody money.
+  const { EXPENSE_SCHEMA } = require('../src/reader');
+  assert.ok(!EXPENSE_SCHEMA.properties.paid_by, 'the reader is not even asked who paid');
+  assert.match(EXPENSE_SCHEMA.properties.paid_with.description, /guessing it wrong creates a debt/i,
+    'and paid_with says why it stays empty unless printed');
+  assert.ok(EXPENSE_SCHEMA.properties.paid_with.enum.includes(''), 'so "" is a valid answer');
+});

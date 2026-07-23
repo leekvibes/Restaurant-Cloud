@@ -6307,15 +6307,15 @@ function quickExpense(today) {
         <div class="cap-body">
           <div>
             <div class="cap-grid">
-              <div class="cap-f wide"><label class="cap-lab" for="qx_name">What was bought</label>
+              <div class="cap-f wide"><label class="cap-lab" for="qx_name">What was bought<span class="cap-mark" data-for="name"></span></label>
                 <input id="qx_name" name="name" required placeholder="Bag of ice, Costco run"></div>
-              <div class="cap-f"><label class="cap-lab" for="qx_amt">Amount</label>
+              <div class="cap-f"><label class="cap-lab" for="qx_amt">Amount<span class="cap-mark" data-for="amount_cents"></span></label>
                 <div class="cap-money"><input id="qx_amt" name="amount_cents" type="number" step="0.01" min="0" required placeholder="0.00"></div></div>
-              <div class="cap-f"><label class="cap-lab" for="qx_date">Date</label>
+              <div class="cap-f"><label class="cap-lab" for="qx_date">Date<span class="cap-mark" data-for="spent_on"></span></label>
                 <input id="qx_date" name="spent_on" type="date" value="${today}" required></div>
-              <div class="cap-f"><label class="cap-lab" for="qx_where">Where</label>
+              <div class="cap-f"><label class="cap-lab" for="qx_where">Where<span class="cap-mark" data-for="where_bought"></span></label>
                 <input id="qx_where" name="where_bought" placeholder="Costco, Home Depot"></div>
-              <div class="cap-f"><label class="cap-lab" for="qx_cat">Category</label>
+              <div class="cap-f"><label class="cap-lab" for="qx_cat">Category<span class="cap-mark" data-for="category"></span></label>
                 <select id="qx_cat" name="category">${EXP_CATS.map((c) => `<option${c === 'Groceries' ? ' selected' : ''}>${c}</option>`).join('')}</select></div>
               <div class="cap-f"><label class="cap-lab" for="qx_who">Who paid</label>
                 <input id="qx_who" name="paid_by" required list="qx-people" placeholder="Name"></div>
@@ -6330,8 +6330,9 @@ function quickExpense(today) {
               <input type="file" name="file" id="qx-file" accept="image/*,application/pdf" capture="environment" multiple hidden>
               <span class="cap-tile-p" id="qx-plus">+</span>
               <span class="cap-tile-t" id="qx-tile-t">Add a photo</span>
-              <span class="cap-tile-s">drag in · or take one</span>
+              <span class="cap-tile-s" id="qx-tile-s">drag in · or take one · ZWIN reads it</span>
             </label>
+            <p class="cap-note" id="qx-note" hidden></p>
           </div>
         </div>
         <div class="cap-foot">
@@ -6369,6 +6370,72 @@ function quickExpenseScript() {
     // before and after is a box people press twice.
     var tile = document.getElementById('qx-tile');
     var file = document.getElementById('qx-file');
+    var form = document.getElementById('qx-form');
+    var touched = {};
+
+    function say(msg, bad) {
+      var n = document.getElementById('qx-note');
+      n.hidden = false; n.textContent = msg;
+      n.style.color = bad ? 'var(--negative)' : 'var(--muted)';
+    }
+
+    // Typing wins here too: somebody who filled the amount in while the photo
+    // was still uploading keeps their number.
+    function set(name, value, low) {
+      if (value === undefined || value === null || value === '' || value === 0) return;
+      if (touched[name]) return;
+      var f = form.querySelector('[name="' + name + '"]');
+      if (!f) return;
+      f.value = value;
+      var mark = form.querySelector('.cap-mark[data-for="' + name + '"]');
+      if (mark) mark.innerHTML = low ? ' <span class="chk">· check this</span>' : ' <span class="ok">✓ read</span>';
+      if (low) { var box = f.closest('.cap-f'); if (box) box.classList.add('warn'); }
+    }
+
+    // A photo attached here is a receipt, and a receipt has the answers on it.
+    // Reading it is the whole reason to photograph it rather than type it.
+    function read() {
+      var list = [].slice.call(file.files || []);
+      if (!list.length) return;
+      document.getElementById('qx-tile-s').textContent = 'reading it…';
+      say('Reading the receipt — keep typing if you like, it will not overwrite what you touch.');
+      var fd = new FormData();
+      list.forEach(function (f) { fd.append('scan', f); });
+      fetch('/c/expenses/read', { method: 'POST', body: fd })
+        .then(function (r) {
+          if (!r.ok) return r.text().then(function (t) { throw new Error(t.slice(0, 120) || r.status); });
+          return r.json();
+        })
+        .then(function (j) {
+          document.getElementById('qx-tile-s').textContent = 'drag in · or take one';
+          if (j.error) { say(j.error + ' Type it in — the photo is still attached.', true); return; }
+          var d = j.data || {};
+          var low = d.confidence === 'low' || d.confidence === 'medium';
+          set('name', d.name, low);
+          set('where_bought', d.where_bought, low);
+          set('amount_cents', d.total, low);
+          set('spent_on', d.spent_on, low);
+          set('category', d.category, low);
+          // Only when the receipt actually says so. Whose card it was is not
+          // printed on it, and guessing wrong invents a debt to somebody.
+          if (d.paid_with) set('paid_with', d.paid_with, low);
+          say(low ? 'Read it, but not clearly — check the amount and the date before saving.'
+            : 'Read it. Check it against the receipt and save.');
+        })
+        .catch(function (e) {
+          document.getElementById('qx-tile-s').textContent = 'drag in · or take one';
+          say('Could not read it — ' + e.message + '. Type it in; the photo is still attached.', true);
+        });
+    }
+
+    form.addEventListener('input', function (e) {
+      if (!e.target.name) return;
+      touched[e.target.name] = true;
+      var mark = form.querySelector('.cap-mark[data-for="' + e.target.name + '"]');
+      if (mark) mark.textContent = '';
+      var box = e.target.closest('.cap-f'); if (box) box.classList.remove('warn');
+    });
+
     function shown() {
       var n = (file.files || []).length;
       if (!n) return;
@@ -6381,6 +6448,7 @@ function quickExpenseScript() {
         var plus = document.getElementById('qx-plus');
         if (plus) plus.replaceWith(img); else if (!img.parentNode) tile.prepend(img);
       }
+      read();
     }
     file.addEventListener('change', shown);
     ['dragenter', 'dragover'].forEach(function (t) {
@@ -7039,7 +7107,8 @@ app.get('/c/expenses', (req, res) => {
         <p class="bs-hero-s">${canWrite()
           ? 'Everything bought without an invoice behind it. Log it with a photo of the receipt and who paid, and the money somebody is owed stops being something they have to remember to ask for.'
           : 'Once the owner logs expenses, they show up here.'}</p>
-        ${canWrite() ? `<button class="bs-btn" type="button" onclick="capQuick()">Log the first expense</button>` : ''}
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="capQuick()">Log the first expense</button>
+          <button class="bs-btn-sm" type="button" onclick="capOpen()">Scan a receipt</button>` : ''}
       </div>`);
 
   const headline = all.length
