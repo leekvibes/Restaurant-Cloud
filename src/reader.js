@@ -282,6 +282,109 @@ async function readInvoice(files) {
   return data;
 }
 
+// ---------------------------------------------------------------------------
+// DOCUMENTS
+//
+// A filing cabinet, not a ledger. What matters about a lease is when it ends,
+// about a 941 which quarter it covers, about a certificate of insurance when
+// it lapses — and none of that is money.
+//
+// What this deliberately does NOT read is identifiers. A W-2 or a 1099 carries
+// a social security number, a 941 carries an EIN, a bank letter carries an
+// account number. This database is a plain SQLite file with no encryption at
+// rest, it lives on a hosted disk, and it is read by a web app behind one
+// shared password. Lifting those numbers out of a PDF and into it would take a
+// document that is already sitting in one protected place and copy its worst
+// contents somewhere weaker — for no benefit, because nobody searches their
+// filing cabinet by SSN. The file itself is kept and the number stays in it.
+// ---------------------------------------------------------------------------
+const DOC_SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string', description: 'What this document is, as a person would name it in a folder. Use the official name if it has one, e.g. "Form 941 — Employer\'s Quarterly Federal Tax Return". Never a filename.' },
+    issuer: { type: 'string', description: 'Who issued or sent it, e.g. "Internal Revenue Service", "Gusto", the landlord, the insurer. "" if not shown.' },
+    category: { type: 'string', enum: ['Payroll', 'Tax', 'Lease', 'Insurance', 'HR', 'Permit', 'Licence', 'Banking', 'Legal', 'Utilities', 'Other'] },
+    doc_date: { type: 'string', description: 'The date on the document itself, YYYY-MM-DD. "" if not shown.' },
+    period_start: { type: 'string', description: 'If it covers a period (a quarter, a policy year, a lease term), the first day, YYYY-MM-DD. "" if it covers no period.' },
+    period_end: { type: 'string', description: 'The last day of that period, YYYY-MM-DD. "" if it covers no period.' },
+    expires_on: { type: 'string', description: 'The date this stops being valid or must be renewed — a permit expiry, a policy end, a lease end. YYYY-MM-DD, "" if it does not expire.' },
+    action_by: { type: 'string', description: 'A date something must be DONE by: a filing deadline, a payment due date, a signature date. YYYY-MM-DD, "" if nothing is required.' },
+    reference: { type: 'string', description: 'A non-personal reference: a form number ("941"), policy number, permit number, case or account reference that is not a bank account. "" if none. NEVER a social security number, EIN, tax ID, bank account or card number.' },
+    summary: { type: 'string', description: 'One plain sentence: what this is and why it was kept. No numbers from the document.' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low if the scan is unclear or you had to guess what it is' },
+  },
+  required: ['title', 'category', 'summary', 'confidence'],
+  additionalProperties: false,
+};
+
+const DOC_PROMPT =
+  'This is a business document a restaurant owner is filing: a tax form, a payroll report, a lease, a licence, an insurance certificate, a letter from an agency, or similar.\n' +
+  'Identify what it is and the dates that make it worth keeping. Read the fields as printed — do not infer a date that is not there.\n' +
+  'TITLE: what a person would write on the folder tab. Prefer the official name printed on it.\n' +
+  'DATES: doc_date is the date ON it. period_start/period_end are the span it COVERS — for a quarterly return that is the quarter, e.g. Q1 2026 is 2026-01-01 to 2026-03-31. ' +
+  'expires_on is when it stops being valid. action_by is when something must be done. Leave any of them "" rather than guessing.\n' +
+  'PRIVACY — this matters more than completeness. Do NOT return any social security number, individual taxpayer number, EIN or other tax ID, bank account or routing number, card number, ' +
+  'date of birth, or home address, in ANY field, including summary and reference. If the only reference on the document is one of those, return "" for reference. ' +
+  'Do not restate an employee\'s pay or an individual\'s figures in the summary. Describe the document, not its contents.\n' +
+  'If several pages are provided they are one document — read them as a whole and describe the whole.';
+
+/**
+ * Read a document well enough to file it.
+ *
+ * One call, unlike an invoice: there is no second half to fetch, and a
+ * document that cannot be read is still worth keeping — the caller falls back
+ * to a plain upload with the title typed by hand.
+ *
+ * @param {Array<{buffer:Buffer, mimetype:string}>} files  images and/or PDFs
+ */
+async function readDocument(files) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    const e = new Error('No ANTHROPIC_API_KEY set — add one to .env to enable document reading.');
+    e.code = 'NO_KEY';
+    throw e;
+  }
+  const client = new Anthropic();
+  try {
+    const data = await askJSON(client, invoiceContent(files), DOC_PROMPT, DOC_SCHEMA, 1024);
+    // A backstop for the prompt above. A model that ignores the instruction
+    // once, on one document, would write the number into the database for
+    // good — and nothing downstream would ever flag it.
+    return scrubIdentifiers(data);
+  } catch (apiErr) {
+    if (apiErr instanceof SyntaxError) throw new Error('Could not read that document — try a clearer scan, or fill it in by hand.');
+    throw invoiceError(apiErr);
+  }
+}
+
+/**
+ * Remove anything shaped like an identifier from what came back.
+ *
+ * Belt and braces on top of the prompt, because the cost of the two failures
+ * is not symmetrical: a redacted reference is a small annoyance, an SSN in an
+ * unencrypted database is permanent.
+ */
+const ID_SHAPES = [
+  /\b\d{3}-\d{2}-\d{4}\b/g,          // social security number
+  /\b\d{2}-\d{7}\b/g,                // EIN
+  /\b\d{9,17}\b/g,                   // bank account / routing / long ID runs
+  /\b(?:\d[ -]?){13,19}\b/g,           // card numbers, spaced or hyphenated
+];
+function scrubIdentifiers(data) {
+  const clean = (v) => {
+    if (typeof v !== 'string') return v;
+    let out = v;
+    for (const re of ID_SHAPES) out = out.replace(re, '[removed]');
+    return out;
+  };
+  const out = {};
+  for (const [k, v] of Object.entries(data || {})) out[k] = clean(v);
+  return out;
+}
+
+module.exports.readDocument = readDocument;
+module.exports.DOC_SCHEMA = DOC_SCHEMA;
+module.exports.scrubIdentifiers = scrubIdentifiers;
+
 module.exports.readInvoice = readInvoice;
 // Exported for the regression test that keeps them apart.
 module.exports.HEADER_SCHEMA = HEADER_SCHEMA;

@@ -14,7 +14,7 @@ const { mountModules, MODULES } = require('./modules');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
-const { readReport, readInvoice } = require('./reader');
+const { readReport, readInvoice, readDocument } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const MX = require('./metrics');
 const CH = require('./charts');
@@ -6035,6 +6035,345 @@ const EXP_PAID = ['Their own money', 'Company card', 'Company cash', 'Drawer cas
 
 /** Somebody is owed for this: they used their own money and have not been paid back. */
 const owedBack = (r) => r.paid_with === 'Their own money' && !r.reimbursed_on;
+
+// ---------------------------------------------------------------------------
+// DOCUMENTS
+//
+// The filing cabinet. A lease, a 941, a certificate of insurance, the letter
+// from the health department. What makes them worth a page rather than a
+// folder is that several of them run out, and the one you needed to renew is
+// never the one you happen to be looking at.
+//
+// The reader fills the form; a person confirms it. Same shape as invoices,
+// with one deliberate difference — it does not read identifiers off the page.
+// See the note above DOC_SCHEMA in reader.js.
+// ---------------------------------------------------------------------------
+const DOC_CATS = ['Payroll', 'Tax', 'Lease', 'Insurance', 'HR', 'Permit', 'Licence',
+  'Banking', 'Legal', 'Utilities', 'Other'];
+
+/** Shorten to a word, not to a character. "Federal Ta" reads as a bug. */
+const clip = (s, n) => (s.length <= n ? s
+  : s.slice(0, n).replace(/\s+\S*$/, '').replace(/[\s,.;:—-]+$/, '') + '…');
+
+/**
+ * What this document wants from you, if anything.
+ *
+ * Whichever date lands first wins: a lease that ends in a fortnight and a
+ * filing due in March are one deadline, not two, and it is the near one you
+ * need to see. daysTo is the app's own, and NaN out of a half-typed date has
+ * to be dropped or it sorts first and every document reads as urgent.
+ */
+function docState(r) {
+  const days = (iso) => { const d = daysTo(iso); return Number.isFinite(d) ? d : null; };
+  const exp = days(r.expires_on);
+  const act = days(r.action_by);
+  const soonest = [exp, act].filter((d) => d !== null).sort((a, b) => a - b)[0];
+  if (soonest === undefined) return { key: 'filed', label: 'Filed', cls: 'ok' };
+  if (soonest < 0) return { key: 'lapsed', label: exp !== null && exp < 0 ? 'Expired' : 'Overdue', cls: 'bad' };
+  if (soonest <= 45) return { key: 'soon', label: soonest === 0 ? 'Today' : `${soonest} day${soonest === 1 ? '' : 's'}`, cls: 'warn' };
+  return { key: 'filed', label: 'Filed', cls: 'ok' };
+}
+
+// Its own instance rather than the invoice one: that is declared further down
+// the file, and reaching for it from here reads it before it exists.
+const docScan = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+app.post('/c/documents/read', docScan.array('scan', 8), async (req, res) => {
+  try {
+    if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
+    const data = await readDocument(req.files);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error('[reader] document read failed:', e.message);
+    res.json({ error: e.code === 'NO_KEY' ? e.message : `Could not read that — ${e.message}` });
+  }
+});
+
+app.get('/c/documents', (req, res) => {
+  const all = db.prepare('SELECT * FROM m_documents ORDER BY COALESCE(doc_date, created_at) DESC, id DESC').all();
+
+  const withState = all.map((r) => ({ r, st: docState(r) }));
+  const lapsed = withState.filter((x) => x.st.key === 'lapsed');
+  const soon = withState.filter((x) => x.st.key === 'soon');
+  const cats = [...new Set(all.map((r) => r.category || 'Other'))];
+
+  const statCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const soonestOf = (r) => [daysTo(r.expires_on), daysTo(r.action_by)]
+    .filter((d) => Number.isFinite(d)).sort((x, y) => x - y)[0];
+  const nextUp = [...lapsed, ...soon].sort((a, b) => soonestOf(a.r) - soonestOf(b.r))[0];
+
+  const strip = `<section class="bs-panel bs-strip">
+    ${statCell('On file', String(all.length), `${cats.length} kind${cats.length === 1 ? '' : 's'}`)}
+    ${statCell('Expired or overdue', String(lapsed.length),
+      lapsed.length ? 'needs sorting out' : 'nothing has lapsed', lapsed.length ? 'bad' : 'ok')}
+    ${statCell('Due within 45 days', String(soon.length),
+      soon.length ? 'renew or file these' : 'nothing coming up', soon.length ? 'warn' : 'ok')}
+    ${statCell('Next', nextUp ? esc(nextUp.st.label) : '—',
+      nextUp ? esc(clip(nextUp.r.title || '', 42)) : 'nothing dated', nextUp ? nextUp.st.cls : '')}
+  </section>`;
+
+  const dateFacts = (r) => [
+    r.doc_date ? `Dated ${niceDate(r.doc_date)}` : '',
+    r.period_start || r.period_end
+      ? `Covers ${r.period_start ? niceDate(r.period_start) : '?'} – ${r.period_end ? niceDate(r.period_end) : '?'}` : '',
+    r.expires_on ? `Expires ${niceDate(r.expires_on)}` : '',
+    r.action_by ? `Due ${niceDate(r.action_by)}` : '',
+  ].filter(Boolean);
+
+  const items = withState.map(({ r, st }) => {
+    const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
+    const search = [r.title, r.issuer, r.category, r.reference, r.summary, r.notes]
+      .filter(Boolean).join(' ').toLowerCase();
+    return `
+    <details class="bs-srow bs-docrow" data-doc data-id="${r.id}" data-state="${st.key}"
+      data-cat="${esc(r.category || 'Other')}" data-search="${esc(search)}"
+      data-date="${esc(r.doc_date || r.created_at || '')}" data-title="${esc((r.title || '').toLowerCase())}">
+      <summary class="bs-sr bs-dr">
+        <span class="bs-dr-t">${esc(r.title || 'Untitled')}${r.reference ? `<u>${esc(r.reference)}</u>` : ''}</span>
+        <span class="bs-dr-i">${esc(r.issuer || '—')}</span>
+        <span class="bs-dr-c">${esc(r.category || 'Other')}</span>
+        <span class="bs-dr-d">${esc(r.doc_date ? niceDate(r.doc_date) : '—')}</span>
+        <span class="bs-tag ${st.cls} bs-dr-s">${esc(st.label)}</span>
+        <span class="bs-sr-e">Open</span>
+      </summary>
+      <div class="bs-ivx">
+        <div class="bs-ivl">
+          <a class="bs-ivthumb${r.file ? '' : ' none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''}>
+            ${isImg ? `<img src="/uploads/${esc(r.file)}" alt="">` : icon('documents')}
+          </a>
+          ${r.ai_status === 'ai' ? '<span class="bs-tag">Read by AI</span>'
+            : r.ai_status === 'ai_edited' ? '<span class="bs-tag">Read, then corrected</span>'
+            : '<span class="bs-tag">Filed by hand</span>'}
+        </div>
+        <div class="bs-ivr">
+          ${r.summary ? `<p class="bs-ivsum">${esc(r.summary)}</p>` : ''}
+          <div class="bs-ivgrid">
+            ${dateFacts(r).map((f) => `<div class="bs-ivf"><span>${esc(f.split(' ')[0])}</span><b>${esc(f.split(' ').slice(1).join(' '))}</b></div>`).join('')
+              || '<div class="bs-ivf"><span>Dates</span><b><i class="bs-em">none on it</i></b></div>'}
+          </div>
+          ${r.notes ? `<div class="bs-ivnote">${esc(r.notes)}</div>` : ''}
+          <div class="bs-ivacts">
+            ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open →</a>
+                        <a class="bs-act" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
+            <a class="bs-btn-sm" href="/c/documents/${r.id}/edit">Edit</a>
+            ${canWrite() ? `<form method="post" action="/c/documents/${r.id}/delete" class="bs-ivdel"
+              onsubmit="return confirm('Delete ${esc((r.title || 'this document').replace(/'/g, ''))}? The uploaded file is kept.')">
+              <button class="bs-act danger" type="submit">Delete</button></form>` : ''}
+          </div>
+        </div>
+      </div>
+    </details>`;
+  }).join('');
+
+  const toolbar = `
+    <div class="bs-tools">
+      <div class="bs-isearch">${icon('search')}
+        <input id="dsearch" type="search" placeholder="Title, who it is from, reference…" autocomplete="off"></div>
+      <div class="bs-quick">
+        <button class="fchip on" data-f="all" data-v="">All <b>${all.length}</b></button>
+        ${lapsed.length ? `<button class="fchip" data-f="state" data-v="lapsed"><i class="bs-pip dupe"></i>Expired <b>${lapsed.length}</b></button>` : ''}
+        ${soon.length ? `<button class="fchip" data-f="state" data-v="soon"><i class="bs-pip rev"></i>Due soon <b>${soon.length}</b></button>` : ''}
+      </div>
+      <details class="fsheet">
+        <summary class="fs-btn">Sort &amp; filter <span class="fs-caret">▾</span></summary>
+        <div class="fs-body"><div class="fs-scrim" aria-hidden="true"></div>
+          <div class="fs-panel">
+            <div class="fs-h">Sort</div>
+            <select id="dsort" class="bs-sel">
+              <option value="date-desc">Newest first</option>
+              <option value="date-asc">Oldest first</option>
+              <option value="title">Title, A–Z</option>
+            </select>
+            ${cats.length ? `<div class="fs-h">Kind</div><div class="fs-opts">
+              ${cats.map((c) => `<button class="fs-o fchip" type="button" data-f="cat" data-v="${esc(c)}">${esc(c)}</button>`).join('')}
+            </div>` : ''}
+          </div></div>
+      </details>
+    </div>`;
+
+  const body = all.length ? `<div class="bs-shead bs-dochead">
+      <span>Document</span><span>From</span><span>Kind</span><span>Dated</span><span></span><span></span>
+    </div><div class="bs-srows docs">${items}</div>`
+    : `<div class="bs-hero">
+        <div class="bs-hero-k">Nothing filed yet</div>
+        <h2 class="bs-hero-t">The lease, the 941, the certificate of insurance, the letter from the health department.</h2>
+        <p class="bs-hero-s">${canWrite()
+          ? 'Upload a PDF or a photo and it reads the title, who sent it and the dates that matter — including the one it runs out on. You confirm before anything is filed.'
+          : 'Once the owner files documents, they show up here.'}</p>
+        ${canWrite() ? '<button class="bs-btn" type="button" onclick="docDrawer(true)">File the first one</button>' : ''}
+      </div>`;
+
+  const headline = all.length
+    ? (lapsed.length
+      ? `Documents — <span class="warn">${lapsed.length} expired or overdue</span>.`
+      : soon.length ? `Documents — ${soon.length} coming up in the next 45 days.`
+      : `Documents — ${all.length} on file, nothing running out.`)
+    : 'Documents — nothing filed yet.';
+
+  res.send(layout('Documents', `
+    ${flash(req)}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">${headline}</h1>
+          <p class="bs-subline">Leases, tax filings, licences and letters. The file is kept as you uploaded it.</p>
+        </div>
+        ${canWrite() ? '<button class="bs-btn" type="button" onclick="docDrawer(true)">File a document</button>' : ''}
+      </div>
+      ${all.length ? strip : ''}
+      ${all.length ? toolbar : ''}
+      ${body}
+      <div class="bs-blank" id="dnone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
+    </div>
+    ${canWrite() ? documentDrawer() : ''}
+    <script>
+      (function () {
+        var q = '', mode = 'all', val = '';
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-doc]').forEach(function (el) {
+            var ok = true;
+            if (mode === 'state' && el.getAttribute('data-state') !== val) ok = false;
+            if (mode === 'cat' && el.getAttribute('data-cat') !== val) ok = false;
+            if (q && el.getAttribute('data-search').indexOf(q) === -1) ok = false;
+            el.style.display = ok ? '' : 'none'; if (ok) shown++;
+          });
+          var none = document.getElementById('dnone');
+          if (none) none.style.display = shown ? 'none' : '';
+        }
+        var si = document.getElementById('dsearch');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        var so = document.getElementById('dsort');
+        if (so) so.addEventListener('change', function () {
+          var box = document.querySelector('.docs'); if (!box) return;
+          var items = [].slice.call(box.querySelectorAll('[data-doc]'));
+          items.sort(function (a, b) {
+            var how = so.value;
+            if (how === 'title') return a.getAttribute('data-title').localeCompare(b.getAttribute('data-title'));
+            var A = a.getAttribute('data-date') || '', B = b.getAttribute('data-date') || '';
+            return how === 'date-asc' ? A.localeCompare(B) : B.localeCompare(A);
+          });
+          items.forEach(function (el) { box.appendChild(el); });
+        });
+        document.querySelectorAll('.fchip').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
+          });
+        });
+      })();
+    </script>
+    ${canWrite() ? documentDrawerScript() : ''}`));
+});
+
+function documentDrawer() {
+  return `
+    <div class="drawer-scrim" onclick="docDrawer(false)"></div>
+    <aside class="drawer" id="doc-drawer" aria-label="File a document">
+      <div class="drawer-h">
+        <div><div class="drawer-t">File a document</div>
+          <div class="drawer-s">A PDF or a photo. It reads it; you confirm it.</div></div>
+        <button class="drawer-x" type="button" onclick="docDrawer(false)" aria-label="Close">✕</button>
+      </div>
+      <form method="post" action="/c/documents" enctype="multipart/form-data" class="drawer-b" id="docform">
+        <div class="scanbox">
+          <label class="scanpick">
+            <input type="file" id="docscan" accept="image/*,application/pdf" multiple hidden>
+            <span class="scanpick-b">Choose a PDF or photo</span>
+            <span class="scanpick-s">Up to 8 pages of one document</span>
+          </label>
+          <div id="docread" class="scanstate" hidden></div>
+        </div>
+        ${/* The reader fills these in; they stay editable, and the form works
+              with the reader switched off entirely. */''}
+        <label class="fld">Title <input name="title" id="d_title" required placeholder="Form 941 — Q1 2026"></label>
+        <div class="fld-row">
+          <label class="fld">Who it is from <input name="issuer" id="d_issuer" placeholder="IRS, Gusto, landlord…"></label>
+          <label class="fld">Kind <select name="category" id="d_category">
+            ${DOC_CATS.map((c) => `<option${c === 'Other' ? ' selected' : ''}>${c}</option>`).join('')}
+          </select></label>
+        </div>
+        <div class="fld-row">
+          <label class="fld">Date on it <input name="doc_date" id="d_doc_date" type="date"></label>
+          <label class="fld">Reference <input name="reference" id="d_reference" placeholder="Form or policy number"></label>
+        </div>
+        <div class="fld-row">
+          <label class="fld">Covers from <input name="period_start" id="d_period_start" type="date"></label>
+          <label class="fld">Covers to <input name="period_end" id="d_period_end" type="date"></label>
+        </div>
+        <div class="fld-row">
+          <label class="fld">Expires / renews on <input name="expires_on" id="d_expires_on" type="date"></label>
+          <label class="fld">Something due by <input name="action_by" id="d_action_by" type="date"></label>
+        </div>
+        <label class="fld">What it is <textarea name="summary" id="d_summary" rows="2" placeholder="One line"></textarea></label>
+        <label class="fld">Notes <textarea name="notes" rows="2" placeholder="Optional"></textarea></label>
+        <input type="file" name="file" id="docfile" accept="image/*,application/pdf" hidden required>
+        <input type="hidden" name="ai_status" id="d_ai_status" value="manual">
+        <div class="drawer-f">
+          <button class="btn btn-ghost" type="button" onclick="docDrawer(false)">Cancel</button>
+          <button class="btn btn-primary" type="submit">File it</button>
+        </div>
+      </form>
+    </aside>`;
+}
+
+function documentDrawerScript() {
+  return `<script>
+  function docDrawer(open) { document.body.classList.toggle('drawer-open', !!open); }
+  (function () {
+    var pick = document.getElementById('docscan');
+    var keep = document.getElementById('docfile');
+    var out = document.getElementById('docread');
+    if (!pick) return;
+
+    function say(html, cls) { out.hidden = false; out.className = 'scanstate ' + (cls || ''); out.innerHTML = html; }
+    function set(id, v) { var el = document.getElementById(id); if (el && v) el.value = v; }
+
+    pick.addEventListener('change', async function () {
+      var files = [].slice.call(pick.files || []);
+      if (!files.length) return;
+
+      // The first file is what gets filed. The rest are extra pages for the
+      // reader — the form stores one file, and quietly keeping only page one
+      // of an eight-page lease would be worse than saying so.
+      var dt = new DataTransfer(); dt.items.add(files[0]); keep.files = dt.files;
+      say('<b>Reading ' + files.length + (files.length === 1 ? ' file' : ' files') + '…</b>' +
+        (files.length > 1 ? '<span>Only the first is stored — the rest are read for context.</span>' : ''), 'busy');
+
+      var fd = new FormData();
+      files.forEach(function (f) { fd.append('scan', f); });
+      try {
+        var r = await fetch('/c/documents/read', { method: 'POST', body: fd });
+        var j = await r.json();
+        if (j.error) { say('<b>Filled in by hand</b><span>' + j.error + '</span>', 'warn'); return; }
+        var d = j.data || {};
+        set('d_title', d.title); set('d_issuer', d.issuer); set('d_reference', d.reference);
+        set('d_doc_date', d.doc_date); set('d_period_start', d.period_start); set('d_period_end', d.period_end);
+        set('d_expires_on', d.expires_on); set('d_action_by', d.action_by); set('d_summary', d.summary);
+        if (d.category) { var c = document.getElementById('d_category'); if (c) c.value = d.category; }
+        document.getElementById('d_ai_status').value = 'ai';
+        say('<b>Read it' + (d.confidence === 'low' ? ' — but not clearly' : '') + '</b>' +
+          '<span>Check the dates before you file it. Identifiers are deliberately not read.</span>',
+          d.confidence === 'low' ? 'warn' : 'ok');
+      } catch (e) {
+        say('<b>Could not reach the reader</b><span>Fill it in by hand — the file still uploads.</span>', 'warn');
+      }
+    });
+
+    // Corrected after the read is a different state from read-and-kept.
+    ['d_title', 'd_issuer', 'd_doc_date', 'd_expires_on', 'd_action_by', 'd_summary'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener('input', function () {
+        var st = document.getElementById('d_ai_status');
+        if (st && st.value === 'ai') st.value = 'ai_edited';
+      });
+    });
+  })();
+  </script>`;
+}
 
 app.get('/c/expenses', (req, res) => {
   const all = db.prepare('SELECT * FROM m_expenses ORDER BY spent_on DESC, id DESC').all();

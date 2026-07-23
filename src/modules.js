@@ -167,9 +167,24 @@ const MODULES = [
     fields: [
       { name: 'title', label: 'Title', type: 'text', required: true, list: true },
       { name: 'category', label: 'Category', type: 'select', list: true,
-        options: ['Payroll', 'Tax', 'Lease', 'Insurance', 'HR', 'Permit', 'Other'] },
+        options: ['Payroll', 'Tax', 'Lease', 'Insurance', 'HR', 'Permit', 'Licence',
+          'Banking', 'Legal', 'Utilities', 'Other'] },
+      { name: 'issuer', label: 'Who it is from', type: 'text', list: true },
+      // Four different dates, because a document has up to four and they are
+      // not interchangeable. The date on a lease is not when it runs out, and
+      // the quarter a 941 covers is neither.
+      { name: 'doc_date', label: 'Date on it', type: 'date', list: true },
+      { name: 'period_start', label: 'Covers from', type: 'date' },
+      { name: 'period_end', label: 'Covers to', type: 'date' },
+      { name: 'expires_on', label: 'Expires / renews on', type: 'date', list: true },
+      { name: 'action_by', label: 'Something due by', type: 'date' },
+      // A form number or policy number. Never a tax ID or an account number —
+      // see the note above DOC_SCHEMA in reader.js for why.
+      { name: 'reference', label: 'Reference', type: 'text' },
+      { name: 'summary', label: 'What it is', type: 'textarea' },
       { name: 'file', label: 'File', type: 'file', required: true, list: true },
       { name: 'notes', label: 'Notes', type: 'textarea' },
+      { name: 'ai_status', label: 'Entered by', type: 'text' },
     ],
   },
   {

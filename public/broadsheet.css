@@ -2225,3 +2225,46 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-dupc + .bs-dupc { border-left: 0; border-top: 1px solid var(--rule); }
   .bs-dupacts .bs-btn, .bs-dupacts .bs-btn-sm { flex: 1; text-align: center; }
 }
+
+/* --- documents ------------------------------------------------------------
+   A filing cabinet reads by title, so the title gets the room. */
+.bs-dochead, .bs-dr {
+  grid-template-columns: minmax(180px, 1fr) 160px 100px 96px 92px 50px;
+}
+.bs-dr-t { font-size: 14px; font-weight: 600; color: var(--headline);
+  display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bs-dr-t > u { text-decoration: none; font-family: var(--mono); font-size: 11px;
+  color: var(--faint); white-space: nowrap; }
+.bs-dr-i { font-size: 12.5px; color: var(--secondary); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.bs-dr-c, .bs-dr-d { font-size: 12.5px; color: var(--muted); }
+.bs-dr-d { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.bs-dr-s { justify-self: start; }
+.bs-ivsum { font-size: 13.5px; color: var(--secondary); margin: 0 0 12px;
+  max-width: 60ch; line-height: 1.5; }
+
+/* The reader's own state, in the drawer. */
+.scanbox { border: 1px dashed var(--rule); padding: 14px; margin-bottom: 16px; }
+.scanpick { display: block; cursor: pointer; text-align: center; }
+.scanpick-b { display: block; font-weight: 650; font-size: 14px; color: var(--headline); }
+.scanpick-s { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.scanstate { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); font-size: 13px; }
+.scanstate b { display: block; color: var(--headline); }
+.scanstate span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.scanstate.ok b { color: var(--positive); }
+.scanstate.warn b { color: var(--negative); }
+
+@media (max-width: 900px) {
+  .bs-dochead { display: none; }
+  .bs-dr {
+    grid-template-columns: 1fr auto;
+    grid-template-areas: 'title state' 'from date' 'kind kind';
+    gap: 4px 10px; padding: 13px 0;
+  }
+  .bs-dr-t { grid-area: title; }
+  .bs-dr-s { grid-area: state; justify-self: end; }
+  .bs-dr-i { grid-area: from; }
+  .bs-dr-d { grid-area: date; justify-self: end; }
+  .bs-dr-c { grid-area: kind; }
+  .bs-dr + .bs-sr-e, .bs-dr .bs-sr-e { display: none; }
+}
