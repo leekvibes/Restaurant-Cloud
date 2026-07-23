@@ -29,7 +29,8 @@ const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
 // Same reason as products above: cash.js creates cash_recon and adds its
 // columns, and the dashboard alert below reads them.
 const CASH = require('./cash');
-const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting } = require('./periods');
+const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting,
+  skipRecord, markSkipped, unskipPeriod } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -537,7 +538,9 @@ app.get('/', (req, res) => {
 
   if (may('payroll')) {
     const justEnded = recentPeriods(2)[1];
-    if (justEnded && !sendRecord(justEnded.start)) {
+    // A skipped period is one the owner has said they are not running, so it
+    // is not outstanding and must not keep asking.
+    if (justEnded && !sendRecord(justEnded.start) && !skipRecord(justEnded.start)) {
       push('blue', 'payroll', `Payroll ready — ${labelFor(justEnded)}`, 'The period has ended and nothing has gone out', '/payroll');
     }
     const cur = currentPeriod();
@@ -598,7 +601,7 @@ app.get('/', (req, res) => {
   }
   if (may('payroll')) {
     const justEnded = recentPeriods(2)[1];
-    if (justEnded && !sendRecord(justEnded.start)) {
+    if (justEnded && !sendRecord(justEnded.start) && !skipRecord(justEnded.start)) {
       notice('todo', 'payroll', 'Payroll ready to send', labelFor(justEnded), 'Review payroll', '/payroll');
     }
   }
@@ -2971,6 +2974,25 @@ function periodSendBlock(from, to, rows) {
 
   const p = { start: from, end: to };
   const done = sendRecord(from);
+  const skipped = skipRecord(from);
+
+  // A period the owner is not running: say so plainly and offer the way back,
+  // rather than the checks and the send button for something nobody intends
+  // to send.
+  if (skipped && !done) return `
+    <section class="bs-panel">
+      <div class="bs-sec-h"><span class="bs-kicker">Not running this period</span></div>
+      <p class="bs-note"><b>${esc(labelFor(p))} is marked as not running.</b>
+        Nothing has been sent and payroll has stopped asking about it${
+          skipped.skipped_by ? ` — ${esc(skipped.skipped_by)} marked it` : ''} on
+        ${esc(String(skipped.skipped_at).slice(0, 16))}. The hours and figures below are
+        still recorded; they are simply not going out.</p>
+      <form class="bs-sendrow" method="post" action="/payroll/unskip">
+        <input type="hidden" name="from" value="${from}"><input type="hidden" name="to" value="${to}">
+        <button class="bs-btn-sm" type="submit">Put it back on the list</button>
+      </form>
+    </section>`;
+
   const issues = periodIssues(from, to, rows);
   const blocking = issues.filter((i) => i.bad);
   const recipients = rows.filter((r) => r.email && (r.hours > 0 || r.takeHome > 0 || r.cashTips > 0)).length;
@@ -3012,8 +3034,32 @@ function periodSendBlock(from, to, rows) {
       ${recipients ? '' : '<span class="bs-sendnote">Nobody in this period has an email on file.</span>'}
       ${blocking.length && recipients ? '<span class="bs-sendnote">Sending is still allowed — the checks above are yours to judge.</span>' : ''}
     </form>
+    ${done ? '' : `<form class="bs-sendrow" method="post" action="/payroll/skip"
+      onsubmit="return confirm('Mark ${esc(labelFor(p))} as not running? Nothing will be sent and payroll will stop asking about it.')">
+      <input type="hidden" name="from" value="${from}"><input type="hidden" name="to" value="${to}">
+      <button class="bs-btn-quiet" type="submit">Not running this period</button>
+      <span class="bs-sendnote">Stops the reminders without sending anything. Reversible.</span>
+    </form>`}
     </section>`;
 }
+
+app.post('/payroll/skip', (req, res) => {
+  const from = String(req.body.from || '');
+  const to = String(req.body.to || '');
+  if (!isPeriod(from, to)) return res.redirect('/payroll?err=1&msg=' + encodeURIComponent('That range is not a pay period.'));
+  // Who chose to skip it, so the record answers "who decided that" later.
+  markSkipped(from, to, (req.user && req.user.name) || null);
+  return res.redirect(`/payroll?from=${from}&to=${to}&msg=`
+    + encodeURIComponent(`${labelFor({ start: from, end: to })} marked as not running. Payroll will stop asking about it.`));
+});
+
+app.post('/payroll/unskip', (req, res) => {
+  const from = String(req.body.from || '');
+  const to = String(req.body.to || '');
+  unskipPeriod(from);
+  return res.redirect(`/payroll?from=${from}&to=${to}&msg=`
+    + encodeURIComponent(`${labelFor({ start: from, end: to })} is back on the list.`));
+});
 
 app.post('/payroll/send', async (req, res) => {
   const from = String(req.body.from || '');
@@ -3125,12 +3171,15 @@ app.get('/payroll/:employeeId(\\d+)', (req, res) => {
 });
 
 app.get('/payroll', (req, res) => {
-  // Default to the period that just ended — the one you're about to run —
-  // rather than a rolling 14 days, which is never an actual pay period.
+  // Open on the newest period — the one running now. It used to open on the
+  // period that just ended, on the reasoning that it is the one you are about
+  // to run; in practice that meant every visit landed a fortnight behind and
+  // had to be clicked forward. The one that just ended is the second chip and
+  // still one tap away.
   const cur = currentPeriod();
   const justEnded = recentPeriods(2)[1];
-  const from = req.query.from || justEnded.start;
-  const to = req.query.to || justEnded.end;
+  const from = req.query.from || cur.start;
+  const to = req.query.to || cur.end;
   const { rows, totals, shiftCount, midDate } = aggregatePayroll(from, to);
 
   // =========================================================================
@@ -4501,7 +4550,9 @@ app.get('/sales', (req, res) => {
   // Listing `traded` hid the one row anybody actually needed to click: a
   // service with no sales entered yet is exactly what you came here to fix,
   // and it was invisible on the page whose job is entering them.
-  const awaiting = rows.filter((x) => x.sales === 0);
+  // A closed day is answered, not outstanding: staff worked, there were no
+  // sales, and that is the whole story. Leaving it in here would nag forever.
+  const awaiting = rows.filter((x) => x.sales === 0 && !x.closed);
   // Days standing on server sales because no restaurant total was ever entered.
   const serverOnlyCount = rows.filter((x) =>
     x.sales > 0 && x.food + x.coffee + x.alcohol + x.other === 0 && x.server_sales > 0).length;
@@ -4546,7 +4597,7 @@ app.get('/sales', (req, res) => {
 
   const ledgerRow = (x) => {
     const split = x.food + x.coffee + x.alcohol + x.other > 0;
-    const none = x.sales === 0;
+    const none = x.sales === 0 && !x.closed;
     const serverOnly = !none && !split && x.server_sales > 0;
     const st = shiftState(x, today);
     const cr = cash.get(`${x.date}|${x.daypart}`);
@@ -4557,7 +4608,7 @@ app.get('/sales', (req, res) => {
     return `<details class="bs-srow bs-dayrow${weekend ? ' wknd' : ''}" id="s${x.id}">
       <summary class="bs-sr">
         <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8))}</span>
-        <span class="bs-lr-s">${esc(dp(x.daypart))}${serverOnly ? '<i class="bs-tag">server only</i>' : ''}${none ? '<i class="bs-tag warn">no sales</i>' : ''}</span>
+        <span class="bs-lr-s">${esc(dp(x.daypart))}${serverOnly ? '<i class="bs-tag">server only</i>' : ''}${none ? '<i class="bs-tag warn">no sales</i>' : ''}${x.closed ? '<i class="bs-tag">closed</i>' : ''}</span>
         <span class="bs-sr-f">${none ? '<span class="bs-em">—</span>' : money(x.sales)}</span>
         <span class="bs-sr-f muted">${split && x.food ? money(x.food) : '<span class="bs-em">—</span>'}</span>
         <span class="bs-sr-f muted">${split && x.coffee ? money(x.coffee) : '<span class="bs-em">—</span>'}</span>
@@ -4586,7 +4637,7 @@ app.get('/sales', (req, res) => {
   const ledger = months.map((mo) => {
     const tot = mo.list.reduce((a, x) => a + x.sales, 0);
     const tips2 = mo.list.reduce((a, x) => a + x.tips, 0);
-    const todo = mo.list.filter((x) => x.sales === 0).length;
+    const todo = mo.list.filter((x) => x.sales === 0 && !x.closed).length;
     return `<details class="bs-month" data-month>
       <summary class="bs-month-h">
         <span class="bs-kicker">${esc(MONTH_LBL(mo.ym))}</span>
@@ -4967,7 +5018,47 @@ app.get('/sales/:id', (req, res) => {
 
       <p class="bs-note">Leave a category at zero if you do not sell it. These figures replace the
         server-sales estimate everywhere they appear.</p>
+
+      <!-- The alternative to typing zeros. A day staff worked but the room
+           never opened is not a $0 day: entering zeros makes it one, and it
+           then drags the averages and sits in "needs sales entry" forever. -->
+      <section class="bs-pos-block">
+        <div class="bs-sec-h bs-sec-gap"><span class="bs-kicker">Or: nobody was served</span></div>
+        ${sh.closed_at ? `
+          <p class="bs-note"><b>Marked as closed.</b> ${esc(String(sh.closed_at).slice(0, 16))} —
+            staff hours and wages still count, and this service is not waiting on sales.</p>
+          <form method="post" action="/sales/${sh.id}/open" class="bs-entry-act">
+            ${back.map((kv) => { const [k, val] = kv.split('='); return `<input type="hidden" name="${k}" value="${esc(decodeURIComponent(val))}">`; }).join('')}
+            <button class="bs-btn-sm" type="submit">We were open after all</button>
+          </form>`
+        : `
+          <p class="bs-note">Use this when the restaurant did not open but people still came in —
+            a deep clean, a private booking that fell through, a holiday with prep. Their hours and
+            wages are unchanged; this service just stops asking for sales, and stays out of the
+            averages instead of counting as a zero.</p>
+          <form method="post" action="/sales/${sh.id}/closed" class="bs-entry-act">
+            ${back.map((kv) => { const [k, val] = kv.split('='); return `<input type="hidden" name="${k}" value="${esc(decodeURIComponent(val))}">`; }).join('')}
+            <button class="bs-btn-sm" type="submit">Restaurant was closed</button>
+          </form>`}
+      </section>
     </div>`));
+});
+
+/** Mark a service closed — staff worked, the room never opened. */
+app.post('/sales/:id/closed', (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  db.prepare("UPDATE shifts SET closed_at = datetime('now') WHERE id = ?").run(sh.id);
+  const back = salesReturn(req.body);
+  res.redirect(`/sales?${back.join('&')}#s${sh.id}`);
+});
+
+app.post('/sales/:id/open', (req, res) => {
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  db.prepare('UPDATE shifts SET closed_at = NULL WHERE id = ?').run(sh.id);
+  const back = salesReturn(req.body);
+  res.redirect(`/sales?${back.join('&')}#s${sh.id}`);
 });
 
 app.post('/sales/:id', (req, res) => {

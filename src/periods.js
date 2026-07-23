@@ -22,6 +22,16 @@ CREATE TABLE IF NOT EXISTS period_sends (
   sent_at      TEXT NOT NULL DEFAULT (datetime('now')),
   sent_count   INTEGER NOT NULL DEFAULT 0
 );
+-- A period deliberately not run. Its own table rather than a flag on
+-- period_sends: that row means "these emails went out at this time to this
+-- many people", and a skip is the absence of that, not a variety of it.
+-- Keeping them apart means a skip can never be mistaken for a send.
+CREATE TABLE IF NOT EXISTS period_skips (
+  period_start TEXT PRIMARY KEY,
+  period_end   TEXT NOT NULL,
+  skipped_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  skipped_by   TEXT
+);
 `);
 
 const Q = {
@@ -31,6 +41,11 @@ const Q = {
   markSent: db.prepare(`INSERT INTO period_sends (period_start, period_end, sent_count, sent_at)
     VALUES (@start, @end, @count, datetime('now'))
     ON CONFLICT(period_start) DO UPDATE SET sent_count = excluded.sent_count, sent_at = excluded.sent_at`),
+  skipFor: db.prepare('SELECT * FROM period_skips WHERE period_start = ?'),
+  markSkipped: db.prepare(`INSERT INTO period_skips (period_start, period_end, skipped_by, skipped_at)
+    VALUES (@start, @end, @by, datetime('now'))
+    ON CONFLICT(period_start) DO UPDATE SET skipped_by = excluded.skipped_by, skipped_at = excluded.skipped_at`),
+  unskip: db.prepare('DELETE FROM period_skips WHERE period_start = ?'),
 };
 
 const getSetting = (k, fallback = null) => {
@@ -91,7 +106,17 @@ function isPeriod(from, to) {
 const sendRecord = (start) => Q.sendFor.get(start) || null;
 const markSent = (start, end, count) => Q.markSent.run({ start, end, count });
 
+/**
+ * A period the owner has said they are not running — a fortnight nobody was
+ * on payroll for, or one paid outside the app. Payroll stops nagging about it
+ * without pretending anything was sent.
+ */
+const skipRecord = (start) => Q.skipFor.get(start) || null;
+const markSkipped = (start, end, by) => Q.markSkipped.run({ start, end, by: by || null });
+const unskipPeriod = (start) => Q.unskip.run(start);
+
 module.exports = {
   getSetting, setSetting, anchor, periodLength, periodFor, currentPeriod,
   recentPeriods, labelFor, fmtRange, isPeriod, sendRecord, markSent,
+  skipRecord, markSkipped, unskipPeriod,
 };

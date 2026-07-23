@@ -74,6 +74,12 @@ if (!empCols.includes('salary_cents')) db.exec('ALTER TABLE employees ADD COLUMN
 // Migration: add the tip-out policy stamp + shared-pool columns to shifts.
 const shiftCols = db.prepare('PRAGMA table_info(shifts)').all().map((c) => c.name);
 if (!shiftCols.includes('policy_id')) db.exec('ALTER TABLE shifts ADD COLUMN policy_id INTEGER');
+// A day the restaurant did not open but staff still came in — a deep clean, a
+// private booking that fell through, a holiday with prep work. Their hours and
+// wages are real and still count; there simply were no sales. Recording that
+// as $0 would drag every average and leave the service nagging to be filled in
+// forever, so it is marked rather than zeroed.
+if (!shiftCols.includes('closed_at')) db.exec('ALTER TABLE shifts ADD COLUMN closed_at TEXT');
 if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_jar_cents INTEGER NOT NULL DEFAULT 0');
 if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
 if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');

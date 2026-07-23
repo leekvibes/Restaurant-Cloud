@@ -820,3 +820,94 @@ test('the staff portal starts below the phone status bar', async () => {
   const signin = await (await fetch(`${BASE}/tips`, { redirect: 'manual' })).text();
   assert.match(signin, /class="tp-top"/, 'the PIN screen uses the inset bar');
 });
+
+test('payroll opens on the period running now', async () => {
+  // It used to open on the period that just ended, so every visit landed a
+  // fortnight behind and had to be clicked forward.
+  const { currentPeriod, labelFor } = require('../src/periods');
+  const cur = currentPeriod();
+  const html = await (await fetch(`${BASE}/payroll`, { redirect: 'manual' })).text();
+  const sub = html.match(/class="bs-subline">([\s\S]*?)<\/p>/);
+  assert.ok(sub, 'the page states its period');
+  assert.ok(sub[1].includes(labelFor(cur)),
+    `expected ${labelFor(cur)}, got ${sub[1].replace(/\s+/g, ' ').trim().slice(0, 60)}`);
+});
+
+test('a skipped period stops the dashboard asking, without looking sent', async () => {
+  const P = require('../src/periods');
+  const { start, end } = P.recentPeriods(2)[1];
+  const post = (u, b) => fetch(BASE + u, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(b).toString(),
+  });
+  const nags = async () => ((await (await fetch(`${BASE}/`, { redirect: 'manual' })).text())
+    .match(/Payroll ready/g) || []).length;
+
+  // The precondition IS the test. Checking "no nag after skipping" proves
+  // nothing if there was no nag to begin with — which is how the first version
+  // of this passed while the guard it was meant to cover had been deleted.
+  const before = await nags();
+  assert.ok(before > 0, `the dashboard is asking about ${start} to begin with, got ${before}`);
+
+  await post('/payroll/skip', { from: start, to: end });
+  assert.strictEqual(await nags(), 0, 'skipping silences it');
+
+  const page = await (await fetch(`${BASE}/payroll?from=${start}&to=${end}`, { redirect: 'manual' })).text();
+  assert.match(page, /marked as not running/, 'and the page says why');
+  // A skip must never read as a send — they are separate tables for this reason.
+  assert.ok(!/Already sent/.test(page), 'without claiming anything went out');
+
+  await post('/payroll/unskip', { from: start, to: end });
+  assert.strictEqual(await nags(), before, 'and unskipping brings it back');
+});
+
+test('a closed service is answered, not outstanding', async () => {
+  // Staff worked, the room never opened. Typing zeros would make it a $0 day
+  // that drags the averages and sits in "needs sales entry" for ever.
+  //
+  // The fixture's only service HAS sales, so an earlier version of this test
+  // closed it and asserted the nag was absent — which it always was. A service
+  // with genuinely no sales has to exist for the assertion to mean anything.
+  const Database = require('better-sqlite3');
+  const rw = new Database(DB);
+  const date = '2026-03-11';                       // clear of every other fixture row
+  rw.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'dinner', 'open')").run(date);
+  const id = rw.prepare('SELECT id FROM shifts WHERE date = ?').get(date).id;
+  rw.close();
+
+  const post = (u, b) => fetch(BASE + u, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(b).toString(),
+  });
+  const range = `r=custom&from=${date}&to=${date}`;
+  const page = async () => (await fetch(`${BASE}/sales?${range}`, { redirect: 'manual' })).text();
+
+  const before = await page();
+  assert.match(before, /Needs sales entry/, 'it is asking for sales to begin with');
+
+  await post(`/sales/${id}/closed`, { r: 'custom', from: date, to: date });
+  const closed = await page();
+  assert.ok(!/Needs sales entry/.test(closed), 'closing stops it asking');
+  assert.match(closed, /bs-tag">closed/, 'and says why');
+  assert.match(closed, /all entered/, 'the month no longer counts it as unfinished');
+
+  await post(`/sales/${id}/open`, { r: 'custom', from: date, to: date });
+  assert.match(await page(), /Needs sales entry/, 'reopening puts it back');
+});
+
+test('the app icon is the wordmark, white on black', () => {
+  // Asserted on the bytes, not on a filename: a PNG that is not actually
+  // black would sail past a check that only looked for the file.
+  const buf = fs.readFileSync(path.join(__dirname, '..', 'public', 'icon-512.png'));
+  assert.strictEqual(buf.slice(1, 4).toString(), 'PNG', 'it is a PNG');
+  const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
+  assert.deepStrictEqual([w, h], [512, 512], 'at the declared size');
+
+  for (const f of ['manifest.webmanifest', 'manifest-tips.webmanifest']) {
+    const m = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'));
+    assert.strictEqual(m.background_color, '#000000', `${f}: the splash matches the icon`);
+    assert.ok(m.icons.some((i) => i.purpose === 'maskable'), `${f}: has a maskable icon`);
+  }
+});

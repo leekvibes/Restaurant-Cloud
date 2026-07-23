@@ -35,6 +35,7 @@ const SERVER_SALES_SQL = `(SELECT COALESCE(SUM(ss.food_cents + ss.coffee_cents +
 
 const shiftRows = db.prepare(`
   SELECT sh.id, sh.date, sh.daypart, sh.status,
+    (sh.closed_at IS NOT NULL) AS closed,
     COALESCE(sh.total_food_cents,0) AS food, COALESCE(sh.total_coffee_cents,0) AS coffee,
     COALESCE(sh.total_alcohol_cents,0) AS alcohol, COALESCE(sh.total_other_cents,0) AS other,
     ${SERVER_SALES_SQL} AS server_sales,
