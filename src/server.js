@@ -6005,6 +6005,347 @@ function pendingOnInvoice(inv) {
   return pendingCount(rows, importedIdx(inv));
 }
 
+// ---------------------------------------------------------------------------
+// EXPENSES
+//
+// The Costco run, a bag of ice, a part from the hardware shop. Money that
+// leaves the business without an invoice behind it, usually out of somebody's
+// own pocket, and usually forgotten by the time payroll comes round.
+//
+// The table and the generic add/edit/delete come from the module config, the
+// same as every other collection. What is here is the page worth reading: a
+// ledger, and one figure that matters more than the rest — what the restaurant
+// currently owes its own staff.
+// ---------------------------------------------------------------------------
+const EXP_CATS = ['Groceries', 'Ice', 'Supplies', 'Cleaning', 'Repairs', 'Equipment',
+  'Kitchen', 'Bar', 'Office', 'Travel', 'Other'];
+const EXP_PAID = ['Their own money', 'Company card', 'Company cash', 'Drawer cash', 'Other'];
+
+/** Somebody is owed for this: they used their own money and have not been paid back. */
+const owedBack = (r) => r.paid_with === 'Their own money' && !r.reimbursed_on;
+
+app.get('/c/expenses', (req, res) => {
+  const all = db.prepare('SELECT * FROM m_expenses ORDER BY spent_on DESC, id DESC').all();
+  const today = isoDate(startOfToday());
+  const thisMonth = today.slice(0, 7);
+
+  const years = [...new Set(all.map((r) => (r.spent_on || '').slice(0, 4)).filter(Boolean))].sort().reverse();
+  const year = years.includes(req.query.y) ? req.query.y : (years[0] || today.slice(0, 4));
+  const rows = all.filter((r) => (r.spent_on || '').slice(0, 4) === year);
+
+  const brief = (cents) => (Math.abs(cents) >= 100000
+    ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
+  const statCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const spendMonth = all.filter((r) => (r.spent_on || '').slice(0, 7) === thisMonth)
+    .reduce((a, r) => a + (r.amount_cents || 0), 0);
+  const owed = all.filter(owedBack);
+  const owedTotal = owed.reduce((a, r) => a + (r.amount_cents || 0), 0);
+  // Who is owed the most, because that is the name you settle up with first.
+  const byPerson = new Map();
+  for (const r of owed) byPerson.set(r.paid_by || '—', (byPerson.get(r.paid_by || '—') || 0) + (r.amount_cents || 0));
+  const topOwed = [...byPerson.entries()].sort((a, b) => b[1] - a[1])[0];
+  const noReceipt = rows.filter((r) => !r.file).length;
+  const yearSpend = rows.reduce((a, r) => a + (r.amount_cents || 0), 0);
+
+  const strip = `<section class="bs-panel bs-strip">
+    ${statCell('Spent this month', brief(spendMonth), MONTHS[Number(thisMonth.slice(5, 7)) - 1] + ' ' + thisMonth.slice(0, 4))}
+    ${statCell('Owed back', brief(owedTotal), owed.length
+      ? `${owed.length} to settle${topOwed ? ` · most to ${esc(topOwed[0])}` : ''}` : 'Nobody is out of pocket',
+      owedTotal ? 'warn' : 'ok')}
+    ${statCell('No receipt', String(noReceipt), noReceipt ? 'photograph them before they fade' : 'every one has a photo',
+      noReceipt ? 'warn' : 'ok')}
+    ${statCell(`Spent in ${esc(year)}`, brief(yearSpend), `${rows.length} expense${rows.length === 1 ? '' : 's'}`)}
+  </section>`;
+
+  const byMonth = new Map();
+  for (const r of rows) {
+    const m = (r.spent_on || '').slice(0, 7) || 'undated';
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(r);
+  }
+  const months = [...byMonth.keys()].sort().reverse();
+
+  const monthBlocks = months.map((m, idx) => {
+    const list = byMonth.get(m);
+    const total = list.reduce((a, r) => a + (r.amount_cents || 0), 0);
+    const owing = list.filter(owedBack).length;
+    const label = m === 'undated' ? 'No date' : `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+
+    const items = list.map((r) => {
+      const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
+      const owe = owedBack(r);
+      const search = [r.name, r.where_bought, r.paid_by, r.category, r.notes,
+        ((r.amount_cents || 0) / 100).toFixed(2)].filter(Boolean).join(' ').toLowerCase();
+      return `
+      <details class="bs-srow bs-exrow" data-exp data-id="${r.id}"
+        data-owed="${owe ? '1' : '0'}" data-cat="${esc(r.category || 'Other')}"
+        data-amt="${(r.amount_cents || 0) / 100}" data-date="${esc(r.spent_on || '')}"
+        data-who="${esc((r.paid_by || '').toLowerCase())}" data-search="${esc(search)}">
+        <summary class="bs-sr bs-xr">
+          <span class="bs-xr-d">${esc(niceDate(r.spent_on))}</span>
+          <span class="bs-xr-w">${esc(r.name || 'Something')}${
+            r.where_bought ? `<u>${esc(r.where_bought)}</u>` : ''}</span>
+          <span class="bs-xr-c">${esc(r.category || '—')}</span>
+          <span class="bs-xr-p">${esc(r.paid_by || '—')}${
+            owe ? '<i class="bs-tag warn">owed back</i>'
+            : r.reimbursed_on ? '<i class="bs-tag ok">paid back</i>' : ''}</span>
+          <span class="bs-sr-f">${money(r.amount_cents || 0)}</span>
+          <span class="bs-xr-r">${r.file ? '<i class="bs-pip has" title="Receipt attached"></i>' : '<i class="bs-pip none" title="No receipt"></i>'}</span>
+          <span class="bs-sr-e">Open</span>
+        </summary>
+        <div class="bs-ivx">
+          <div class="bs-ivl">
+            <a class="bs-ivthumb${r.file ? '' : ' none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''}>
+              ${isImg ? `<img src="/uploads/${esc(r.file)}" alt="">` : icon(r.file ? 'invoices' : 'documents')}
+            </a>
+            <span class="bs-tag">${r.file ? 'Receipt' : 'No receipt'}</span>
+          </div>
+          <div class="bs-ivr">
+            <div class="bs-ivgrid">
+              <div class="bs-ivf"><span>Amount</span><b>${money(r.amount_cents || 0)}</b></div>
+              <div class="bs-ivf"><span>Who paid</span><b>${esc(r.paid_by || '—')}</b></div>
+              <div class="bs-ivf"><span>Paid with</span><b>${esc(r.paid_with || '—')}</b></div>
+              <div class="bs-ivf"><span>Where</span><b>${esc(r.where_bought || '—')}</b></div>
+              <div class="bs-ivf"><span>Paid back</span><b>${r.reimbursed_on ? esc(niceDate(r.reimbursed_on)) : '<i class="bs-em">not yet</i>'}</b></div>
+            </div>
+            ${r.notes ? `<div class="bs-ivnote">${esc(r.notes)}</div>` : ''}
+            <div class="bs-ivacts">
+              ${canWrite() && owe ? `<form method="post" action="/c/expenses/${r.id}/reimburse" style="margin:0">
+                <button class="bs-btn" type="submit">Mark paid back</button></form>` : ''}
+              ${canWrite() && r.reimbursed_on ? `<form method="post" action="/c/expenses/${r.id}/reimburse" style="margin:0">
+                <input type="hidden" name="undo" value="1">
+                <button class="bs-btn-sm" type="submit">Not paid back after all</button></form>` : ''}
+              <a class="bs-btn-sm" href="/c/expenses/${r.id}/edit">Edit</a>
+              ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open receipt →</a>` : ''}
+            </div>
+          </div>
+        </div>
+      </details>`;
+    }).join('');
+
+    return `
+      <details class="bs-month" data-month${idx === 0 ? ' open' : ''}>
+        <summary class="bs-month-h">
+          <span class="bs-kicker">${esc(label)}</span>
+          <span class="bs-month-meta">${list.length} expense${list.length === 1 ? '' : 's'}
+            ${owing ? `· <b class="warn">${owing} owed back</b>` : '· <b class="ok">all settled</b>'}</span>
+          <span class="bs-month-tot"><b>${money(total)}</b></span>
+          <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
+        </summary>
+        <div class="bs-shead bs-exhead">
+          <span>Date</span><span>What</span><span>Category</span><span>Who paid</span>
+          <span class="r">Amount</span><span></span><span></span>
+        </div>
+        <div class="bs-srows exps">${items}</div>
+      </details>`;
+  }).join('');
+
+  const usedCats = [...new Set(rows.map((r) => r.category || 'Other'))];
+  const toolbar = `
+    <div class="bs-tools">
+      <div class="bs-isearch">${icon('search')}
+        <input id="xsearch" type="search" placeholder="What, where, who paid, amount…" autocomplete="off"></div>
+      <div class="bs-quick">
+        <button class="fchip on" data-f="all" data-v="">All <b>${rows.length}</b></button>
+        <button class="fchip" data-f="owed" data-v="1"><i class="bs-pip unpaid"></i>Owed back</button>
+        <button class="fchip" data-f="owed" data-v="0"><i class="bs-pip paid"></i>Settled</button>
+      </div>
+      <details class="fsheet" id="expfilter">
+        <summary class="fs-btn">Sort &amp; filter <span class="fs-caret">▾</span></summary>
+        <div class="fs-body">
+          <div class="fs-scrim" aria-hidden="true"></div>
+          <div class="fs-panel">
+            <div class="fs-h">Year</div>
+            <div class="fs-opts">
+              ${years.length ? years.map((y) => `<a class="fs-o${y === year ? ' on' : ''}" href="/c/expenses?y=${y}">${y}</a>`).join('')
+                : `<span class="fs-o on">${esc(year)}</span>`}
+            </div>
+            <div class="fs-h">Sort</div>
+            <select id="xsort" class="bs-sel">
+              <option value="date-desc">Newest first</option>
+              <option value="date-asc">Oldest first</option>
+              <option value="amt-desc">Amount, high to low</option>
+              <option value="amt-asc">Amount, low to high</option>
+              <option value="who">Who paid, A–Z</option>
+            </select>
+            ${usedCats.length ? `<div class="fs-h">Category</div>
+            <div class="fs-opts">
+              ${usedCats.map((c) => `<button class="fs-o fchip" type="button" data-f="cat" data-v="${esc(c)}">${esc(c)}</button>`).join('')}
+            </div>` : ''}
+          </div>
+        </div>
+      </details>
+    </div>`;
+
+  const body = rows.length ? monthBlocks : (all.length
+    ? `<div class="bs-blank"><b>Nothing in ${esc(year)}</b><span>Pick another year in Sort &amp; filter.</span></div>`
+    : `<div class="bs-hero">
+        <div class="bs-hero-k">Nothing logged yet</div>
+        <h2 class="bs-hero-t">The Costco run, a bag of ice, a part from the hardware shop.</h2>
+        <p class="bs-hero-s">${canWrite()
+          ? 'Everything bought without an invoice behind it. Log it with a photo of the receipt and who paid, and the money somebody is owed stops being something they have to remember to ask for.'
+          : 'Once the owner logs expenses, they show up here.'}</p>
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="expDrawer(true)">Log the first expense</button>` : ''}
+      </div>`);
+
+  const headline = all.length
+    ? `Expenses — ${brief(yearSpend)} in ${esc(year)}${owedTotal
+        ? `, <span class="warn">${brief(owedTotal)} owed back</span>.` : ', nobody out of pocket.'}`
+    : 'Expenses — nothing logged yet.';
+
+  res.send(layout('Expenses', `
+    ${flash(req)}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">${headline}</h1>
+          <p class="bs-subline">Anything bought outside an invoice. Bills from a vendor belong on
+            <a class="bs-act" href="/c/invoices">Invoices</a>.</p>
+        </div>
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="expDrawer(true)">Log an expense</button>` : ''}
+      </div>
+      ${all.length ? strip : ''}
+      ${all.length ? toolbar : ''}
+      ${body}
+      <div class="bs-blank" id="xnone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
+    </div>
+    ${canWrite() ? expenseDrawer(today) : ''}
+    <script>
+      (function () {
+        var q = '', mode = 'all', val = '';
+        function pass(el) {
+          if (mode === 'owed' && el.getAttribute('data-owed') !== val) return false;
+          if (mode === 'cat' && el.getAttribute('data-cat') !== val) return false;
+          if (q && el.getAttribute('data-search').indexOf(q) === -1) return false;
+          return true;
+        }
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-month]').forEach(function (g) {
+            var n = 0;
+            g.querySelectorAll('[data-exp]').forEach(function (el) {
+              var ok = pass(el); el.style.display = ok ? '' : 'none'; if (ok) { n++; shown++; }
+            });
+            g.style.display = n ? '' : 'none';
+            if (n && (q || mode !== 'all')) g.open = true;
+          });
+          var none = document.getElementById('xnone');
+          if (none) none.style.display = shown ? 'none' : '';
+        }
+        function sortNow(how) {
+          document.querySelectorAll('[data-month] .exps').forEach(function (box) {
+            var items = [].slice.call(box.querySelectorAll('[data-exp]'));
+            items.sort(function (a, b) {
+              var A = function (k) { return a.getAttribute(k) || ''; }, B = function (k) { return b.getAttribute(k) || ''; };
+              switch (how) {
+                case 'date-asc': return A('data-date').localeCompare(B('data-date'));
+                case 'amt-desc': return parseFloat(B('data-amt')) - parseFloat(A('data-amt'));
+                case 'amt-asc': return parseFloat(A('data-amt')) - parseFloat(B('data-amt'));
+                case 'who': return A('data-who').localeCompare(B('data-who'));
+                default: return B('data-date').localeCompare(A('data-date'));
+              }
+            });
+            items.forEach(function (el) { box.appendChild(el); });
+          });
+        }
+        var si = document.getElementById('xsearch');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        var so = document.getElementById('xsort');
+        if (so) so.addEventListener('change', function () { sortNow(this.value); });
+        document.querySelectorAll('.fchip').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on');
+            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
+          });
+        });
+      })();
+    </script>
+    ${canWrite() ? expenseDrawerScript() : ''}`));
+});
+
+/**
+ * Paid back, or not after all.
+ *
+ * A date rather than a flag: "when" answers questions a yes cannot, and the
+ * settle-up conversation is always about a week, not a boolean.
+ */
+app.post('/c/expenses/:id/reimburse', (req, res) => {
+  if (!canWrite()) return res.status(403).end();
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT id FROM m_expenses WHERE id = ?').get(id);
+  if (!row) return res.status(404).end();
+  const undo = req.body.undo === '1';
+  db.prepare('UPDATE m_expenses SET reimbursed_on = ? WHERE id = ?')
+    .run(undo ? null : isoDate(startOfToday()), id);
+  res.redirect('/c/expenses?msg=' + encodeURIComponent(undo ? 'Marked as still owed.' : 'Marked paid back.'));
+});
+
+/**
+ * The drawer.
+ *
+ * It posts to /c/expenses, which the generic module handler already answers —
+ * it writes every field and stores the receipt. Nothing here is a second copy
+ * of that: the form is the good version of the same form.
+ */
+function expenseDrawer(today) {
+  const names = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
+  return `
+    <div class="drawer-scrim" onclick="expDrawer(false)"></div>
+    <aside class="drawer" id="exp-drawer" aria-label="Log an expense">
+      <div class="drawer-h">
+        <div><div class="drawer-t">Log an expense</div>
+          <div class="drawer-s">Something bought without an invoice.</div></div>
+        <button class="drawer-x" type="button" onclick="expDrawer(false)" aria-label="Close">✕</button>
+      </div>
+      <form method="post" action="/c/expenses" enctype="multipart/form-data" class="drawer-b">
+        <label class="fld">What was bought
+          <input name="name" required placeholder="Bag of ice, Costco run, tap washer"></label>
+        <div class="fld-row">
+          <label class="fld">Amount <input name="amount_cents" type="number" step="0.01" min="0" required placeholder="0.00"></label>
+          <label class="fld">Date <input name="spent_on" type="date" required value="${today}"></label>
+        </div>
+        <div class="fld-row">
+          <label class="fld">Where <input name="where_bought" placeholder="Costco, Home Depot…"></label>
+          <label class="fld">Category <select name="category">
+            ${EXP_CATS.map((c) => `<option${c === 'Groceries' ? ' selected' : ''}>${c}</option>`).join('')}
+          </select></label>
+        </div>
+        <div class="fld-row">
+          ${/* A list rather than a menu: it is usually a member of staff, and
+                sometimes it is you, or a friend of the restaurant who is not
+                in the staff table and never will be. A menu would make those
+                people unrecordable. */''}
+          <label class="fld">Who paid
+            <input name="paid_by" required list="exp-people" placeholder="Name"></label>
+          <label class="fld">Paid with <select name="paid_with">
+            ${EXP_PAID.map((c) => `<option>${c}</option>`).join('')}
+          </select></label>
+        </div>
+        <datalist id="exp-people">${names.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+        <label class="fld">Receipt photo
+          <input name="file" type="file" accept="image/*,application/pdf" capture="environment"></label>
+        <label class="fld">Notes <textarea name="notes" rows="2" placeholder="Optional"></textarea></label>
+        <div class="drawer-f">
+          <button class="btn btn-ghost" type="button" onclick="expDrawer(false)">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save expense</button>
+        </div>
+      </form>
+    </aside>`;
+}
+
+function expenseDrawerScript() {
+  return `<script>
+  function expDrawer(open) {
+    document.body.classList.toggle('drawer-open', !!open);
+    var d = document.getElementById('exp-drawer');
+    if (d && open) { var f = d.querySelector('input[name="name"]'); if (f) setTimeout(function () { f.focus(); }, 120); }
+  }
+  </script>`;
+}
+
 app.get('/c/invoices', (req, res) => {
   const all = invQ.all.all();
   const vendors = invQ.vendors.all();

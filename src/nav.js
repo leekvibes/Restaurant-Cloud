@@ -67,6 +67,7 @@ const SECTIONS = [
   ] },
   { title: 'Purchasing', links: [
     ['/c/invoices', 'invoices', 'Invoices', '#0891b2', 'trackers'],
+    ['/c/expenses', 'cash', 'Expenses', '#b45309', 'trackers'],
     ['/c/vendors', 'vendors', 'Vendors', '#ea580c', 'trackers'],
     ['/c/products', 'par', 'Products', '#ca8a04', 'trackers'],
     ['/menu', 'costs', 'Menu costing', '#7c3aed', 'menu', 'BETA'],

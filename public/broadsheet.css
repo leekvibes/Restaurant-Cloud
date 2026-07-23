@@ -2163,3 +2163,43 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-month-tot { margin-left: auto; }
   .bs-month-go { display: none; }
 }
+
+/* --- expenses -------------------------------------------------------------
+   The same ledger as invoices, one column different: an expense has no status
+   to chase, it has a person who is owed. */
+.bs-exhead, .bs-xr {
+  grid-template-columns: 92px minmax(150px, 1fr) 106px 168px 104px 22px 50px;
+}
+.bs-xr-d { font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums; }
+.bs-xr-w { font-size: 14px; font-weight: 600; color: var(--headline);
+  display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bs-xr-w > u { text-decoration: none; font-weight: 400; font-size: 12px;
+  color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bs-xr-c { font-size: 12.5px; color: var(--muted); }
+.bs-xr-p { font-size: 12.5px; color: var(--secondary);
+  display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* Receipt or no receipt, as one mark. A column of hollow dots is a list of
+   things to photograph before the ink fades. */
+.bs-xr-r { display: flex; align-items: center; justify-content: center; }
+.bs-pip.has { background: var(--positive); }
+.bs-pip.none { background: none; border: 1px solid var(--faint); }
+.bs-tag.ok { color: var(--positive); border-color: var(--positive); }
+
+@media (max-width: 900px) {
+  .bs-exhead { display: none; }
+  .bs-xr {
+    grid-template-columns: auto 1fr auto auto;
+    grid-template-areas:
+      'what what what amt'
+      'date who  cat  rec';
+    gap: 4px 10px; padding: 13px 0;
+  }
+  .bs-xr-w { grid-area: what; }
+  .bs-xr .bs-sr-f { grid-area: amt; font-size: 14px; }
+  .bs-xr-d { grid-area: date; white-space: nowrap; }
+  .bs-xr-p { grid-area: who; min-width: 0; }
+  .bs-xr-c { grid-area: cat; white-space: nowrap; }
+  .bs-xr-r { grid-area: rec; }
+  .bs-xr .bs-sr-e { display: none; }
+}

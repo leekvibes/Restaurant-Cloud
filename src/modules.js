@@ -48,6 +48,36 @@ const MODULES = [
     ],
   },
   {
+    // Money spent outside the invoice flow: the Costco run, a bag of ice, a
+    // part from the hardware shop. An invoice is a bill from a vendor you have
+    // an account with and settle later; this is somebody standing at a till.
+    // The two do not belong in one table — an expense has no vendor, no due
+    // date and no terms, and it usually has something an invoice never does,
+    // which is a person who is now owed their money back.
+    slug: 'expenses', table: 'm_expenses', title: 'Expenses', icon: '🧺',
+    blurb: 'Anything bought outside an invoice — and who is owed for it',
+    orderBy: 'spent_on DESC, id DESC',
+    dateField: null,
+    fields: [
+      { name: 'spent_on', label: 'Date', type: 'date', required: true, list: true },
+      { name: 'name', label: 'What was bought', type: 'text', required: true, list: true },
+      { name: 'where_bought', label: 'Where', type: 'text', list: true },
+      { name: 'category', label: 'Category', type: 'select', list: true,
+        options: ['Groceries', 'Ice', 'Supplies', 'Cleaning', 'Repairs', 'Equipment',
+          'Kitchen', 'Bar', 'Office', 'Travel', 'Other'] },
+      { name: 'amount_cents', label: 'Amount', type: 'money', required: true, list: true },
+      { name: 'paid_by', label: 'Who paid', type: 'text', required: true, list: true },
+      // Whether the restaurant has already parted with the money, or a person
+      // has and is waiting. This is the whole reason "who paid" is worth
+      // recording, so it sits next to it rather than in the notes.
+      { name: 'paid_with', label: 'Paid with', type: 'select',
+        options: ['Their own money', 'Company card', 'Company cash', 'Drawer cash', 'Other'] },
+      { name: 'reimbursed_on', label: 'Paid back on', type: 'date' },
+      { name: 'file', label: 'Receipt photo', type: 'file', list: true },
+      { name: 'notes', label: 'Notes', type: 'textarea' },
+    ],
+  },
+  {
     slug: 'invoices', table: 'm_invoices', title: 'Invoices', icon: '🧾',
     blurb: 'Upload & assign to a vendor',
     orderBy: 'invoice_date DESC, id DESC',

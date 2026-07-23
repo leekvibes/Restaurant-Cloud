@@ -1,0 +1,192 @@
+'use strict';
+
+// Expenses: money that leaves without an invoice behind it.
+//
+// The whole point of the section is the one figure an invoice never has — what
+// the restaurant owes somebody who used their own money. Everything here is
+// driven through the real form, including the receipt upload, because the
+// upload is the part with moving pieces: multipart parsing, a file written to
+// disk, and a filename stored on the row.
+
+const test = require('node:test');
+const assert = require('node:assert');
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const PORT = 3977;
+const BASE = `http://127.0.0.1:${PORT}`;
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-exp-'));
+const DB = path.join(dir, 'exp.db');
+const UPLOADS = path.join(dir, 'uploads');
+let child;
+let Database;
+
+test.before(async () => {
+  Database = require('better-sqlite3');
+  fs.mkdirSync(UPLOADS, { recursive: true });
+  child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: {
+      ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York',
+      ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '', UPLOAD_DIR: UPLOADS,
+    },
+    stdio: 'ignore',
+  });
+  for (let i = 0; i < 80; i++) {
+    try { await fetch(`${BASE}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+});
+
+test.after(() => {
+  if (child) child.kill();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** The drawer's own form: multipart, because it carries a receipt. */
+async function logExpense(fields, receipt) {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+  if (receipt) fd.set('file', new Blob([receipt.bytes], { type: receipt.type }), receipt.name);
+  return fetch(`${BASE}/c/expenses`, { method: 'POST', body: fd, redirect: 'manual' });
+}
+
+const rows = () => {
+  const db = new Database(DB, { readonly: true });
+  const out = db.prepare('SELECT * FROM m_expenses ORDER BY id').all();
+  db.close();
+  return out;
+};
+
+test('the page stands on its own before anything is logged', async () => {
+  const res = await fetch(`${BASE}/c/expenses`);
+  assert.strictEqual(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /Expenses — nothing logged yet/, 'it says what it is');
+  assert.match(html, /Costco run, a bag of ice/, 'and what it is for');
+  // The empty page is the only place to explain the difference from Invoices.
+  assert.match(html, /Log the first expense/, 'with a way in');
+  // Scripts only: the shared theme toggle legitimately compares to `undefined`,
+  // and scanning the whole document caught that instead of anything rendered.
+  const visible = html.replace(/<script[\s\S]*?<\/script>/g, '');
+  assert.ok(!/\$NaN|undefined|Infinity|\bnull\b/.test(visible),
+    'no arithmetic on an empty set leaks into the page');
+});
+
+test('a bag of ice, paid for out of somebody pocket, with the receipt', async () => {
+  // A real PNG header, so the file written to disk is a file and the row's
+  // extension is one the page will render as an image.
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+  const res = await logExpense({
+    name: 'Two bags of ice', where_bought: 'Costco', category: 'Ice',
+    amount_cents: '12.48', spent_on: '2026-07-20',
+    paid_by: 'Rosa Diaz', paid_with: 'Their own money', notes: 'Machine was down',
+  }, { bytes: png, name: 'receipt.png', type: 'image/png' });
+  assert.strictEqual(res.status, 302);
+
+  const [r] = rows();
+  assert.ok(r, 'the expense was stored');
+  assert.strictEqual(r.name, 'Two bags of ice');
+  assert.strictEqual(r.where_bought, 'Costco');
+  assert.strictEqual(r.paid_by, 'Rosa Diaz');
+  assert.strictEqual(r.spent_on, '2026-07-20');
+  // Money is integer cents everywhere in this app, and the form types dollars.
+  assert.strictEqual(r.amount_cents, 1248, 'dollars typed in, cents stored');
+  assert.strictEqual(r.reimbursed_on, null, 'nobody has paid her back yet');
+
+  assert.ok(r.file, 'the receipt filename is on the row');
+  const onDisk = path.join(UPLOADS, r.file);
+  assert.ok(fs.existsSync(onDisk), `the receipt is on disk at ${onDisk}`);
+  assert.deepStrictEqual(fs.readFileSync(onDisk), png, 'and it is the bytes that were sent');
+
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(html, /Two bags of ice/, 'it is on the page');
+  assert.match(html, /\$12\.48/, 'at what it cost');
+  assert.match(html, new RegExp(`/uploads/${r.file}`), 'and the receipt is reachable from it');
+});
+
+test('what the restaurant owes is only what somebody fronted', async () => {
+  // Same money, three ways of paying it. Only one of them leaves a person out
+  // of pocket, and the headline figure has to know the difference — otherwise
+  // it is just a second copy of total spend.
+  await logExpense({ name: 'Sanitiser', amount_cents: '40.00', spent_on: '2026-07-21',
+    paid_by: 'Ana Ortiz', paid_with: 'Company card', category: 'Cleaning' });
+  await logExpense({ name: 'Tap washer', amount_cents: '7.52', spent_on: '2026-07-21',
+    paid_by: 'Joseph', paid_with: 'Their own money', category: 'Repairs' });
+  await logExpense({ name: 'Bin bags', amount_cents: '18.00', spent_on: '2026-07-21',
+    paid_by: 'Ana Ortiz', paid_with: 'Drawer cash', category: 'Supplies' });
+
+  const all = rows();
+  const spent = all.reduce((a, r) => a + r.amount_cents, 0);
+  const owed = all.filter((r) => r.paid_with === 'Their own money' && !r.reimbursed_on)
+    .reduce((a, r) => a + r.amount_cents, 0);
+  assert.strictEqual(spent, 7800, 'four expenses, $78.00 spent');
+  assert.strictEqual(owed, 2000, 'but only the two paid personally are owed back');
+
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(html, /\$20\.00 owed back/, 'the headline names what is owed, not what was spent');
+  assert.ok(!/\$78\.00 owed back/.test(html), 'company money is not a debt to anybody');
+  // The name you settle up with first.
+  assert.match(html, /most to (Rosa Diaz|Joseph)/, 'and says who is owed the most');
+});
+
+test('marking one paid back settles that one and no other', async () => {
+  const before = rows().filter((r) => r.paid_with === 'Their own money' && !r.reimbursed_on);
+  assert.strictEqual(before.length, 2, 'two people are out of pocket — the precondition');
+  const target = before[0];
+
+  const res = await fetch(`${BASE}/c/expenses/${target.id}/reimburse`, { method: 'POST', redirect: 'manual' });
+  assert.strictEqual(res.status, 302);
+
+  const after = rows();
+  const settled = after.find((r) => r.id === target.id);
+  assert.ok(settled.reimbursed_on, 'it carries the date it was settled, not just a yes');
+  assert.match(settled.reimbursed_on, /^\d{4}-\d{2}-\d{2}$/, 'as a date');
+  assert.strictEqual(settled.amount_cents, target.amount_cents, 'and settling did not touch the money');
+
+  const stillOwed = after.filter((r) => r.paid_with === 'Their own money' && !r.reimbursed_on);
+  assert.strictEqual(stillOwed.length, 1, 'the other person is still owed');
+  assert.notStrictEqual(stillOwed[0].id, target.id);
+
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const owed = after.filter((r) => r.paid_with === 'Their own money' && !r.reimbursed_on)
+    .reduce((a, r) => a + r.amount_cents, 0);
+  assert.match(html, new RegExp(`\\$${(owed / 100).toFixed(2)} owed back`),
+    'and the headline came down by exactly the one that was settled');
+});
+
+test('settling can be taken back', async () => {
+  const settled = rows().find((r) => r.reimbursed_on);
+  assert.ok(settled, 'something is settled — the precondition');
+
+  const fd = new URLSearchParams({ undo: '1' });
+  await fetch(`${BASE}/c/expenses/${settled.id}/reimburse`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: fd.toString(),
+  });
+  const after = rows().find((r) => r.id === settled.id);
+  assert.strictEqual(after.reimbursed_on, null, 'it is owed again');
+});
+
+test('an expense is not an invoice, and does not turn up as one', async () => {
+  // Two tables, two pages, and no leakage: an invoice on the expenses page (or
+  // the reverse) would double-count everything the restaurant spends.
+  const db = new Database(DB, { readonly: true });
+  const invoices = db.prepare('SELECT COUNT(*) n FROM m_invoices').get().n;
+  db.close();
+  assert.strictEqual(invoices, 0, 'nothing was written to invoices');
+
+  const inv = await (await fetch(`${BASE}/c/invoices`)).text();
+  assert.ok(!/Two bags of ice/.test(inv), 'and no expense appears on the invoice ledger');
+});
+
+test('the receipt column says which ones still need photographing', async () => {
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  const withFile = rows().filter((r) => r.file).length;
+  const without = rows().length - withFile;
+  assert.ok(without > 0 && withFile > 0, 'there is one of each — the precondition');
+  assert.match(html, new RegExp(`No receipt</span><span class="bs-stat[^"]*">${without}<`),
+    'the strip counts the ones with no photo');
+  assert.strictEqual((html.match(/bs-pip none/g) || []).length, without, 'and marks each of them');
+  assert.strictEqual((html.match(/bs-pip has/g) || []).length, withFile, 'and the ones that have one');
+});
