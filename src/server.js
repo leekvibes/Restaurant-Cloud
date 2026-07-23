@@ -5896,29 +5896,31 @@ function matchVendor(name) {
 function invoicePanel(r, vName) {
   const ai = aiBadge(r);
   const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
+  const fact = (l, v) => `<div class="bs-ivf"><span>${l}</span><b>${v}</b></div>`;
+  const none = '<i class="bs-em">—</i>';
   return `
-        <div class="inv-open">
-          <div class="inv-openl">
-            <a class="ithumb${r.file ? '' : ' ithumb-none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''}>
+        <div class="bs-ivx">
+          <div class="bs-ivl">
+            <a class="bs-ivthumb${r.file ? '' : ' none'}" ${r.file ? `href="/uploads/${esc(r.file)}" target="_blank"` : ''}>
               ${isImg ? `<img src="/uploads/${esc(r.file)}" alt="">` : icon(r.file ? 'invoices' : 'documents')}
             </a>
-            <span class="aibadge ${ai.cls}" title="${esc(ai.title)}">${ai.label}</span>
+            <span class="bs-tag ${ai.cls === 'ai-check' ? 'warn' : ''}" title="${esc(ai.title)}">${ai.label}</span>
           </div>
-          <div class="inv-openr">
-            <div class="inv-grid">
-              <div class="tfact"><span>Invoice #</span><b>${r.invoice_number ? esc(r.invoice_number) : '<i class="unset">none</i>'}</b></div>
-              <div class="tfact"><span>Subtotal</span><b>${r.subtotal_cents ? money(r.subtotal_cents) : '<i class="unset">—</i>'}</b></div>
-              <div class="tfact"><span>Tax</span><b>${r.tax_cents ? money(r.tax_cents) : '<i class="unset">—</i>'}</b></div>
-              <div class="tfact"><span>Due</span><b>${r.due_date ? esc(niceDate(r.due_date)) : '<i class="unset">—</i>'}</b></div>
-              <div class="tfact"><span>Paid by</span><b>${r.payment_method ? esc(r.payment_method) : '<i class="unset">—</i>'}</b></div>
+          <div class="bs-ivr">
+            <div class="bs-ivgrid">
+              ${fact('Invoice #', r.invoice_number ? esc(r.invoice_number) : none)}
+              ${fact('Subtotal', r.subtotal_cents ? money(r.subtotal_cents) : none)}
+              ${fact('Tax', r.tax_cents ? money(r.tax_cents) : none)}
+              ${fact('Due', r.due_date ? esc(niceDate(r.due_date)) : none)}
+              ${fact('Paid by', r.payment_method ? esc(r.payment_method) : none)}
             </div>
-            ${r.notes ? `<div class="inv-notes">${esc(r.notes)}</div>` : ''}
-            <div class="inv-acts">
+            ${r.notes ? `<div class="bs-ivnote">${esc(r.notes)}</div>` : ''}
+            <div class="bs-ivacts">
               <form method="post" action="/c/invoices/${r.id}/status" style="margin:0">
                 <input type="hidden" name="status" value="${r.status === 'Paid' ? 'Unpaid' : 'Paid'}">
-                <button class="btn btn-sm ${r.status === 'Paid' ? 'btn-ghost' : 'btn-primary'}" type="submit">${r.status === 'Paid' ? 'Mark unpaid' : 'Mark paid'}</button>
+                <button class="${r.status === 'Paid' ? 'bs-btn-sm' : 'bs-btn'}" type="submit">${r.status === 'Paid' ? 'Mark unpaid' : 'Mark paid'}</button>
               </form>
-              <a class="btn btn-sm" href="/c/invoices/${r.id}/edit">Edit</a>
+              <a class="bs-btn-sm" href="/c/invoices/${r.id}/edit">Edit</a>
               ${/* The only product-related thing on the invoice page: a way out
                     to the import screen. The lines themselves stay off here —
                     an invoice is an accounting record.
@@ -5936,13 +5938,13 @@ function invoicePanel(r, vName) {
                   // anything, so a re-match still sees it as outstanding and
                   // the button would ask about it again for good.
                   const left = needsProductReview(r) ? pendingOnInvoice(r) : 0;
-                  if (left) return `<a class="btn btn-sm btn-primary" href="/c/invoices/${r.id}/import">Review ${left} product line${left === 1 ? '' : 's'}</a>`;
+                  if (left) return `<a class="bs-btn" href="/c/invoices/${r.id}/import">Review ${left} product line${left === 1 ? '' : 's'}</a>`;
                   const bought = prodQ.purchasesForInvoice.all(r.id).length;
-                  return `<a class="btn btn-sm btn-ghost" href="/c/invoices/${r.id}/import">${bought ? 'Products imported ✓' : 'No products to import'}</a>`;
+                  return `<a class="bs-act bs-ivdone" href="/c/invoices/${r.id}/import">${bought ? 'Products imported ✓' : 'No products to import'}</a>`;
                 })()}
-              ${r.file ? `<a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" target="_blank">Open original</a>
-                          <a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
-              ${r.vendor_id ? `<a class="btn btn-sm btn-ghost" href="/c/vendors/${Number(r.vendor_id)}">Vendor</a>` : ''}
+              ${r.file ? `<a class="bs-act" href="/uploads/${esc(r.file)}" target="_blank">Open original →</a>
+                          <a class="bs-act" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
+              ${r.vendor_id ? `<a class="bs-act" href="/c/vendors/${Number(r.vendor_id)}">Vendor →</a>` : ''}
             </div>
           </div>
         </div>`;
@@ -6026,17 +6028,22 @@ app.get('/c/invoices', (req, res) => {
   const overdue = stAll.filter((x) => x.s.key === 'overdue');
   const yearSpend = rows.reduce((a, r) => a + (r.amount_cents || 0), 0);
 
-  const card = (tone, ico, label, value, sub) => `
-    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
-      <div class="mcard-body"><div class="mcard-label">${label}</div>
-        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div></div>`;
+  // Four figures on one ruled band, the way Sales and Shifts read. The tinted
+  // icon cards said "dashboard"; this page is a ledger and should look like
+  // one. Colour is meaning here and nothing else: outstanding money is amber
+  // only while it is outstanding, overdue is red only while something is.
+  const brief = (cents) => (Math.abs(cents) >= 100000
+    ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
+  const statCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
-  const cards = `<div class="mcards">
-    ${card('blue', 'invoices', 'Spend this month', money(spendMonth), MONTH_NAMES[Number(thisMonth.slice(5, 7)) - 1] + ' ' + thisMonth.slice(0, 4))}
-    ${card('amber', 'expirations', 'Outstanding', money(unpaid.reduce((a, x) => a + (x.r.amount_cents || 0), 0)), unpaid.length ? `${unpaid.length} unpaid` : 'All settled')}
-    ${card('red', 'incidents', 'Overdue', String(overdue.length), overdue.length ? esc(vName.get(Number(overdue[0].r.vendor_id)) || 'Unknown vendor') : 'Nothing past due')}
-    ${card('green', 'payroll', `Spend in ${esc(year)}`, money(yearSpend), `${rows.length} invoice${rows.length === 1 ? '' : 's'}`)}
-  </div>`;
+  const outstanding = unpaid.reduce((a, x) => a + (x.r.amount_cents || 0), 0);
+  const strip = `<section class="bs-panel bs-strip">
+    ${statCell('Spend this month', brief(spendMonth), MONTH_NAMES[Number(thisMonth.slice(5, 7)) - 1] + ' ' + thisMonth.slice(0, 4))}
+    ${statCell('Outstanding', brief(outstanding), unpaid.length ? `${unpaid.length} unpaid` : 'All settled', outstanding ? 'warn' : 'ok')}
+    ${statCell('Overdue', String(overdue.length), overdue.length ? esc(vName.get(Number(overdue[0].r.vendor_id)) || 'Unknown vendor') : 'Nothing past due', overdue.length ? 'bad' : 'ok')}
+    ${statCell(`Spend in ${esc(year)}`, brief(yearSpend), `${rows.length} invoice${rows.length === 1 ? '' : 's'}`)}
+  </section>`;
 
   // --- month groups -------------------------------------------------------
   const byMonth = new Map();
@@ -6064,41 +6071,48 @@ app.get('/c/invoices', (req, res) => {
       const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
       const search = [vn, r.invoice_number, r.category, r.notes, ((r.amount_cents || 0) / 100).toFixed(2)]
         .filter(Boolean).join(' ').toLowerCase();
+      const rev = needsProductReview(r);
       return `
-      <details class="inv" data-inv data-id="${r.id}" data-status="${s.key}" data-cat="${esc(r.category || 'Other')}"
+      <details class="bs-srow bs-invrow" data-inv data-id="${r.id}" data-status="${s.key}" data-cat="${esc(r.category || 'Other')}"
         data-vendor="${esc(String(r.vendor_id || ''))}" data-amt="${(r.amount_cents || 0) / 100}"
         data-date="${esc(r.invoice_date || '')}" data-due="${esc(r.due_date || '')}"
         data-vname="${esc(vn.toLowerCase())}" data-added="${esc(String(r.created_at || ''))}"
-        data-search="${esc(search)}" data-review="${needsProductReview(r) ? '1' : '0'}"
-        style="--c:${c.color};--ct:${c.tint}">
-        <summary class="inv-row">
-          <span class="inv-dot"></span>
-          <span class="inv-vendor">${esc(vn)}</span>
-          <span class="inv-cat">${esc(r.category || 'Other')}</span>
-          <span class="tstatus ${s.cls} inv-st">${esc(s.label)}</span>
-          <span class="inv-date">${esc(niceDate(r.invoice_date))}</span>
-          <span class="inv-amt">${money(r.amount_cents || 0)}</span>
+        data-search="${esc(search)}" data-review="${rev ? '1' : '0'}"
+        style="--c:${c.color}">
+        <summary class="bs-sr bs-ir">
+          <span class="bs-ir-v"><i class="bs-catdot"></i>${esc(vn)}${r.invoice_number ? `<u>${esc(r.invoice_number)}</u>` : ''}</span>
+          <span class="bs-ir-c">${esc(r.category || 'Other')}</span>
+          ${/* invStatus carries both a key and a class; the key is the one with
+                 the four values worth colouring. Two tags fit here and the row
+                 then stands two lines tall, which breaks the rhythm the ledger
+                 is for — so only the actionable one rides along, and the AI's
+                 own confidence stays in the panel where it can be read. */''}
+          <span class="bs-ir-t ${s.key}"><i class="bs-pip ${s.key}"></i>${esc(s.label)}${
+            rev ? '<i class="bs-tag rev">review</i>' : ''}</span>
+          <span class="bs-ir-d">${esc(niceDate(r.invoice_date))}</span>
+          <span class="bs-sr-f">${money(r.amount_cents || 0)}</span>
+          <span class="bs-sr-e">Open</span>
         </summary>
-        <div class="inv-lazy"><div class="inv-spin"></div></div>
+        <div class="inv-lazy"><div class="bs-loading">Loading…</div></div>
       </details>`;
     }).join('');
 
     // Only the newest month opens by default — an accountant scrolling 2024
     // wants the headline figures, not 60 rows they have to scroll past.
     return `
-      <details class="mgroup" data-month${idx === 0 ? ' open' : ''}>
-        <summary class="mgroup-h">
-          <span class="mgroup-chev">▸</span>
-          <span class="mgroup-name">${esc(label)}</span>
-          <span class="mgroup-stats">
-            <span>${list.length} invoice${list.length === 1 ? '' : 's'}</span>
-            <span class="mg-total">${money(total)}</span>
-            <span class="mg-paid">${paid} paid</span>
-            ${out ? `<span class="mg-out">${out} outstanding</span>` : ''}
-            ${over ? `<span class="mg-over">${over} overdue</span>` : ''}
-          </span>
+      <details class="bs-month" data-month${idx === 0 ? ' open' : ''}>
+        <summary class="bs-month-h">
+          <span class="bs-kicker">${esc(label)}</span>
+          <span class="bs-month-meta">${list.length} invoice${list.length === 1 ? '' : 's'}
+            ${over ? `· <b class="warn">${over} overdue</b>` : out ? `· <b>${out} outstanding</b>` : '· <b class="ok">all paid</b>'}</span>
+          <span class="bs-month-tot"><b>${money(total)}</b></span>
+          <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
         </summary>
-        <div class="invs">${items}</div>
+        <div class="bs-shead bs-invhead">
+          <span>Vendor</span><span>Category</span><span>Status</span><span>Date</span>
+          <span class="r">Amount</span><span></span>
+        </div>
+        <div class="bs-srows invs">${items}</div>
       </details>`;
   }).join('');
 
@@ -6107,67 +6121,102 @@ app.get('/c/invoices', (req, res) => {
   const usedCats = [...new Set(rows.map((r) => r.category || 'Other'))];
   const usedVendors = vendors.filter((v) => rows.some((r) => Number(r.vendor_id) === Number(v.id)));
 
+  // Search and the four quick verdicts stay on the page — those are the ones
+  // reached constantly. Everything that narrows further goes in the sheet, the
+  // same disclosure Sales uses: eleven controls in a row was a control panel,
+  // and a control panel is what you build when you cannot decide what matters.
+  // Every id and data- hook is unchanged, so the filtering script never learns
+  // the furniture moved.
   const toolbar = `
-    <div class="yearbar">
-      ${years.map((y) => `<a class="ytab${y === year ? ' on' : ''}" href="/c/invoices?y=${y}">${y}</a>`).join('')}
-      ${years.length ? '' : `<span class="ytab on">${esc(year)}</span>`}
-    </div>
-    <div class="toolbar2">
-      <div class="searchbox">${icon('search')}
+    <div class="bs-tools">
+      <div class="bs-isearch">${icon('search')}
         <input id="isearch" type="search" placeholder="Vendor, invoice #, notes, amount…" autocomplete="off"></div>
-      <select id="isort" class="minisel">
-        <option value="date-desc">Newest first</option>
-        <option value="date-asc">Oldest first</option>
-        <option value="amt-desc">Amount, high to low</option>
-        <option value="amt-asc">Amount, low to high</option>
-        <option value="vendor">Vendor A–Z</option>
-        <option value="due">Due date</option>
-        <option value="added">Recently uploaded</option>
-      </select>
-      <select id="ivendor" class="minisel">
-        <option value="">All vendors</option>
-        ${usedVendors.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
-      </select>
-      <select id="iamt" class="minisel">
-        <option value="">Any amount</option>
-        <option value="0-100">Under $100</option>
-        <option value="100-500">$100 – $500</option>
-        <option value="500-1000">$500 – $1,000</option>
-        <option value="1000-999999">Over $1,000</option>
-      </select>
-    </div>
-    <div class="fchips">
-      <button class="fchip on" data-f="all" data-v="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
-      <button class="fchip" data-f="status" data-v="unpaid" style="--c:#d97706;--ct:#fffbeb"><i class="fdot"></i>Unpaid</button>
-      <button class="fchip" data-f="status" data-v="overdue" style="--c:#dc2626;--ct:#fef2f2"><i class="fdot"></i>Overdue</button>
-      <button class="fchip" data-f="status" data-v="paid" style="--c:#059669;--ct:#ecfdf5"><i class="fdot"></i>Paid</button>
-      ${needsReview ? `<button class="fchip" data-f="review" data-v="1" style="--c:#7c3aed;--ct:#f5f3ff"><i class="fdot"></i>Needs product review<span class="fcount">${needsReview}</span></button>` : ''}
-      ${usedCats.map((c) => { const cc = invCat(c); return `<button class="fchip" data-f="cat" data-v="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}"><i class="fdot"></i>${esc(c)}</button>`; }).join('')}
+      <div class="bs-quick">
+        <button class="fchip on" data-f="all" data-v="">All <b>${rows.length}</b></button>
+        <button class="fchip" data-f="status" data-v="unpaid"><i class="bs-pip unpaid"></i>Unpaid</button>
+        <button class="fchip" data-f="status" data-v="overdue"><i class="bs-pip overdue"></i>Overdue</button>
+        <button class="fchip" data-f="status" data-v="paid"><i class="bs-pip paid"></i>Paid</button>
+        ${needsReview ? `<button class="fchip" data-f="review" data-v="1"><i class="bs-pip rev"></i>To review <b>${needsReview}</b></button>` : ''}
+      </div>
+      <details class="fsheet" id="invfilter">
+        <summary class="fs-btn">Sort &amp; filter <span class="fs-caret">▾</span></summary>
+        <div class="fs-body">
+          <div class="fs-scrim" aria-hidden="true"></div>
+          <div class="fs-panel">
+            <div class="fs-h">Year</div>
+            <div class="fs-opts">
+              ${years.length ? years.map((y) => `<a class="fs-o${y === year ? ' on' : ''}" href="/c/invoices?y=${y}">${y}</a>`).join('')
+                : `<span class="fs-o on">${esc(year)}</span>`}
+            </div>
+            <div class="fs-h">Sort</div>
+            <select id="isort" class="bs-sel">
+              <option value="date-desc">Newest first</option>
+              <option value="date-asc">Oldest first</option>
+              <option value="amt-desc">Amount, high to low</option>
+              <option value="amt-asc">Amount, low to high</option>
+              <option value="vendor">Vendor A–Z</option>
+              <option value="due">Due date</option>
+              <option value="added">Recently uploaded</option>
+            </select>
+            <div class="fs-h">Vendor</div>
+            <select id="ivendor" class="bs-sel">
+              <option value="">All vendors</option>
+              ${usedVendors.map((v) => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
+            </select>
+            <div class="fs-h">Amount</div>
+            <select id="iamt" class="bs-sel">
+              <option value="">Any amount</option>
+              <option value="0-100">Under $100</option>
+              <option value="100-500">$100 – $500</option>
+              <option value="500-1000">$500 – $1,000</option>
+              <option value="1000-999999">Over $1,000</option>
+            </select>
+            ${usedCats.length ? `<div class="fs-h">Category</div>
+            <div class="fs-opts">
+              ${usedCats.map((c) => `<button class="fs-o fchip" type="button" data-f="cat" data-v="${esc(c)}">${esc(c)}</button>`).join('')}
+            </div>` : ''}
+          </div>
+        </div>
+      </details>
     </div>`;
 
   const body = rows.length ? monthBlocks : (all.length
-    ? `<div class="empty2"><div class="empty2-t">No invoices in ${esc(year)}</div><div class="empty2-s">Pick another year above.</div></div>`
-    : `<div class="upload-hero">
-        <div class="uh-ico">${icon('invoices')}</div>
-        <div class="uh-t">No invoices yet</div>
-        <div class="uh-s">${canWrite()
-          ? 'Photograph an invoice and it fills itself in — vendor, dates, amounts and category — so you only check the numbers.'
-          : 'Once the owner uploads invoices, they show up here.'}</div>
-        ${canWrite() ? `<button class="btn btn-primary btn-lg" type="button" onclick="invDrawer(true)">＋ Upload your first invoice</button>` : ''}
-        ${canWrite() ? `<div class="uh-ways"><span>Take a photo</span><span>Upload a PDF</span><span>Drag &amp; drop</span></div>` : ''}
+    ? `<div class="bs-blank"><b>No invoices in ${esc(year)}</b><span>Pick another year in Sort &amp; filter.</span></div>`
+    : `<div class="bs-hero">
+        <div class="bs-hero-k">Nothing on file yet</div>
+        <h2 class="bs-hero-t">Photograph an invoice and it fills itself in.</h2>
+        <p class="bs-hero-s">${canWrite()
+          ? 'Vendor, dates, amounts and category are read for you — you only check the numbers. The original stays attached to the record.'
+          : 'Once the owner uploads invoices, they show up here.'}</p>
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="invDrawer(true)">Add the first invoice</button>
+        <div class="bs-hero-w"><span>Take a photo</span><span>Upload a PDF</span><span>Drag &amp; drop</span></div>` : ''}
       </div>`);
+
+  // The page names itself in the largest thing on it and then says what the
+  // year came to — the same shape as "Sales — $X rung".
+  const headline = all.length
+    ? `Invoices — ${brief(yearSpend)} billed in ${esc(year)}${overdue.length
+        ? `, <span class="warn">${overdue.length} overdue</span>.` : unpaid.length
+        ? `, ${unpaid.length} still to pay.` : ', all settled.'}`
+    : 'Invoices — nothing on file yet.';
 
   res.send(layout('Invoices', `
     ${flash(req)}
-    <div class="phead">
-      <div class="phead-t"><h1>Invoices</h1>
-        <p class="phead-s">${canWrite() ? 'Photograph or drop an invoice — it reads the details for you.' : 'Every invoice on file, with the original attached.'}</p></div>
-      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="invDrawer(true)">＋ Upload invoice</button>` : ''}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">${headline}</h1>
+          <p class="bs-subline">${canWrite()
+            ? 'Photograph or drop an invoice and it reads the details for you. What you buy is on <a class="bs-act" href="/c/products">Products</a>.'
+            : 'Every invoice on file, with the original attached.'}</p>
+        </div>
+        ${canWrite() ? `<button class="bs-btn" type="button" onclick="invDrawer(true)">Add invoice</button>` : ''}
+      </div>
+      ${all.length ? strip : ''}
+      ${all.length ? toolbar : ''}
+      ${body}
+      <div class="bs-blank" id="inone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
     </div>
-    ${all.length ? cards : ''}
-    ${all.length ? toolbar : ''}
-    ${body}
-    <div class="empty2" id="inone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or filter.</div></div>
     ${canWrite() ? invoiceDrawer(vendors, today) : ''}
     <script>
       // Filters combine, and sorting reorders within each month rather than
@@ -7686,11 +7735,11 @@ app.get('/c/invoices/:id/import', (req, res) => {
 
   const head = `
     ${flash(req)}
-    <div class="phead">
-      <div class="phead-t">
-        <a class="link back" href="/c/invoices">← Invoices</a>
-        <h1>Import products</h1>
-        <p class="phead-s">${esc(vName.get(Number(inv.vendor_id)) || 'Invoice')}${inv.invoice_number ? ' · ' + esc(inv.invoice_number) : ''}${inv.invoice_date ? ' · ' + esc(inv.invoice_date) : ''}</p>
+    <div class="bs-head bs-ihead">
+      <div class="bs-headwrap">
+        <a class="bs-act bs-back" href="/c/invoices">← Invoices</a>
+        <h1 class="bs-headline">Import products</h1>
+        <p class="bs-subline">${esc(vName.get(Number(inv.vendor_id)) || 'Invoice')}${inv.invoice_number ? ' · ' + esc(inv.invoice_number) : ''}${inv.invoice_date ? ' · ' + esc(inv.invoice_date) : ''}</p>
       </div>
     </div>`;
 
@@ -7702,24 +7751,24 @@ app.get('/c/invoices/:id/import', (req, res) => {
   const outstanding = gAll.review.length + gAll.likelyNew.length;
 
   if (!outstanding && already.length) {
-    return res.send(layout('Import products', `${head}
-      <div class="attn attn-ok"><div class="attn-h">${icon('policy')} All products imported</div>
-        <p>${already.length} line${already.length === 1 ? '' : 's'} from this invoice ${already.length === 1 ? 'is' : 'are'} in your product history. Nothing else needs a decision.</p></div>
-      <div class="table-wrap"><table class="table">
+    return res.send(layout('Import products', `<div class="bs-page">${head}
+      <div class="bs-note ok"><b>All products imported</b>
+        <span>${already.length} line${already.length === 1 ? '' : 's'} from this invoice ${already.length === 1 ? 'is' : 'are'} in your product history. Nothing else needs a decision.</span></div>
+      <div class="table-wrap"><table class="table bs-table">
         <thead><tr><th>Product</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
         <tbody>${already.map((a) => `<tr><td><a href="/c/products/${a.product_id}">${esc(a.name)}</a></td>
           <td class="num">${a.qty || '—'}</td><td class="num">${a.unit_price_cents ? money(a.unit_price_cents) : '—'}</td>
           <td class="num">${money(a.total_cents)}</td></tr>`).join('')}</tbody></table></div>
-      <form method="post" action="/c/invoices/${inv.id}/import/undo" class="danger-zone"
+      <form method="post" action="/c/invoices/${inv.id}/import/undo" class="bs-undo"
         onsubmit="return confirm('Remove these purchases from your product history?')">
-        <button class="btn btn-danger btn-sm" type="submit">Undo this import</button></form>`));
+        <button class="bs-btn-sm bs-danger" type="submit">Undo this import</button></form></div>`));
   }
 
   if (!outstanding) {
-    return res.send(layout('Import products', `${head}
-      <div class="empty2"><div class="empty2-t">${allRows.length ? 'Nothing left to decide' : 'No line items on this invoice'}</div>
-        <div class="empty2-s">The reader either couldn't make out the item table, or this invoice was entered by hand. You can still add purchases from a product's own page.</div>
-        <a class="btn" href="/c/products">Go to Products</a></div>`));
+    return res.send(layout('Import products', `<div class="bs-page">${head}
+      <div class="bs-blank"><b>${allRows.length ? 'Nothing left to decide' : 'No line items on this invoice'}</b>
+        <span>The reader either couldn't make out the item table, or this invoice was entered by hand. You can still add purchases from a product's own page.</span>
+        <a class="bs-btn-sm" href="/c/products" style="margin-top:14px">Go to Products</a></div></div>`));
   }
 
   const g = gAll;
@@ -7828,13 +7877,15 @@ app.get('/c/invoices/:id/import', (req, res) => {
   ].join('');
 
   const ask = g.review.length;
-  res.send(layout('Import products', `${head}
-    <div class="attn ${ask ? 'attn-soft' : 'attn-ok'}"><div class="attn-h">${icon('invoices')} ${
+  res.send(layout('Import products', `<div class="bs-page">${head}
+    ${/* Green means finished. Lines still waiting are not finished, so the
+           no-uncertain-lines case is plain rather than reassuring. */''}
+    <div class="bs-note${ask ? ' ask' : ''}"><b>${
       ask ? `${ask} line${ask === 1 ? '' : 's'} need${ask === 1 ? 's' : ''} your decision`
-          : `${rows.length} line${rows.length === 1 ? '' : 's'} left to import`}</div>
-      <p>${already.length ? `${already.length} confident line${already.length === 1 ? ' was' : 's were'} imported automatically when you saved. ` : ''}${
+          : `${rows.length} line${rows.length === 1 ? '' : 's'} left to import`}</b>
+      <span>${already.length ? `${already.length} confident line${already.length === 1 ? ' was' : 's were'} imported automatically when you saved. ` : ''}${
         g.likelyNew.length ? `${g.likelyNew.length} look${g.likelyNew.length === 1 ? 's' : ''} new — tick the ones you want. ` : ''}${
-        skipped ? `${skipped} look${skipped === 1 ? 's' : ''} like a charge and will be skipped. ` : ''}Nothing is saved until you press Import.</p></div>
+        skipped ? `${skipped} look${skipped === 1 ? 's' : ''} like a charge and will be skipped. ` : ''}Nothing is saved until you press Import.</span></div>
     <form method="post" action="/c/invoices/${inv.id}/import" id="importform">
       <input type="hidden" name="count" value="${rows.length}">
       <input type="hidden" name="idx" value="${rows.map((r) => r.i).join(',')}">
@@ -7855,6 +7906,7 @@ app.get('/c/invoices/:id/import', (req, res) => {
         </div>
       </div>
     </form>
+    </div>
     ${importScript()}`));
 });
 

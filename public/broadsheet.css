@@ -1777,3 +1777,389 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-chip-c { font-size: 9px; color: var(--faint); }
 .bs-acct[open] .bs-chip { border-color: var(--ink); }
 .bs-inline-note { margin: -6px 0 12px; font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 62ch; }
+
+/* ===========================================================================
+   INVOICES — the ledger
+   ---------------------------------------------------------------------------
+   An invoice list is a ledger, so it wears the ledger's shape: the same
+   .bs-shead / .bs-sr grid the sales day list and the staff sheet use, ruled
+   rather than boxed. What it replaced was four tinted icon cards over a row of
+   coloured pills — a dashboard costume on a page whose whole job is a column
+   of figures you scan down.
+   ======================================================================== */
+
+/* Vendor, category, status, date, amount, edge. Vendor takes the slack: it is
+   the only column whose content has no natural width, and it is what anyone
+   scanning is scanning for. */
+.bs-invhead, .bs-ir {
+  grid-template-columns: minmax(150px, 1fr) 104px 178px 92px 106px 50px;
+}
+
+.bs-ir-v { font-size: 14px; font-weight: 600; color: var(--headline);
+  display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bs-ir-v > u { text-decoration: none; font-weight: 400; font-family: var(--mono);
+  font-size: 11px; color: var(--faint); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.bs-ir-c, .bs-ir-d { font-size: 12.5px; color: var(--muted); }
+.bs-ir-d { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.bs-ir-t { font-size: 12.5px; color: var(--secondary);
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+/* The category's colour, reduced to the smallest mark that still carries it.
+   The old row wore the category as a tinted background and a coloured left
+   edge, which meant twelve categories painted twelve different rows and the
+   status — the thing you actually act on — competed with all of them. */
+.bs-catdot { width: 7px; height: 7px; flex: none; border-radius: 50%;
+  background: var(--c, var(--faint)); }
+
+/* Status reads by colour AND by word, never colour alone. */
+.bs-pip { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--faint); }
+.bs-pip.paid, .bs-pip.ok { background: var(--positive); }
+.bs-pip.unpaid, .bs-pip.due, .bs-pip.soon { background: var(--warning); }
+.bs-pip.overdue, .bs-pip.bad { background: var(--danger); }
+.bs-pip.rev { background: var(--accent); }
+
+.bs-tag.rev { color: var(--accent); border-color: var(--accent); }
+/* The word carries the state as well as the dot — colour alone is not a label. */
+.bs-ir-t.overdue { color: var(--danger); }
+.bs-ir-t.due { color: var(--warning); }
+.bs-stat.warn { color: var(--warning); }
+
+/* --- the tool band -------------------------------------------------------- */
+.bs-isearch { position: relative; flex: 1; min-width: 190px; display: flex; align-items: center; }
+.bs-isearch svg { position: absolute; left: 10px; width: 15px; height: 15px; color: var(--faint); pointer-events: none; }
+.bs-isearch input {
+  width: 100%; padding: 8px 12px 8px 32px;
+  border: 1px solid var(--field-border); border-radius: 0; background: var(--surface);
+  font-family: var(--sans); font-size: 13px; color: var(--ink);
+}
+.bs-isearch input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+.bs-quick { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+/* Square, hairline, ink — the pill version belongs to the old shell. */
+.bs .fchip {
+  border-radius: 0; padding: 7px 12px; gap: 6px;
+  border: 1px solid var(--field-border); background: transparent;
+  font-family: var(--sans); font-size: 12.5px; color: var(--secondary);
+}
+.bs .fchip:hover { border-color: var(--ink-2); color: var(--ink); }
+.bs .fchip b { font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--faint); }
+.bs .fchip.on { background: var(--ink); border-color: var(--ink); color: var(--btn-ink); }
+.bs .fchip.on b { color: var(--btn-ink); opacity: .65; }
+.bs .fchip.on .bs-pip { box-shadow: 0 0 0 1px var(--btn-ink); }
+
+.bs-sel {
+  width: 100%; padding: 8px 11px; border: 1px solid var(--field-border);
+  border-radius: 0; background: var(--surface);
+  font-family: var(--sans); font-size: 13px; color: var(--ink);
+}
+.bs-sel:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+
+/* --- nothing here -------------------------------------------------------- */
+.bs-blank { display: grid; gap: 4px; justify-items: center; text-align: center;
+  padding: 46px 20px; border-top: 1px solid var(--rule); margin-top: 22px; }
+.bs-blank b { font-family: var(--serif); font-size: 19px; font-weight: 500; color: var(--headline); }
+.bs-blank span { font-size: 13px; color: var(--muted); }
+.bs-loading { padding: 18px 0; font-size: 12.5px; color: var(--faint); }
+
+/* The first-run page. One sentence in the serif, set like a standfirst,
+   because an empty page is the only chance to say what this thing is for. */
+.bs-hero { padding: 54px 0 60px; max-width: 46ch; }
+.bs-hero-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted); }
+.bs-hero-t { margin: 12px 0 0; font-family: var(--serif); font-size: 30px;
+  font-weight: 400; line-height: 1.18; color: var(--headline); }
+.bs-hero-s { margin: 12px 0 22px; font-size: 14px; line-height: 1.6; color: var(--muted); }
+.bs-hero-w { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 16px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--faint); }
+
+@media (max-width: 900px) {
+  /* Four columns of ledger do not fit a phone, so the row becomes two lines:
+     who and how much on top, everything qualifying it underneath. */
+  .bs-invhead { display: none; }
+  .bs-ir {
+    grid-template-columns: auto auto 1fr auto;
+    grid-template-areas:
+      'vend vend vend amt'
+      'stat cat  date .';
+    gap: 4px 10px; padding: 13px 0;
+  }
+  .bs-ir-v { grid-area: vend; }
+  .bs-ir .bs-sr-f { grid-area: amt; font-size: 14px; }
+  .bs-ir-t { grid-area: stat; }
+  .bs-ir-c { grid-area: cat; }
+  .bs-ir-d { grid-area: date; }
+  .bs-ir .bs-sr-e { display: none; }
+  .bs-hero-t { font-size: 24px; }
+}
+
+/* --- an opened invoice ---------------------------------------------------- */
+/* The original on the left because that is the thing being checked against;
+   the figures read down the right. Fetched on open, so it arrives into an
+   already-tinted row. */
+.bs-ivx { display: flex; gap: 22px; padding: 4px 0 20px; align-items: flex-start; }
+.bs-ivl { display: grid; gap: 8px; justify-items: center; flex: none; width: 132px; }
+.bs-ivthumb {
+  display: grid; place-items: center; width: 132px; height: 168px; overflow: hidden;
+  border: 1px solid var(--rule); background: var(--surface); color: var(--faint);
+}
+.bs-ivthumb img { width: 100%; height: 100%; object-fit: cover; }
+.bs-ivthumb svg { width: 30px; height: 30px; }
+.bs-ivthumb.none { border-style: dashed; }
+.bs-ivr { flex: 1; min-width: 0; }
+.bs-ivgrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(124px, 1fr));
+  border-top: 1px solid var(--rule);
+}
+.bs-ivf { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--rule-light); }
+.bs-ivf span { display: block; font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.bs-ivf b { display: block; margin-top: 3px; font-family: var(--mono);
+  font-size: 14px; font-weight: 500; color: var(--headline);
+  font-variant-numeric: tabular-nums; }
+.bs-ivnote { margin-top: 12px; padding: 10px 12px; background: var(--surface-2);
+  font-size: 13px; line-height: 1.55; color: var(--secondary); }
+.bs-ivacts { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 16px; }
+.bs-ivdone { color: var(--positive); }
+
+@media (max-width: 700px) {
+  .bs-ivx { flex-direction: column; gap: 14px; }
+  .bs-ivl { width: 100%; grid-auto-flow: column; justify-items: start;
+    align-items: center; justify-content: start; gap: 12px; }
+  .bs-ivthumb { width: 76px; height: 96px; }
+}
+
+/* ===========================================================================
+   DRAWERS, in the broadsheet
+   ---------------------------------------------------------------------------
+   Every drawer in the app wears .drawer — invoice, vendor, product, user,
+   recurring task — so this is written once against the shell rather than five
+   times against five pages. Nothing here changes a field name, an id, or the
+   .inv-hide toggling the upload flow runs on: it is the same drawer, in the
+   paper's clothes.
+   ======================================================================== */
+.bs .drawer {
+  background: var(--paper); border-left: 1px solid var(--rule-heavy);
+  box-shadow: -18px 0 48px rgba(0, 0, 0, .12);
+}
+.bs .drawer-scrim { background: rgba(20, 18, 14, .34); }
+.bs .drawer-h { padding: 20px 24px 15px; border-bottom: 1px solid var(--rule-heavy); }
+.bs .drawer-t {
+  font-family: var(--serif); font-size: 22px; font-weight: 400;
+  letter-spacing: 0; color: var(--headline);
+}
+.bs .drawer-s { font-size: 13px; color: var(--muted); }
+.bs .drawer-x { border-radius: 0; color: var(--muted); }
+.bs .drawer-x:hover { background: var(--ink); color: var(--paper); }
+.bs .drawer-b { padding: 20px 24px; gap: 16px; }
+.bs .drawer-f { gap: 10px; padding-top: 14px; border-top: 1px solid var(--rule); }
+
+/* A label is a caption, so it is set like every other caption on the paper:
+   mono, small, tracked, upper. */
+.bs .fld {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 400;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+}
+.bs .fld input, .bs .fld select, .bs .fld textarea {
+  border: 1px solid var(--field-border); border-radius: 0; background: var(--surface);
+  font-family: var(--sans); font-size: 13.5px; color: var(--ink);
+  text-transform: none; letter-spacing: 0;
+}
+/* Money is mono everywhere else on the paper; it should not become a sans
+   number the one moment you are typing it in. */
+.bs .fld input[type="number"], .bs .fld input[type="date"] {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.bs .fld input:focus, .bs .fld select:focus, .bs .fld textarea:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill);
+}
+.bs .fldhint { font-family: var(--sans); font-size: 12px; letter-spacing: 0;
+  text-transform: none; color: var(--muted); }
+
+.bs .drawer .btn {
+  border-radius: 0; font-family: var(--sans); font-size: 13px; font-weight: 600;
+  border: 1px solid var(--ink); background: var(--surface); color: var(--ink);
+}
+.bs .drawer .btn:hover { background: var(--ink); color: var(--paper); }
+.bs .drawer .btn-primary { background: var(--btn-bg); border-color: var(--btn-bg); color: var(--btn-ink); }
+.bs .drawer .btn-primary:hover { opacity: .88; background: var(--btn-bg); color: var(--btn-ink); }
+.bs .drawer .btn-ghost { border-color: var(--rule); color: var(--muted); background: transparent; }
+
+/* --- dropping one in ------------------------------------------------------ */
+.bs .dropzone {
+  border: 1px dashed var(--rule-heavy); border-radius: 0;
+  background: var(--surface-2); padding: 40px 22px;
+}
+.bs .dropzone.dz-over { border-color: var(--accent); border-style: solid; background: var(--accent-fill); }
+.bs .dz-ico { color: var(--faint); }
+.bs .dz-t { font-family: var(--serif); font-size: 19px; font-weight: 400; color: var(--headline); }
+.bs .dz-s { font-size: 12.5px; color: var(--muted); }
+.bs .dz-warn { font-size: 12px; color: var(--warning); }
+.bs .dz-manual { font-size: 13px; color: var(--accent); }
+.bs .analyse-t { font-family: var(--serif); font-size: 20px; font-weight: 400; color: var(--headline); }
+.bs .analyse-s { font-size: 12.5px; color: var(--muted); }
+/* The reading animation: a rule sweeping down the page, not a shimmer. */
+.bs .analyse-doc { border: 1px solid var(--rule); background: var(--surface); border-radius: 0; }
+.bs .analyse-scan { background: linear-gradient(180deg, transparent, var(--accent-fill), transparent); }
+
+.bs .ai-note, .bs .aisum, .bs .totalcheck {
+  border-radius: 0; border: 1px solid var(--rule); background: var(--surface-2);
+  font-size: 12.5px; color: var(--secondary);
+}
+/* The tinted rounded chip behind the icon is the old shell's badge. On paper
+   the mark is just a mark. */
+.bs .dz-ico { background: none; border-radius: 0; width: auto; height: auto; color: var(--faint); }
+.bs .dz-btns { gap: 10px; }
+
+/* ===========================================================================
+   IMPORT PRODUCTS — the line-by-line screen
+   ---------------------------------------------------------------------------
+   The class names are unchanged on purpose. The tick boxes, the bulk actions
+   and the duplicate warnings are all wired to .iline / .igroup / data-row, and
+   the tests assert against them — this is the same screen wearing the paper's
+   type and rules, not a rebuild.
+   ======================================================================== */
+.bs-ihead { display: block; }
+.bs-back { display: inline-block; margin-bottom: 8px; font-size: 13px; }
+.bs-ihead .bs-headline { max-width: none; }
+
+/* A note, not an alert box. Colour on the left rule only. */
+.bs-note {
+  display: grid; gap: 4px; margin: 20px 0 0; padding: 14px 0 14px 16px;
+  border-left: 2px solid var(--rule-heavy); background: var(--surface-2);
+  padding-right: 16px;
+}
+.bs-note b { font-family: var(--serif); font-size: 17px; font-weight: 400; color: var(--headline); }
+.bs-note span { font-size: 13px; line-height: 1.55; color: var(--secondary); }
+.bs-note.ok { border-left-color: var(--positive); }
+.bs-note.ask { border-left-color: var(--warning); }
+
+.bs .igroup { margin-top: 30px; }
+.bs .igroup-h {
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--rule-heavy);
+}
+.bs .igroup-t {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--headline); font-weight: 400;
+}
+.bs .igroup-n {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  background: none; padding: 0; border-radius: 0;
+}
+.bs .igroup-h .ibulk { margin-left: auto; }
+.bs .igroup-s { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
+
+.bs .iline {
+  border: 0; border-bottom: 1px dotted var(--rule-dotted); border-radius: 0;
+  background: none; padding: 14px 0; gap: 16px;
+}
+.bs .iline:hover { background: var(--row-hover); }
+.bs .iline-d { font-size: 14px; font-weight: 600; color: var(--headline); }
+.bs .iline-m {
+  margin-top: 3px; font-family: var(--mono); font-size: 11.5px;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.bs .iline-m b { color: var(--headline); font-weight: 500; }
+.bs .iline-why { margin-top: 7px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.bs .iline-sug { font-size: 12.5px; color: var(--secondary); }
+.bs .why {
+  border-radius: 0; padding: 1px 6px; font-family: var(--mono);
+  font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+  background: none; border: 1px solid var(--rule); color: var(--muted);
+}
+.bs .why-ok { color: var(--positive); border-color: var(--positive); }
+.bs .why-warn { color: var(--warning); border-color: var(--warning); }
+.bs .iline-tag {
+  border-radius: 0; padding: 1px 6px; font-family: var(--mono);
+  font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+  background: none; border: 1px solid var(--rule); color: var(--muted); font-weight: 400;
+}
+.bs .iline-tag.ask { color: var(--warning); border-color: var(--warning); }
+.bs .iline-tag.fee { color: var(--faint); }
+.bs .iline-tag.new { color: var(--accent); border-color: var(--accent); }
+.bs .minisel {
+  border-radius: 0; border: 1px solid var(--field-border); background: var(--surface);
+  font-family: var(--sans); font-size: 13px; color: var(--ink); padding: 7px 10px;
+}
+.bs .minisel:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+
+/* The duplicate warning: the one place on this screen that argues with you. */
+.bs .iline-dupe { background: var(--warn-bg); }
+.bs .iline-dup {
+  margin-top: 9px; padding: 10px 12px; border-radius: 0;
+  border: 1px solid var(--warning); background: var(--surface);
+  font-size: 12.5px; color: var(--secondary);
+}
+.bs .iline-dup > b { font-family: var(--sans); font-size: 12.5px; color: var(--warning); }
+.bs .dupopt { border-radius: 0; }
+
+.bs .bs-table th {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); font-weight: 400;
+}
+.bs .bs-table td { font-size: 13.5px; }
+.bs .bs-table td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.bs-undo { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.bs .bs-danger { border-color: var(--danger); color: var(--danger); }
+.bs .bs-danger:hover { background: var(--danger); color: var(--paper); border-color: var(--danger); }
+
+/* The tick box, on paper. */
+.bs .ipick {
+  border-radius: 0; border: 1px solid var(--field-border); background: var(--surface);
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--secondary);
+}
+.bs .ipick:hover { border-color: var(--ink-2); color: var(--ink); }
+.bs .ipick input { accent-color: var(--ink); }
+.bs .ipick:has(input:checked) {
+  background: var(--ink); border-color: var(--ink); color: var(--btn-ink);
+}
+.bs .iline:has(.ipick input:checked) { background: var(--row-hover); }
+
+/* The bar that submits. */
+.bs .stickybar-keep .sticky-in { padding: 12px 16px; }
+.bs .sticky-txt b { font-family: var(--mono); font-size: 13px; font-weight: 400; color: var(--headline); }
+.bs .sticky-txt span { font-size: 12.5px; color: var(--muted); }
+.bs .sticky-acts .btn { border-radius: 0; font-family: var(--sans); font-weight: 600; }
+/* The submit button is the page's one solid action — ink, like Save and Add
+   invoice, not the old shell's blue. */
+.bs .sticky-acts .btn-primary,
+.bs .sticky-acts .btn-primary:hover {
+  background: var(--btn-bg); border-color: var(--btn-bg); color: var(--btn-ink);
+}
+.bs .sticky-acts .btn-primary:hover { opacity: .88; }
+.bs .sticky-acts .btn-ghost { border-color: var(--rule); color: var(--muted); background: transparent; }
+.bs .sticky-acts .btn-ghost:hover { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* ---------------------------------------------------------------------------
+   The stat strip on a phone.
+   Stacking four figures one per row pushed the first invoice most of a screen
+   down the page — and only odd cells had their indent zeroed, so every second
+   figure sat 26px further right than the one above it, which reads as a
+   mistake because it is one. Two across: the whole strip is then a thumb's
+   length, and the columns line up.
+   ------------------------------------------------------------------------ */
+@media (max-width: 760px) {
+  .bs-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  .bs-strip-c { padding: 13px 14px 13px 0; border-left: 0; border-top: 1px solid var(--rule); }
+  .bs-strip-c:nth-child(-n+2) { border-top: 0; padding-top: 0; }
+  .bs-strip-c:nth-child(even) { padding-left: 15px; border-left: 1px solid var(--rule); }
+  .bs-strip-c .bs-stat { font-size: 21px; }
+  .bs-strip-note { grid-column: 1 / -1; padding-left: 0; }
+}
+
+@media (max-width: 900px) {
+  /* "Jul 19" is two words the browser is entitled to break, and it did —
+     a date on two lines in a ledger reads as two dates. */
+  .bs-ir-d, .bs-ir-c { white-space: nowrap; }
+  .bs-ir-t { flex-wrap: nowrap; min-width: 0; }
+  .bs-ir-t .bs-tag { margin-left: 2px; }
+  /* Month, count and total belong on one line; the disclosure word does not
+     need a line of its own at all. */
+  .bs-month-h { flex-wrap: wrap; gap: 4px 10px; }
+  .bs-month-h .bs-kicker { flex: none; }
+  .bs-month-meta { flex: 1; min-width: 0; }
+  .bs-month-tot { margin-left: auto; }
+  .bs-month-go { display: none; }
+}
