@@ -4,6 +4,7 @@
 try { process.loadEnvFile(require('path').join(__dirname, '..', '.env')); } catch { /* no .env, fine */ }
 
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
 const { runShift } = require('./engine');
@@ -38,6 +39,86 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+
+// ---------------------------------------------------------------------------
+// COMPRESSION
+//
+// Nothing was compressed. A year of the invoice ledger is 640KB of HTML, and
+// the two stylesheets are another 290KB on top of it — approaching a megabyte
+// of text on a first load, sent verbatim. Gzipped it is about 90KB. That is
+// the single largest thing standing between this app and a phone on a café's
+// wifi, and it costs nothing but a few milliseconds of CPU.
+//
+// Deliberately not the `compression` package, and deliberately not a stream
+// wrapper. zlib is already in the stack, and the general middleware has to
+// intercept res.write/res.end to handle streaming — which is exactly where its
+// edge cases live (HEAD, 304, early errors, headers already flushed). This app
+// answers every page with a single res.send of a complete string, so the whole
+// problem collapses to "gzip a string before it goes out", which can be got
+// right by reading it.
+//
+// Uploads are untouched: they are served by express.static below, never
+// through res.send, and a JPEG or a PDF is already compressed.
+const zlib = require('zlib');
+const COMPRESSIBLE = /^(?:text\/|application\/(?:json|javascript|manifest))/i;
+const GZIP_FLOOR = 1024;          // below this the header costs more than it saves
+
+app.use((req, res, next) => {
+  if (!/\bgzip\b/i.test(req.headers['accept-encoding'] || '')) return next();
+  const send = res.send.bind(res);
+  res.send = (body) => {
+    // Only complete strings. Buffers and streams take the untouched path.
+    if (typeof body !== 'string' || body.length < GZIP_FLOOR) return send(body);
+    if (res.getHeader('Content-Encoding')) return send(body);
+    // res.send sets Content-Type itself when nothing has set it — and for a
+    // string that default is HTML. It has to be pinned down BEFORE the body
+    // becomes a Buffer, because res.send's default for a Buffer is
+    // application/octet-stream, and a page sent as that is a page the browser
+    // downloads instead of rendering. res.json sets the header first, so its
+    // own type is already here and is kept.
+    const type = String(res.getHeader('Content-Type') || 'text/html; charset=utf-8');
+    if (!COMPRESSIBLE.test(type)) return send(body);
+
+    // Async, so a 600KB page does not block the event loop while it deflates.
+    zlib.gzip(body, { level: 6 }, (err, buf) => {
+      if (err || res.headersSent) return send(body);   // any doubt: send it plain
+      res.setHeader('Content-Type', type);             // or the Buffer default wins
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.removeHeader('Content-Length');              // express sets it from the buffer
+      send(buf);
+    });
+    return res;
+  };
+  next();
+});
+
+// The stylesheets never change between restarts, so they are gzipped once at
+// boot rather than on every request. Everything else in public/ — icons, the
+// fonts — is already compressed and is served untouched below.
+const STATIC_GZ = new Map();
+try {
+  for (const f of fs.readdirSync(PUBLIC_DIR)) {
+    if (!/\.(css|js|webmanifest)$/i.test(f)) continue;
+    const raw = fs.readFileSync(path.join(PUBLIC_DIR, f));
+    if (raw.length < GZIP_FLOOR) continue;
+    STATIC_GZ.set(f, zlib.gzipSync(raw, { level: 9 }));
+  }
+} catch (e) { console.error('[static] pre-compression skipped:', e.message); }
+
+app.use('/static', (req, res, next) => {
+  const name = req.path.replace(/^\//, '');
+  const buf = STATIC_GZ.get(name);
+  if (!buf || !/\bgzip\b/i.test(req.headers['accept-encoding'] || '')) return next();
+  res.setHeader('Content-Type', name.endsWith('.css') ? 'text/css; charset=utf-8'
+    : name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'application/manifest+json');
+  res.setHeader('Content-Encoding', 'gzip');
+  res.setHeader('Vary', 'Accept-Encoding');
+  // Same caching the static handler would have applied — these are already
+  // cache-busted by the ?v= stamp in every URL the app writes.
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.end(buf);
+});
 app.use('/static', express.static(PUBLIC_DIR));
 // PWA files must be served from the site root so the service worker's scope
 // covers the whole app (a /static/sw.js could only control /static/*).

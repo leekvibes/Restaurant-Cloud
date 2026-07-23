@@ -947,3 +947,67 @@ test('the manager app and the staff portal are two separate installs', async () 
   const srcs = (m) => m.icons.map((i) => i.src).sort().join();
   assert.notStrictEqual(srcs(mgr), srcs(staff), 'with their own icon sets');
 });
+
+// ---------------------------------------------------------------------------
+// Compression.
+//
+// Nothing was compressed: a year of the invoice ledger went out as 640KB of
+// HTML and the stylesheets as another 290KB. These pin the two things that
+// make compression safe rather than merely small — that what arrives is
+// byte-for-byte what was sent, and that it still arrives labelled as a page.
+//
+// The second one is not hypothetical. The first version of this gzipped the
+// body correctly and let Express label the Buffer application/octet-stream,
+// which every browser downloads instead of rendering. curl could not see it.
+// ---------------------------------------------------------------------------
+
+const zlib = require('node:zlib');
+
+test('a compressed page decodes to exactly the page that was sent', async () => {
+  for (const p of ['/c/invoices', '/shifts', '/']) {
+    const plain = await (await fetch(BASE + p, { headers: { 'accept-encoding': 'identity' } })).text();
+    const res = await fetch(BASE + p, { headers: { 'accept-encoding': 'gzip' } });
+    const buf = Buffer.from(await res.arrayBuffer());
+    // fetch may decode transparently; handle both so the test is about the
+    // bytes rather than about which client ran it.
+    const got = res.headers.get('content-encoding') === 'gzip' && buf[0] === 0x1f && buf[1] === 0x8b
+      ? zlib.gunzipSync(buf).toString('utf8') : buf.toString('utf8');
+    assert.strictEqual(got, plain, `${p}: what arrives is what was sent`);
+  }
+});
+
+test('a compressed page is still labelled as a page', async () => {
+  // res.send's default Content-Type for a Buffer is application/octet-stream.
+  // Gzipping turns the body into a Buffer, so the type has to be pinned first
+  // or every page becomes a download.
+  const res = await fetch(BASE + '/c/invoices', { headers: { 'accept-encoding': 'gzip' } });
+  assert.match(res.headers.get('content-type') || '', /^text\/html/,
+    'HTML stays HTML after being compressed');
+  assert.ok(!/octet-stream/.test(res.headers.get('content-type') || ''),
+    'and never becomes a file the browser saves instead of showing');
+  assert.match(res.headers.get('vary') || '', /accept-encoding/i,
+    'and says it varies, so a cache cannot serve gzip to a client that cannot read it');
+});
+
+test('a client that cannot decompress still gets the page', async () => {
+  const res = await fetch(BASE + '/c/invoices', { headers: { 'accept-encoding': 'identity' } });
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(res.headers.get('content-encoding'), null, 'nothing is encoded for it');
+  assert.match(await res.text(), /^<!doctype html>/i, 'and it is a readable page');
+});
+
+test('JSON keeps its own content type through compression', async () => {
+  // The reader endpoints answer JSON that the drawer parses. Mislabelled, it
+  // would parse as text and the drawer would report a failed read.
+  const res = await fetch(`${BASE}/c/expenses/read`, { method: 'POST', headers: { 'accept-encoding': 'gzip' } });
+  assert.match(res.headers.get('content-type') || '', /^application\/json/);
+  assert.ok(await res.json(), 'and it still parses');
+});
+
+test('a stylesheet arrives as a stylesheet', async () => {
+  const res = await fetch(`${BASE}/static/broadsheet.css`, { headers: { 'accept-encoding': 'gzip' } });
+  assert.match(res.headers.get('content-type') || '', /^text\/css/,
+    'or the browser refuses it and the app renders unstyled');
+  const css = await res.text();
+  assert.match(css, /\.bs-page|\.bs-srow/, 'and it is the real stylesheet');
+});
