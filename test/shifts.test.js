@@ -396,3 +396,25 @@ test('saving those figures actually writes them, for both roles', async () => {
   assert.strictEqual(c.status, 302);
   assert.deepStrictEqual(row(people.sandra), { c: 4125, d: 7750 }, 'blank did not wipe them');
 });
+
+test('the on-shift roster shows card and cash as separate columns', async () => {
+  // Malek wanted to read what someone took in card and what they took in cash
+  // without opening their row. The table used to add the two into one "Tips"
+  // column, which is exactly the figure the edit form then split back apart.
+  const { sent, people } = module.exports;
+  const page = await html(`/shifts/${sent}`);
+
+  const head = page.match(/<div class="bs-shead bs-staffhead[^"]*">([\s\S]*?)<\/div>/)[1];
+  const cols = [...head.matchAll(/>([A-Za-z]+)<\/span>/g)].map((m) => m[1]);
+  assert.ok(cols.includes('Card') && cols.includes('Cash'), `card and cash are columns: ${cols.join(' ')}`);
+  assert.ok(!cols.includes('Tips'), 'the combined Tips column is gone');
+
+  // And the row prints two figures where it used to print one. The seeded
+  // server has card tips and no cash, so the two cells must read differently.
+  const row = page.slice(page.indexOf(`id="edit-${people.sandra}"`));
+  const summary = row.slice(0, row.indexOf('</summary>'));
+  const figures = [...summary.matchAll(/class="bs-sr-f[^"]*">(?:<span[^>]*>)?([^<]*)/g)].map((m) => m[1].trim());
+  // food, coffee, card, cash, hrs, wage — six figure cells, card ≠ cash.
+  const card = figures[2], cash = figures[3];
+  assert.notStrictEqual(card, cash, `card (${card}) and cash (${cash}) are shown independently`);
+});

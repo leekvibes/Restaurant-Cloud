@@ -805,11 +805,18 @@ body {
   display: grid;
   align-items: baseline; gap: 0 12px;
 }
+/* Nine cells: Name Role Kitchen Coffee Card Cash Hrs Wage Edit.
+   Card and Cash are separate columns so a manager reads what someone took in
+   plastic and what they took in cash without opening the row.
+   The table shares its row with the tip-pool sidebar (~725px, not the page
+   width), so the fixed tracks are kept lean — the extra column would otherwise
+   crush Name to a couple of characters. */
 .bs-staffhead, .bs-staffrow {
-  grid-template-columns: 1fr 78px 96px 92px 88px 60px 72px 52px;
+  grid-template-columns: minmax(96px, 1fr) 54px 78px 78px 64px 64px 44px 52px 38px;
 }
+/* Ten with alcohol. */
 .bs-staffhead.has-alc, .has-alc .bs-staffrow {
-  grid-template-columns: 1fr 74px 88px 84px 80px 82px 56px 68px 50px;
+  grid-template-columns: minmax(84px, 1fr) 48px 70px 70px 60px 60px 60px 42px 48px 34px;
 }
 .bs-shead {
   padding: 12px 0 8px;
@@ -1011,18 +1018,29 @@ body {
      list survives onto the phone — six cells spread across nine columns. */
   .bs-staffhead, .bs-staffrow,
   .bs-staffhead.has-alc, .has-alc .bs-staffrow {
-    grid-template-columns: 1fr 76px 74px 62px 52px 48px;
+    grid-template-columns: 1fr 62px 62px 50px 40px;
   }
 
-  /* Wage sits at 7 without alcohol and at 8 with it, so the two variants are
-     addressed separately rather than one rule reaching across both. */
-  .bs-staffhead:not(.has-alc) > :nth-child(2), .bs-staffhead:not(.has-alc) > :nth-child(7),
-  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(2),
-  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(7) { display: none; }
+  /* A phone keeps what the request is about: Name, Card, Cash, Hrs, Edit. The
+     sales columns fold — they are on the expanded row and on the desktop — so
+     the two tip figures have room to sit side by side rather than overflowing.
+     Card/Cash are positions 5·6 without alcohol and 6·7 with it, so the two
+     variants fold different cells to leave the same five standing.
 
+     no alc (9): keep 1 Name · 5 Card · 6 Cash · 7 Hrs · 9 Edit
+                 fold 2 Role · 3 Kitchen · 4 Coffee · 8 Wage */
+  .bs-staffhead:not(.has-alc) > :nth-child(2), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(2),
+  .bs-staffhead:not(.has-alc) > :nth-child(3), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(3),
+  .bs-staffhead:not(.has-alc) > :nth-child(4), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(4),
+  .bs-staffhead:not(.has-alc) > :nth-child(8), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(8) { display: none; }
+
+  /* with alc (10): keep 1 Name · 6 Card · 7 Cash · 8 Hrs · 10 Edit
+                    fold 2 Role · 3 Kitchen · 4 Coffee · 5 Alcohol · 9 Wage */
   .bs-staffhead.has-alc > :nth-child(2), .has-alc .bs-staffrow > :nth-child(2),
+  .bs-staffhead.has-alc > :nth-child(3), .has-alc .bs-staffrow > :nth-child(3),
+  .bs-staffhead.has-alc > :nth-child(4), .has-alc .bs-staffrow > :nth-child(4),
   .bs-staffhead.has-alc > :nth-child(5), .has-alc .bs-staffrow > :nth-child(5),
-  .bs-staffhead.has-alc > :nth-child(8), .has-alc .bs-staffrow > :nth-child(8) { display: none; }
+  .bs-staffhead.has-alc > :nth-child(9), .has-alc .bs-staffrow > :nth-child(9) { display: none; }
 
   .bs-pill input, .bs-pill select { width: 100%; }
   .bs-pill { flex: 1 1 132px; }

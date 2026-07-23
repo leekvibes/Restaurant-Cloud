@@ -1461,7 +1461,6 @@ app.get('/shifts/:id', (req, res) => {
     `<label class="bs-pill"><span>${name}</span><input name="${name === 'Kitchen' ? 'food' : name.toLowerCase()}" type="text" inputmode="decimal" value="${val || ''}" placeholder="0.00"></label>`;
 
   const staffRow = ({ p, st: st2 }, isServer) => {
-    const tips = toCents(p.cardTips) + toCents(p.cashTips);
     const e = entries[p.employeeId] || {};
     const id = `edit-${p.employeeId}`;
     return `<details class="bs-srow" id="${id}">
@@ -1471,7 +1470,8 @@ app.get('/shifts/:id', (req, res) => {
         <span class="bs-sr-f">${isServer ? money0(toCents(p.food)) : '<span class="bs-em">—</span>'}</span>
         <span class="bs-sr-f">${isServer ? money0(toCents(p.coffee)) : '<span class="bs-em">—</span>'}</span>
         ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
-        <span class="bs-sr-f">${money0(tips)}</span>
+        <span class="bs-sr-f">${money0(toCents(p.cardTips))}</span>
+        <span class="bs-sr-f">${money0(toCents(p.cashTips))}</span>
         <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? (Math.round(p.hours * 100) / 100).toFixed(2) : 'missing'}</span>
         <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
         ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
@@ -1608,7 +1608,7 @@ app.get('/shifts/:id', (req, res) => {
             <div class="bs-shead bs-staffhead${anyAlcohol ? ' has-alc' : ''}">
               <span>Name</span><span>Role</span><span class="r">Kitchen</span><span class="r">Coffee</span>
               ${anyAlcohol ? '<span class="r">Alcohol</span>' : ''}
-              <span class="r">Tips</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
+              <span class="r">Card</span><span class="r">Cash</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
             </div>
             <div class="bs-srows${anyAlcohol ? ' has-alc' : ''}">
               ${serverStates.map((x) => staffRow(x, true)).join('')}
