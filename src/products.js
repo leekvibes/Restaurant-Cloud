@@ -440,6 +440,27 @@ function groupRows(rows) {
 }
 
 /**
+ * How many lines on this invoice still want a person.
+ *
+ * One definition, because there were two and they disagreed. The invoice list
+ * called an invoice unfinished whenever a line had ever been read; the import
+ * screen called it finished once nothing was left to decide. An invoice of
+ * nothing but delivery fees sat in both states at once — permanently flagged
+ * for review by the list, and answered with "nothing left to decide" the
+ * moment you followed the flag.
+ *
+ * A charge is not work: it imports nothing and defaults to skip. Everything
+ * else is — including a confident line that somehow has not been imported.
+ * Auto-import puts those in when the invoice is saved, so one surviving here
+ * means something went wrong, and the safe reading of "went wrong" is that a
+ * person should look rather than that the invoice is done.
+ */
+function pendingCount(rows, done) {
+  const seen = done || new Set();
+  return (rows || []).filter((r) => !seen.has(r.i) && !r.fee).length;
+}
+
+/**
  * Products close enough to a line to be worth a second look, but not close
  * enough for the matcher to offer them.
  *
@@ -605,6 +626,6 @@ const needsPackInfo = () => q.plain.all().filter((p) => {
 module.exports = {
   q, CATEGORIES, norm, trendOf, reviewRows,
   matchProduct, matchLine, scoreMatch, aliasIndex, learnAlias,
-  mergeProducts, likelyDuplicates, groupRows, nearMisses, HIGH, MED, WARN,
+  mergeProducts, likelyDuplicates, groupRows, nearMisses, pendingCount, HIGH, MED, WARN,
   priceOf, costFor, costableUnits, needsPackInfo,
 };

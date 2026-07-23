@@ -25,7 +25,7 @@ const CH = require('./charts');
 // the column and died on startup on one that didn't. Which is every fresh
 // deploy. test/boot.test.js now covers exactly this.
 const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
-  learnAlias, mergeProducts, likelyDuplicates, groupRows, nearMisses, aliasIndex } = require('./products');
+  learnAlias, mergeProducts, likelyDuplicates, groupRows, nearMisses, pendingCount, aliasIndex } = require('./products');
 // Same reason as products above: cash.js creates cash_recon and adds its
 // columns, and the dashboard alert below reads them.
 const CASH = require('./cash');
@@ -5921,9 +5921,25 @@ function invoicePanel(r, vName) {
               <a class="btn btn-sm" href="/c/invoices/${r.id}/edit">Edit</a>
               ${/* The only product-related thing on the invoice page: a way out
                     to the import screen. The lines themselves stay off here —
-                    an invoice is an accounting record. */
-                r.lines_imported ? `<a class="btn btn-sm btn-ghost" href="/c/invoices/${r.id}/import">Products imported ✓</a>`
-                : r.ai_lines ? `<a class="btn btn-sm btn-primary" href="/c/invoices/${r.id}/import">Review ${lineCount(r)} product line${lineCount(r) === 1 ? '' : 's'}</a>` : ''}
+                    an invoice is an accounting record.
+
+                    Three states, not two. "Imported" and "still to review" left
+                    nowhere to put an invoice that was read, needed nothing, and
+                    imported nothing — a page of delivery fees — so it wore the
+                    reviewing label permanently. */
+                (() => {
+                  if (!r.ai_lines || r.ai_lines === '[]') return '';
+                  // The flag decides whether this invoice is finished; the
+                  // count only says how much is left when it isn't. Recounting
+                  // an invoice already marked done would undo a legitimate
+                  // answer: skipping a line resolves it without importing
+                  // anything, so a re-match still sees it as outstanding and
+                  // the button would ask about it again for good.
+                  const left = needsProductReview(r) ? pendingOnInvoice(r) : 0;
+                  if (left) return `<a class="btn btn-sm btn-primary" href="/c/invoices/${r.id}/import">Review ${left} product line${left === 1 ? '' : 's'}</a>`;
+                  const bought = prodQ.purchasesForInvoice.all(r.id).length;
+                  return `<a class="btn btn-sm btn-ghost" href="/c/invoices/${r.id}/import">${bought ? 'Products imported ✓' : 'No products to import'}</a>`;
+                })()}
               ${r.file ? `<a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" target="_blank">Open original</a>
                           <a class="btn btn-sm btn-ghost" href="/uploads/${esc(r.file)}" download>Download</a>` : ''}
               ${r.vendor_id ? `<a class="btn btn-sm btn-ghost" href="/c/vendors/${Number(r.vendor_id)}">Vendor</a>` : ''}
@@ -5958,15 +5974,33 @@ function aiBadge(row) {
 }
 
 /**
- * How many line items the reader found on an invoice.
+ * Has this invoice been read, with product work still on it?
  *
- * Deliberately a count of the stored JSON and not a re-match: scoring every
- * line of every invoice against every product, to draw a list, would get
- * slower with every invoice ever filed. The list says how much is waiting;
- * the import screen is where the real work happens.
+ * Deliberately the stored flag and not a re-match: this is asked for every
+ * invoice on the page, and scoring every line of every invoice against every
+ * product to draw a list would get slower with every invoice ever filed.
+ * autoImport stamps the flag the moment nothing is left to decide, so the flag
+ * is the answer. `[]` is a read that found no item table — also not work, and
+ * the reason for the check: it is a non-empty string, so truthiness alone
+ * called an invoice with no line items unfinished forever.
  */
-function lineCount(inv) {
-  try { return JSON.parse(inv.ai_lines || '[]').length; } catch { return 0; }
+const needsProductReview = (r) => !!r.ai_lines && r.ai_lines !== '[]' && !r.lines_imported;
+
+/**
+ * What is actually left to decide on this invoice.
+ *
+ * The panel is fetched one invoice at a time, on demand, so it can afford the
+ * match the list cannot — and it has to, because the honest number is the
+ * whole point of the button. Counting the stored lines instead offered
+ * "Review 12 product lines" for an invoice where ten went in on save and one
+ * was a delivery fee: three times the work that was really waiting.
+ */
+function pendingOnInvoice(inv) {
+  let lines = [];
+  try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { return 0; }
+  if (!lines.length) return 0;
+  const rows = reviewRows(lines, prodQ.plain.all(), inv.vendor_id ? Number(inv.vendor_id) : null);
+  return pendingCount(rows, importedIdx(inv));
 }
 
 app.get('/c/invoices', (req, res) => {
@@ -6035,7 +6069,7 @@ app.get('/c/invoices', (req, res) => {
         data-vendor="${esc(String(r.vendor_id || ''))}" data-amt="${(r.amount_cents || 0) / 100}"
         data-date="${esc(r.invoice_date || '')}" data-due="${esc(r.due_date || '')}"
         data-vname="${esc(vn.toLowerCase())}" data-added="${esc(String(r.created_at || ''))}"
-        data-search="${esc(search)}" data-review="${r.ai_lines && !r.lines_imported ? '1' : '0'}"
+        data-search="${esc(search)}" data-review="${needsProductReview(r) ? '1' : '0'}"
         style="--c:${c.color};--ct:${c.tint}">
         <summary class="inv-row">
           <span class="inv-dot"></span>
@@ -6069,7 +6103,7 @@ app.get('/c/invoices', (req, res) => {
   }).join('');
 
   // Read but not yet imported — the queue an operator actually works through.
-  const needsReview = rows.filter((r) => r.ai_lines && !r.lines_imported).length;
+  const needsReview = rows.filter(needsProductReview).length;
   const usedCats = [...new Set(rows.map((r) => r.category || 'Other'))];
   const usedVendors = vendors.filter((v) => rows.some((r) => Number(r.vendor_id) === Number(v.id)));
 
@@ -7583,11 +7617,52 @@ function autoImport(invoiceId) {
   }
   // Everything that still wants a person: uncertain matches and genuinely new
   // products. Charges are not pending — they are deliberately never products.
-  const pending = rows.filter((r) => !already.has(r.i)
-    && (r.confidence === 'medium' || (r.confidence === 'low' && !r.fee))).length;
-  if (added && !pending) db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(invoiceId);
+  const pending = pendingCount(rows, already);
+  // Stamped whenever nothing is left to decide, not only when something went
+  // in. An invoice carrying nothing but a delivery fee imports nothing and is
+  // finished the moment it is read; under the old rule it never earned the
+  // stamp, so the list and the dashboard advertised product work that the
+  // import screen then said did not exist.
+  if (!pending) db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?").run(invoiceId);
   return { added, pending };
 }
+
+// --- one-time repair -------------------------------------------------------
+// The stamp above used to require that a line actually went in, so an invoice
+// carrying nothing but charges never earned it: nothing to import, and yet
+// listed as needing product review for good. The rule is fixed for everything
+// read from here on. These are the invoices already on disk under the old one,
+// and they will never be re-read, so nothing else would ever correct them.
+//
+// Only the flag moves. No purchase is written, no price recalculated, no line
+// imported — and an invoice is touched only when every line still outstanding
+// is a charge, which is exactly the case where there was never anything to
+// import. Anything uncertain, anything new, or a confident line that somehow
+// missed its import all leave the invoice alone, flagged, for a person.
+const repairReviewFlags = db.transaction(() => {
+  if (db.prepare("SELECT 1 FROM settings WHERE key = 'invoice_review_flag_repaired'").get()) return 0;
+  const stale = db.prepare(`SELECT * FROM m_invoices
+    WHERE ai_lines IS NOT NULL AND ai_lines <> '' AND ai_lines <> '[]'
+      AND COALESCE(lines_imported, 0) = 0`).all();
+  const products = prodQ.plain.all();
+  const stamp = db.prepare("UPDATE m_invoices SET lines_imported = datetime('now') WHERE id = ?");
+  let n = 0;
+  for (const inv of stale) {
+    let lines = [];
+    try { lines = JSON.parse(inv.ai_lines || '[]'); } catch { continue; }
+    if (!lines.length) continue;
+    const rows = reviewRows(lines, products, inv.vendor_id ? Number(inv.vendor_id) : null);
+    if (pendingCount(rows, importedIdx(inv))) continue;
+    stamp.run(inv.id);
+    n++;
+  }
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('invoice_review_flag_repaired', ?)").run(String(n));
+  return n;
+});
+try {
+  const repaired = repairReviewFlags();
+  if (repaired) console.log(`[invoices] ${repaired} invoice${repaired === 1 ? '' : 's'} had no product work left; review flag cleared.`);
+} catch (e) { console.error('[invoices] review-flag repair skipped:', e.message); }
 
 app.get('/c/invoices/:id/import', (req, res) => {
   const inv = invQ.one.get(Number(req.params.id));

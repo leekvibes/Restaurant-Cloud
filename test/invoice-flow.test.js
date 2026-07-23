@@ -274,3 +274,182 @@ test('creating a new product warns when something close already exists', () => {
     assert.ok(Array.isArray(n.why), 'and says why it is close');
   }
 });
+
+// ---------------------------------------------------------------------------
+// The review queue.
+//
+// "Needs product review" was asked in two places that disagreed. The list
+// asked whether any line had ever been read; the import screen asked whether
+// anything was still undecided. An invoice of nothing but delivery fees
+// answered yes to the first and no to the second, so it sat in the queue for
+// good and the screen it sent you to said there was nothing to do.
+// ---------------------------------------------------------------------------
+
+/** The <details> block for one invoice on the list page. */
+function invRow(html, id) {
+  const at = html.indexOf(`data-id="${id}"`);
+  return at === -1 ? '' : html.slice(html.lastIndexOf('<details', at), html.indexOf('</summary>', at));
+}
+
+test('an invoice of nothing but charges is not queued for review', async () => {
+  const res = await post('/c/invoices', {
+    amount: '18.75', vendor_id: String(VENDOR), invoice_date: '2026-03-03',
+    invoice_number: 'BLD-FEE-1', category: 'Food', status: 'Unpaid', ai_status: 'ai',
+    ai_lines: JSON.stringify([
+      { description: 'Fuel surcharge', total: 14.50 },
+      { description: 'Delivery charge', total: 4.25 },
+    ]),
+  });
+  assert.strictEqual(res.status, 302);
+  assert.ok(!/\/import/.test(res.headers.get('location') || ''),
+    'nothing needs deciding, so it must not open the review screen');
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'BLD-FEE-1'").get();
+  const bought = db.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(inv.id).n;
+  db.close();
+
+  // The precondition. Without this the rest passes for an invoice that simply
+  // never stored any lines, which is a different thing entirely.
+  assert.ok(inv.ai_lines && inv.ai_lines !== '[]', 'the reader did find lines on it');
+  assert.strictEqual(bought, 0, 'and none of them were importable');
+  assert.ok(inv.lines_imported, 'an invoice with no product work left is marked resolved');
+
+  const list = await (await fetch(`${BASE}/c/invoices?y=2026`)).text();
+  assert.match(invRow(list, inv.id), /data-review="0"/, 'so the list does not flag it');
+
+  const panel = await (await fetch(`${BASE}/c/invoices/${inv.id}/panel`)).text();
+  assert.match(panel, /No products to import/, 'and says so plainly rather than claiming an import');
+  assert.ok(!/Review \d+ product line/.test(panel), 'it offers no review it cannot fulfil');
+
+  // The two ends of the same question now give the same answer.
+  const screen = await (await fetch(`${BASE}/c/invoices/${inv.id}/import`)).text();
+  assert.match(screen, /Nothing left to decide/, 'and the screen it links to agrees');
+});
+
+test('an invoice the reader found no lines on is not queued either', async () => {
+  // '[]' is a read that came back empty. It is a non-empty string, so asking
+  // whether ai_lines is truthy called it unfinished for good — and nothing
+  // could ever finish it, because there was nothing there to decide.
+  const db = new Database(DB);
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-06-07', 900, 'Unpaid', 'BLD-EMPTY-1', '[]')`).run().lastInsertRowid;
+  assert.strictEqual(db.prepare('SELECT ai_lines FROM m_invoices WHERE id = ?').get(id).ai_lines, '[]',
+    'stored as an empty read, not as NULL — that is the case under test');
+  db.close();
+
+  assert.match(invRow(await (await fetch(`${BASE}/c/invoices?y=2026`)).text(), id), /data-review="0"/,
+    'an empty read is not product work');
+  const panel = await (await fetch(`${BASE}/c/invoices/${id}/panel`)).text();
+  assert.ok(!/Review \d+ product line/.test(panel), 'and offers no review');
+});
+
+test('the review button counts what is left, not everything that was read', async () => {
+  // Six lines: two the matcher is sure of, three it is not, one charge. The
+  // certain two import on save and the charge imports nothing, so three lines
+  // want a person. The button used to offer all six.
+  const res = await post('/c/invoices', {
+    amount: '467.80', vendor_id: String(VENDOR), invoice_date: '2026-04-04',
+    invoice_number: 'BLD-COUNT-1', category: 'Food', status: 'Unpaid', ai_status: 'ai',
+    ai_lines: JSON.stringify(LINES),
+  });
+  assert.strictEqual(res.status, 302);
+
+  const db = new Database(DB, { readonly: true });
+  const inv = db.prepare("SELECT * FROM m_invoices WHERE invoice_number = 'BLD-COUNT-1'").get();
+  const stored = JSON.parse(inv.ai_lines).length;
+  const bought = db.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(inv.id).n;
+  db.close();
+
+  // Derived, not hardcoded. Earlier tests in this file confirm matches, and a
+  // confirmed match is an alias learned — so how many of these six the matcher
+  // is now sure of depends on what has run before it. Pinning it to a number
+  // makes this test fail for being right. What must hold is the relationship:
+  // everything already imported, and the one charge, are not review work.
+  const CHARGES = 1; // 'Fuel surcharge'
+  const expect = stored - bought - CHARGES;
+
+  // Preconditions, or the arithmetic below proves nothing.
+  assert.strictEqual(stored, 6, 'six lines were read');
+  assert.ok(bought >= 1, `at least one line imported on save, or there is no gap to measure (got ${bought})`);
+  assert.ok(expect >= 1 && expect < stored, `and something is genuinely left to decide (${expect} of ${stored})`);
+
+  const panel = await (await fetch(`${BASE}/c/invoices/${inv.id}/panel`)).text();
+  const said = Number((panel.match(/Review (\d+) product line/) || [])[1]);
+  assert.strictEqual(said, expect,
+    `the button counts only the undecided lines: ${bought} imported and ${CHARGES} charge are not work`);
+  assert.notStrictEqual(said, stored, 'not every line ever read');
+  assert.match(invRow(await (await fetch(`${BASE}/c/invoices?y=2026`)).text(), inv.id),
+    /data-review="1"/, 'and this one really is in the queue');
+});
+
+test('an invoice finished by skipping stays finished', async () => {
+  // Skipping resolves a line without importing anything, so a re-match still
+  // sees it as outstanding. The stored flag is what says the invoice is done,
+  // and the count must not talk over it — or the button asks about a line the
+  // operator has already answered, every time, for good.
+  const db = new Database(DB);
+  const vend = db.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-05-05', ?, 1200, 'Unpaid', 'BLD-SKIP-1', ?)`)
+    .run(String(vend.id), JSON.stringify([{ description: 'Qqx Skipped Thing', qty: 1, unit_price: 12, total: 12 }]))
+    .lastInsertRowid;
+  db.close();
+
+  const before = await (await fetch(`${BASE}/c/invoices/${id}/panel`)).text();
+  assert.match(before, /Review 1 product line</, 'it starts out wanting a decision');
+
+  await post(`/c/invoices/${id}/import`, { count: '1', idx: '0', action_0: 'skip', desc_0: 'Qqx Skipped Thing' });
+
+  const db2 = new Database(DB, { readonly: true });
+  const row = db2.prepare('SELECT * FROM m_invoices WHERE id = ?').get(id);
+  const bought = db2.prepare('SELECT COUNT(*) n FROM product_purchases WHERE invoice_id = ?').get(id).n;
+  db2.close();
+  assert.strictEqual(bought, 0, 'skipping imported nothing — which is why a re-match would still flag it');
+  assert.ok(row.lines_imported, 'but the invoice is answered');
+
+  const after = await (await fetch(`${BASE}/c/invoices/${id}/panel`)).text();
+  assert.ok(!/Review \d+ product line/.test(after), 'so it is not put back in the queue');
+  assert.match(invRow(await (await fetch(`${BASE}/c/invoices?y=2026`)).text(), id), /data-review="0"/,
+    'and the list agrees');
+});
+
+test('invoices stamped under the old rule are repaired on boot', async () => {
+  // Everything above fixes invoices read from now on. These are already on
+  // disk, will never be re-read, and nothing else would ever correct them.
+  const db = new Database(DB);
+  const vend = db.prepare('SELECT id FROM m_vendors LIMIT 1').get();
+  const mk = (num, lines) => db.prepare(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, status, invoice_number, ai_lines)
+    VALUES ('2026-06-06', ?, 1000, 'Unpaid', ?, ?)`).run(String(vend.id), num, JSON.stringify(lines)).lastInsertRowid;
+  // Left exactly as the old rule left them: lines read, flag never stamped.
+  const feeOnly = mk('BLD-LEGACY-FEE', [{ description: 'Freight charge', total: 10 }]);
+  const realWork = mk('BLD-LEGACY-WORK', [{ description: 'Qqx Legacy Widget', qty: 1, unit_price: 10, total: 10 }]);
+  db.prepare("DELETE FROM settings WHERE key = 'invoice_review_flag_repaired'").run();
+  const pre = db.prepare('SELECT COUNT(*) n FROM product_purchases').get().n;
+  db.close();
+
+  // The repair runs at boot, so it takes a boot to observe.
+  const port = PORT + 1;
+  const second = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: { ...process.env, PORT: String(port), DB_PATH: DB, TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
+    stdio: 'ignore',
+  });
+  try {
+    for (let i = 0; i < 80; i++) {
+      try { await fetch(`http://127.0.0.1:${port}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    const after = new Database(DB, { readonly: true });
+    const fee = after.prepare('SELECT * FROM m_invoices WHERE id = ?').get(feeOnly);
+    const work = after.prepare('SELECT * FROM m_invoices WHERE id = ?').get(realWork);
+    const post2 = after.prepare('SELECT COUNT(*) n FROM product_purchases').get().n;
+    const mark = after.prepare("SELECT value FROM settings WHERE key = 'invoice_review_flag_repaired'").get();
+    after.close();
+
+    assert.ok(fee.lines_imported, 'an invoice with only charges is released from the queue');
+    assert.ok(!work.lines_imported, 'one with a line still to decide is left alone');
+    assert.strictEqual(post2, pre, 'and the repair moved a flag, not a single purchase');
+    assert.ok(mark, 'it records that it ran, so it is not a cost on every boot');
+  } finally {
+    second.kill();
+  }
+});
