@@ -2451,3 +2451,67 @@ body.cap-open.qx-open [data-cap] { display: none; }
    codebase twice now — once on the staff portal, once here — so it is stated
    loudly rather than worked around per element. */
 [data-cap] [hidden], [data-qx] [hidden] { display: none !important; }
+
+/* ===========================================================================
+   MONTH HEADERS — the thing you click to open a month
+   ---------------------------------------------------------------------------
+   Every ledger on the broadsheet shell groups by month behind the same
+   markup: <details class="bs-month"><summary class="bs-month-h">. Styling it
+   here rather than per page means Shifts, Sales, Expenses and Invoices all
+   change together — and a ledger added later gets it for free, which is the
+   point of them sharing the class.
+
+   The month read as a small mono kicker, quieter than the rows underneath it,
+   and the only hint that it opened was the words "open ▸" at the far right of
+   the line — the opposite end from the label your eye is on. So it was hard to
+   tell there was anything to click. Now the month is the boldest thing on its
+   own line and carries a triangle directly beside it, right when shut and
+   pointing down when open, which is the convention every file list has used
+   for thirty years.
+   =========================================================================== */
+.bs-month-h { cursor: pointer; }
+
+/* The triangle, before the label rather than at the far end of the row.
+   Rotating one glyph avoids a second character swapping in and out, which
+   would re-flow the line on every open. */
+.bs-month-h::before {
+  content: '▸';
+  align-self: center;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ink);
+  transform-origin: 50% 50%;
+  flex: none;
+}
+.bs-month[open] > .bs-month-h::before { transform: rotate(90deg); }
+
+/* Deliberately not transitioned. A pseudo-element on a <summary> keeps a stale
+   animated value when <details> toggles — the box tree is rebuilt underneath
+   it — so the arrow was measured pointing the wrong way on both months: stuck
+   rotated on the one rendered open, never rotating on the one opened by click.
+   The state is what matters here, not the sweep between states, and an
+   instant flip is what a native disclosure triangle does anyway. The chevron
+   on the Cash page still animates because it is a real <span>, which does not
+   have this problem. */
+
+/* The month itself, at the weight of a row title rather than a caption. Still
+   mono and uppercase — it is a date, and the ledgers below it are mono — but
+   sized and weighted to be the anchor of the line. Letter-spacing comes down
+   as the size goes up, or "JULY 2026" sprawls. */
+.bs-month-h .bs-kicker {
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--headline);
+}
+
+/* Hovering the header nudges only the parts that belong to it, so the row
+   reads as one target without repainting the whole sticky bar. */
+.bs-month-h:hover .bs-kicker { color: var(--link); }
+.bs-month-h:hover::before { color: var(--link); }
+
+/* The old far-right "open ▸ / close ▾" hint. Redundant now that the triangle
+   sits beside the month — two arrows on one line saying the same thing is
+   worse than the one problem it was there to solve. Hidden rather than cut
+   from the templates, so it is one line to bring back. */
+.bs-month-h .bs-month-go { display: none; }
