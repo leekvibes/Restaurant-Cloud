@@ -3643,7 +3643,8 @@ app.get('/cash', (req, res) => {
   const blocks = [...months.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([m, list], idx) => {
     const mNet = list.filter((x) => x.c.counted != null).reduce((a, x) => a + x.c.variance, 0);
     const mDep = list.reduce((a, x) => a + (x.c.actualDeposit ?? x.c.calcDeposit ?? 0), 0);
-    return `<details class="mgroup" data-month${idx === 0 ? ' open' : ''}>
+    // Closed by default, like every other month ledger.
+    return `<details class="mgroup" data-month>
       <summary class="mgroup-h"><span class="mgroup-chev">▸</span><span class="mgroup-name">${esc(MONTH_LABEL(m))}</span>
         <span class="mgroup-stats"><span>${list.length} count${list.length === 1 ? '' : 's'}</span>
           <span class="mg-total">${CASH.money(mDep)} deposited</span>
@@ -7195,7 +7196,7 @@ app.get('/c/expenses', (req, res) => {
     }).join('');
 
     return `
-      <details class="bs-month" data-month${idx === 0 ? ' open' : ''}>
+      <details class="bs-month" data-month>
         <summary class="bs-month-h">
           <span class="bs-kicker">${esc(label)}</span>
           <span class="bs-month-meta">${list.length} expense${list.length === 1 ? '' : 's'}
@@ -7464,10 +7465,14 @@ app.get('/c/invoices', (req, res) => {
       </details>`;
     }).join('');
 
-    // Only the newest month opens by default — an accountant scrolling 2024
-    // wants the headline figures, not 60 rows they have to scroll past.
+    // Every month starts closed, including the newest. A ledger that opens
+    // itself decides for you which month you came for, and on a busy year that
+    // is sixty rows to scroll past before you reach the month you wanted. The
+    // month totals are on the header line, so a closed ledger still answers
+    // "what did we spend" at a glance. Shifts and Sales already worked this
+    // way; this is the rest of them agreeing.
     return `
-      <details class="bs-month" data-month${idx === 0 ? ' open' : ''}>
+      <details class="bs-month" data-month>
         <summary class="bs-month-h">
           <span class="bs-kicker">${esc(label)}</span>
           <span class="bs-month-meta">${list.length} invoice${list.length === 1 ? '' : 's'}

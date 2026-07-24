@@ -55,6 +55,12 @@ test.before(async () => {
   run(`INSERT INTO m_invoices (invoice_date, vendor_id, amount_cents, category, status)
        VALUES (?, NULL, 45000, NULL, 'Paid')`, today);
 
+  // An expense, so the expenses ledger renders a month group. Without one that
+  // page draws no groups at all and any sweep over the ledgers passes it
+  // silently — which is exactly how an auto-open regression there went
+  // uncaught until a mutation run pointed at it.
+  run(`INSERT INTO m_expenses (spent_on, name, where_bought, category, amount_cents, paid_by, paid_with)
+    VALUES (?, 'Bag of ice', 'Costco', 'Ice', 1248, 'Malek', 'Company card')`, today);
   run("INSERT INTO m_expirations (name, expires_on) VALUES ('Liquor licence', ?)", today);
   run("INSERT INTO m_equipment (name, warranty_expires) VALUES ('Walk-in cooler', ?)", today);
   run("INSERT INTO m_documents (title) VALUES ('Lease')");
@@ -1010,4 +1016,49 @@ test('a stylesheet arrives as a stylesheet', async () => {
     'or the browser refuses it and the app renders unstyled');
   const css = await res.text();
   assert.match(css, /\.bs-page|\.bs-srow/, 'and it is the real stylesheet');
+});
+
+// ---------------------------------------------------------------------------
+// No ledger opens itself.
+//
+// A month ledger that expands its newest group decides for you which month you
+// came for, and on a busy year that is sixty rows to scroll past before you
+// reach the one you wanted. Every month starts shut; the totals on the header
+// line still answer "what did we spend" without opening anything.
+//
+// Written as a sweep over the pages rather than one test each, so a ledger
+// added later is covered the day it ships.
+// ---------------------------------------------------------------------------
+
+test('no month group is expanded on arrival, on any ledger', async () => {
+  // Named per page, because "no group was open" is also true of a page that
+  // drew no groups — a sweep that cannot tell those apart reports a pass for a
+  // ledger it never looked at.
+  const ledgers = ['/shifts', '/sales', '/c/invoices', '/c/expenses'];
+  const covered = {};
+  for (const p of ledgers) {
+    const html = await (await fetch(BASE + p)).text();
+    // Only the rendered container, not the JS that opens groups on filter.
+    const groups = html.match(/<details class="(?:bs-month|mgroup)"[^>]*>/g) || [];
+    covered[p] = groups.length;
+    for (const g of groups) {
+      assert.ok(!/\bopen\b/.test(g), `${p}: a month is expanded on arrival — ${g}`);
+    }
+  }
+  for (const p of ledgers) {
+    assert.ok(covered[p] > 0,
+      `${p} rendered no month groups, so it was not actually checked — seed it. ${JSON.stringify(covered)}`);
+  }
+});
+
+test('a closed ledger still shows what each month came to', async () => {
+  // Closing them only works because the header carries the figures. If the
+  // total moved inside the group, shutting it would hide the answer.
+  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  const heads = html.match(/<summary class="bs-month-h">[\s\S]*?<\/summary>/g) || [];
+  assert.ok(heads.length, 'the invoice ledger has month headers');
+  for (const h of heads) {
+    assert.match(h, /bs-month-tot/, 'each closed month still states its total');
+    assert.match(h, /bs-month-meta/, 'and how many rows are inside it');
+  }
 });
