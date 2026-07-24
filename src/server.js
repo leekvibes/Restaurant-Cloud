@@ -2752,15 +2752,43 @@ const portalPage = (title, body) => layout(title, `<div class="pt">${body}</div>
  * more than the page shows and enough for the all-time line to be honest about
  * what it covers.
  */
-function earningsFor(empId, limit = 60) {
+// A shift the restaurant has finished with.
+//
+// The status is 'emailed' — set when the shift sheet goes out, which is the
+// moment its figures stop moving. The portal was written against 'sent', a
+// status this app has never used, so the earnings page matched no shifts at
+// all and every staff screen about pay was blank. The other two readers of it
+// had the opposite failure: `status <> 'sent'` is true of every shift ever
+// recorded, so a service that had already been emailed still counted as open
+// tonight, and staff were asked to hand in tips for it a second time.
+const SHIFT_DONE = 'emailed';
+
+// How far back a staff member's own history goes.
+//
+// Not the beginning of the data: this database carries months of services
+// imported from before ZWIN was keeping the record, and those figures are not
+// ones to put in front of somebody as their pay. Overridable without a deploy
+// for when that line moves again.
+const HISTORY_FROM = process.env.PORTAL_HISTORY_FROM || '2026-07-18';
+
+function earningsFor(empId, limit = 400) {
   // w.hours comes along because somebody who is in neither payout list — a
   // cook on a night with no kitchen pot — still worked, and their hours are
   // the only thing their screen has to show. Reading them from the work row
   // is the same number the shift sheet and payroll use.
-  const worked = db.prepare(`SELECT sh.*, w.hours AS worked_hours FROM shifts sh
+  // The rate is resolved by the same SQL payroll uses — per-shift override,
+  // then the wage set for the role they actually worked, then their default.
+  // Importing the fragment rather than restating it: a second copy of this
+  // rule is a second answer to "what were they paid", and the one on the
+  // staff member's own phone must not be the one that drifts.
+  const worked = db.prepare(`SELECT sh.*, w.hours AS worked_hours, w.role AS worked_role,
+      ${WAGE_RATE_SQL} AS rate_cents, e.pay_type
+    FROM shifts sh
     JOIN work w ON w.shift_id = sh.id
-    WHERE w.employee_id = ? AND sh.status = 'sent'
-    ORDER BY sh.date DESC, sh.id DESC LIMIT ?`).all(empId, limit);
+    JOIN employees e ON e.id = w.employee_id
+    LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+    WHERE w.employee_id = ? AND sh.status = '${SHIFT_DONE}' AND sh.date >= ?
+    ORDER BY sh.date DESC, sh.id DESC LIMIT ?`).all(empId, HISTORY_FROM, limit);
 
   const out = [];
   for (const sh of worked) {
@@ -2768,20 +2796,26 @@ function earningsFor(empId, limit = 60) {
     try { r = runShift(shiftInputs(sh.id), policyForShift(sh)); } catch { continue; }
     const asServer = r.servers.find((x) => x.employeeId === empId);
     const asSupport = (r.support || []).find((x) => x.employeeId === empId);
+    // Salaried people have no hourly rate, and showing them one would be a
+    // number they are not paid by.
+    const salaried = sh.pay_type === 'salary';
+    const rate = salaried ? 0 : (sh.rate_cents || 0);
+    const hours = asServer ? asServer.hours : asSupport ? asSupport.hours : (sh.worked_hours || 0);
+    const pay = { salaried, rate, hours, wage: Math.round(rate * (hours || 0)), role: sh.worked_role };
+
     if (asServer) {
       out.push({ shift: sh, kind: 'server', kept: asServer.tipsKept,
         collected: asServer.totalTips, tippedOut: asServer.tipoutTotal,
         cash: asServer.cashTips, toPaycheck: asServer.tipsKept - asServer.cashTips,
-        hours: asServer.hours });
+        ...pay });
     } else if (asSupport) {
       const cash = asSupport.cashTotal || 0;
       const card = asSupport.cardTotal || 0;
       out.push({ shift: sh, kind: 'support', kept: cash + card,
-        collected: cash + card, tippedOut: 0, cash, toPaycheck: card,
-        hours: asSupport.hours });
+        collected: cash + card, tippedOut: 0, cash, toPaycheck: card, ...pay });
     } else {
       out.push({ shift: sh, kind: 'hours', kept: 0, collected: 0, tippedOut: 0,
-        cash: 0, toPaycheck: 0, hours: sh.worked_hours || 0 });
+        cash: 0, toPaycheck: 0, ...pay });
     }
   }
   return out;
@@ -2800,7 +2834,7 @@ app.get('/portal', (req, res) => {
   // Tonight's service, if one is open. The greeting line says what it knows
   // and no more — the app has no roster, so "you're on tonight" would be a
   // guess dressed as a fact.
-  const openToday = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> 'sent'
+  const openToday = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> '${SHIFT_DONE}'
     ORDER BY id DESC LIMIT 1`).get(today);
   const already = openToday
     ? db.prepare('SELECT 1 FROM tip_submissions WHERE shift_id = ? AND employee_id = ?')
@@ -2925,9 +2959,21 @@ app.get('/portal/earnings', (req, res) => {
   const paid = all.filter((x) => x.kind !== 'hours');
   const keptTotal = paid.reduce((a, x) => a + x.kept, 0);
   const avg = paid.length ? Math.round(keptTotal / paid.length) : 0;
+  // Hours are counted over every shift, tipped or not — they are the part of
+  // the record that is the same for a cook and a server.
+  const hoursTotal = all.reduce((a, x) => a + (Number(x.hours) || 0), 0);
+  const wageTotal = all.reduce((a, x) => a + (x.wage || 0), 0);
   const since = all.length ? all[all.length - 1].shift.date : null;
 
   const line = (k, v, tone) => `<div class="pt-line"><span>${k}</span><b${tone ? ` class="${tone}"` : ''}>${v}</b></div>`;
+
+  // Hours, the rate they were on, and what those hours came to. Every shift
+  // has these whether or not a tip ever reached the person — for a cook they
+  // are the whole of it, and for a server they are the half that does not
+  // change with the night.
+  const hrs = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$/, '') : Number(h || 0)} hrs`;
+  const rateOf = (x) => (x.salaried ? 'salaried' : x.rate ? `${money(x.rate)}/hr` : 'no rate set');
+  const worked = (x) => `${hrs(x.hours)} &middot; ${rateOf(x)}`;
 
   // Somebody who received nothing has their hours to show, not a zero.
   //
@@ -2946,14 +2992,21 @@ app.get('/portal/earnings', (req, res) => {
   const hero = !last ? `<p class="pt-quiet">Nothing recorded yet. Once your manager sends a shift
       you worked, what you made shows up here.</p>`
     : (last.kind === 'hours' || gotNothing(last)) ? `
-      <div class="pt-hero"><span>You worked</span><b class="pt-huge">${last.hours || 0} hrs</b></div>
-      ${line('Service', `${esc(niceDate(last.shift.date))} · ${esc(dp(last.shift.daypart))}`)}`
+      <div class="pt-hero"><span>You worked</span><b class="pt-huge">${hrs(last.hours)}</b></div>
+      ${line('Service', `${esc(niceDate(last.shift.date))} · ${esc(dp(last.shift.daypart))}`)}
+      ${last.salaried ? line('Paid', 'salaried')
+        : last.rate ? line('Your rate', `${money(last.rate)}/hr`) + line('Hours pay', money(last.wage))
+        : line('Your rate', 'not set — ask your manager')}`
     : `
       <div class="pt-hero"><span>You kept</span><b class="pt-huge ok">${money(last.kept)}</b></div>
       ${line('Tips collected', money(last.collected))}
       ${last.tippedOut ? line('Tipped out to support', `−${money(last.tippedOut)}`, 'bad') : ''}
       ${line('Cash in hand', money(last.cash))}
-      ${line('To your paycheck', money(last.toPaycheck))}`;
+      ${line('To your paycheck', money(last.toPaycheck))}
+      ${line('Hours worked', hrs(last.hours))}
+      ${last.salaried ? line('Paid', 'salaried')
+        : last.rate ? line('Your rate', `${money(last.rate)}/hr`) + line('Hours pay', money(last.wage))
+        : ''}`;
 
   res.send(portalPage("What you've earned", `
     ${portalSub(`${esc(firstName(emp.name))} · ${esc(roleName)}`)}
@@ -2962,25 +3015,31 @@ app.get('/portal/earnings', (req, res) => {
       ${last ? `<div class="pt-kick"><span>Last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>` : ''}
       ${hero}
 
-      ${paid.length && keptTotal ? `
+      ${all.length ? `
       <div class="pt-kick"><span>All time</span>${since ? `<span>Since ${esc(niceDate(since))}</span>` : ''}</div>
       <div class="pt-stats">
-        <div><b>${money(keptTotal)}</b><span>kept total</span></div>
-        <div><b>${paid.length}</b><span>shift${paid.length === 1 ? '' : 's'}</span></div>
-        <div><b>${money(avg)}</b><span>avg / shift</span></div>
+        ${keptTotal ? `<div><b>${money(keptTotal)}</b><span>kept total</span></div>` : ''}
+        <div><b>${hrs(hoursTotal).replace(' hrs', '')}</b><span>hours</span></div>
+        ${wageTotal ? `<div><b>${money(wageTotal)}</b><span>hours pay</span></div>` : ''}
+        <div><b>${all.length}</b><span>shift${all.length === 1 ? '' : 's'}</span></div>
+        ${keptTotal ? `<div><b>${money(avg)}</b><span>avg tips / shift</span></div>` : ''}
       </div>` : ''}
 
       ${all.length > 1 ? `
-      <div class="pt-kick"><span>Past shifts</span></div>
+      <div class="pt-kick"><span>Past shifts</span><span>${all.length - 1}</span></div>
       <div class="pt-past">
-        ${all.slice(1, 13).map((x) => `<div class="pt-pastrow">
-          <span class="pt-pd">${esc(niceDate(x.shift.date))}</span>
-          <span class="pt-ps">${esc(dp(x.shift.daypart))}</span>
-          <b class="${x.kind === 'hours' || gotNothing(x) ? '' : 'ok'}">${x.kind === 'hours' || gotNothing(x)
-            ? `${x.hours || 0} hrs` : money(x.kept)}</b>
+        ${all.slice(1).map((x) => `<div class="pt-pastrow">
+          <span class="pt-pr-m">
+            <span class="pt-pd">${esc(niceDate(x.shift.date))}</span>
+            <span class="pt-ps">${esc(dp(x.shift.daypart))}</span>
+            <b class="${x.kind === 'hours' || gotNothing(x) ? '' : 'ok'}">${x.kind === 'hours' || gotNothing(x)
+              ? hrs(x.hours) : money(x.kept)}</b>
+          </span>
+          <span class="pt-pr-s">
+            <span>${worked(x)}${x.salaried || !x.rate ? '' : ` &middot; ${money(x.wage)} hours pay`}</span>
+          </span>
         </div>`).join('')}
-      </div>
-      ${all.length > 13 ? `<p class="pt-quiet">Showing the last 12 of ${all.length} recorded.</p>` : ''}` : ''}
+      </div>` : ''}
     </div>
     <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
 });
@@ -7504,7 +7563,7 @@ app.get('/staff-portal', (req, res) => {
   // Who has handed in tonight, and who has not. The portal's whole job at the
   // end of a service is to collect these, so the page that manages it should
   // say plainly who is outstanding.
-  const openShift = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> 'sent'
+  const openShift = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> '${SHIFT_DONE}'
     ORDER BY id DESC LIMIT 1`).get(today);
   let expected = [];
   if (openShift) {

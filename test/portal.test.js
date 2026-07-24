@@ -48,7 +48,11 @@ const tipForm = async (cookie) => (await form('/portal/tips', {}, { cookie })).t
 
 test.before(async () => {
   Database = require('better-sqlite3');
-  const env = { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '', ZWIN_SKIP_BACKFILL: '1' };
+  // The live history cutoff is a business decision that moves; these tests are
+  // about the machinery, so they open the window all the way and the one test
+  // that is about the cutoff sets its own.
+  const env = { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
+    ZWIN_SKIP_BACKFILL: '1', PORTAL_HISTORY_FROM: '2000-01-01' };
   const boot = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
     { env: { ...env, PORT: String(PORT + 40) }, stdio: 'ignore' });
   for (let i = 0; i < 90; i++) {
@@ -68,7 +72,7 @@ test.before(async () => {
 
   // A sent shift with real figures, so the earnings page has the engine's own
   // numbers to show rather than a fixture of its own.
-  const sh = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES ('2026-07-22','cafe','sent',datetime('now'))").run().lastInsertRowid;
+  const sh = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES ('2026-07-22','cafe','emailed',datetime('now'))").run().lastInsertRowid;
   const ids = Object.fromEntries(w.prepare('SELECT name, id FROM employees').all().map((e) => [e.name, e.id]));
   // Bella covers the bar as well as the floor. Somebody has to, or the
   // two-jobs half of the position step goes untested.
@@ -248,6 +252,70 @@ test('a cook is shown what they received, without a tip-out they never paid', as
     'and never bills them for a tip-out they are on the receiving end of');
 });
 
+test('a finished shift is one the app has actually finished', async () => {
+  // This shipped blank. The portal asked for shifts with status 'sent', and
+  // this app has never written that status — a shift becomes 'emailed' when
+  // the sheet goes out. So the query matched nothing, every staff member's
+  // pay screen said "Nothing recorded yet", and it looked like an empty
+  // restaurant rather than a typo.
+  const statuses = db.prepare('SELECT DISTINCT status FROM shifts').all().map((r) => r.status);
+  assert.ok(!statuses.includes('sent'), `the app writes ${statuses.join('/')} — never 'sent'`);
+
+  const html = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+  assert.ok(!/Nothing recorded yet/.test(html), 'a server who worked a finished shift sees it');
+  assert.match(html, /You kept/, 'with what they kept');
+});
+
+test('history starts where the manager says it starts', async () => {
+  // The database carries months of services imported from before ZWIN kept
+  // the record. Those are not figures to put in front of somebody as their
+  // pay, so the window has a floor — and it has to actually hold.
+  const older = db.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES ('2026-06-02','dinner','emailed',datetime('now'))`).run().lastInsertRowid;
+  const bella = db.prepare("SELECT id FROM employees WHERE name = 'Bella Reyes'").get().id;
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)')
+    .run(older, bella, 'server', 6);
+
+  // This suite runs with the floor wide open, so the old shift shows.
+  const wide = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+  assert.match(wide, /Jun 2/, 'with no floor, June is in the history');
+
+  // A server booted with a floor must not show it. Same database, same person.
+  const port = PORT + 7;
+  const child2 = require('node:child_process').spawn(
+    process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
+    { env: { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
+      ZWIN_SKIP_BACKFILL: '1', PORT: String(port), PORTAL_HISTORY_FROM: '2026-07-18' }, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 90; i++) {
+      try { await fetch(`http://127.0.0.1:${port}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    const start = await fetch(`http://127.0.0.1:${port}/tips/start`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ pin: '1111' }).toString(),
+    });
+    const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+    const cut = await (await fetch(`http://127.0.0.1:${port}/portal/earnings`, { headers: { cookie } })).text();
+    assert.ok(!/Jun 2/.test(cut), 'the June shift is behind the floor');
+    assert.match(cut, /Jul 22/, 'and July is still there');
+  } finally {
+    child2.kill();
+    db.prepare('DELETE FROM work WHERE shift_id = ?').run(older);
+    db.prepare('DELETE FROM shifts WHERE id = ?').run(older);
+  }
+});
+
+test('a shift shows the hours and the rate it was worked at', async () => {
+  // "What did I make" is two questions for anybody paid hourly, and the
+  // portal only ever answered the tips half.
+  db.prepare('UPDATE employees SET hourly_rate_cents = 1650 WHERE name = ?').run('Marco Diaz');
+  const html = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
+  assert.match(html, /8 hrs/, 'the hours they worked');
+  assert.match(html, /\$16\.50\/hr/, 'the rate behind them');
+  assert.match(html, /\$132\.00/, 'and what those hours came to');
+});
+
 test('somebody who received nothing is shown their hours, not a zero', async () => {
   // The engine lists everyone who worked on the support side of a shift,
   // including positions no tip-out ever reaches. Leading with "You kept $0.00"
@@ -257,7 +325,11 @@ test('somebody who received nothing is shown their hours, not a zero', async () 
   assert.match(html, /You worked/, 'the headline is what they did');
   assert.match(html, /4 hrs/, 'and it is their actual hours from the shift');
   assert.ok(!/\$0\.00/.test(html), 'no zero anywhere on it');
-  assert.ok(!/All time/.test(html), 'and no all-time panel of three zeros');
+  // They do get an all-time panel — hours are a record worth keeping even when
+  // no tip ever reached them. What it must not carry is money columns that
+  // could only ever read zero.
+  assert.match(html, /All time/, 'their hours still add up to something');
+  assert.ok(!/kept total|avg tips/.test(html), 'without money columns that can only be zero');
 
   // The rule is "nothing arrived", not "this position does not hand tips in".
   // A busser hands nothing in and still gets a share every service, so keying

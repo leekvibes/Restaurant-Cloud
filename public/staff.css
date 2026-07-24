@@ -502,6 +502,16 @@ body.bare {
 .pt-pastrow b { font-family: var(--mono, 'Geist Mono', monospace); font-size: 15px; font-weight: 600; color: var(--pt-ink); }
 .pt-pastrow b.ok { color: var(--pt-green); }
 
+/* A past shift is two lines on a phone, not four columns squeezed into 390px:
+   what the night was on top, what it was worked at underneath. */
+.pt-pastrow { flex-direction: column; align-items: stretch; gap: 3px; }
+.pt-pr-m { display: flex; align-items: baseline; gap: 14px; }
+.pt-pr-s {
+  display: flex; gap: 8px;
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 11.5px;
+  letter-spacing: .02em; color: var(--pt-muted);
+}
+
 /* --- specials ------------------------------------------------------------- */
 .pt-dishes { margin-top: 2px; }
 .pt-dish { padding: 15px 0; border-bottom: 1px dotted var(--pt-dot); }

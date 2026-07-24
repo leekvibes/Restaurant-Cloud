@@ -47,7 +47,7 @@ async function up() {
   // come free from the real database, which is exactly the kind of dependency
   // that hides until the data changes.
   const sh = w.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
-    VALUES (date('now','-1 day'), 'dinner', 'sent', datetime('now'))`).run().lastInsertRowid;
+    VALUES (date('now','-1 day'), 'dinner', 'emailed', datetime('now'))`).run().lastInsertRowid;
   w.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)').run(sh, emp, 'server', 7);
   w.prepare(`INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents,
     alcohol_cents, card_tips_cents, cash_tips_cents) VALUES (?,?,?,?,?,?,?)`)
