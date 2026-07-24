@@ -2256,43 +2256,54 @@ app.get('/tips', (req, res) => {
   const err = req.query.err === '1'
     ? `<div class="tp-err">${esc(req.query.msg || 'Something went wrong.')}</div>` : '';
 
+  const errText = err ? esc(req.query.msg || "That PIN didn't match — try again.") : '';
+
   const body = `
-    <div class="tp">
-      <div class="tp-top">
-        <span class="tp-mark">${esc(markOf(RESTAURANT))}</span>
-        <div class="tp-who">
-          <div class="tp-brand">${esc(RESTAURANT)}</div>
-          <div class="tp-name">Staff portal</div>
+    <div class="tp si">
+      <header class="si-top">
+        <span class="si-badge"><img src="/static/logo.png?v=${BUILD}" alt="${esc(RESTAURANT)}"></span>
+        <span class="si-who">
+          <span class="si-brand">${esc(RESTAURANT)}</span>
+          <span class="si-name">Staff portal</span>
+        </span>
+        <span class="si-zwin">ZWIN</span>
+      </header>
+
+      <form method="post" action="/tips/start" id="pinform" class="si-main">
+        ${/* The value lives on a hidden field; the keypad below fills it, and
+             there is no text input to focus, so the phone's keyboard never
+             opens and there is nothing that can zoom on a stray tap. */''}
+        <input type="hidden" name="pin" id="pin" value="">
+
+        <div class="si-intro">
+          <h1 class="si-h">Sign in.</h1>
+          <p class="si-lead">Your ${PIN_LEN}-digit PIN gets you your shift, tips, specials and pay.
+            Ask your manager if you don't have one.</p>
         </div>
-      </div>
 
-      <div class="tp-body">
-        <h1 class="tp-h">Log your tips.</h1>
-        <p class="tp-lead">Enter your ${PIN_LEN}-digit PIN to start. Ask your manager if you don't have one.</p>
-        ${err}
-
-        <form method="post" action="/tips/start" id="pinform">
-          <div class="tp-sec tp-signin">
-            <label class="tp-seck" for="pin">Your PIN</label>
-            ${/* The phone's own numeric keyboard, not a keypad of our own. The
-                 custom one covered two thirds of the screen and misbehaved on
-                 iOS; a plain field is one the phone already knows how to do.
-                 font-size ≥16px so focusing it does not zoom the page. */''}
-            <input type="text" name="pin" id="pin" class="tp-pinbox" inputmode="numeric"
-              pattern="[0-9]*" autocomplete="off" maxlength="${PIN_LEN}" required
-              placeholder="Tap to enter your PIN" aria-label="Your ${PIN_LEN}-digit PIN">
-            <p class="tp-pinmsg" id="pinmsg" hidden>Enter all ${PIN_LEN} digits.</p>
+        <div class="si-pinrow">
+          <div class="si-kick">Your PIN</div>
+          <div class="si-cells" id="cells">
+            ${Array.from({ length: PIN_LEN }, (_, i) =>
+              `<span class="si-cell${i === 0 ? ' at' : ''}"></span>`).join('')}
           </div>
-        </form>
-      </div>
+          <p class="si-err" id="pinmsg"${err ? '' : ' hidden'}>${errText}</p>
+        </div>
 
-      <div class="tp-foot">
-        <button class="tp-go" type="submit" form="pinform" id="go">Continue &rarr;</button>
-      </div>
-      <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
+        <div class="si-pad">
+          <div class="si-keys" id="keys">
+            ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) =>
+              `<button type="button" class="si-key" data-k="${n}">${n}</button>`).join('')}
+            <span class="si-key-gap"></span>
+            <button type="button" class="si-key" data-k="0">0</button>
+            <button type="button" class="si-key si-key-del" data-k="del" aria-label="Delete">&#9003;</button>
+          </div>
+          <button class="si-go" type="submit" id="go" disabled>Continue &rarr;</button>
+        </div>
+      </form>
     </div>
     ${pinScript()}`;
-  res.send(layout('Log your tips', body, { bare: true, staff: true }));
+  res.send(layout('Sign in', body, { bare: true, staff: true, lockZoom: true }));
 });
 
 /**
@@ -2309,25 +2320,53 @@ const markOf = (name) => String(name || 'ZWIN')
 function pinScript() {
   return `<script>
   (function () {
+    var LEN = ${PIN_LEN};
     var input = document.getElementById('pin');
     var form = document.getElementById('pinform');
-    if (!input || !form) return;
-    var LEN = ${PIN_LEN};
-    input.addEventListener('input', function () {
-      // Digits only, whatever the keyboard sends.
-      var clean = input.value.replace(/[^0-9]/g, '').slice(0, LEN);
-      if (clean !== input.value) input.value = clean;
-      document.getElementById('pinmsg').hidden = true;
-      // Complete and there is nothing else to decide, so go — one less tap for
-      // someone holding a till float in the other hand.
-      if (input.value.length === LEN) {
-        setTimeout(function () { form.requestSubmit ? form.requestSubmit() : form.submit(); }, 150);
+    var keys = document.getElementById('keys');
+    var cells = document.getElementById('cells');
+    var go = document.getElementById('go');
+    var err = document.getElementById('pinmsg');
+    if (!input || !form || !keys || !cells || !go) return;
+
+    function draw() {
+      var v = input.value, boxes = cells.children;
+      for (var i = 0; i < boxes.length; i++) {
+        boxes[i].className = 'si-cell' + (i < v.length ? ' filled' : (i === v.length ? ' at' : ''));
       }
+      go.disabled = v.length !== LEN;
+    }
+    function push(d) {
+      if (input.value.length >= LEN) return;
+      input.value += d;
+      if (err) err.hidden = true;
+      draw();
+    }
+    function del() { input.value = input.value.slice(0, -1); draw(); }
+
+    // One delegated handler. On pointerdown where the browser has it — the
+    // digit lands the instant a thumb touches, none of the 300ms click delay,
+    // and touch-action in the CSS already rules out the double-tap-zoom this
+    // screen used to trigger. Exactly one of the two listeners is ever bound,
+    // so a mouse that fires both pointer and click never counts a key twice.
+    function hit(e) {
+      var b = e.target.closest('[data-k]');
+      if (!b) return;
+      e.preventDefault();
+      if (b.dataset.k === 'del') del(); else push(b.dataset.k);
+    }
+    if (window.PointerEvent) keys.addEventListener('pointerdown', hit);
+    else keys.addEventListener('click', hit);
+    // A real keyboard still works — desktop, or a paired bluetooth one.
+    document.addEventListener('keydown', function (e) {
+      if (e.key >= '0' && e.key <= '9') { push(e.key); e.preventDefault(); }
+      else if (e.key === 'Backspace') { del(); e.preventDefault(); }
+      else if (e.key === 'Enter' && input.value.length === LEN) { form.requestSubmit ? form.requestSubmit() : form.submit(); }
     });
     form.addEventListener('submit', function (e) {
-      if (input.value.length !== LEN) { e.preventDefault(); document.getElementById('pinmsg').hidden = false; }
+      if (input.value.length !== LEN) { e.preventDefault(); if (err) err.hidden = false; }
     });
-    setTimeout(function () { try { input.focus(); } catch (e) { /* ignore */ } }, 60);
+    draw();
   })();
   </script>`;
 }

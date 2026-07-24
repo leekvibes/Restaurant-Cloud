@@ -655,7 +655,14 @@ function head(title, opts = {}) {
   // The sheet follows `bare`; the identity follows `staff`.
   const staff = !!opts.staff;
   const tpShell = !!opts.bare;
-  return `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  // The PIN screen has its own keypad and no text input to focus, so there is
+  // nothing on it that should ever zoom — and a stray double-tap or pinch that
+  // zooms it is exactly the bug staff hit. Lock the scale there, and only
+  // there, so the rest of the app keeps pinch-to-zoom.
+  const viewport = opts.lockZoom
+    ? 'width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no'
+    : 'width=device-width,initial-scale=1,viewport-fit=cover';
+  return `<meta charset="utf-8"><meta name="viewport" content="${viewport}">
     <title>${esc(title)} · ${esc(staff ? RESTAURANT : APP_NAME)}</title>
     <link rel="stylesheet" href="/static/fonts.css?v=${BUILD}">
     <link rel="stylesheet" href="/static/styles.css?v=${BUILD}">

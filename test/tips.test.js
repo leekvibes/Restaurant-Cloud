@@ -91,7 +91,7 @@ test('the sign-in page names nobody', async () => {
   for (const name of ['Rosa', 'Diaz', 'Ana', 'Ortiz']) {
     assert.ok(!html.includes(name), `${name} is not on the sign-in page`);
   }
-  assert.match(html, /Log your tips/);
+  assert.match(html, /Sign in\./);
 });
 
 test('neither service is preselected', async () => {
@@ -181,15 +181,18 @@ test('with no JavaScript the whole form is still there', async () => {
   assert.match(html, /type="submit" form="report"/, 'and a submit that posts it');
 });
 
-test('the PIN field takes a number, and only a PIN-length one', async () => {
-  // The sign-in field is the phone's own number pad now, not a keypad of our
-  // own. It is capped at the PIN length, and /employees refuses any other
-  // length — a PIN that could not be typed here is one nobody could sign in
-  // with, and nothing would say why.
+test('the sign-in keypad draws exactly as many cells as a PIN has digits', async () => {
+  // The screen has its own keypad — no text input to focus, so the phone's
+  // keyboard never opens and nothing zooms. The PIN rides on a hidden field
+  // the keys fill. If a PIN of some other length could be saved, that person
+  // could never enter it here, so /employees refuses any other length.
   const html = await (await fetch(`${BASE}/tips`)).text();
-  assert.match(html, /id="pin"[^>]*inputmode="numeric"/, 'it opens the number pad');
-  assert.match(html, /id="pin"[^>]*maxlength="4"/, 'and stops at four digits');
-  assert.ok(!/class="tp-keys"|class="tp-cell/.test(html), 'the custom keypad is gone');
+  assert.strictEqual((html.match(/class="si-cell[ "]/g) || []).length, 4, 'four cells');
+  assert.strictEqual((html.match(/data-k="/g) || []).length, 11, 'ten digits and a delete');
+  assert.match(html, /<input type="hidden" name="pin"/, 'the PIN is a hidden field the keypad fills');
+  assert.ok(!/name="pin"[^>]*inputmode/.test(html), 'never a focusable field, so the keyboard never opens');
+  // And the page is locked against the stray zoom staff hit.
+  assert.match(html, /user-scalable=no/, 'the sign-in viewport is zoom-locked');
 
   const bad = await form('/employees', { name: 'Too Long', role: 'server', pin: '12345' });
   assert.strictEqual(bad.status, 302);

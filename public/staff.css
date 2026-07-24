@@ -263,7 +263,6 @@ body.bare {
 }
 .tp-go:active { background: var(--accent-hover); }
 .tp-go[disabled] { opacity: .4; cursor: not-allowed; }
-.tp-pinmsg { margin: 14px 0 0; font-size: 14px; color: var(--warning); }
 .tp-reassure { margin: 12px 0 0; text-align: center; font-size: 14px; color: var(--muted); }
 .tp-build {
   padding: 18px 20px calc(20px + env(safe-area-inset-bottom));
@@ -271,23 +270,105 @@ body.bare {
   font-family: var(--mono); font-size: 12px; letter-spacing: .1em; color: var(--faint);
 }
 
-/* --- sign in -------------------------------------------------------------- */
-/* "YOUR PIN" is a bare label here — the ruled kicker belongs to the report's
-   sections. One field that opens the phone's own number pad, not a keypad of
-   our own; font-size stays ≥16px so focusing it never zooms the page. */
-.tp-signin .tp-seck { border-bottom: 0; padding-bottom: 0; }
-.tp-signin { margin-top: 34px; }
-.tp-pinbox {
-  width: 100%; box-sizing: border-box; margin-top: 14px;
-  border: 1px solid var(--tp-field); background: var(--surface);
-  font-family: var(--mono); font-size: 30px; font-weight: 600;
-  letter-spacing: .35em; text-indent: .35em; text-align: center; color: var(--ink);
-  padding: 16px 12px;
+/* ===========================================================================
+   SIGN IN — the PIN screen
+   ---------------------------------------------------------------------------
+   Its own on-screen keypad, never the phone's, so nothing here focuses a text
+   field and nothing zooms. Static and unscrollable: a fixed 100dvh column with
+   the keypad and Continue anchored to the bottom (margin-top:auto), overflow
+   hidden so a stray drag cannot move it, and touch-action:manipulation +
+   a locked viewport so a double-tap or pinch cannot zoom it either.
+   =========================================================================== */
+.si {
+  --si-page: #f4ead9; --si-ink: #1f1d1a; --si-body: #5c5647; --si-muted: #77705f;
+  --si-kick: #8b8574; --si-line: #cabfa4; --si-press: #e9dcc4; --si-disabled: #d3c6ac;
+  --si-dis-ink: #8b8574; --si-accent: #2451c9; --si-err: #9a2c1d;
+  background: var(--si-page); color: var(--si-body);
+  height: 100vh; height: 100dvh; overflow: hidden;
+  touch-action: manipulation;
 }
-.tp-pinbox::placeholder {
-  font-size: 16px; font-weight: 500; letter-spacing: 0; text-indent: 0; color: var(--faint);
+:root[data-theme="night"] .si {
+  --si-page: #191815; --si-ink: #eae6d9; --si-body: #b3ad9c; --si-muted: #8f8a7a;
+  --si-kick: #8f8a7a; --si-line: #46423a; --si-press: #2e2a22; --si-disabled: #35332c;
+  --si-dis-ink: #6f6a5c; --si-accent: #8fa8ff; --si-err: #e08573;
 }
-.tp-pinbox:focus { outline: none; border-color: var(--accent); }
+.si * { box-sizing: border-box; }
+
+.si-top {
+  display: flex; align-items: center; gap: 13px;
+  padding: calc(16px + env(safe-area-inset-top)) 20px 15px;
+  border-bottom: 2px solid var(--si-ink);
+}
+.si-badge {
+  width: 40px; height: 40px; flex: none; border: 1.5px solid var(--si-ink);
+  border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--si-page);
+}
+.si-badge img { width: 33px; height: 33px; object-fit: contain; }
+.si-who { display: flex; flex-direction: column; min-width: 0; }
+.si-brand {
+  font-family: var(--mono); font-size: 10px; font-weight: 500;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--si-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.si-name { font-size: 15px; font-weight: 600; color: var(--si-ink); }
+.si-zwin {
+  margin-left: auto; font-family: var(--sans); font-size: 13px; font-weight: 700;
+  letter-spacing: .16em; color: var(--si-ink);
+}
+
+.si-main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.si-intro { padding: 26px 20px 0; }
+.si-h {
+  font-family: var(--serif); font-weight: 500; font-size: 32px; line-height: 1.05;
+  letter-spacing: -.01em; color: var(--si-ink); margin: 0;
+}
+.si-lead { font-size: 14.5px; line-height: 1.5; color: var(--si-body); margin: 12px 0 0; text-wrap: pretty; }
+
+.si-pinrow { padding: 30px 20px 0; }
+.si-kick {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--si-kick);
+}
+.si-cells { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+.si-cell { height: 52px; border-bottom: 2px solid var(--si-line); display: grid; place-items: center; }
+.si-cell.at { border-bottom: 3px solid var(--si-accent); }
+.si-cell.at::after {
+  content: ''; width: 2px; height: 26px; background: var(--si-accent);
+  animation: si-blink 1.05s step-end infinite;
+}
+.si-cell.filled { border-bottom: 2px solid var(--si-ink); }
+.si-cell.filled::after { content: ''; width: 13px; height: 13px; border-radius: 50%; background: var(--si-ink); }
+@keyframes si-blink { 50% { opacity: 0; } }
+.si-err { margin: 14px 0 0; font-size: 12.5px; font-weight: 500; color: var(--si-err); min-height: 16px; }
+
+/* Keypad + Continue, sunk to the bottom of the screen. */
+.si-pad { margin-top: auto; padding: 0 20px calc(22px + env(safe-area-inset-bottom)); }
+.si-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.si-key {
+  min-height: 58px; border: 1px solid var(--si-line); background: transparent;
+  font-family: var(--mono); font-size: 24px; font-weight: 500; color: var(--si-ink);
+  cursor: pointer; touch-action: manipulation;
+  -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+}
+/* Instant press feedback — the whole point of pointerdown over click. */
+.si-key:active { border: 1.5px solid var(--si-ink); background: var(--si-press); font-weight: 600; }
+.si-key-gap { visibility: hidden; }
+.si-key-del { border: 0; background: none; font-size: 20px; font-weight: 400; color: var(--si-body); }
+.si-key-del:active { border: 0; background: none; font-weight: 400; }
+.si-go {
+  display: block; width: 100%; margin-top: 18px; padding: 16px; border: 0;
+  font-family: var(--sans); font-size: 15.5px; font-weight: 600; text-align: center;
+  background: var(--si-ink); color: var(--si-page); cursor: pointer; touch-action: manipulation;
+}
+.si-go[disabled] { background: var(--si-disabled); color: var(--si-dis-ink); cursor: not-allowed; }
+
+/* Shorter phones: shrink the keys before anything is allowed to scroll. */
+@media (max-height: 720px) {
+  .si-intro { padding-top: 18px; }
+  .si-pinrow { padding-top: 20px; }
+  .si-key { min-height: 50px; font-size: 22px; }
+  .si-h { font-size: 28px; }
+}
 
 /* --- messages ------------------------------------------------------------- */
 .tp-err {
@@ -306,7 +387,6 @@ body.bare {
 
 @media (max-width: 359px) {
   .tp-h { font-size: 26px; }
-  .tp-pinbox { font-size: 26px; }
 }
 
 /* ===========================================================================

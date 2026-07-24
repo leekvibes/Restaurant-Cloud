@@ -816,15 +816,15 @@ test('the staff portal starts below the phone status bar', async () => {
   // from the start; the top never did, so the restaurant name and "Not you?"
   // drew underneath the clock on every iPhone.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
-  for (const bar of ['.tp-top', '.tp-navbar']) {
+  for (const bar of ['.tp-top', '.tp-navbar', '.si-top']) {
     const m = new RegExp(`\\${bar}\\s*\\{([^}]*)\\}`).exec(css);
     assert.ok(m, `${bar} exists`);
     assert.match(m[1], /padding:\s*calc\([^)]*env\(safe-area-inset-top\)/,
       `${bar} reserves the status bar`);
   }
-  // Both staff screens use one of those two bars, so both are covered.
+  // The sign-in has its own header bar; it reserves the inset too.
   const signin = await (await fetch(`${BASE}/tips`, { redirect: 'manual' })).text();
-  assert.match(signin, /class="tp-top"/, 'the PIN screen uses the inset bar');
+  assert.match(signin, /class="si-top"/, 'the PIN screen uses the inset bar');
 });
 
 test('payroll opens on the period running now', async () => {
