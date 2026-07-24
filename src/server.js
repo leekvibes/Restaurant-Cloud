@@ -2721,6 +2721,9 @@ function requirePortal(req, res) {
 
 const GREETING = (h) => (h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : 'Evening');
 const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || 'there';
+// Hours as a person reads them: a whole number when it is one, two decimals
+// when it is not, and never a trailing zero. "8 hrs", "8.27 hrs", "8.5 hrs".
+const hrsShort = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$/, '') : Number(h || 0)} hrs`;
 
 /** The portal's own chrome: wordmark, restaurant, sign out. */
 const portalHead = (right) => `
@@ -2858,46 +2861,18 @@ app.get('/portal', (req, res) => {
       </div>`).join('')}
     </div>` : '';
 
-  // The same home for everybody, minus what does not apply.
-  //
-  // Not three layouts — one, with a section that is simply absent for a
-  // position that hands nothing in. A cook opening this should recognise the
-  // screen a server describes to them, in the same order, with one block
-  // missing rather than a different block in its place. Whether the heading
-  // reads "tips & sales" or "cash tips" follows the same rule: it names what
-  // is actually being asked for, and nothing else moves.
-  const task = !shape.tips ? '' : `
-    <div class="pt-kick"><span>End of your shift</span></div>
-    <div class="pt-task">
-      <div class="pt-task-h">
-        ${/* The same name for everyone. What gets asked for inside still
-               follows the position — a barista is never shown sales fields —
-               but the way in reads identically on every phone, so staff
-               describing it to each other are describing the same thing. */''}
-        <h2>Submit sales or tips</h2>
-        <span class="pt-due">${already ? 'Submitted' : 'Due tonight'}</span>
-      </div>
-      <p class="pt-task-s">What you made tonight — about a minute.</p>
-      <div class="pt-task-f">
-        <span class="pt-state">${already ? 'Sent — you can still change it' : 'Not started'}</span>
-        <form method="post" action="/portal/tips" class="pt-inline">
-          <button class="pt-start" type="submit">${already ? 'Edit' : 'Start'} →</button>
-        </form>
-      </div>
-    </div>`;
-
   const lastBlock = last ? `
     <div class="pt-kick"><span>Your last shift</span><a href="/portal/earnings">All earnings →</a></div>
-    <div class="pt-last">
+    <a class="pt-last" href="/portal/earnings/${last.shift.id}">
       <div class="pt-last-l">
         <span>${esc(niceDate(last.shift.date))} · ${last.kind === 'hours' ? 'you worked' : 'you kept'}</span>
         ${last.kind === 'hours'
-          ? `<i>${last.hours || 0} hrs</i>`
+          ? `<i>${hrsShort(last.hours)}${last.rate ? ` at ${money(last.rate)}/hr` : ''}</i>`
           : `<i>${money(last.cash)} cash + ${money(last.toPaycheck)} to your paycheck${
               last.tippedOut ? ', after tip-out' : ''}</i>`}
       </div>
-      <b class="pt-big">${last.kind === 'hours' ? `${last.hours || 0} hrs` : money(last.kept)}</b>
-    </div>` : '';
+      <b class="pt-big${last.kind === 'hours' ? ' hrs' : ''}">${last.kind === 'hours' ? hrsShort(last.hours) : money(last.kept)}</b>
+    </a>` : '';
 
   const row = (href, glyph, title, sub, tag) => `
     <a class="pt-row" href="${href}">
@@ -2907,21 +2882,32 @@ app.get('/portal', (req, res) => {
       <span class="pt-chev">›</span>
     </a>`;
 
+  // Submitting is one option among the others now, not a headline block above
+  // them — a staff member could not find it when it read like a section title.
+  // It is the first row, and it carries a tag so it still stands out: the one
+  // thing on this screen with something to do tonight.
+  const submitRow = !shape.tips ? '' : `
+    <a class="pt-row pt-row-do" href="/portal/tips">
+      <span class="pt-ico">✎</span>
+      <span class="pt-row-t"><b>Submit sales or tips</b>
+        <i class="pt-tag${already ? ' done' : ''}">${already ? 'Submitted' : 'Due tonight'}</i>
+        <span>${already ? 'Sent — tap to change it' : 'What you made tonight · about a minute'}</span></span>
+      <span class="pt-chev">›</span>
+    </a>`;
+
   res.send(portalPage('Your portal', `
     ${portalHead()}
     <div class="pt-body">
       <p class="pt-date">${esc(now.toLocaleDateString('en-US',
         { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase())} — ${GREETING(now.getHours()).toUpperCase()}</p>
       <h1 class="pt-hi">${GREETING(now.getHours())}, ${esc(firstName(emp.name))}.</h1>
-      <p class="pt-onshift">${openToday
-        ? `<i class="pt-dot"></i>You're on <b>${esc(dp(openToday.daypart))}</b> tonight · ${esc(roleName)}`
-        : `<i class="pt-dot off"></i>No service open right now · ${esc(roleName)}`}</p>
 
       ${noteBlock}
-      ${task}
       ${lastBlock}
 
+      <div class="pt-kick"><span>What you can do</span></div>
       <div class="pt-rows">
+        ${submitRow}
         ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
           hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
         ${row('/portal/specials', '✦', "Today's specials",
@@ -2932,15 +2918,21 @@ app.get('/portal', (req, res) => {
     <p class="pt-foot">Anything you submit stays editable until your manager sends the shift.</p>`));
 });
 
-// The hub's Start button. A POST because it hands the submission flow the
-// token it has always taken — the tip form and everything behind it are
-// unchanged.
-app.post('/portal/tips', (req, res) => {
+// Opening the submission form. Available as GET so the hub can link to it the
+// same way it links to every other page — the form is server-rendered and
+// carries its own token, so there is nothing unsafe about arriving by a tap on
+// a link. POST is kept because the old Start button used it and a home screen
+// somebody saved may still post; both do exactly the same thing, and both
+// refuse a position that is not asked to submit — hiding the row is not a
+// permission, the route saying no is.
+const openTips = (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   if (!who.shape.tips) return res.redirect('/portal');
   res.send(tipsFormPage(who.emp));
-});
+};
+app.get('/portal/tips', openTips);
+app.post('/portal/tips', openTips);
 
 app.get('/portal/out', (req, res) => {
   res.setHeader('Set-Cookie', `${PORTAL_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
@@ -2950,11 +2942,53 @@ app.get('/portal/out', (req, res) => {
 // ---------------------------------------------------------------------------
 // WHAT YOU'VE EARNED
 // ---------------------------------------------------------------------------
+// The full breakdown of one shift — the same lines whether it is shown as the
+// last-shift hero on the earnings page or on its own when tapped. One builder
+// so the two can never say different things about the same night.
+function shiftBreakdown(x) {
+  const line = (k, v, tone) => `<div class="pt-line"><span>${k}</span><b${tone ? ` class="${tone}"` : ''}>${v}</b></div>`;
+  const wage = x.salaried ? line('Paid', 'salaried')
+    : x.rate ? line('Your rate', `${money(x.rate)}/hr`) + line('Hours pay', money(x.wage))
+    : line('Your rate', 'not set — ask your manager');
+  const nothing = !x.kept && !x.collected;
+  if (x.kind === 'hours' || nothing) {
+    return `<div class="pt-hero"><span>You worked</span><b class="pt-huge">${hrsShort(x.hours)}</b></div>
+      ${wage}`;
+  }
+  return `<div class="pt-hero"><span>You kept</span><b class="pt-huge ok">${money(x.kept)}</b></div>
+    ${line('Tips collected', money(x.collected))}
+    ${x.tippedOut ? line('Tipped out to support', `−${money(x.tippedOut)}`, 'bad') : ''}
+    ${line('Cash in hand', money(x.cash))}
+    ${line('To your paycheck', money(x.toPaycheck))}
+    ${line('Hours worked', hrsShort(x.hours))}
+    ${x.salaried || x.rate ? wage : ''}`;
+}
+
+// One shift on its own, reached by tapping any row in the history. Recomputed
+// from the same list the page is built from, so a shift you can see is a shift
+// you can open; anything else falls back to the full list rather than 404ing.
+app.get('/portal/earnings/:id', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const id = Number(req.params.id);
+  const x = earningsFor(emp.id, 400).find((e) => e.shift.id === id);
+  if (!x) return res.redirect('/portal/earnings');
+  res.send(portalPage('Your shift', `
+    ${portalSub('<a class="pt-back2" href="/portal/earnings">All earnings</a>')}
+    <div class="pt-body">
+      <h1 class="pt-title">${esc(niceDate(x.shift.date))}</h1>
+      <div class="pt-kick"><span>${esc(dp(x.shift.daypart))} service</span></div>
+      ${shiftBreakdown(x)}
+    </div>
+    <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
+});
+
 app.get('/portal/earnings', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
-  const { emp, roleName } = who;
-  const all = earningsFor(emp.id, 60);
+  const { emp } = who;
+  const all = earningsFor(emp.id, 400);
   const last = all[0];
   const paid = all.filter((x) => x.kind !== 'hours');
   const keptTotal = paid.reduce((a, x) => a + x.kept, 0);
@@ -2965,15 +2999,9 @@ app.get('/portal/earnings', (req, res) => {
   const wageTotal = all.reduce((a, x) => a + (x.wage || 0), 0);
   const since = all.length ? all[all.length - 1].shift.date : null;
 
-  const line = (k, v, tone) => `<div class="pt-line"><span>${k}</span><b${tone ? ` class="${tone}"` : ''}>${v}</b></div>`;
-
-  // Hours, the rate they were on, and what those hours came to. Every shift
-  // has these whether or not a tip ever reached the person — for a cook they
-  // are the whole of it, and for a server they are the half that does not
-  // change with the night.
-  const hrs = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$/, '') : Number(h || 0)} hrs`;
+  // The rate a past-shift subtitle reads, and the hours·rate line under it.
   const rateOf = (x) => (x.salaried ? 'salaried' : x.rate ? `${money(x.rate)}/hr` : 'no rate set');
-  const worked = (x) => `${hrs(x.hours)} &middot; ${rateOf(x)}`;
+  const worked = (x) => `${hrsShort(x.hours)} &middot; ${rateOf(x)}`;
 
   // Somebody who received nothing has their hours to show, not a zero.
   //
@@ -2989,56 +3017,59 @@ app.get('/portal/earnings', (req, res) => {
   // share every service. What matters here is only whether anything arrived.
   const gotNothing = (x) => !x.kept && !x.collected;
 
-  const hero = !last ? `<p class="pt-quiet">Nothing recorded yet. Once your manager sends a shift
-      you worked, what you made shows up here.</p>`
-    : (last.kind === 'hours' || gotNothing(last)) ? `
-      <div class="pt-hero"><span>You worked</span><b class="pt-huge">${hrs(last.hours)}</b></div>
-      ${line('Service', `${esc(niceDate(last.shift.date))} · ${esc(dp(last.shift.daypart))}`)}
-      ${last.salaried ? line('Paid', 'salaried')
-        : last.rate ? line('Your rate', `${money(last.rate)}/hr`) + line('Hours pay', money(last.wage))
-        : line('Your rate', 'not set — ask your manager')}`
-    : `
-      <div class="pt-hero"><span>You kept</span><b class="pt-huge ok">${money(last.kept)}</b></div>
-      ${line('Tips collected', money(last.collected))}
-      ${last.tippedOut ? line('Tipped out to support', `−${money(last.tippedOut)}`, 'bad') : ''}
-      ${line('Cash in hand', money(last.cash))}
-      ${line('To your paycheck', money(last.toPaycheck))}
-      ${line('Hours worked', hrs(last.hours))}
-      ${last.salaried ? line('Paid', 'salaried')
-        : last.rate ? line('Your rate', `${money(last.rate)}/hr`) + line('Hours pay', money(last.wage))
-        : ''}`;
+  // The all-time figures, split into the two rows the design asks for: the
+  // money and hours totals on top, the counts centered underneath. Built as a
+  // list so a cook (no tips) simply has fewer cells rather than a different
+  // layout.
+  //
+  // Rounded to whole dollars here, unlike the exact per-shift figures. Three
+  // mono amounts with cents do not fit three-across on a phone — "$6,813.33"
+  // collides with its neighbour — and a running total is a sense of the size,
+  // not a figure anyone reconciles to the penny.
+  const money0 = (c) => '$' + Math.round((c || 0) / 100).toLocaleString('en-US');
+  const topStats = [
+    keptTotal ? [money0(keptTotal), 'kept total'] : null,
+    [hrsShort(hoursTotal).replace(' hrs', ''), 'hours'],
+    wageTotal ? [money0(wageTotal), 'hours pay'] : null,
+  ].filter(Boolean);
+  const botStats = [
+    [String(all.length), `shift${all.length === 1 ? '' : 's'}`],
+    keptTotal ? [money0(avg), 'avg tips / shift'] : null,
+  ].filter(Boolean);
+  const statCell = ([v, k]) => `<div class="pt-stat"><b>${v}</b><span>${k}</span></div>`;
 
   res.send(portalPage("What you've earned", `
-    ${portalSub(`${esc(firstName(emp.name))} · ${esc(roleName)}`)}
+    ${portalSub('')}
     <div class="pt-body">
       <h1 class="pt-title">What you've earned</h1>
-      ${last ? `<div class="pt-kick"><span>Last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>` : ''}
-      ${hero}
+      ${last ? `
+        <div class="pt-kick"><span>Your last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>
+        ${shiftBreakdown(last)}`
+      : `<p class="pt-quiet">Nothing recorded yet. Once your manager sends a shift
+          you worked, what you made shows up here.</p>`}
 
       ${all.length ? `
       <div class="pt-kick"><span>All time</span>${since ? `<span>Since ${esc(niceDate(since))}</span>` : ''}</div>
       <div class="pt-stats">
-        ${keptTotal ? `<div><b>${money(keptTotal)}</b><span>kept total</span></div>` : ''}
-        <div><b>${hrs(hoursTotal).replace(' hrs', '')}</b><span>hours</span></div>
-        ${wageTotal ? `<div><b>${money(wageTotal)}</b><span>hours pay</span></div>` : ''}
-        <div><b>${all.length}</b><span>shift${all.length === 1 ? '' : 's'}</span></div>
-        ${keptTotal ? `<div><b>${money(avg)}</b><span>avg tips / shift</span></div>` : ''}
+        <div class="pt-stat-row">${topStats.map(statCell).join('')}</div>
+        ${botStats.length ? `<div class="pt-stat-row bot">${botStats.map(statCell).join('')}</div>` : ''}
       </div>` : ''}
 
       ${all.length > 1 ? `
       <div class="pt-kick"><span>Past shifts</span><span>${all.length - 1}</span></div>
       <div class="pt-past">
-        ${all.slice(1).map((x) => `<div class="pt-pastrow">
+        ${all.slice(1).map((x) => `<a class="pt-pastrow" href="/portal/earnings/${x.shift.id}">
           <span class="pt-pr-m">
             <span class="pt-pd">${esc(niceDate(x.shift.date))}</span>
             <span class="pt-ps">${esc(dp(x.shift.daypart))}</span>
             <b class="${x.kind === 'hours' || gotNothing(x) ? '' : 'ok'}">${x.kind === 'hours' || gotNothing(x)
-              ? hrs(x.hours) : money(x.kept)}</b>
+              ? hrsShort(x.hours) : money(x.kept)}</b>
+            <span class="pt-chev">›</span>
           </span>
           <span class="pt-pr-s">
             <span>${worked(x)}${x.salaried || !x.rate ? '' : ` &middot; ${money(x.wage)} hours pay`}</span>
           </span>
-        </div>`).join('')}
+        </a>`).join('')}
       </div>` : ''}
     </div>
     <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
@@ -3100,9 +3131,6 @@ app.get('/portal/stock', (req, res) => {
   if (!who) return;
   const { emp } = who;
   const mine = PORTAL.q.stockMine.all(emp.id);
-  // The catalogue, so a report names something the ordering side recognises
-  // rather than a spelling of it.
-  const products = prodQ.plain.all();
 
   const recent = mine.length ? `<p class="pt-foot-in">Recently sent: ${mine.slice(0, 4).map((m) =>
     `${esc(m.item)}${m.resolution ? ` (${esc(m.resolution)} ✓)` : ` (${esc(m.status)})`}`).join(' · ')}</p>` : '';
@@ -3120,13 +3148,12 @@ app.get('/portal/stock', (req, res) => {
         </div>
 
         <div class="pt-kick"><span>Add an item</span></div>
+        ${/* Free text, on purpose. Staff type whatever they are out of in their
+              own words — no dropdown of the catalogue to match against. The
+              manager reads exactly what was written. */''}
         <label class="pt-field">
-          <input id="stock-item" list="stock-products" placeholder="What is it?" autocomplete="off">
-          <span class="pt-hintr">type or pick</span>
+          <input id="stock-item" placeholder="What are you out of?" autocomplete="off">
         </label>
-        <datalist id="stock-products">
-          ${products.map((p) => `<option value="${esc(p.name)}"></option>`).join('')}
-        </datalist>
 
         <div class="pt-seg" id="stock-status">
           <button type="button" data-s="out" class="on">Out</button>
@@ -3156,7 +3183,6 @@ app.post('/portal/stock', (req, res) => {
   // rather than guessed at — a report nobody can read helps nobody.
   let items = [];
   try { items = JSON.parse(req.body.items || '[]'); } catch { items = []; }
-  const byName = new Map(prodQ.plain.all().map((p) => [p.name.toLowerCase(), p.id]));
   const batch = `${emp.id}-${Date.now()}`;
   let n = 0;
 
@@ -3167,9 +3193,9 @@ app.post('/portal/stock', (req, res) => {
       const status = PORTAL.STOCK_STATUS.includes(raw.status) ? raw.status : 'out';
       PORTAL.q.addStock.run({
         item,
-        // Linked where the name is one we already buy, so the manager's side
-        // can reach the vendor without anybody retyping it.
-        product_id: byName.get(item.toLowerCase()) || null,
+        // Always free text — the report is exactly what the staff member typed,
+        // never silently matched to a catalogue product on their behalf.
+        product_id: null,
         status,
         note: String(raw.note || '').trim().slice(0, 200) || null,
         employee_id: emp.id,

@@ -1,13 +1,13 @@
 {
-  "name": "Cash Tips",
-  "short_name": "Tips",
-  "description": "Log your cash tips at the end of your shift.",
-  "start_url": "/tips",
-  "scope": "/tips",
+  "name": "Staff Portal",
+  "short_name": "Portal",
+  "description": "Your shifts, pay and tips, the board, and end-of-shift submissions.",
+  "start_url": "/portal",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#f4ead9",
+  "theme_color": "#f4ead9",
   "icons": [
     {
       "src": "/static/tips-icon-192.png",

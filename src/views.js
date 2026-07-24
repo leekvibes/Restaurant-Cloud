@@ -666,8 +666,8 @@ function head(title, opts = {}) {
     <link rel="icon" href="/static/${staff ? 'tips-' : ''}icon-192.png?v=${BUILD}">
     <link rel="apple-touch-icon" href="/static/${staff ? 'tips-' : ''}apple-touch-icon.png?v=${BUILD}">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'black-translucent' : 'default'}">
-    <meta name="apple-mobile-web-app-title" content="${staff ? 'Cash Tips' : APP_NAME}">
+    <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'default' : 'default'}">
+    <meta name="apple-mobile-web-app-title" content="${staff ? 'Portal' : APP_NAME}">
     <meta name="mobile-web-app-capable" content="yes">
     <script>
       // Before first paint, or the page flashes the wrong theme on every load.

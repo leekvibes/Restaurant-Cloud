@@ -911,9 +911,13 @@ test('the app icon is the wordmark, white on black', () => {
   const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
   assert.deepStrictEqual([w, h], [512, 512], 'at the declared size');
 
-  for (const f of ['manifest.webmanifest', 'manifest-tips.webmanifest']) {
+  // Each app's launch splash matches the page it opens to, so there is no
+  // flash of the wrong colour before the first paint: the manager app is dark,
+  // the staff portal is the cream it renders on.
+  const splash = { 'manifest.webmanifest': '#000000', 'manifest-tips.webmanifest': '#f4ead9' };
+  for (const [f, bg] of Object.entries(splash)) {
     const m = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'));
-    assert.strictEqual(m.background_color, '#000000', `${f}: the splash matches the icon`);
+    assert.strictEqual(m.background_color, bg, `${f}: the splash matches the page it opens to`);
     assert.ok(m.icons.some((i) => i.purpose === 'maskable'), `${f}: has a maskable icon`);
   }
 });
@@ -948,7 +952,11 @@ test('the manager app and the staff portal are two separate installs', async () 
   const mgr = read('manifest.webmanifest');
   const staff = read('manifest-tips.webmanifest');
   assert.strictEqual(mgr.start_url, '/', 'the manager app opens on the dashboard');
-  assert.strictEqual(staff.start_url, '/tips', 'the staff portal opens on the tip form');
+  assert.strictEqual(staff.start_url, '/portal', 'the staff portal opens on the hub');
+  // Scope covers the whole app, not just /tips: staff move from the PIN screen
+  // at /tips to the hub at /portal, and a scope of /tips would drop them out of
+  // the installed app — into Safari with a URL bar — the moment they signed in.
+  assert.strictEqual(staff.scope, '/', 'the portal stays in-app across /tips and /portal');
   assert.notStrictEqual(mgr.name, staff.name, 'and they are named apart');
   const srcs = (m) => m.icons.map((i) => i.src).sort().join();
   assert.notStrictEqual(srcs(mgr), srcs(staff), 'with their own icon sets');

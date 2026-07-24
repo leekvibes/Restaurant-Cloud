@@ -153,38 +153,27 @@ test('the report has a way back to the hub', async () => {
   assert.match(html, /class="tp-back" data-goto="1"/, 'the later steps keep theirs');
 });
 
-/**
- * The sections a home is built from, named, in the order they appear.
- *
- * By their headings rather than their class, because a section's kicker is
- * part of the section — counting bare classes cannot tell which heading
- * belongs to the block that was left out.
- */
-const shapeOf = (html) => [...html.matchAll(/class="pt-kick"><span>([^<]+)</g)].map((m) => m[1].trim());
 
 test('every role gets the same home, minus what does not apply', async () => {
-  // One layout, not three. A cook should recognise the screen a server
-  // describes to them — same sections, same order — with the submission simply
-  // absent rather than replaced by something else in its place.
+  // One layout, not three. Submitting is a row among the others now — a staff
+  // member could not find it as a headline block — so the difference between a
+  // server and a cook is just whether that one row is present. Everything else
+  // is the same list in the same order.
   const cook = await (await asStaff('/portal', await signIn('2222'))).text();
   const server = await (await asStaff('/portal', await signIn('1111'))).text();
 
-  assert.ok(!/Submit sales or tips/.test(cook), 'a cook is not asked to hand anything in');
-  assert.ok(!/pt-task/.test(cook), 'and gets no task block at all — not a different one');
-  assert.match(server, /pt-task/, 'while a server does');
+  assert.ok(!/Submit sales or tips/.test(cook), 'a cook is not offered the submission row');
+  assert.ok(!/pt-row-do/.test(cook), 'not even a disabled one');
+  assert.match(server, /pt-row-do/, 'while a server gets it');
+  assert.match(server, /Submit sales or tips/, 'named the same for everyone who does');
 
-  // Everything else is the same furniture in the same order.
-  const serverSections = shapeOf(server);
-  const cookSections = shapeOf(cook);
-  assert.ok(serverSections.includes('End of your shift'), 'the server has the submission section');
-  assert.deepStrictEqual(cookSections, serverSections.filter((x) => x !== 'End of your shift'),
-    `a cook's home is the server's home minus the submission: [${cookSections.join(' | ')}] vs [${serverSections.join(' | ')}]`);
-
-  // And every other door is open to them.
+  // The three rows every role shares, in the same order, both with a working
+  // door behind them.
   const cookie = await signIn('2222');
   for (const [href, what] of [['/portal/earnings', 'their own hours and pay'],
     ['/portal/specials', 'the board'], ['/portal/stock', 'reporting stock']]) {
     assert.ok(cook.includes(href), `a cook still gets ${what}`);
+    assert.ok(server.includes(href), `and so does a server`);
     assert.strictEqual((await asStaff(href, cookie)).status, 200, `and ${href} opens`);
   }
 });
@@ -238,6 +227,38 @@ test('the money on a server\'s screen reconciles the way the engine defines it',
   assert.ok(tippedOut > 0, 'she tipped out — otherwise this proves less than it looks');
   assert.strictEqual(collected - tippedOut, kept, 'what she collected, less the tip-out, is what she kept');
   assert.strictEqual(cash + cheque, kept, 'and it arrives as cash plus paycheck, nothing lost between');
+});
+
+test('any past shift opens to its own full breakdown', async () => {
+  // The history is a list of links now, not just a row of figures — a staff
+  // member can tap any night and see exactly how it broke down, the same lines
+  // the last-shift hero shows.
+  const cookie = await signIn('1111');
+  // The home screen's last-shift block links straight into that shift; the
+  // history list links into each of the rest the same way.
+  const home = await (await asStaff('/portal', cookie)).text();
+  const id = (home.match(/\/portal\/earnings\/(\d+)/) || [])[1];
+  assert.ok(id, 'the last shift links into its own breakdown');
+
+  const one = await (await asStaff(`/portal/earnings/${id}`, cookie)).text();
+  assert.match(one, /You kept|You worked/, 'the shift opens to its breakdown');
+  assert.match(one, /Hours worked|Your rate|salaried/, 'with the hours side of it');
+  assert.match(one, /All earnings/, 'and a way back to the list');
+
+  // A shift id that is not theirs (or not real) does not 404 or leak — it just
+  // returns them to their own list.
+  const bogus = await fetch(`${BASE}/portal/earnings/99999`, { headers: { cookie }, redirect: 'manual' });
+  assert.strictEqual(bogus.status, 302, 'an unknown shift redirects');
+  assert.match(bogus.headers.get('location') || '', /\/portal\/earnings$/, 'back to all earnings');
+});
+
+test('the submit row opens the form on a plain tap', async () => {
+  // The row is a link, so it must open with a GET — a staff member tapping it
+  // is not posting anything yet.
+  const cookie = await signIn('1111');
+  const res = await fetch(`${BASE}/portal/tips`, { headers: { cookie }, redirect: 'manual' });
+  assert.strictEqual(res.status, 200, 'GET opens the form');
+  assert.match(await res.text(), /End-of-shift report/, 'which is the report');
 });
 
 test('a cook is shown what they received, without a tip-out they never paid', async () => {
@@ -436,7 +457,10 @@ test('a note stops showing the day after it expires', async () => {
     'and yesterday\'s does not — a board that keeps stale notices is one nobody reads');
 });
 
-test('a report from the floor arrives on the manager page, linked to the product', async () => {
+test('a report from the floor is what the person typed, never matched to a product', async () => {
+  // Staff type free text and the manager reads exactly that. The report is
+  // never silently linked to a catalogue product, even when the words happen
+  // to match one — there is no picker, and there is no guessing behind it.
   const cookie = await signIn('1111');
   const res = await form('/portal/stock', {
     items: JSON.stringify([
@@ -450,14 +474,23 @@ test('a report from the floor arrives on the manager page, linked to the product
   assert.strictEqual(rows.length, 2, 'both were filed');
   const oat = rows.find((r) => r.item === 'Oat milk');
   const other = rows.find((r) => r.item !== 'Oat milk');
-  assert.ok(oat.product_id, 'a name we already buy links to the product, so the vendor is one join away');
-  assert.strictEqual(other.product_id, null, 'and one we do not buy is kept as words rather than guessed at');
+  // 'Oat milk' is seeded as a product, so the old behaviour would have linked
+  // it. It must not now.
+  assert.strictEqual(oat.product_id, null, 'a name we happen to buy is still left as the words typed');
+  assert.strictEqual(other.product_id, null, 'and one we do not is too');
   assert.strictEqual(oat.reported_by, 'Bella Reyes', 'with who said so');
   assert.strictEqual(oat.batch, other.batch, 'and both in one batch — she pressed send once');
 
   const admin = await (await fetch(`${BASE}/staff-portal`)).text();
-  assert.match(admin, /Oat milk/, 'the manager sees it');
-  assert.match(admin, /in Products/i, 'and that it is something already bought');
+  assert.match(admin, /Oat milk/, 'the manager sees exactly what was reported');
+});
+
+test('the stock report has no product picker to choose from', async () => {
+  // The manager asked for free text, not a dropdown of the catalogue — so the
+  // page must not ship one, however staff type.
+  const html = await (await asStaff('/portal/stock', await signIn('1111'))).text();
+  assert.ok(!/<datalist/.test(html), 'no datalist of products');
+  assert.ok(!/list="stock-products"/.test(html), 'and the field is not wired to one');
 });
 
 test('resolving a report takes it off the list without deleting it', async () => {

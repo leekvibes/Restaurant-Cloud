@@ -121,23 +121,26 @@ test('opening the portal to staff did not open it to the world', async () => {
 });
 
 test('every route under /portal asks who you are', async () => {
-  // The exemption is written once, in OPEN_PATHS, and covers the whole prefix.
-  // A route added under it later that forgets requirePortal would be public,
-  // and nothing about writing it would say so. So the source is the test.
+  // /portal is exempt from the manager password (OPEN_PATHS), for the whole
+  // prefix. That is only safe if each route demands the PIN cookie itself — so
+  // rather than grep the source for requirePortal (which misses a route that
+  // delegates to a shared handler), hit every one of them with no cookie and
+  // insist it turns you away to the PIN screen and serves nothing.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  // Each route runs to wherever the next one starts, so the body is whole
-  // however long it is.
-  const starts = [...src.matchAll(/^app\.(get|post)\('([^']+)'/gm)];
-  const routes = starts.map((m, i) => [
-    src.slice(m.index, i + 1 < starts.length ? starts[i + 1].index : src.length), m[1], m[2],
-  ]).filter(([, , route]) => /^\/portal(\/|$)/.test(route));
+  const routes = [...src.matchAll(/^app\.(get|post)\('(\/portal[^']*)'/gm)]
+    .map((m) => [m[1], m[2]])
+    // A route with a :param needs a real value to hit; the id ones all take one.
+    .map(([verb, route]) => [verb, route.replace(/:\w+/g, '1')]);
   assert.ok(routes.length >= 6, `found ${routes.length} portal routes — the scan should see them all`);
-  for (const [block, verb, route] of routes) {
-    // /portal/out is the exception on purpose: it clears the cookie and sends
-    // you to the PIN screen, which needs no identity to do.
-    if (route === '/portal/out') continue;
-    assert.match(block, /requirePortal\(req, res\)/,
-      `${verb.toUpperCase()} ${route} is exempt from the manager password and must call requirePortal`);
+
+  for (const [verb, route] of routes) {
+    const res = await fetch(BASE + route, {
+      method: verb.toUpperCase(), redirect: 'manual',
+      headers: verb === 'post' ? { 'content-type': 'application/x-www-form-urlencoded' } : {},
+    });
+    assert.strictEqual(res.status, 302, `${verb.toUpperCase()} ${route} must not serve a stranger`);
+    assert.match(res.headers.get('location') || '', /^\/(tips|portal)/,
+      `${verb.toUpperCase()} ${route} sends them to the PIN screen, not the owner's login`);
   }
 });
 
