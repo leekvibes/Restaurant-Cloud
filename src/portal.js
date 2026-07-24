@@ -145,6 +145,13 @@ const q = {
     WHERE service_date >= ? ORDER BY service_date DESC, sort, id`),
   addSpecial: db.prepare(`INSERT INTO portal_specials (service_date, name, price_cents, description, low_note, sort)
     VALUES (@service_date, @name, @price_cents, @description, @low_note, @sort)`),
+  // Edit the fields a manager can get wrong — not the 86 state, which has its
+  // own actions, and not the day, which would move it to a board it was never
+  // put on.
+  updateSpecial: db.prepare(`UPDATE portal_specials
+    SET name = @name, price_cents = @price_cents, description = @description, low_note = @low_note
+    WHERE id = @id`),
+  oneSpecial: db.prepare('SELECT * FROM portal_specials WHERE id = ?'),
   eightySix: db.prepare(`UPDATE portal_specials
     SET eighty_sixed_at = datetime('now'), sold_out_note = @note WHERE id = @id`),
   unEightySix: db.prepare("UPDATE portal_specials SET eighty_sixed_at = NULL, sold_out_note = NULL WHERE id = ?"),

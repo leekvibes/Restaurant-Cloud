@@ -97,26 +97,29 @@ body.bare {
 .tp-navbar .tp-count b { color: var(--ink); font-weight: 500; }
 
 /* --- body ----------------------------------------------------------------- */
-.tp-body { flex: 1; padding: 26px 20px 30px; }
+/* Trimmed from what it was: a 34px serif head over 26px gaps read as zoomed-in
+   and pushed the form down the page. Text stays legible; the air between it is
+   what came down, so more of the report fits without scrolling. */
+.tp-body { flex: 1; padding: 20px 20px 24px; }
 .tp-h {
-  font-family: var(--serif); font-weight: 500; font-size: 34px; line-height: 1.1;
+  font-family: var(--serif); font-weight: 500; font-size: 28px; line-height: 1.12;
   letter-spacing: -.01em; color: var(--headline); margin: 0;
 }
-.tp-lead { font-size: 16px; line-height: 1.5; color: var(--body); margin: 14px 0 0; }
-.tp-lead + .tp-sec, .tp-lead + form .tp-sec:first-child { margin-top: 34px; }
+.tp-lead { font-size: 15px; line-height: 1.5; color: var(--body); margin: 10px 0 0; }
+.tp-lead + .tp-sec, .tp-lead + form .tp-sec:first-child { margin-top: 24px; }
 
 /* --- progress ------------------------------------------------------------- */
-.tp-prog { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 26px 0 12px; }
+.tp-prog { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 18px 0 10px; }
 .tp-prog span { height: 3px; background: var(--rule-light); }
 .tp-prog span.on { background: var(--accent); }
 .tp-stepk {
   font-family: var(--mono); font-size: 11px; font-weight: 500;
   letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
-  margin: 0 0 22px;
+  margin: 0 0 16px;
 }
 
 /* --- a section, and a ruled row inside it -------------------------------- */
-.tp-sec { margin-top: 26px; }
+.tp-sec { margin-top: 20px; }
 .tp-sec:first-of-type { margin-top: 0; }
 .tp-seck {
   font-family: var(--mono); font-size: 11px; font-weight: 500;
@@ -125,7 +128,7 @@ body.bare {
 }
 .tp-row {
   display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
-  min-height: 56px; padding: 14px 0;
+  min-height: 50px; padding: 11px 0;
   border-bottom: 1px solid var(--rule-light);
 }
 .tp-row-v { font-size: 22px; font-weight: 600; color: var(--headline); }
@@ -247,14 +250,16 @@ body.bare {
 /* --- the bar that stays at the bottom ------------------------------------- */
 .tp-foot {
   position: sticky; bottom: 0; z-index: 5;
-  padding: 14px 20px calc(16px + env(safe-area-inset-bottom));
+  padding: 11px 20px calc(12px + env(safe-area-inset-bottom));
   background: var(--paper); border-top: 1px solid var(--rule-light);
 }
+/* The button was a 60px slab that ate a third of the screen. Still a
+   comfortable tap target, just not the loudest thing on the page. */
 .tp-go {
-  display: block; width: 100%; min-height: 60px; border: 0; cursor: pointer;
+  display: block; width: 100%; min-height: 48px; border: 0; cursor: pointer;
   background: var(--accent); color: #fff;
-  font-family: var(--sans); font-size: 18px; font-weight: 600; text-align: center;
-  text-decoration: none; line-height: 60px;
+  font-family: var(--sans); font-size: 16px; font-weight: 600; text-align: center;
+  text-decoration: none; line-height: 48px;
 }
 .tp-go:active { background: var(--accent-hover); }
 .tp-go[disabled] { opacity: .4; cursor: not-allowed; }
@@ -268,29 +273,21 @@ body.bare {
 
 /* --- sign in -------------------------------------------------------------- */
 /* "YOUR PIN" is a bare label here — the ruled kicker belongs to the report's
-   sections, and a rule above four ruled boxes is one rule too many. */
+   sections. One field that opens the phone's own number pad, not a keypad of
+   our own; font-size stays ≥16px so focusing it never zooms the page. */
 .tp-signin .tp-seck { border-bottom: 0; padding-bottom: 0; }
-.tp-signin { margin-top: 40px; }
-.tp-pin { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; margin-top: 14px; }
-.tp-cell {
-  height: 66px; border: 1px solid var(--tp-field); background: var(--surface);
-  display: flex; align-items: center; justify-content: center;
-}
-.tp-cell.filled { border: 1.5px solid var(--ink); }
-.tp-cell.filled::after {
-  content: ''; width: 11px; height: 11px; border-radius: 50%; background: var(--ink);
-}
-.tp-cell.at { border: 1.5px solid var(--accent); border-bottom: 3px solid var(--accent); }
-
-.tp-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; margin-top: 26px; }
-.tp-keys button {
-  min-height: 70px; cursor: pointer;
+.tp-signin { margin-top: 34px; }
+.tp-pinbox {
+  width: 100%; box-sizing: border-box; margin-top: 14px;
   border: 1px solid var(--tp-field); background: var(--surface);
-  font-family: var(--mono); font-size: 27px; font-weight: 500; color: var(--ink);
+  font-family: var(--mono); font-size: 30px; font-weight: 600;
+  letter-spacing: .35em; text-indent: .35em; text-align: center; color: var(--ink);
+  padding: 16px 12px;
 }
-.tp-keys button:active { background: var(--tp-sel); border-color: var(--accent); }
-.tp-keys .ghost { border: 0; background: none; font-size: 22px; color: var(--secondary); }
-.tp-keys .ghost:active { background: none; }
+.tp-pinbox::placeholder {
+  font-size: 16px; font-weight: 500; letter-spacing: 0; text-indent: 0; color: var(--faint);
+}
+.tp-pinbox:focus { outline: none; border-color: var(--accent); }
 
 /* --- messages ------------------------------------------------------------- */
 .tp-err {
@@ -308,9 +305,8 @@ body.bare {
 .tp-receipt { margin-top: 26px; background: var(--tp-panel); }
 
 @media (max-width: 359px) {
-  .tp-h { font-size: 29px; }
-  .tp-keys button { min-height: 62px; font-size: 24px; }
-  .tp-cell { height: 58px; }
+  .tp-h { font-size: 26px; }
+  .tp-pinbox { font-size: 26px; }
 }
 
 /* ===========================================================================

@@ -73,6 +73,16 @@ test('the page stands on its own before anything is logged', async () => {
     'no arithmetic on an empty set leaks into the page');
 });
 
+test('the log-an-expense modal attaches a photo without a wall for a box', async () => {
+  // The receipt attach is a small square you can put a photo in, not a big
+  // dropzone under the fields; the footer is a real footer, so Save is reached
+  // without scrolling the phone sideways or to the end.
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(html, /class="cap-shot"/, 'a small photo box');
+  assert.ok(!/class="cap-tile"/.test(html), 'not the old full-width tile');
+  assert.match(html, /class="cap-foot"[\s\S]*?Save expense/, 'the footer holds Save');
+});
+
 test('a bag of ice, paid for out of somebody pocket, with the receipt', async () => {
   // A real PNG header, so the file written to disk is a file and the row's
   // extension is one the page will render as an image.

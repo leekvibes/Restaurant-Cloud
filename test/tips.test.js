@@ -181,13 +181,15 @@ test('with no JavaScript the whole form is still there', async () => {
   assert.match(html, /type="submit" form="report"/, 'and a submit that posts it');
 });
 
-test('the keypad draws exactly as many cells as a PIN has digits', async () => {
-  // The keypad submits the moment its cells are full. If a PIN of some other
-  // length could be saved, that person could never sign in and nothing would
-  // say why — so /employees refuses any other length.
+test('the PIN field takes a number, and only a PIN-length one', async () => {
+  // The sign-in field is the phone's own number pad now, not a keypad of our
+  // own. It is capped at the PIN length, and /employees refuses any other
+  // length — a PIN that could not be typed here is one nobody could sign in
+  // with, and nothing would say why.
   const html = await (await fetch(`${BASE}/tips`)).text();
-  const cells = (html.match(/class="tp-cell/g) || []).length;
-  assert.strictEqual(cells, 4);
+  assert.match(html, /id="pin"[^>]*inputmode="numeric"/, 'it opens the number pad');
+  assert.match(html, /id="pin"[^>]*maxlength="4"/, 'and stops at four digits');
+  assert.ok(!/class="tp-keys"|class="tp-cell/.test(html), 'the custom keypad is gone');
 
   const bad = await form('/employees', { name: 'Too Long', role: 'server', pin: '12345' });
   assert.strictEqual(bad.status, 302);

@@ -662,9 +662,9 @@ function head(title, opts = {}) {
     <link rel="stylesheet" href="/static/broadsheet.css?v=${BUILD}">
     ${tpShell ? `<link rel="stylesheet" href="/static/staff.css?v=${BUILD}">` : ''}
     <link rel="manifest" href="${staff ? '/manifest-tips.webmanifest' : '/manifest.webmanifest'}">
-    <meta name="theme-color" content="${tpShell ? '#f7eee0' : '#ffffff'}">
-    <link rel="icon" href="/static/${staff ? 'tips-' : ''}icon-192.png?v=${BUILD}">
-    <link rel="apple-touch-icon" href="/static/${staff ? 'tips-' : ''}apple-touch-icon.png?v=${BUILD}">
+    <meta name="theme-color" content="${tpShell ? '#f4ead9' : '#ffffff'}">
+    <link rel="icon" href="/static/${staff ? 'palm-icon-192' : 'icon-192'}.png?v=${BUILD}">
+    <link rel="apple-touch-icon" href="/static/${staff ? 'palm-apple-touch-icon' : 'apple-touch-icon'}.png?v=${BUILD}">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'default' : 'default'}">
     <meta name="apple-mobile-web-app-title" content="${staff ? 'Portal' : APP_NAME}">

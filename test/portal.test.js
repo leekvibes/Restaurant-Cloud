@@ -444,6 +444,38 @@ test("a manager's 86 reaches the floor", async () => {
   assert.match(row.sold_out_note, /86'D \d+(AM|PM)/, `and says so: ${row.sold_out_note}`);
 });
 
+test('a special can be edited after it is posted', async () => {
+  const d = today();
+  await form('/staff-portal/special', { d, name: 'Qqx Editable', price: '12.00', description: 'First.' });
+  const dish = db.prepare("SELECT id FROM portal_specials WHERE name = 'Qqx Editable'").get();
+
+  // The edit composer is reached by ?edit=id and pre-fills the current values.
+  const editForm = await (await fetch(`${BASE}/staff-portal?tab=board&d=${d}&edit=${dish.id}`)).text();
+  assert.match(editForm, /value="Qqx Editable"/, 'the form opens pre-filled');
+  assert.match(editForm, /Save changes/, 'as an edit, not a new one');
+
+  await form(`/staff-portal/special/${dish.id}/edit`, { d, name: 'Qqx Edited', price: '18.50', description: 'Changed.' });
+  const row = db.prepare('SELECT * FROM portal_specials WHERE id = ?').get(dish.id);
+  assert.strictEqual(row.name, 'Qqx Edited', 'the name changed');
+  assert.strictEqual(row.price_cents, 1850, 'and the price');
+  assert.strictEqual(row.description, 'Changed.', 'and the description');
+});
+
+test('any item can be 86’d, not only a running special', async () => {
+  // The manager types anything they are out of; it lands on the 86 list struck
+  // through, without ever having been a running special.
+  const d = today();
+  await form('/staff-portal/special/86-item', { d, name: 'Qqx Fresh oysters', note: 'back tomorrow' });
+  const row = db.prepare("SELECT * FROM portal_specials WHERE name = 'Qqx Fresh oysters'").get();
+  assert.ok(row, 'it was created');
+  assert.ok(row.eighty_sixed_at, 'already 86’d, not running');
+  assert.strictEqual(row.sold_out_note, 'back tomorrow', 'with the note the manager typed');
+  assert.strictEqual(row.price_cents, null, 'and no price — it was never a special');
+
+  const floor = await (await asStaff('/portal/specials', await signIn('1111'))).text();
+  assert.match(floor, /Qqx Fresh oysters/, 'and the floor sees it on the 86 board');
+});
+
 test('a note stops showing the day after it expires', async () => {
   const yesterday = isoDate(new Date(startOfToday().getTime() - 86400000));
   await form('/staff-portal/note', { title: 'Qqx Stale notice', body: 'Old news.', tone: 'fyi',

@@ -2273,29 +2273,15 @@ app.get('/tips', (req, res) => {
 
         <form method="post" action="/tips/start" id="pinform">
           <div class="tp-sec tp-signin">
-            <div class="tp-seck">Your PIN</div>
-            <div class="tp-pin" id="cells">
-              ${Array.from({ length: PIN_LEN }, (_, i) =>
-                `<div class="tp-cell${i === 0 ? ' at' : ''}" data-i="${i}"></div>`).join('')}
-            </div>
+            <label class="tp-seck" for="pin">Your PIN</label>
+            ${/* The phone's own numeric keyboard, not a keypad of our own. The
+                 custom one covered two thirds of the screen and misbehaved on
+                 iOS; a plain field is one the phone already knows how to do.
+                 font-size ≥16px so focusing it does not zoom the page. */''}
+            <input type="text" name="pin" id="pin" class="tp-pinbox" inputmode="numeric"
+              pattern="[0-9]*" autocomplete="off" maxlength="${PIN_LEN}" required
+              placeholder="Tap to enter your PIN" aria-label="Your ${PIN_LEN}-digit PIN">
             <p class="tp-pinmsg" id="pinmsg" hidden>Enter all ${PIN_LEN} digits.</p>
-          </div>
-
-          <!-- The keypad is ours, not the phone's. A system numeric keyboard
-               covers two thirds of the screen, shows a "done" button that does
-               nothing here, and on iOS drags the layout around when it opens.
-               The input stays in the DOM so a desktop keyboard and password
-               managers still work; it is just never focused on a touch device. -->
-          <input type="text" name="pin" id="pin" inputmode="none" autocomplete="off"
-            maxlength="${PIN_LEN}" pattern="[0-9]*" required
-            style="position:absolute;opacity:0;width:1px;height:1px;padding:0;border:0">
-
-          <div class="tp-keys" id="keys">
-            ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) =>
-              `<button type="button" data-k="${n}">${n}</button>`).join('')}
-            <span></span>
-            <button type="button" data-k="0">0</button>
-            <button type="button" class="ghost" data-k="del" aria-label="Delete">&#9003;</button>
           </div>
         </form>
       </div>
@@ -2324,47 +2310,24 @@ function pinScript() {
   return `<script>
   (function () {
     var input = document.getElementById('pin');
-    var cells = document.getElementById('cells');
-    var keys = document.getElementById('keys');
-    var go = document.getElementById('go');
     var form = document.getElementById('pinform');
-    if (!input || !cells || !keys || !go || !form) return;
+    if (!input || !form) return;
     var LEN = ${PIN_LEN};
-
-    function draw() {
-      var v = input.value;
-      var boxes = cells.children;
-      for (var i = 0; i < boxes.length; i++) {
-        boxes[i].className = 'tp-cell' + (i < v.length ? ' filled' : (i === v.length ? ' at' : ''));
+    input.addEventListener('input', function () {
+      // Digits only, whatever the keyboard sends.
+      var clean = input.value.replace(/[^0-9]/g, '').slice(0, LEN);
+      if (clean !== input.value) input.value = clean;
+      document.getElementById('pinmsg').hidden = true;
+      // Complete and there is nothing else to decide, so go — one less tap for
+      // someone holding a till float in the other hand.
+      if (input.value.length === LEN) {
+        setTimeout(function () { form.requestSubmit ? form.requestSubmit() : form.submit(); }, 150);
       }
-      if (v.length) document.getElementById('pinmsg').hidden = true;
-    }
-    function push(d) {
-      if (input.value.length >= LEN) return;
-      input.value += d;
-      draw();
-      // Four digits in and there is nothing else to decide, so go. Saves a tap
-      // at the one moment the person is holding a till float in the other hand.
-      if (input.value.length === LEN) setTimeout(function () { form.requestSubmit ? form.requestSubmit() : form.submit(); }, 130);
-    }
-    // Solid from the first paint, the way the design has it — an incomplete
-    // PIN is answered in words rather than by a button that looks broken.
-    // Native validation would point its bubble at an input nobody can see.
-    document.getElementById('pinform').addEventListener('submit', function (e) {
+    });
+    form.addEventListener('submit', function (e) {
       if (input.value.length !== LEN) { e.preventDefault(); document.getElementById('pinmsg').hidden = false; }
     });
-    keys.addEventListener('click', function (e) {
-      var b = e.target.closest('button[data-k]');
-      if (!b) return;
-      if (b.dataset.k === 'del') { input.value = input.value.slice(0, -1); draw(); return; }
-      push(b.dataset.k);
-    });
-    // A real keyboard still works — desktop, and anyone using a bluetooth one.
-    document.addEventListener('keydown', function (e) {
-      if (e.key >= '0' && e.key <= '9') { push(e.key); e.preventDefault(); }
-      else if (e.key === 'Backspace') { input.value = input.value.slice(0, -1); draw(); e.preventDefault(); }
-    });
-    draw();
+    setTimeout(function () { try { input.focus(); } catch (e) { /* ignore */ } }, 60);
   })();
   </script>`;
 }
@@ -7079,16 +7042,17 @@ function quickExpense(today) {
             </div>
             <datalist id="qx-people">${people.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
           </div>
-          <div>
-            <span class="cap-lab">Receipt photo</span>
-            <label class="cap-tile" id="qx-tile">
+          <div class="cap-photo">
+            <label class="cap-shot" id="qx-tile" title="Add a receipt photo">
               <input type="file" name="file" id="qx-file" accept="image/*,application/pdf" capture="environment" multiple hidden>
-              <span class="cap-tile-p" id="qx-plus">+</span>
-              <span class="cap-tile-t" id="qx-tile-t">Add a photo</span>
-              <span class="cap-tile-s" id="qx-tile-s">drag in · or take one · ZWIN reads it</span>
+              <span class="cap-shot-p" id="qx-plus">+</span>
             </label>
-            <p class="cap-note" id="qx-note" hidden></p>
+            <span class="cap-photo-t">
+              <b class="cap-tile-t" id="qx-tile-t">Add a receipt photo</b>
+              <span class="cap-tile-s" id="qx-tile-s">optional · ZWIN reads it and fills this in</span>
+            </span>
           </div>
+          <p class="cap-note" id="qx-note" hidden></p>
         </div>
         <div class="cap-foot">
           <a class="bs-btn-sm" href="#" data-qx-close>Cancel</a>
@@ -7677,6 +7641,7 @@ app.get('/staff-portal', (req, res) => {
       </span>
       <span class="pa-do">
         ${d.low_note ? `<span class="pa-dl">${esc(d.low_note)}</span>` : ''}
+        <a class="bs-act" href="/staff-portal?tab=board&amp;d=${esc(day)}&amp;edit=${d.id}">edit</a>
         ${d.eighty_sixed_at
           ? `<span class="bs-tag bad">${esc(d.sold_out_note || "86'd")}</span>
              <form method="post" action="/staff-portal/special/${d.id}/back" style="margin:0">
@@ -7740,6 +7705,56 @@ app.get('/staff-portal', (req, res) => {
         }).join('') || '<p class="bs-quiet">Nobody is on this shift yet.</p>'}
       </div>` : ''}`;
 
+  // The right column does one of three things: add a special, 86 an arbitrary
+  // item that was never a special, or edit one that is already up. Editing is
+  // reached from a dish's "edit" link (?edit=id); the other two are a toggle.
+  const editing = req.query.edit
+    ? PORTAL.q.oneSpecial.get(Number(req.query.edit)) : null;
+  const mode = editing ? 'edit' : (req.query.compose === '86' ? '86' : 'add');
+  const composeHref = (m) => `/staff-portal?tab=board&d=${esc(day)}&compose=${m}`;
+  const modeTabs = `<div class="pa-modes">
+    <a class="pa-mode${mode === 'add' ? ' on' : ''}" href="${composeHref('add')}">Add a special</a>
+    <a class="pa-mode${mode === '86' ? ' on' : ''}" href="${composeHref('86')}">86 an item</a>
+  </div>`;
+
+  const composer = mode === 'edit' ? `
+    <div class="bs-kick2"><span>Edit &mdash; ${esc(editing.name)}</span>
+      <a class="bs-act" href="/staff-portal?tab=board&amp;d=${esc(day)}">cancel</a></div>
+    <form method="post" action="/staff-portal/special/${editing.id}/edit" class="pa-add pa-form">
+      <input type="hidden" name="d" value="${esc(day)}">
+      <label class="fld wide">Dish<input name="name" required value="${esc(editing.name)}"></label>
+      <label class="fld">Price<input name="price" type="number" step="0.01" min="0"
+        value="${editing.price_cents != null ? (editing.price_cents / 100).toFixed(2) : ''}" placeholder="$0"></label>
+      <label class="fld wide">Description<input name="description" value="${esc(editing.description || '')}"
+        placeholder="One line servers can read aloud."></label>
+      <label class="fld wide">Low note <i>optional</i><input name="low_note"
+        value="${esc(editing.low_note || '')}" placeholder="e.g. 6 left"></label>
+      <button class="bs-btn" type="submit">Save changes</button>
+    </form>`
+  : mode === '86' ? `
+    ${modeTabs}
+    <form method="post" action="/staff-portal/special/86-item" class="pa-add pa-form">
+      <input type="hidden" name="d" value="${esc(day)}">
+      <label class="fld wide">What&rsquo;s 86&rsquo;d<input name="name" required
+        placeholder="Type anything — oysters, the porchetta, table 12&rsquo;s wine"></label>
+      <label class="fld wide">Note <i>optional</i><input name="note"
+        placeholder="e.g. back tomorrow, or leave blank for the time"></label>
+      <button class="bs-btn" type="submit">Add to the 86 board</button>
+    </form>
+    <p class="pa-lead">Puts it straight on the 86 list, struck through, for anything you&rsquo;re out of
+      that was never a running special.</p>`
+  : `
+    ${modeTabs}
+    <form method="post" action="/staff-portal/special" class="pa-add pa-form">
+      <input type="hidden" name="d" value="${esc(day)}">
+      <label class="fld wide">Dish<input name="name" required placeholder="Name"></label>
+      <label class="fld">Price<input name="price" type="number" step="0.01" min="0" placeholder="$0"></label>
+      <label class="fld wide">Description<input name="description"
+        placeholder="One line servers can read aloud."></label>
+      <label class="fld wide">Low note <i>optional</i><input name="low_note" placeholder="e.g. 6 left"></label>
+      <button class="bs-btn" type="submit">Add to the board</button>
+    </form>`;
+
   const bodyBoard = `
     <div class="pa-two">
       <div class="pa-col">
@@ -7754,18 +7769,7 @@ app.get('/staff-portal', (req, res) => {
           ? `<div class="bs-srows">${[...running, ...off].map(dishRow).join('')}</div>`
           : `<p class="bs-quiet">Nothing on the board for ${esc(niceDate(day))} yet.</p>`}
       </div>
-      <div class="pa-col">
-        <div class="bs-kick2"><span>Add a special</span></div>
-        <form method="post" action="/staff-portal/special" class="pa-add pa-form">
-          <input type="hidden" name="d" value="${esc(day)}">
-          <label class="fld wide">Dish<input name="name" required placeholder="Name"></label>
-          <label class="fld">Price<input name="price" type="number" step="0.01" min="0" placeholder="$0"></label>
-          <label class="fld wide">Description<input name="description"
-            placeholder="One line servers can read aloud."></label>
-          <label class="fld wide">Low note <i>optional</i><input name="low_note" placeholder="e.g. 6 left"></label>
-          <button class="bs-btn" type="submit">Add to the board</button>
-        </form>
-      </div>
+      <div class="pa-col">${composer}</div>
     </div>`;
 
   const bodyNotes = `
@@ -7898,6 +7902,37 @@ app.post('/staff-portal/special', (req, res) => {
     sort: 100,
   });
   backTo(res, 'board', 'On the board.', { d });
+});
+
+// 86 something that was never a running special — straight onto the 86 list.
+// A single-segment path, so it cannot be mistaken for /special/:id/86.
+app.post('/staff-portal/special/86-item', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? req.body.d : isoDate(startOfToday());
+  const name = String(req.body.name || '').trim();
+  if (!name) return backTo(res, 'board', 'Say what is 86’d.', { d, compose: '86', err: '1' });
+  const when = new Date().toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
+  const note = String(req.body.note || '').trim().slice(0, 60) || `86'D ${when}`;
+  const id = PORTAL.q.addSpecial.run({
+    service_date: d, name: name.slice(0, 120), price_cents: null,
+    description: null, low_note: null, sort: 100,
+  }).lastInsertRowid;
+  PORTAL.q.eightySix.run({ id, note });
+  backTo(res, 'board', "86'd — it’s on every phone.", { d });
+});
+
+app.post('/staff-portal/special/:id/edit', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? req.body.d : isoDate(startOfToday());
+  const name = String(req.body.name || '').trim();
+  if (!name) return backTo(res, 'board', 'A special needs a name.', { d, edit: req.params.id, err: '1' });
+  PORTAL.q.updateSpecial.run({
+    id: Number(req.params.id), name: name.slice(0, 120),
+    price_cents: req.body.price ? toCents(req.body.price) : null,
+    description: String(req.body.description || '').trim().slice(0, 240) || null,
+    low_note: String(req.body.low_note || '').trim().slice(0, 60) || null,
+  });
+  backTo(res, 'board', 'Updated.', { d });
 });
 
 app.post('/staff-portal/special/:id/86', (req, res) => {

@@ -2295,7 +2295,8 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 80; }
 .cap-wrap { position: fixed; inset: 0; z-index: 81; display: grid; place-items: center;
   padding: 24px; pointer-events: none; opacity: 0; transition: opacity .18s ease; }
-.cap-card { width: min(1180px, 100%); max-height: calc(100vh - 48px); overflow: auto;
+.cap-card { width: min(1180px, 100%); max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px); overflow: auto;
   background: var(--paper); border: 1px solid var(--rule-strong, var(--ink));
   box-shadow: 0 24px 60px rgba(31, 29, 26, .28); transform: translateY(6px);
   transition: transform .18s ease; }
@@ -2395,20 +2396,41 @@ body.cap-open { overflow: hidden; }
 .cap-skel:nth-child(2) { width: 82%; }
 .cap-skel:nth-child(3) { width: 61%; }
 
-/* --- the quick expense modal, for when there is no document -------------- */
-.cap-card.cap-quick { width: min(760px, 100%); }
-.cap-quick .cap-body { display: grid; grid-template-columns: 1fr 260px; gap: 22px; }
-.cap-tile { border: 2px dashed var(--dash, #b9a878); background: var(--dropfill, #faf3e6);
-  min-height: 186px; display: grid; place-content: center; justify-items: center; gap: 6px;
-  text-align: center; cursor: pointer; padding: 16px; }
-.cap-tile.over { border-color: var(--accent); }
-.cap-tile-p { width: 46px; height: 46px; border: 1px solid var(--ink); display: grid; place-items: center;
-  font-size: 22px; color: var(--headline); }
+/* --- the quick expense modal, for when there is no document --------------
+   A fixed header, a body that scrolls, and a footer pinned to the bottom, so
+   Save is always on screen without scrolling to the end or sideways — the
+   card never grows past the viewport, and the body takes whatever is left. */
+.cap-card.cap-quick {
+  width: min(560px, 100%); box-sizing: border-box;
+  display: flex; flex-direction: column; overflow: hidden;
+  max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px);
+}
+.cap-quick .cap-head { flex: none; }
+/* The form wraps the body and the footer, so IT is the card's flex child —
+   make it the column that fills, and let the body inside it scroll. Miss this
+   and the body sizes to its content and the footer rides off the bottom. */
+.cap-quick form { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.cap-quick .cap-body { display: block; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.cap-quick .cap-body > * { min-width: 0; }
+
+/* The receipt attach: a small square, not a wall. Empty it is a + to press;
+   with a photo it becomes a thumbnail the size of the one on the invoice list,
+   enough to say "it uploaded" and no more. The fields it filled are what the
+   screen is for. */
+.cap-photo { display: flex; align-items: center; gap: 14px; margin-top: 20px; }
+.cap-shot {
+  width: 60px; height: 60px; flex: none; box-sizing: border-box;
+  border: 1.5px dashed var(--dash, #b9a878); background: var(--dropfill, #faf3e6);
+  display: grid; place-items: center; cursor: pointer; overflow: hidden;
+}
+.cap-shot.over { border-color: var(--accent); border-style: solid; }
+.cap-shot img { width: 100%; height: 100%; object-fit: cover; }
+.cap-shot-p { font-size: 26px; line-height: 1; color: var(--headline); }
+.cap-photo-t { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .cap-tile-t { font-size: 14px; font-weight: 600; color: var(--headline); }
 .cap-tile-s { font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.cap-tile img { max-width: 100%; max-height: 150px; }
 .cap-foot { display: flex; align-items: center; justify-content: flex-end; gap: 14px;
-  padding: 14px 22px; border-top: 1px solid var(--rule); background: var(--panel); }
+  padding: 14px 22px; border-top: 1px solid var(--rule); background: var(--panel); flex: none; }
 
 /* --- saved --------------------------------------------------------------- */
 .cap-toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(8px);
@@ -2422,12 +2444,12 @@ body.cap-open { overflow: hidden; }
 @media (max-width: 900px) {
   .cap-wrap { padding: 0; }
   .cap-card { max-height: 100vh; height: 100vh; width: 100%; }
+  .cap-card { max-height: 100dvh; height: 100dvh; }   /* iOS: fit the visible area, not behind the URL bar */
   .cap-work { grid-template-columns: 1fr; }
   .cap-doc { min-height: 220px; }
   .cap-sheet, .cap-sheet img, .cap-sheet embed, .cap-sheet iframe { min-height: 200px; }
   .cap-grid { grid-template-columns: 1fr; }
   .cap-f { border-right: 0; }
-  .cap-quick .cap-body { grid-template-columns: 1fr; }
   .cap-title { font-size: 20px; }
   .cap-drop { padding: 34px 16px; }
   .cap-drop-t { font-size: 21px; }
@@ -2667,6 +2689,19 @@ body.cap-open.qx-open [data-cap] { display: none; }
   background: transparent; padding: 4px 0; font-size: 12.5px;
 }
 .pa-body .pa-mini:focus { outline: 0; border-bottom-color: var(--ink); }
+
+/* The composer's two modes — add a special, or 86 any item — as a small
+   two-up toggle above the form. Editing replaces the whole thing, so it has no
+   toggle, only a Cancel. */
+.pa-modes { display: flex; gap: 0; margin: 4px 0 2px; border: 1px solid var(--rule); width: fit-content; }
+.pa-mode {
+  padding: 8px 16px; font-size: 13px; font-weight: 500; color: var(--secondary);
+  text-decoration: none;
+}
+.pa-mode + .pa-mode { border-left: 1px solid var(--rule); }
+.pa-mode:hover { color: var(--ink); }
+.pa-mode.on { background: var(--ink); color: var(--paper); font-weight: 600; }
+.pa-mode.on:hover { color: var(--paper); }
 
 /* Composer fields are underlines on the paper, not boxes on it. Scoped to
    .pa-form so the rest of the app's forms are untouched. */
