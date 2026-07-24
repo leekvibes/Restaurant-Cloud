@@ -2515,3 +2515,71 @@ body.cap-open.qx-open [data-cap] { display: none; }
    worse than the one problem it was there to solve. Hidden rather than cut
    from the templates, so it is one line to bring back. */
 .bs-month-h .bs-month-go { display: none; }
+
+/* ===========================================================================
+   PORTAL, MANAGER SIDE
+   The three conversations with the floor on one page. Same ledger furniture as
+   everywhere else — rows, hairlines, no cards — with a coloured left bar
+   carrying the one thing that is scanned for: how urgent it is.
+   =========================================================================== */
+.bs-kick2 {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--ink); padding-bottom: 7px; margin: 30px 0 0;
+}
+.bs-kick2 a { color: var(--link); text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+.bs-quiet { font-size: 13.5px; color: var(--muted); margin: 14px 0 0; }
+
+.pa-bar { width: 3px; align-self: stretch; background: var(--faint); flex: none; }
+.pa-bar.out, .pa-bar.urgent { background: var(--negative); }
+.pa-bar.low, .pa-bar.caution { background: #c99a12; }
+.pa-bar.order { background: var(--link); }
+.pa-bar.fyi { background: var(--muted); }
+
+.pa-stock, .pa-note, .pa-dish, .pa-hand {
+  display: flex; align-items: center; gap: 14px; padding: 13px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.pa-stock.done, .pa-note.done { opacity: .55; }
+.pa-what { flex: 1; min-width: 0; }
+.pa-what b { font-size: 14.5px; color: var(--headline); font-weight: 600; }
+.pa-what span { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.pa-what i { font-style: normal; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase; margin-left: 8px; }
+.pa-known { color: var(--positive); }
+.pa-new { color: var(--faint); }
+.pa-meta { text-align: right; min-width: 130px; }
+.pa-meta span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.pa-st { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; font-weight: 600; color: var(--muted); }
+.pa-st.out { color: var(--negative); }
+.pa-st.low { color: var(--warning); }
+.pa-st.order { color: var(--link); }
+.pa-do { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; min-width: 210px; }
+.pa-do .bs-act.danger { color: var(--negative); }
+
+.pa-dn { flex: 1; min-width: 0; }
+.pa-dn b { font-family: var(--serif); font-weight: 500; font-size: 17px; color: var(--headline); }
+.pa-dn span { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.pa-dp { font-family: var(--mono); font-size: 14px; color: var(--headline); min-width: 74px; text-align: right; }
+.pa-dl { font-size: 12.5px; color: var(--warning); min-width: 74px; }
+.pa-dish.off .pa-dn b { text-decoration: line-through; color: var(--muted); }
+.pa-86 { display: flex; gap: 8px; align-items: center; }
+.pa-mini { width: 108px; padding: 7px 9px; border: 1px solid var(--rule); background: var(--paper);
+  font: inherit; font-size: 12.5px; color: var(--headline); }
+
+.pa-add {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+  align-items: end; padding: 18px 0 4px; border-bottom: 1px solid var(--rule);
+}
+.pa-add .fld.wide { grid-column: 1 / -1; }
+.pa-add .bs-btn { grid-column: 1 / -1; justify-self: start; }
+.pa-daypick { margin: 0; }
+.pa-daypick input { border: 1px solid var(--rule); background: var(--paper); padding: 5px 8px;
+  font: inherit; font-family: var(--mono); font-size: 12px; color: var(--headline); }
+
+@media (max-width: 900px) {
+  .pa-stock, .pa-note, .pa-dish, .pa-hand { flex-wrap: wrap; }
+  .pa-meta, .pa-do { min-width: 0; text-align: left; justify-content: flex-start; }
+  .pa-add { grid-template-columns: 1fr 1fr; }
+}

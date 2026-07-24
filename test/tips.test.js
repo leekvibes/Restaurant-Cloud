@@ -58,13 +58,30 @@ test.before(async () => {
 
 test.after(() => { if (child) child.kill(); if (db) db.close(); });
 
+/**
+ * PIN in, tip form out.
+ *
+ * A verified PIN now lands on the portal hub rather than dropping straight
+ * into the form — the portal holds more than one thing, and for a cook it
+ * holds no form at all. The form is one press further in, so this helper
+ * takes that press. Everything after it is unchanged: the same signed token,
+ * in the same field, posted to the same route.
+ */
 const signIn = async (pin) => {
-  const res = await form('/tips/start', { pin });
-  assert.strictEqual(res.status, 200, `PIN ${pin} signs in`);
+  const start = await form('/tips/start', { pin });
+  assert.strictEqual(start.status, 302, `PIN ${pin} signs in`);
+  assert.match(start.headers.get('location') || '', /\/portal/, 'and lands on the hub');
+  const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(cookie, /^zwin_portal=/, 'carrying who it is');
+
+  const res = await fetch(`${BASE}/portal/tips`, {
+    method: 'POST', redirect: 'manual', headers: { cookie },
+  });
+  assert.strictEqual(res.status, 200, 'the tip form opens from the hub');
   const html = await res.text();
   const m = html.match(/name="token" value="([^"]+)"/);
   assert.ok(m, 'a token comes back');
-  return { html, token: m[1] };
+  return { html, token: m[1], cookie };
 };
 
 test('the sign-in page names nobody', async () => {
@@ -128,9 +145,16 @@ test('a full report lands on the right service, for the right person', async () 
 test('you cannot file yourself as a server to keep the tips', async () => {
   // Ana is a busser. A hand-written POST claiming 'server' would move her from
   // the pool to keeping her own tips.
-  const { token } = await signIn('1357');
+  //
+  // Posted with her name and PIN rather than a portal token, which is what a
+  // hand-written POST actually looks like — and is now the only way she could
+  // reach this route at all, since a busser is not offered a submission in the
+  // portal. The guard being tested is the same one either way: the role is
+  // read from what she is assigned, never from what the post claims.
   const res = await form('/tips', {
-    token, position: 'server', date: '2026-07-19', daypart: 'cafe', cash_tips: '60', food: '900',
+    employee_id: db.prepare("SELECT id FROM employees WHERE name='Ana Ortiz'").get().id,
+    pin: '1357',
+    position: 'server', date: '2026-07-19', daypart: 'cafe', cash_tips: '60', food: '900',
   });
   assert.strictEqual(res.status, 302);
   const sh = db.prepare("SELECT id FROM shifts WHERE date='2026-07-19' AND daypart='cafe'").get();

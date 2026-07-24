@@ -12,6 +12,7 @@ const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest,
 const { fmt, toCents } = require('./money');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, canWrite, navAllowed } = require('./views');
 const { mountModules, MODULES, pagesOf } = require('./modules');
+const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
@@ -2647,6 +2648,509 @@ function reportScript() {
   </script>`;
 }
 
+// ===========================================================================
+// THE STAFF PORTAL
+//
+// What a person sees after their PIN. The PIN screen itself is untouched —
+// same page, same keypad, same token — it just no longer drops straight into
+// the tip form. It lands on a hub, because the portal now has more than one
+// thing in it and "submit your tips" is only one of them, and for a cook it
+// is none of them.
+//
+// Identity travels in a cookie rather than a hidden field. The form token
+// still works and is still what the submission checks, but a hub is a set of
+// pages you move between, and threading a token through every link means
+// either putting it in URLs — where it lands in history and referrers — or
+// making every link a POST. The cookie is the same signed token with the same
+// lifetime, in the one place a browser will carry it for you.
+// ===========================================================================
+const PORTAL_COOKIE = 'zwin_portal';
+
+function setPortalCookie(req, res, empId) {
+  const https = req.secure || req.get('x-forwarded-proto') === 'https';
+  res.setHeader('Set-Cookie', `${PORTAL_COOKIE}=${tipsToken(empId)}; Path=/; HttpOnly; SameSite=Lax; `
+    + `Max-Age=${Math.round(TIPS_TTL / 1000)}${https ? '; Secure' : ''}`);
+}
+
+/** The person this request belongs to, or null. Same token, same expiry. */
+const portalUser = (req) => readTipsToken(readCookie(req, PORTAL_COOKIE));
+
+/**
+ * Everything the portal needs to know about who is asking.
+ *
+ * Position drives the shape of every screen, so it is resolved once here
+ * rather than in each route — a screen and the route behind it disagreeing
+ * about whether somebody submits tips is how you get a button that 403s.
+ */
+function portalWho(emp) {
+  const pos = positions.bySlug.get(emp.role) || null;
+  return { emp, position: pos, shape: PORTAL.shapeFor(pos),
+    roleName: pos ? pos.name : (emp.role || 'Staff') };
+}
+
+/** Sends anyone without a live cookie back to the PIN screen. */
+function requirePortal(req, res) {
+  const emp = portalUser(req);
+  if (emp) return portalWho(emp);
+  res.redirect('/tips?err=1&msg=' + encodeURIComponent(
+    'That timed out — enter your PIN again. Nothing you sent was lost.'));
+  return null;
+}
+
+const GREETING = (h) => (h < 12 ? 'Morning' : h < 17 ? 'Afternoon' : 'Evening');
+const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || 'there';
+
+/** The portal's own chrome: wordmark, restaurant, sign out. */
+const portalHead = (right) => `
+  <div class="pt-top">
+    <span class="pt-mark">ZWIN</span>
+    <span class="pt-house">${esc(RESTAURANT)}</span>
+    ${right || '<a class="pt-out" href="/portal/out">Sign out</a>'}
+  </div>`;
+
+/** A sub-page's chrome: back to the hub, and who you are. */
+const portalSub = (right) => `
+  <div class="pt-top">
+    <a class="pt-back" href="/portal">← Home</a>
+    <span class="pt-who">${right || ''}</span>
+  </div>`;
+
+const portalPage = (title, body) => layout(title, `<div class="pt">${body}</div>`, { bare: true, staff: true });
+
+// ---------------------------------------------------------------------------
+// What a person earned. Everything here already existed — it is the engine's
+// own numbers, for one person, which until now only ever left the building in
+// an email.
+// ---------------------------------------------------------------------------
+/**
+ * Run the engine over the shifts this person actually worked.
+ *
+ * Bounded on purpose: a portal opened on a phone should not replay four years
+ * of service to draw one screen. `limit` shifts, newest first, which is far
+ * more than the page shows and enough for the all-time line to be honest about
+ * what it covers.
+ */
+function earningsFor(empId, limit = 60) {
+  // w.hours comes along because somebody who is in neither payout list — a
+  // cook on a night with no kitchen pot — still worked, and their hours are
+  // the only thing their screen has to show. Reading them from the work row
+  // is the same number the shift sheet and payroll use.
+  const worked = db.prepare(`SELECT sh.*, w.hours AS worked_hours FROM shifts sh
+    JOIN work w ON w.shift_id = sh.id
+    WHERE w.employee_id = ? AND sh.status = 'sent'
+    ORDER BY sh.date DESC, sh.id DESC LIMIT ?`).all(empId, limit);
+
+  const out = [];
+  for (const sh of worked) {
+    let r;
+    try { r = runShift(shiftInputs(sh.id), policyForShift(sh)); } catch { continue; }
+    const asServer = r.servers.find((x) => x.employeeId === empId);
+    const asSupport = (r.support || []).find((x) => x.employeeId === empId);
+    if (asServer) {
+      out.push({ shift: sh, kind: 'server', kept: asServer.tipsKept,
+        collected: asServer.totalTips, tippedOut: asServer.tipoutTotal,
+        cash: asServer.cashTips, toPaycheck: asServer.tipsKept - asServer.cashTips,
+        hours: asServer.hours });
+    } else if (asSupport) {
+      const cash = asSupport.cashTotal || 0;
+      const card = asSupport.cardTotal || 0;
+      out.push({ shift: sh, kind: 'support', kept: cash + card,
+        collected: cash + card, tippedOut: 0, cash, toPaycheck: card,
+        hours: asSupport.hours });
+    } else {
+      out.push({ shift: sh, kind: 'hours', kept: 0, collected: 0, tippedOut: 0,
+        cash: 0, toPaycheck: 0, hours: sh.worked_hours || 0 });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// HOME
+// ---------------------------------------------------------------------------
+app.get('/portal', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp, shape, roleName } = who;
+  const today = isoDate(startOfToday());
+  const now = new Date();
+
+  // Tonight's service, if one is open. The greeting line says what it knows
+  // and no more — the app has no roster, so "you're on tonight" would be a
+  // guess dressed as a fact.
+  const openToday = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> 'sent'
+    ORDER BY id DESC LIMIT 1`).get(today);
+  const already = openToday
+    ? db.prepare('SELECT 1 FROM tip_submissions WHERE shift_id = ? AND employee_id = ?')
+      .get(openToday.id, emp.id) : null;
+
+  const notes = PORTAL.q.notesFor.all({ on: today });
+  const board = PORTAL.q.specialsFor.all(today);
+  const running = board.filter((b) => !b.eighty_sixed_at).length;
+  const off = board.length - running;
+
+  const hist = earningsFor(emp.id, 12);
+  const last = hist[0];
+
+  const noteBlock = notes.length ? `
+    <div class="pt-kick"><span>Before your shift</span><span>For today</span></div>
+    <div class="pt-notes">
+      ${notes.map((n) => `<div class="pt-note ${esc(n.tone)}">
+        <b>${esc(n.title)}</b>
+        ${n.body ? `<span>${esc(n.body)}${n.ends_on && n.ends_on <= today
+          ? ' <i>expires today</i>' : ''}</span>` : ''}
+      </div>`).join('')}
+    </div>` : '';
+
+  // The one thing this person is here to do, which for a cook is nothing.
+  const task = shape.tips ? `
+    <div class="pt-kick"><span>End of your shift</span></div>
+    <div class="pt-task">
+      <div class="pt-task-h">
+        <h2>${shape.sales ? 'Submit tips &amp; sales' : 'Submit your cash tips'}</h2>
+        <span class="pt-due">${already ? 'Submitted' : 'Due tonight'}</span>
+      </div>
+      <p class="pt-task-s">${shape.sales
+        ? 'What you sold and made — about a minute.'
+        : 'What you took in cash tonight — about a minute.'}</p>
+      <div class="pt-task-f">
+        <span class="pt-state">${already ? 'Sent — you can still change it' : 'Not started'}</span>
+        <form method="post" action="/portal/tips" class="pt-inline">
+          <button class="pt-start" type="submit">${already ? 'Edit' : 'Start'} →</button>
+        </form>
+      </div>
+    </div>`
+    : `
+    <div class="pt-kick"><span>Your shift</span></div>
+    <p class="pt-quiet">Nothing to submit — your hours come from the schedule.
+      If you are out of something, report it below.</p>`;
+
+  const lastBlock = last ? `
+    <div class="pt-kick"><span>Your last shift</span><a href="/portal/earnings">All earnings →</a></div>
+    <div class="pt-last">
+      <div class="pt-last-l">
+        <span>${esc(niceDate(last.shift.date))} · ${last.kind === 'hours' ? 'you worked' : 'you kept'}</span>
+        ${last.kind === 'hours'
+          ? `<i>${last.hours || 0} hrs</i>`
+          : `<i>${money(last.cash)} cash + ${money(last.toPaycheck)} to your paycheck${
+              last.tippedOut ? ', after tip-out' : ''}</i>`}
+      </div>
+      <b class="pt-big">${last.kind === 'hours' ? `${last.hours || 0} hrs` : money(last.kept)}</b>
+    </div>` : '';
+
+  const row = (href, glyph, title, sub, tag) => `
+    <a class="pt-row" href="${href}">
+      <span class="pt-ico">${glyph}</span>
+      <span class="pt-row-t"><b>${title}</b>${tag ? `<i class="pt-tag">${tag}</i>` : ''}
+        ${sub ? `<span>${sub}</span>` : ''}</span>
+      <span class="pt-chev">›</span>
+    </a>`;
+
+  res.send(portalPage('Your portal', `
+    ${portalHead()}
+    <div class="pt-body">
+      <p class="pt-date">${esc(now.toLocaleDateString('en-US',
+        { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase())} — ${GREETING(now.getHours()).toUpperCase()}</p>
+      <h1 class="pt-hi">${GREETING(now.getHours())}, ${esc(firstName(emp.name))}.</h1>
+      <p class="pt-onshift">${openToday
+        ? `<i class="pt-dot"></i>You're on <b>${esc(dp(openToday.daypart))}</b> tonight · ${esc(roleName)}`
+        : `<i class="pt-dot off"></i>No service open right now · ${esc(roleName)}`}</p>
+
+      ${noteBlock}
+      ${task}
+      ${lastBlock}
+
+      <div class="pt-rows">
+        ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
+          hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
+        ${row('/portal/specials', '✦', "Today's specials",
+          board.length ? `${running} running · ${off} on the 86 board` : 'Nothing posted today')}
+        ${row('/portal/stock', '⊞', 'Report out of stock', 'Out of something, or running low')}
+      </div>
+    </div>
+    <p class="pt-foot">Anything you submit stays editable until your manager sends the shift.</p>`));
+});
+
+// The hub's Start button. A POST because it hands the submission flow the
+// token it has always taken — the tip form and everything behind it are
+// unchanged.
+app.post('/portal/tips', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  if (!who.shape.tips) return res.redirect('/portal');
+  res.send(tipsFormPage(who.emp));
+});
+
+app.get('/portal/out', (req, res) => {
+  res.setHeader('Set-Cookie', `${PORTAL_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.redirect('/tips');
+});
+
+// ---------------------------------------------------------------------------
+// WHAT YOU'VE EARNED
+// ---------------------------------------------------------------------------
+app.get('/portal/earnings', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp, roleName } = who;
+  const all = earningsFor(emp.id, 60);
+  const last = all[0];
+  const paid = all.filter((x) => x.kind !== 'hours');
+  const keptTotal = paid.reduce((a, x) => a + x.kept, 0);
+  const avg = paid.length ? Math.round(keptTotal / paid.length) : 0;
+  const since = all.length ? all[all.length - 1].shift.date : null;
+
+  const line = (k, v, tone) => `<div class="pt-line"><span>${k}</span><b${tone ? ` class="${tone}"` : ''}>${v}</b></div>`;
+
+  const hero = !last ? `<p class="pt-quiet">Nothing recorded yet. Once your manager sends a shift
+      you worked, what you made shows up here.</p>`
+    : last.kind === 'hours' ? `
+      <div class="pt-hero"><span>You worked</span><b class="pt-huge">${last.hours || 0} hrs</b></div>
+      ${line('Service', `${esc(niceDate(last.shift.date))} · ${esc(dp(last.shift.daypart))}`)}`
+    : `
+      <div class="pt-hero"><span>You kept</span><b class="pt-huge ok">${money(last.kept)}</b></div>
+      ${line('Tips collected', money(last.collected))}
+      ${last.tippedOut ? line('Tipped out to support', `−${money(last.tippedOut)}`, 'bad') : ''}
+      ${line('Cash in hand', money(last.cash))}
+      ${line('To your paycheck', money(last.toPaycheck))}`;
+
+  res.send(portalPage("What you've earned", `
+    ${portalSub(`${esc(firstName(emp.name))} · ${esc(roleName)}`)}
+    <div class="pt-body">
+      <h1 class="pt-title">What you've earned</h1>
+      ${last ? `<div class="pt-kick"><span>Last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>` : ''}
+      ${hero}
+
+      ${paid.length ? `
+      <div class="pt-kick"><span>All time</span>${since ? `<span>Since ${esc(niceDate(since))}</span>` : ''}</div>
+      <div class="pt-stats">
+        <div><b>${money(keptTotal)}</b><span>kept total</span></div>
+        <div><b>${paid.length}</b><span>shift${paid.length === 1 ? '' : 's'}</span></div>
+        <div><b>${money(avg)}</b><span>avg / shift</span></div>
+      </div>` : ''}
+
+      ${all.length > 1 ? `
+      <div class="pt-kick"><span>Past shifts</span></div>
+      <div class="pt-past">
+        ${all.slice(1, 13).map((x) => `<div class="pt-pastrow">
+          <span class="pt-pd">${esc(niceDate(x.shift.date))}</span>
+          <span class="pt-ps">${esc(dp(x.shift.daypart))}</span>
+          <b class="${x.kind === 'hours' ? '' : 'ok'}">${x.kind === 'hours'
+            ? `${x.hours || 0} hrs` : money(x.kept)}</b>
+        </div>`).join('')}
+      </div>
+      ${all.length > 13 ? `<p class="pt-quiet">Showing the last 12 of ${all.length} recorded.</p>` : ''}` : ''}
+    </div>
+    <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
+});
+
+// ---------------------------------------------------------------------------
+// SPECIALS & 86 BOARD — read only
+// ---------------------------------------------------------------------------
+app.get('/portal/specials', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const today = isoDate(startOfToday());
+  const board = PORTAL.q.specialsFor.all(today);
+  const running = board.filter((b) => !b.eighty_sixed_at);
+  const off = board.filter((b) => b.eighty_sixed_at);
+  const touched = PORTAL.q.boardTouched.get(today);
+  const when = touched && touched.at
+    ? new Date(touched.at.replace(' ', 'T') + 'Z').toLocaleTimeString('en-US',
+      { hour: 'numeric', minute: '2-digit' }) : null;
+
+  res.send(portalPage('Specials & 86 board', `
+    ${portalSub(when ? `Updated ${esc(when)}` : '')}
+    <div class="pt-body">
+      <p class="pt-date">${esc(niceDate(today).toUpperCase())}</p>
+      <h1 class="pt-title">Specials &amp; 86 board</h1>
+      <p class="pt-sub">Know these before your shift.</p>
+
+      ${running.length ? `
+      <div class="pt-kick"><span>Running today · ${running.length}</span></div>
+      <div class="pt-dishes">
+        ${running.map((d) => `<div class="pt-dish">
+          <div class="pt-dish-h"><b>${esc(d.name)}</b>${d.price_cents != null
+            ? `<i>${money(d.price_cents)}</i>` : ''}</div>
+          ${d.description || d.low_note ? `<p>${esc(d.description || '')}${d.low_note
+            ? ` <span class="pt-low">${esc(d.low_note)}</span>` : ''}</p>` : ''}
+        </div>`).join('')}
+      </div>` : ''}
+
+      ${off.length ? `
+      <div class="pt-kick bad"><span>86'd — don't offer · ${off.length}</span></div>
+      <div class="pt-dishes">
+        ${off.map((d) => `<div class="pt-dish off">
+          <div class="pt-dish-h"><b>${esc(d.name)}</b>
+            <i class="bad">${esc(d.sold_out_note || '86’d')}</i></div>
+        </div>`).join('')}
+      </div>` : ''}
+
+      ${!board.length ? `<p class="pt-quiet">Nothing posted for today yet. Check back before service —
+        your manager updates this.</p>` : ''}
+    </div>
+    <p class="pt-foot">Manager updates this — check back before each service.</p>`));
+});
+
+// ---------------------------------------------------------------------------
+// REPORT OUT OF STOCK — the one thing that travels the other way
+// ---------------------------------------------------------------------------
+app.get('/portal/stock', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const mine = PORTAL.q.stockMine.all(emp.id);
+  // The catalogue, so a report names something the ordering side recognises
+  // rather than a spelling of it.
+  const products = prodQ.plain.all();
+
+  const recent = mine.length ? `<p class="pt-foot-in">Recently sent: ${mine.slice(0, 4).map((m) =>
+    `${esc(m.item)}${m.resolution ? ` (${esc(m.resolution)} ✓)` : ` (${esc(m.status)})`}`).join(' · ')}</p>` : '';
+
+  res.send(portalPage('Report out of stock', `
+    ${portalSub(esc(firstName(emp.name)))}
+    <div class="pt-body">
+      <h1 class="pt-title">Out of stock</h1>
+      <p class="pt-sub">Add everything you're out of or low on — send it all at once.</p>
+
+      <form method="post" action="/portal/stock" id="stockform">
+        <div class="pt-kick"><span>Your list · <b id="stock-n">0</b> items</span></div>
+        <div class="pt-list" id="stock-list">
+          <p class="pt-quiet" id="stock-empty">Nothing added yet — add your first item below.</p>
+        </div>
+
+        <div class="pt-kick"><span>Add an item</span></div>
+        <label class="pt-field">
+          <input id="stock-item" list="stock-products" placeholder="What is it?" autocomplete="off">
+          <span class="pt-hintr">type or pick</span>
+        </label>
+        <datalist id="stock-products">
+          ${products.map((p) => `<option value="${esc(p.name)}"></option>`).join('')}
+        </datalist>
+
+        <div class="pt-seg" id="stock-status">
+          <button type="button" data-s="out" class="on">Out</button>
+          <button type="button" data-s="low">Low</button>
+          <button type="button" data-s="order">Order</button>
+        </div>
+
+        <div class="pt-addrow">
+          <input id="stock-note" class="pt-underline" placeholder="Note (optional)" autocomplete="off">
+          <button type="button" class="pt-add" id="stock-add">+ Add</button>
+        </div>
+      </form>
+    </div>
+    <div class="pt-send">
+      <button class="pt-sendbtn" type="submit" form="stockform" id="stock-send" disabled>
+        Add something to send</button>
+      ${recent}
+    </div>
+    ${stockScript()}`));
+});
+
+app.post('/portal/stock', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  // The list arrives as JSON from the composer. Anything malformed is dropped
+  // rather than guessed at — a report nobody can read helps nobody.
+  let items = [];
+  try { items = JSON.parse(req.body.items || '[]'); } catch { items = []; }
+  const byName = new Map(prodQ.plain.all().map((p) => [p.name.toLowerCase(), p.id]));
+  const batch = `${emp.id}-${Date.now()}`;
+  let n = 0;
+
+  db.transaction(() => {
+    for (const raw of Array.isArray(items) ? items.slice(0, 40) : []) {
+      const item = String(raw && raw.item || '').trim().slice(0, 120);
+      if (!item) continue;
+      const status = PORTAL.STOCK_STATUS.includes(raw.status) ? raw.status : 'out';
+      PORTAL.q.addStock.run({
+        item,
+        // Linked where the name is one we already buy, so the manager's side
+        // can reach the vendor without anybody retyping it.
+        product_id: byName.get(item.toLowerCase()) || null,
+        status,
+        note: String(raw.note || '').trim().slice(0, 200) || null,
+        employee_id: emp.id,
+        reported_by: emp.name,
+        batch,
+      });
+      n++;
+    }
+  })();
+
+  res.redirect('/portal?sent=' + n);
+});
+
+/** The composer. Builds the list client-side and posts it in one field. */
+function stockScript() {
+  return `<script>
+  (function () {
+    var list = [], status = 'out';
+    var elList = document.getElementById('stock-list');
+    var elEmpty = document.getElementById('stock-empty');
+    var elN = document.getElementById('stock-n');
+    var elSend = document.getElementById('stock-send');
+    var form = document.getElementById('stockform');
+    var item = document.getElementById('stock-item');
+    var note = document.getElementById('stock-note');
+
+    document.querySelectorAll('#stock-status button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        status = b.dataset.s;
+        document.querySelectorAll('#stock-status button').forEach(function (x) {
+          x.classList.toggle('on', x === b);
+        });
+      });
+    });
+
+    function draw() {
+      elEmpty.hidden = list.length > 0;
+      [].slice.call(elList.querySelectorAll('.pt-item')).forEach(function (n) { n.remove(); });
+      list.forEach(function (it, i) {
+        var row = document.createElement('div');
+        row.className = 'pt-item ' + it.status;
+        row.innerHTML = '<span class="pt-item-t"><b></b><span></span></span>'
+          + '<span class="pt-item-s">' + it.status.toUpperCase() + '</span>'
+          + '<button type="button" class="pt-x" aria-label="Remove">✕</button>';
+        row.querySelector('b').textContent = it.item;
+        row.querySelector('.pt-item-t span').textContent = it.note || '';
+        row.querySelector('.pt-x').addEventListener('click', function () {
+          list.splice(i, 1); draw();
+        });
+        elList.appendChild(row);
+      });
+      elN.textContent = list.length;
+      elSend.disabled = list.length === 0;
+      elSend.textContent = list.length
+        ? 'Send ' + list.length + ' item' + (list.length === 1 ? '' : 's') + ' to manager'
+        : 'Add something to send';
+    }
+
+    document.getElementById('stock-add').addEventListener('click', function () {
+      var name = (item.value || '').trim();
+      if (!name) { item.focus(); return; }
+      list.push({ item: name, status: status, note: (note.value || '').trim() });
+      item.value = ''; note.value = '';
+      item.focus();
+      draw();
+    });
+
+    // The list only exists in the page until it is sent, so it rides along in
+    // one hidden field rather than as forty numbered inputs.
+    form.addEventListener('submit', function (e) {
+      if (!list.length) { e.preventDefault(); return; }
+      var f = document.createElement('input');
+      f.type = 'hidden'; f.name = 'items'; f.value = JSON.stringify(list);
+      form.appendChild(f);
+    });
+
+    draw();
+  })();
+  </script>`;
+}
+
 app.post('/tips/start', (req, res) => {
   const pin = String(req.body.pin || '').trim();
   const matches = pin ? q.staffByPin.all(pin) : [];
@@ -2656,7 +3160,12 @@ app.post('/tips/start', (req, res) => {
         ? 'That PIN is set up for more than one person. Tell your manager so it can be fixed.'
         : "That PIN wasn't recognised. Check it and try again, or ask your manager."));
   }
-  res.send(tipsFormPage(matches[0]));
+  // The PIN screen is unchanged; where it lands is not. A verified PIN now
+  // opens the hub, because the portal holds more than the tip form — and for
+  // a cook it holds no form at all. The submission flow behind it is
+  // untouched: it still takes the same signed token from the same field.
+  setPortalCookie(req, res, matches[0].id);
+  res.redirect('/portal');
 });
 
 /**
@@ -6905,6 +7414,317 @@ function captureScript(kinds) {
   })();
   </script>`;
 }
+
+// ===========================================================================
+// THE PORTAL, FROM THE MANAGER'S SIDE
+//
+// One page, deliberately. The portal is three small conversations — what you
+// tell the floor before service, what is on and off the board, and what the
+// floor tells you it has run out of — and they happen in the same ten minutes
+// before a shift. Split across three sections they would each be too small to
+// visit; together they are the one screen you open on the way in.
+//
+// It is not a fourth copy of the data. Notes, specials and stock live in
+// portal.js and this reads and writes them; everything about money on this
+// page is the same engine figure the shift sheet shows.
+// ===========================================================================
+app.get('/staff-portal', (req, res) => {
+  if (!navAllowed('staff')) return res.status(403).send(layout('Not allowed',
+    '<div class="bs-blank"><b>Not your area</b><span>Ask the owner to turn on Team for your account.</span></div>'));
+
+  const today = isoDate(startOfToday());
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.d || '')) ? req.query.d : today;
+
+  const openStock = PORTAL.q.stockOpen.all();
+  const recentStock = PORTAL.q.stockRecent.all().filter((r) => r.resolved_at);
+  const board = PORTAL.q.specialsFor.all(day);
+  const running = board.filter((b) => !b.eighty_sixed_at);
+  const off = board.filter((b) => b.eighty_sixed_at);
+  const notes = PORTAL.q.notesAll.all();
+  const live = notes.filter((n) => n.starts_on <= today && (!n.ends_on || n.ends_on >= today));
+
+  // Who has handed in tonight, and who has not. The portal's whole job at the
+  // end of a service is to collect these, so the page that manages it should
+  // say plainly who is outstanding.
+  const openShift = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> 'sent'
+    ORDER BY id DESC LIMIT 1`).get(today);
+  let expected = [];
+  if (openShift) {
+    expected = db.prepare(`SELECT w.employee_id, w.role, e.name,
+        (SELECT COUNT(*) FROM tip_submissions t
+          WHERE t.shift_id = w.shift_id AND t.employee_id = w.employee_id) AS sent
+      FROM work w JOIN employees e ON e.id = w.employee_id
+      WHERE w.shift_id = ? ORDER BY e.name`).all(openShift.id);
+  }
+  const takesTips = new Map(positions.all.all().map((p) => [p.slug, p.takes_tips !== 0]));
+  const owing = expected.filter((p) => takesTips.get(p.role) && !p.sent);
+
+  const statTone = (n) => (n ? 'warn' : 'ok');
+  const cell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span>`
+    + `<span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span>`
+    + `<span class="bs-strip-s">${sub}</span></div>`;
+
+  const STATUS_TONE = { out: 'bad', low: 'warn', order: '' };
+
+  // --- what the floor has reported -----------------------------------------
+  const stockRow = (r, done) => `
+    <div class="bs-srow pa-stock${done ? ' done' : ''}">
+      <span class="pa-bar ${esc(r.status)}"></span>
+      <span class="pa-what">
+        <b>${esc(r.item)}</b>
+        ${r.product_name ? `<i class="pa-known">in Products${r.vendor_name
+          ? ` · ${esc(r.vendor_name)}` : ''}</i>` : '<i class="pa-new">not a product yet</i>'}
+        ${r.note ? `<span>${esc(r.note)}</span>` : ''}
+      </span>
+      <span class="pa-meta">
+        <b class="pa-st ${esc(r.status)}">${esc(r.status.toUpperCase())}</b>
+        <span>${esc(r.reported_by || 'Someone')} · ${esc(niceDate(String(r.reported_at || '').slice(0, 10)))}</span>
+      </span>
+      <span class="pa-do">
+        ${done
+          ? `<span class="bs-tag ok">${esc(r.resolution || 'done')}</span>
+             <form method="post" action="/staff-portal/stock/${r.id}/reopen" style="margin:0">
+               <button class="bs-act" type="submit">Reopen</button></form>`
+          : PORTAL.STOCK_RESOLUTION.map((x) => `
+             <form method="post" action="/staff-portal/stock/${r.id}/resolve" style="margin:0">
+               <input type="hidden" name="resolution" value="${x}">
+               <button class="bs-btn-sm" type="submit">${x[0].toUpperCase() + x.slice(1)}</button></form>`).join('')}
+        ${r.product_id ? `<a class="bs-act" href="/c/products/${r.product_id}">Product →</a>` : ''}
+      </span>
+    </div>`;
+
+  // --- the board -----------------------------------------------------------
+  const dishRow = (d) => `
+    <div class="bs-srow pa-dish${d.eighty_sixed_at ? ' off' : ''}">
+      <span class="pa-dn"><b>${esc(d.name)}</b>${d.description
+        ? `<span>${esc(d.description)}</span>` : ''}</span>
+      <span class="pa-dp">${d.price_cents != null ? money(d.price_cents) : '—'}</span>
+      <span class="pa-dl">${d.low_note ? esc(d.low_note) : ''}</span>
+      <span class="pa-do">
+        ${d.eighty_sixed_at
+          ? `<span class="bs-tag bad">${esc(d.sold_out_note || "86'd")}</span>
+             <form method="post" action="/staff-portal/special/${d.id}/back" style="margin:0">
+               <button class="bs-act" type="submit">Put back on</button></form>`
+          : `<form method="post" action="/staff-portal/special/${d.id}/86" style="margin:0" class="pa-86">
+               <input name="note" placeholder="Sold out" class="pa-mini">
+               <button class="bs-btn-sm" type="submit">86 it</button></form>`}
+        <form method="post" action="/staff-portal/special/${d.id}/delete" style="margin:0"
+          onsubmit="return confirm('Remove ${esc(d.name.replace(/'/g, ''))} from the board?')">
+          <button class="bs-act danger" type="submit">Remove</button></form>
+      </span>
+    </div>`;
+
+  res.send(layout('Portal', `
+    ${flash(req)}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Portal — ${openStock.length
+            ? `<span class="warn">${openStock.length} thing${openStock.length === 1 ? '' : 's'} reported</span>`
+            : 'nothing reported'}${owing.length ? `, ${owing.length} still to hand in` : '.'}</h1>
+          <p class="bs-subline">What staff see on their phones, and what they send back.
+            <a class="bs-act" href="/portal">Open the staff view →</a></p>
+        </div>
+      </div>
+
+      <section class="bs-panel bs-strip">
+        ${cell('Reported', String(openStock.length),
+          openStock.length ? 'waiting on you' : 'all dealt with', statTone(openStock.length))}
+        ${cell('On the board', String(running.length),
+          `${off.length} 86'd · ${esc(niceDate(day))}`)}
+        ${cell('Notes live', String(live.length),
+          live.length ? 'showing on every phone' : 'nothing posted')}
+        ${cell('Still to hand in', String(owing.length),
+          openShift ? `${esc(dp(openShift.daypart))} tonight` : 'no service open',
+          statTone(owing.length))}
+      </section>
+
+      ${/* 1. What came in. First because it is the only part with somebody
+             waiting on the other end. */''}
+      <div class="bs-kick2"><span>Reported from the floor</span>
+        <span class="bs-meta">${openStock.length} open</span></div>
+      ${openStock.length
+        ? `<div class="bs-srows">${openStock.map((r) => stockRow(r, false)).join('')}</div>`
+        : '<p class="bs-quiet">Nothing outstanding. Anything staff report shows up here.</p>'}
+      ${recentStock.length ? `
+        <details class="bs-fold">
+          <summary>Recently dealt with · ${recentStock.length}</summary>
+          <div class="bs-srows">${recentStock.slice(0, 15).map((r) => stockRow(r, true)).join('')}</div>
+        </details>` : ''}
+
+      ${/* 2. The board. */''}
+      <div class="bs-kick2"><span>Specials &amp; 86 board</span>
+        <form method="get" action="/staff-portal" class="pa-daypick">
+          <input type="date" name="d" value="${esc(day)}" onchange="this.form.submit()">
+        </form></div>
+      ${board.length
+        ? `<div class="bs-srows">${[...running, ...off].map(dishRow).join('')}</div>`
+        : `<p class="bs-quiet">Nothing on the board for ${esc(niceDate(day))} yet.</p>`}
+
+      <form method="post" action="/staff-portal/special" class="pa-add">
+        <input type="hidden" name="d" value="${esc(day)}">
+        <label class="fld">Dish<input name="name" required placeholder="Heirloom tomato tartine"></label>
+        <label class="fld">Price<input name="price" type="number" step="0.01" min="0" placeholder="14.00"></label>
+        <label class="fld wide">Description<input name="description" placeholder="Whipped ricotta, basil oil, sourdough. Veg."></label>
+        <label class="fld">Low note<input name="low_note" placeholder="6 left."></label>
+        <button class="bs-btn" type="submit">Add to the board</button>
+      </form>
+
+      ${/* 3. Before your shift. */''}
+      <div class="bs-kick2"><span>Before your shift</span>
+        <span class="bs-meta">${live.length} showing today</span></div>
+      ${notes.length ? `<div class="bs-srows">${notes.slice(0, 20).map((n) => {
+        const isLive = n.starts_on <= today && (!n.ends_on || n.ends_on >= today);
+        return `<div class="bs-srow pa-note${isLive ? '' : ' done'}">
+          <span class="pa-bar ${esc(n.tone)}"></span>
+          <span class="pa-what"><b>${esc(n.title)}</b>${n.body ? `<span>${esc(n.body)}</span>` : ''}</span>
+          <span class="pa-meta"><b class="pa-st">${esc(n.tone.toUpperCase())}</b>
+            <span>${esc(niceDate(n.starts_on))}${n.ends_on ? ` – ${esc(niceDate(n.ends_on))}` : ' only'}</span></span>
+          <span class="pa-do">${isLive ? '<span class="bs-tag ok">live</span>' : '<span class="bs-tag">expired</span>'}
+            <form method="post" action="/staff-portal/note/${n.id}/delete" style="margin:0">
+              <button class="bs-act danger" type="submit">Delete</button></form></span>
+        </div>`;
+      }).join('')}</div>` : '<p class="bs-quiet">No notes yet. Anything posted here shows on every phone until it expires.</p>'}
+
+      <form method="post" action="/staff-portal/note" class="pa-add">
+        <label class="fld wide">Note<input name="title" required placeholder="Private event 7–9pm"></label>
+        <label class="fld wide">One line<input name="body" placeholder="Back room booked. Keep walk-ins to the front."></label>
+        <label class="fld">How urgent<select name="tone">
+          <option value="urgent">Urgent — red</option>
+          <option value="caution">Caution — amber</option>
+          <option value="fyi" selected>For information — grey</option>
+        </select></label>
+        <label class="fld">Show from<input name="starts_on" type="date" value="${esc(today)}" required></label>
+        <label class="fld">Until<input name="ends_on" type="date" value="${esc(today)}"></label>
+        <button class="bs-btn" type="submit">Post it</button>
+      </form>
+
+      ${/* 4. Who still owes you a submission tonight. */''}
+      ${openShift ? `
+      <div class="bs-kick2"><span>Handed in tonight</span>
+        <a class="bs-act" href="/shifts/${openShift.id}">Open the shift sheet →</a></div>
+      <div class="bs-srows">
+        ${expected.map((p) => {
+          const wants = takesTips.get(p.role);
+          return `<div class="bs-srow pa-hand">
+            <span class="pa-what"><b>${esc(p.name)}</b><span>${esc(p.role)}</span></span>
+            <span class="pa-do">${!wants
+              ? '<span class="bs-tag">nothing to hand in</span>'
+              : p.sent ? '<span class="bs-tag ok">sent</span>'
+              : '<span class="bs-tag warn">waiting</span>'}</span>
+          </div>`;
+        }).join('') || '<p class="bs-quiet">Nobody is on this shift yet.</p>'}
+      </div>` : ''}
+
+      ${/* 5. Who is asked for what, so the shapes above are explainable. */''}
+      <div class="bs-kick2"><span>Who the portal asks for tips</span>
+        <a class="bs-act" href="/positions">Positions →</a></div>
+      <div class="bs-srows">
+        ${positions.all.all().map((p) => `<div class="bs-srow pa-hand">
+          <span class="pa-what"><b>${esc(p.name)}</b><span>${p.kind === 'server'
+            ? 'sales and tips' : 'support'}</span></span>
+          <span class="pa-do">
+            <form method="post" action="/staff-portal/position/${p.id}/tips" style="margin:0">
+              <input type="hidden" name="on" value="${p.takes_tips !== 0 ? '0' : '1'}">
+              <button class="bs-btn-sm" type="submit">${p.takes_tips !== 0
+                ? 'Asked to submit' : 'Not asked'}</button></form>
+          </span>
+        </div>`).join('')}
+      </div>
+      <p class="bs-quiet">A position that is not asked still sees the board, reports stock, and
+        gets their own hours and pay — they are simply never shown a tip form.</p>
+    </div>`));
+});
+
+// --- the actions ------------------------------------------------------------
+const portalGuard = (req, res) => {
+  if (canWrite() && navAllowed('staff')) return true;
+  res.status(403).end();
+  return false;
+};
+
+app.post('/staff-portal/stock/:id/resolve', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const how = PORTAL.STOCK_RESOLUTION.includes(req.body.resolution) ? req.body.resolution : 'dismissed';
+  PORTAL.q.resolveStock.run({ id: Number(req.params.id), resolution: how, resolved_by: 'manager' });
+  res.redirect('/staff-portal?msg=' + encodeURIComponent(`Marked ${how}.`));
+});
+
+app.post('/staff-portal/stock/:id/reopen', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  PORTAL.q.reopenStock.run(Number(req.params.id));
+  res.redirect('/staff-portal?msg=' + encodeURIComponent('Back on the list.'));
+});
+
+app.post('/staff-portal/special', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? req.body.d : isoDate(startOfToday());
+  const name = String(req.body.name || '').trim();
+  if (!name) return res.redirect('/staff-portal?err=1&msg=' + encodeURIComponent('A special needs a name.'));
+  PORTAL.q.addSpecial.run({
+    service_date: d, name: name.slice(0, 120),
+    price_cents: req.body.price ? toCents(req.body.price) : null,
+    description: String(req.body.description || '').trim().slice(0, 240) || null,
+    low_note: String(req.body.low_note || '').trim().slice(0, 60) || null,
+    sort: 100,
+  });
+  res.redirect(`/staff-portal?d=${d}&msg=` + encodeURIComponent('On the board.'));
+});
+
+app.post('/staff-portal/special/:id/86', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  // The time is the point — "86'D 6PM" tells a server whether it went before
+  // or after they last looked at the board.
+  const typed = String(req.body.note || '').trim();
+  const when = new Date().toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
+  PORTAL.q.eightySix.run({ id: Number(req.params.id), note: typed || `86'D ${when}` });
+  res.redirect('/staff-portal?msg=' + encodeURIComponent("86'd — the board updates on every phone."));
+});
+
+app.post('/staff-portal/special/:id/back', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  PORTAL.q.unEightySix.run(Number(req.params.id));
+  res.redirect('/staff-portal?msg=' + encodeURIComponent('Back on.'));
+});
+
+app.post('/staff-portal/special/:id/delete', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  PORTAL.q.delSpecial.run(Number(req.params.id));
+  res.redirect('/staff-portal?msg=' + encodeURIComponent('Removed from the board.'));
+});
+
+app.post('/staff-portal/note', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const title = String(req.body.title || '').trim();
+  if (!title) return res.redirect('/staff-portal?err=1&msg=' + encodeURIComponent('A note needs something to say.'));
+  const starts = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.starts_on || '')) ? req.body.starts_on : isoDate(startOfToday());
+  const ends = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.ends_on || '')) ? req.body.ends_on : null;
+  PORTAL.q.addNote.run({
+    title: title.slice(0, 120),
+    body: String(req.body.body || '').trim().slice(0, 240) || null,
+    tone: PORTAL.TONES.includes(req.body.tone) ? req.body.tone : 'fyi',
+    starts_on: starts,
+    // An end before the start would render the note invisible the moment it is
+    // written, which reads as the post having failed.
+    ends_on: ends && ends >= starts ? ends : null,
+    created_by: 'manager',
+  });
+  res.redirect('/staff-portal?msg=' + encodeURIComponent('Posted — it shows until it expires.'));
+});
+
+app.post('/staff-portal/note/:id/delete', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  PORTAL.q.delNote.run(Number(req.params.id));
+  res.redirect('/staff-portal?msg=' + encodeURIComponent('Note removed.'));
+});
+
+app.post('/staff-portal/position/:id/tips', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  db.prepare('UPDATE positions SET takes_tips = ? WHERE id = ?')
+    .run(req.body.on === '1' ? 1 : 0, Number(req.params.id));
+  res.redirect('/staff-portal?msg=' + encodeURIComponent('Updated who gets asked.'));
+});
 
 app.get('/c/documents', (req, res) => {
   const all = db.prepare('SELECT * FROM m_documents ORDER BY COALESCE(doc_date, created_at) DESC, id DESC').all();

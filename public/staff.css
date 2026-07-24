@@ -312,3 +312,285 @@ body.bare {
   .tp-keys button { min-height: 62px; font-size: 24px; }
   .tp-cell { height: 58px; }
 }
+
+/* ===========================================================================
+   THE PORTAL — what a person sees after their PIN
+   ---------------------------------------------------------------------------
+   Same shell as the tip form (this stylesheet already loads for it), same
+   restraint: cream page, hairlines, radius 0, no white cards. Structure comes
+   from rules and coloured left-bars, never from boxes.
+
+   Sized for a phone held one-handed at the end of a shift. Nothing here is
+   below 44px if it can be tapped, and nothing depends on hover.
+   =========================================================================== */
+.pt {
+  --pt-page: #f4ead9;
+  --pt-field: #fffdf9;
+  --pt-ink: #1f1d1a;
+  --pt-body: #3a382f;
+  --pt-second: #5c5647;
+  --pt-muted: #77705f;
+  --pt-faint: #a89f8a;
+  --pt-blue: #2451c9;
+  --pt-amber: #8a4a10;
+  --pt-red: #9a2c1d;
+  --pt-green: #1a7a3c;
+  --pt-line: #cabfa4;
+  --pt-hair: #e3d7bf;
+  --pt-dot: #cfc2a6;
+  background: var(--pt-page);
+  color: var(--pt-body);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--sans, 'Geist', system-ui, sans-serif);
+}
+
+/* --- chrome --------------------------------------------------------------- */
+.pt-top {
+  display: flex; align-items: center; gap: 12px;
+  padding: calc(14px + env(safe-area-inset-top)) 20px 13px;
+  border-bottom: 2px solid var(--pt-ink);
+  background: var(--pt-page);
+}
+.pt-mark { font-weight: 700; letter-spacing: .16em; font-size: 15px; color: var(--pt-ink); }
+.pt-house {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 11.5px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--pt-muted);
+}
+.pt-out, .pt-back { margin-left: auto; color: var(--pt-blue); font-size: 14px; font-weight: 500; }
+.pt-back { margin-left: 0; margin-right: auto; }
+.pt-who {
+  margin-left: auto; font-family: var(--mono, 'Geist Mono', monospace);
+  font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--pt-muted);
+}
+
+.pt-body { flex: 1; padding: 22px 20px 28px; }
+.pt-foot, .pt-foot-in {
+  padding: 15px 20px calc(18px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--pt-hair);
+  font-size: 12.5px; color: var(--pt-muted); text-align: center; margin: 0;
+}
+.pt-foot-in { border: 0; padding: 9px 20px 0; }
+
+/* --- greeting ------------------------------------------------------------- */
+.pt-date {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 11px;
+  letter-spacing: .14em; color: var(--pt-muted); margin: 0 0 6px;
+}
+.pt-hi {
+  font-family: var(--serif, 'Newsreader', Georgia, serif); font-weight: 500;
+  font-size: 33px; line-height: 1.1; color: var(--pt-ink); margin: 0 0 10px;
+}
+.pt-title {
+  font-family: var(--serif, 'Newsreader', Georgia, serif); font-weight: 500;
+  font-size: 30px; line-height: 1.12; color: var(--pt-ink); margin: 0 0 6px;
+}
+.pt-sub { font-size: 14.5px; color: var(--pt-muted); margin: 0 0 4px; }
+.pt-onshift { font-size: 15px; color: var(--pt-body); margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+.pt-onshift b { color: var(--pt-ink); font-weight: 600; }
+.pt-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--pt-green); flex: none; }
+.pt-dot.off { background: var(--pt-faint); }
+
+/* --- section kickers ------------------------------------------------------ */
+.pt-kick {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 10.5px;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--pt-muted);
+  border-bottom: 1px solid var(--pt-ink);
+  padding-bottom: 7px; margin: 26px 0 0;
+}
+.pt-kick.bad { color: var(--pt-red); border-bottom-color: var(--pt-red); }
+.pt-kick a { color: var(--pt-blue); text-transform: none; letter-spacing: 0; font-size: 13px; }
+.pt-kick b { font-weight: 700; }
+
+/* --- before your shift ---------------------------------------------------- */
+.pt-notes { margin-top: 2px; }
+.pt-note {
+  border-left: 3px solid var(--pt-faint);
+  padding: 13px 0 13px 14px;
+  border-bottom: 1px dotted var(--pt-dot);
+}
+.pt-note:last-child { border-bottom: 0; }
+.pt-note.urgent { border-left-color: var(--pt-red); }
+.pt-note.caution { border-left-color: #c99a12; }
+.pt-note.fyi { border-left-color: #6b6656; }
+.pt-note b { display: block; font-size: 16px; color: var(--pt-ink); font-weight: 650; }
+.pt-note span { display: block; font-size: 14px; color: var(--pt-second); margin-top: 3px; }
+.pt-note i { color: var(--pt-faint); font-style: normal; }
+
+/* --- the one task --------------------------------------------------------- */
+.pt-task { border-bottom: 2px solid var(--pt-ink); padding-bottom: 14px; }
+.pt-task-h { display: flex; align-items: baseline; gap: 12px; margin-top: 14px; }
+.pt-task-h h2 {
+  font-family: var(--serif, 'Newsreader', Georgia, serif); font-weight: 500;
+  font-size: 27px; color: var(--pt-ink); margin: 0; flex: 1; line-height: 1.15;
+}
+.pt-due {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 10.5px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--pt-amber);
+  border: 1px solid var(--pt-amber); padding: 3px 7px; white-space: nowrap;
+}
+.pt-task-s { font-size: 14.5px; color: var(--pt-muted); margin: 6px 0 14px; }
+.pt-task-f { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pt-state { font-size: 14px; color: var(--pt-faint); }
+.pt-inline { margin: 0; }
+.pt-start {
+  background: none; border: 0; padding: 8px 0; cursor: pointer;
+  color: var(--pt-blue); font: inherit; font-size: 17px; font-weight: 600;
+}
+.pt-quiet { font-size: 14.5px; color: var(--pt-muted); margin: 14px 0 0; line-height: 1.5; }
+
+/* --- last shift ----------------------------------------------------------- */
+.pt-last { display: flex; align-items: center; gap: 14px; padding: 14px 0; }
+.pt-last-l { flex: 1; min-width: 0; }
+.pt-last-l span { display: block; font-size: 14.5px; color: var(--pt-body); }
+.pt-last-l i { display: block; font-style: normal; font-size: 13px; color: var(--pt-muted); margin-top: 3px; }
+.pt-big {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 27px;
+  font-weight: 600; color: var(--pt-green); white-space: nowrap;
+}
+
+/* --- shortcut rows -------------------------------------------------------- */
+.pt-rows { margin-top: 8px; border-top: 1px solid var(--pt-hair); }
+.pt-row {
+  display: flex; align-items: center; gap: 14px; min-height: 62px;
+  padding: 12px 0; border-bottom: 1px solid var(--pt-hair); color: inherit;
+}
+.pt-ico {
+  width: 42px; height: 42px; flex: none; border: 1px solid var(--pt-ink);
+  display: grid; place-items: center; font-size: 17px; color: var(--pt-ink);
+}
+.pt-row-t { flex: 1; min-width: 0; }
+.pt-row-t b { font-size: 16px; color: var(--pt-ink); font-weight: 650; }
+.pt-row-t span { display: block; font-size: 13.5px; color: var(--pt-muted); margin-top: 2px; }
+.pt-tag {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 9.5px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--pt-muted);
+  border: 1px solid var(--pt-line); padding: 2px 6px; margin-left: 8px; font-style: normal;
+}
+.pt-chev { color: var(--pt-faint); font-size: 20px; flex: none; }
+
+/* --- earnings ------------------------------------------------------------- */
+.pt-hero { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 18px 0 10px; }
+.pt-hero span { font-size: 16px; color: var(--pt-body); }
+.pt-huge { font-family: var(--mono, 'Geist Mono', monospace); font-size: 38px; font-weight: 600; color: var(--pt-ink); }
+.pt-huge.ok { color: var(--pt-green); }
+.pt-line {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  padding: 11px 0; border-bottom: 1px dotted var(--pt-dot); font-size: 15px;
+}
+.pt-line b { font-family: var(--mono, 'Geist Mono', monospace); font-size: 15px; color: var(--pt-ink); font-weight: 600; }
+.pt-line b.bad { color: var(--pt-red); }
+.pt-stats { display: flex; gap: 22px; padding: 16px 0 4px; flex-wrap: wrap; }
+.pt-stats div { min-width: 84px; }
+.pt-stats b {
+  display: block; font-family: var(--mono, 'Geist Mono', monospace);
+  font-size: 25px; font-weight: 600; color: var(--pt-ink);
+}
+.pt-stats span { display: block; font-size: 13px; color: var(--pt-muted); margin-top: 2px; }
+.pt-past { margin-top: 2px; }
+.pt-pastrow {
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 13px 0; border-bottom: 1px dotted var(--pt-dot);
+}
+.pt-pd {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 12.5px;
+  letter-spacing: .05em; text-transform: uppercase; color: var(--pt-muted); min-width: 62px;
+}
+.pt-ps { flex: 1; font-size: 15px; color: var(--pt-body); }
+.pt-pastrow b { font-family: var(--mono, 'Geist Mono', monospace); font-size: 15px; font-weight: 600; color: var(--pt-ink); }
+.pt-pastrow b.ok { color: var(--pt-green); }
+
+/* --- specials ------------------------------------------------------------- */
+.pt-dishes { margin-top: 2px; }
+.pt-dish { padding: 15px 0; border-bottom: 1px dotted var(--pt-dot); }
+.pt-dish:last-child { border-bottom: 0; }
+.pt-dish-h { display: flex; align-items: baseline; gap: 12px; }
+.pt-dish-h b {
+  flex: 1; font-family: var(--serif, 'Newsreader', Georgia, serif);
+  font-weight: 500; font-size: 20px; color: var(--pt-ink); line-height: 1.2;
+}
+.pt-dish-h i {
+  font-style: normal; font-family: var(--mono, 'Geist Mono', monospace);
+  font-size: 16px; font-weight: 600; color: var(--pt-ink); white-space: nowrap;
+}
+.pt-dish-h i.bad {
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--pt-red);
+}
+.pt-dish p { font-size: 14.5px; color: var(--pt-second); margin: 5px 0 0; line-height: 1.45; }
+.pt-low { color: var(--pt-amber); font-weight: 600; }
+.pt-dish.off .pt-dish-h b { text-decoration: line-through; color: var(--pt-muted); }
+
+/* --- out of stock --------------------------------------------------------- */
+.pt-list { margin-top: 2px; }
+.pt-item {
+  display: flex; align-items: center; gap: 12px;
+  border-left: 3px solid var(--pt-faint); padding: 13px 0 13px 14px;
+  border-bottom: 1px dotted var(--pt-dot);
+}
+.pt-item.out { border-left-color: var(--pt-red); }
+.pt-item.low { border-left-color: #c99a12; }
+.pt-item.order { border-left-color: var(--pt-blue); }
+.pt-item-t { flex: 1; min-width: 0; }
+.pt-item-t b { display: block; font-size: 16px; color: var(--pt-ink); font-weight: 650; }
+.pt-item-t span { display: block; font-size: 13.5px; color: var(--pt-muted); margin-top: 2px; }
+.pt-item-s {
+  font-family: var(--mono, 'Geist Mono', monospace); font-size: 11px;
+  letter-spacing: .08em; font-weight: 600;
+}
+.pt-item.out .pt-item-s { color: var(--pt-red); }
+.pt-item.low .pt-item-s { color: var(--pt-amber); }
+.pt-item.order .pt-item-s { color: var(--pt-blue); }
+.pt-x {
+  background: none; border: 0; cursor: pointer; color: var(--pt-faint);
+  font-size: 19px; padding: 8px; line-height: 1; min-width: 44px;
+}
+.pt-field { position: relative; display: block; margin: 16px 0 12px; }
+.pt-field input {
+  width: 100%; background: var(--pt-field); border: 1px solid var(--pt-line);
+  padding: 15px 96px 15px 14px; font: inherit; font-size: 17px; color: var(--pt-ink);
+}
+.pt-field input:focus { outline: 0; box-shadow: inset 0 0 0 2px var(--pt-blue); }
+.pt-hintr {
+  position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  font-size: 13px; color: var(--pt-muted); pointer-events: none;
+}
+.pt-seg { display: flex; gap: 10px; margin-bottom: 14px; }
+.pt-seg button {
+  flex: 1; min-height: 48px; background: none; border: 1px solid var(--pt-line);
+  font: inherit; font-size: 15px; color: var(--pt-second); cursor: pointer;
+}
+.pt-seg button.on[data-s="out"] { border: 1.5px solid var(--pt-red); color: var(--pt-red); font-weight: 600; }
+.pt-seg button.on[data-s="low"] { border: 1.5px solid var(--pt-amber); color: var(--pt-amber); font-weight: 600; }
+.pt-seg button.on[data-s="order"] { border: 1.5px solid var(--pt-blue); color: var(--pt-blue); font-weight: 600; }
+.pt-addrow { display: flex; align-items: flex-end; gap: 12px; }
+.pt-underline {
+  flex: 1; background: none; border: 0; border-bottom: 1px solid var(--pt-line);
+  padding: 12px 0; font: inherit; font-size: 15px; color: var(--pt-ink);
+}
+.pt-underline:focus { outline: 0; border-bottom-color: var(--pt-blue); }
+.pt-add {
+  background: var(--pt-ink); color: var(--pt-page); border: 0; cursor: pointer;
+  font: inherit; font-size: 15px; font-weight: 600; padding: 13px 18px; min-height: 46px;
+}
+.pt-send {
+  padding: 14px 20px calc(16px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--pt-hair); background: var(--pt-page);
+  position: sticky; bottom: 0;
+}
+.pt-sendbtn {
+  width: 100%; min-height: 56px; background: var(--pt-ink); color: var(--pt-page);
+  border: 0; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
+}
+.pt-sendbtn:disabled { background: var(--pt-line); color: #fff; cursor: default; }
+
+/* Night, if the shell ever offers it here. */
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="night"] .pt {
+    --pt-page: #191815; --pt-field: #211f1b; --pt-ink: #f3f0e6; --pt-body: #c8c2b0;
+    --pt-second: #b3ad9c; --pt-muted: #8f8a7a; --pt-faint: #6f6a5c;
+    --pt-blue: #8fa8ff; --pt-amber: #d9a05b; --pt-red: #e0806f; --pt-green: #5fc389;
+    --pt-line: #3d392d; --pt-hair: #35332c; --pt-dot: #403d33;
+  }
+}

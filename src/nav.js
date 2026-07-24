@@ -29,7 +29,10 @@ const AREAS = [
   { key: 'payroll',   label: 'Payroll',         paths: ['/payroll'] },
   { key: 'trackers',  label: 'Trackers & logs', paths: ['/c/'] },
   { key: 'menu',      label: 'Menu costing',    paths: ['/menu'] },
-  { key: 'staff',     label: 'Staff',           paths: ['/employees'] },
+  // The portal's manager side sits with Staff: it is about the people, and
+  // anybody trusted with the roster is the person who posts the board and
+  // answers what the floor has run out of.
+  { key: 'staff',     label: 'Staff',           paths: ['/employees', '/staff-portal'] },
   { key: 'settings',  label: 'Settings & users', paths: ['/settings', '/policy', '/positions', '/email', '/users'] },
 ];
 
@@ -84,6 +87,7 @@ const SECTIONS = [
     ['/c/notes', 'notes', 'Decisions log', '#7c3aed', 'trackers'],
   ] },
   { title: 'Team', links: [
+    ['/staff-portal', 'tips', 'Portal', '#1a7a3c', 'staff'],
     ['/employees', 'staff', 'Staff', '#2563eb', 'staff'],
     ['/positions', 'positions', 'Positions', '#7c3aed', 'settings'],
     ['/policy', 'policy', 'Tip-out policy', '#0891b2', 'settings'],
