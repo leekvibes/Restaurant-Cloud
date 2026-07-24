@@ -193,12 +193,16 @@ const STOCK_RESOLUTION = ['ordered', 'restocked', 'dismissed'];
  * decoration.
  */
 function shapeFor(position) {
-  const kind = position ? position.kind : 'support';
   const takesTips = position ? position.takes_tips !== 0 : true;
   return {
-    // A server reports what they sold as well as what they made.
-    sales: kind === 'server' && takesTips,
     // Anyone who collects tips hands them in; a cook typically does not.
+    //
+    // Whether they are also asked for sales is deliberately not here. The hub
+    // says the same thing to everyone — "Submit sales or tips" — and the form
+    // behind it decides by the role the person is filing under, which for
+    // somebody who works two jobs is a choice they make on the screen and can
+    // change. A per-position answer kept here could only ever be the other
+    // one, and two answers to one question is how they drift apart.
     tips: takesTips,
     // Everything else is for everyone. Hours and pay especially: a person who
     // submits nothing still works, and is still owed a way to see it.

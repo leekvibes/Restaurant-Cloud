@@ -43,6 +43,8 @@ async function signIn(pin) {
   return cookie;
 }
 const asStaff = (p, cookie) => fetch(BASE + p, { headers: { cookie } });
+/** The report form itself — what the hub's Start button opens. */
+const tipForm = async (cookie) => (await form('/portal/tips', {}, { cookie })).text();
 
 test.before(async () => {
   Database = require('better-sqlite3');
@@ -65,6 +67,11 @@ test.before(async () => {
   // numbers to show rather than a fixture of its own.
   const sh = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES ('2026-07-22','cafe','sent',datetime('now'))").run().lastInsertRowid;
   const ids = Object.fromEntries(w.prepare('SELECT name, id FROM employees').all().map((e) => [e.name, e.id]));
+  // Bella covers the bar as well as the floor. Somebody has to, or the
+  // two-jobs half of the position step goes untested.
+  w.prepare('INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+    .run(ids['Bella Reyes'], 'barista', 1500);
+
   const work = w.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)');
   work.run(sh, ids['Bella Reyes'], 'server', 7.5);
   work.run(sh, ids['Marco Diaz'], 'kitchen', 8);
@@ -87,16 +94,55 @@ test.after(() => { if (child) child.kill(); if (db) db.close(); fs.rmSync(dir, {
 // The shape of a portal follows the position.
 // ---------------------------------------------------------------------------
 
-test('a server is asked for sales and tips', async () => {
-  const html = await (await asStaff('/portal', await signIn('1111'))).text();
-  assert.match(html, /Submit tips &amp; sales/, 'the task names both');
-  assert.match(html, /Bella/, 'and greets her by name');
+test('the way in reads the same whoever opens it', async () => {
+  // One name for the task on every phone. Staff describe this screen to each
+  // other; when a server says "did you do Submit sales or tips", a barista has
+  // to be looking at those same words. What differs is inside, not on the door.
+  const server = await (await asStaff('/portal', await signIn('1111'))).text();
+  const barista = await (await asStaff('/portal', await signIn('3333'))).text();
+  for (const [html, who] of [[server, 'a server'], [barista, 'a barista']]) {
+    assert.match(html, /Submit sales or tips/, `${who} sees the shared name`);
+    assert.ok(!/Submit your cash tips|Submit tips &amp; sales/.test(html),
+      `and ${who} never sees a name written for one role`);
+  }
+  assert.match(server, /Bella/, 'still greeted by name');
 });
 
-test('a barista is asked for tips but not sales', async () => {
-  const html = await (await asStaff('/portal', await signIn('3333'))).text();
-  assert.match(html, /Submit your cash tips/, 'tips only');
-  assert.ok(!/Submit tips &amp; sales/.test(html), 'never sales — a barista rings none');
+test('a server is asked for sales, a barista is not', async () => {
+  // The distinction survives the shared wording — it just lives where it
+  // belongs, in the form rather than on the button. And it is in the HTML as
+  // sent: a barista who is slow to run the script must not see a flash of
+  // sales fields and start filling them in.
+  const server = await tipForm(await signIn('1111'));
+  const barista = await tipForm(await signIn('3333'));
+  assert.match(server, /id="server-sales"(?!\s*hidden)/, 'a server opens on the sales section');
+  assert.match(barista, /id="server-sales" hidden/, 'a barista opens with it already gone');
+  assert.match(barista, /id="row-sales" hidden/, 'and it is out of their running total too');
+});
+
+test('one job goes straight through, two get a choice', async () => {
+  // Nobody should have to answer "what did you work" when there is only one
+  // answer, and nobody with two jobs should have it guessed for them — how
+  // they are paid hangs on it.
+  const one = await tipForm(await signIn('3333'));
+  assert.match(one, /<input type="hidden" name="position" id="tip-position" value="barista"/,
+    'a barista is simply a barista');
+  assert.ok(!/<select name="position"/.test(one), 'and is asked nothing');
+
+  const both = await tipForm(await signIn('1111'));
+  assert.match(both, /<select name="position" id="tip-position"/, 'two jobs, so she picks');
+  for (const r of ['server', 'barista']) {
+    assert.match(both, new RegExp(`<option value="${r}"`), `${r} is on the menu`);
+  }
+});
+
+test('the report has a way back to the hub', async () => {
+  // Steps two and three have always had Back. Step one had only "Not you?",
+  // which signs you out — so anyone who opened the form to look at it had to
+  // end their session to leave.
+  const html = await tipForm(await signIn('1111'));
+  assert.match(html, /href="\/portal"/, 'step one gets you home');
+  assert.match(html, /class="tp-back" data-goto="1"/, 'the later steps keep theirs');
 });
 
 /**
@@ -115,7 +161,7 @@ test('every role gets the same home, minus what does not apply', async () => {
   const cook = await (await asStaff('/portal', await signIn('2222'))).text();
   const server = await (await asStaff('/portal', await signIn('1111'))).text();
 
-  assert.ok(!/Submit tips|Submit your cash/.test(cook), 'a cook is not asked to hand anything in');
+  assert.ok(!/Submit sales or tips/.test(cook), 'a cook is not asked to hand anything in');
   assert.ok(!/pt-task/.test(cook), 'and gets no task block at all — not a different one');
   assert.match(server, /pt-task/, 'while a server does');
 
@@ -150,7 +196,7 @@ test('who gets asked is a setting, not a list of role names in the code', async 
   const pos = db.prepare("SELECT id FROM positions WHERE slug = 'kitchen'").get();
   await form(`/staff-portal/position/${pos.id}/tips`, { on: '1' });
   const on = await (await asStaff('/portal', await signIn('2222'))).text();
-  assert.match(on, /Submit your cash tips/, 'a cook who is asked, is asked');
+  assert.match(on, /Submit sales or tips/, 'a cook who is asked, is asked');
 
   await form(`/staff-portal/position/${pos.id}/tips`, { on: '0' });
   const off = await (await asStaff('/portal', await signIn('2222'))).text();

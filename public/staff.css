@@ -594,3 +594,12 @@ body.bare {
     --pt-line: #3d392d; --pt-hair: #35332c; --pt-dot: #403d33;
   }
 }
+
+/* The way back to the hub from step one of the report. It sits beside "Not
+   you?", which signs you out — a different thing, so both stay.
+   Neither may shrink or wrap: the name beside them already ellipsizes, so a
+   long one eats into the name rather than folding the navigation onto a
+   second line. */
+.tp-top a { flex: none; white-space: nowrap; }
+.tp-top .tp-home { margin-left: auto; }
+.tp-top .tp-home + a { margin-left: 14px; }

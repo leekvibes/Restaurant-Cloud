@@ -2382,6 +2382,13 @@ function tipsFormPage(emp, opts = {}) {
   // so it shows as a fixed line rather than a menu they could get wrong.
   const roles = rolesForEmployee(emp);
   const label = (r) => r[0].toUpperCase() + r.slice(1);
+  // What the form opens on: the role marked selected below, or the only one
+  // they have. Sales are a server's question, and the server knows the answer
+  // before it sends the page — so it renders it hidden rather than letting the
+  // script hide it a moment later, which showed a barista a flash of fields
+  // they are never asked to fill.
+  const opensAs = roles.includes(emp.role) ? emp.role : roles[0];
+  const salesHidden = opensAs === 'server' ? '' : ' hidden';
   const positionField = roles.length > 1
     ? `<div class="tp-row">
          <select name="position" id="tip-position" class="tp-sel-role" required>
@@ -2415,6 +2422,11 @@ function tipsFormPage(emp, opts = {}) {
           <div class="tp-brand">${esc(RESTAURANT)}</div>
           <div class="tp-name">Hi ${esc(first)}</div>
         </div>
+        ${/* Steps two and three have had a Back button all along; step one had
+              only "Not you?", which is a sign-out, not a way back. Somebody who
+              opened this from the hub to look at it had no way home that did
+              not end their session. */''}
+        <a class="tp-home" href="/portal">&larr; Home</a>
         <a href="/tips">Not you?</a>
       </div>
 
@@ -2470,7 +2482,7 @@ function tipsFormPage(emp, opts = {}) {
               <p class="tp-pick" id="pickshift" hidden>Choose which shift you worked to carry on.</p>
             </div>
 
-            <div class="tp-sec" id="server-sales">
+            <div class="tp-sec" id="server-sales"${salesHidden}>
               <div class="tp-seck">Your sales tonight</div>
               <div class="tp-field">
                 <span class="tp-label">Kitchen / food sales</span>
@@ -2508,7 +2520,7 @@ function tipsFormPage(emp, opts = {}) {
 
             <div class="tp-tot">
               <div class="tp-tot-h">Tonight's totals &mdash; what your manager sees</div>
-              <div class="tp-tot-r" id="row-sales"><span>Sales rung</span><b id="t-sales">$0.00</b></div>
+              <div class="tp-tot-r" id="row-sales"${salesHidden}><span>Sales rung</span><b id="t-sales">$0.00</b></div>
               <div class="tp-tot-r"><span>Cash tips</span><b id="t-cash">$0.00</b></div>
               <div class="tp-tot-r"><span>Card tips</span><b id="t-card">$0.00</b></div>
               <div class="tp-tot-r sum"><span>Total tips</span><b id="t-tips">$0.00</b></div>
@@ -2814,12 +2826,14 @@ app.get('/portal', (req, res) => {
     <div class="pt-kick"><span>End of your shift</span></div>
     <div class="pt-task">
       <div class="pt-task-h">
-        <h2>${shape.sales ? 'Submit tips &amp; sales' : 'Submit your cash tips'}</h2>
+        ${/* The same name for everyone. What gets asked for inside still
+               follows the position — a barista is never shown sales fields —
+               but the way in reads identically on every phone, so staff
+               describing it to each other are describing the same thing. */''}
+        <h2>Submit sales or tips</h2>
         <span class="pt-due">${already ? 'Submitted' : 'Due tonight'}</span>
       </div>
-      <p class="pt-task-s">${shape.sales
-        ? 'What you sold and made — about a minute.'
-        : 'What you took in cash tonight — about a minute.'}</p>
+      <p class="pt-task-s">What you made tonight — about a minute.</p>
       <div class="pt-task-f">
         <span class="pt-state">${already ? 'Sent — you can still change it' : 'Not started'}</span>
         <form method="post" action="/portal/tips" class="pt-inline">
