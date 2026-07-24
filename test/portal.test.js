@@ -99,15 +99,38 @@ test('a barista is asked for tips but not sales', async () => {
   assert.ok(!/Submit tips &amp; sales/.test(html), 'never sales — a barista rings none');
 });
 
-test('a cook is asked for nothing, and still gets everything else', async () => {
+/**
+ * The sections a home is built from, named, in the order they appear.
+ *
+ * By their headings rather than their class, because a section's kicker is
+ * part of the section — counting bare classes cannot tell which heading
+ * belongs to the block that was left out.
+ */
+const shapeOf = (html) => [...html.matchAll(/class="pt-kick"><span>([^<]+)</g)].map((m) => m[1].trim());
+
+test('every role gets the same home, minus what does not apply', async () => {
+  // One layout, not three. A cook should recognise the screen a server
+  // describes to them — same sections, same order — with the submission simply
+  // absent rather than replaced by something else in its place.
+  const cook = await (await asStaff('/portal', await signIn('2222'))).text();
+  const server = await (await asStaff('/portal', await signIn('1111'))).text();
+
+  assert.ok(!/Submit tips|Submit your cash/.test(cook), 'a cook is not asked to hand anything in');
+  assert.ok(!/pt-task/.test(cook), 'and gets no task block at all — not a different one');
+  assert.match(server, /pt-task/, 'while a server does');
+
+  // Everything else is the same furniture in the same order.
+  const serverSections = shapeOf(server);
+  const cookSections = shapeOf(cook);
+  assert.ok(serverSections.includes('End of your shift'), 'the server has the submission section');
+  assert.deepStrictEqual(cookSections, serverSections.filter((x) => x !== 'End of your shift'),
+    `a cook's home is the server's home minus the submission: [${cookSections.join(' | ')}] vs [${serverSections.join(' | ')}]`);
+
+  // And every other door is open to them.
   const cookie = await signIn('2222');
-  const html = await (await asStaff('/portal', cookie)).text();
-  assert.match(html, /Nothing to submit/, 'no form is put in front of them');
-  assert.ok(!/Submit tips|Submit your cash/.test(html), 'not even a tips one');
-  // The point of the whole exercise: they lose the submission and nothing else.
   for (const [href, what] of [['/portal/earnings', 'their own hours and pay'],
     ['/portal/specials', 'the board'], ['/portal/stock', 'reporting stock']]) {
-    assert.ok(html.includes(href), `a cook still gets ${what}`);
+    assert.ok(cook.includes(href), `a cook still gets ${what}`);
     assert.strictEqual((await asStaff(href, cookie)).status, 200, `and ${href} opens`);
   }
 });
@@ -131,7 +154,7 @@ test('who gets asked is a setting, not a list of role names in the code', async 
 
   await form(`/staff-portal/position/${pos.id}/tips`, { on: '0' });
   const off = await (await asStaff('/portal', await signIn('2222'))).text();
-  assert.match(off, /Nothing to submit/, 'and turning it back off restores the quiet line');
+  assert.ok(!/pt-task/.test(off), 'and turning it back off takes the section away again');
 });
 
 // ---------------------------------------------------------------------------
@@ -170,6 +193,7 @@ test('a cook is shown what they received, without a tip-out they never paid', as
   // cook is the support it leaves towards.
   const html = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
   assert.match(html, /You kept|You worked|Nothing recorded/, 'it says what they got');
+  assert.ok(!/Nothing to submit/.test(html), 'without repeating what they are not asked for');
   assert.ok(!/Tipped out to support/.test(html),
     'and never bills them for a tip-out they are on the receiving end of');
 });

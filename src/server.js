@@ -2802,8 +2802,15 @@ app.get('/portal', (req, res) => {
       </div>`).join('')}
     </div>` : '';
 
-  // The one thing this person is here to do, which for a cook is nothing.
-  const task = shape.tips ? `
+  // The same home for everybody, minus what does not apply.
+  //
+  // Not three layouts — one, with a section that is simply absent for a
+  // position that hands nothing in. A cook opening this should recognise the
+  // screen a server describes to them, in the same order, with one block
+  // missing rather than a different block in its place. Whether the heading
+  // reads "tips & sales" or "cash tips" follows the same rule: it names what
+  // is actually being asked for, and nothing else moves.
+  const task = !shape.tips ? '' : `
     <div class="pt-kick"><span>End of your shift</span></div>
     <div class="pt-task">
       <div class="pt-task-h">
@@ -2819,11 +2826,7 @@ app.get('/portal', (req, res) => {
           <button class="pt-start" type="submit">${already ? 'Edit' : 'Start'} →</button>
         </form>
       </div>
-    </div>`
-    : `
-    <div class="pt-kick"><span>Your shift</span></div>
-    <p class="pt-quiet">Nothing to submit — your hours come from the schedule.
-      If you are out of something, report it below.</p>`;
+    </div>`;
 
   const lastBlock = last ? `
     <div class="pt-kick"><span>Your last shift</span><a href="/portal/earnings">All earnings →</a></div>

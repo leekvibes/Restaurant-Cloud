@@ -9,6 +9,12 @@ node_modules/
 # your live data & private files
 data.db
 data.db-*
+# Any hand-made backup. data.db-* covers SQLite's own -wal/-shm but not a
+# copy named data.db.bak-2026… , which is exactly the file most likely to be
+# sitting in the working tree when somebody runs `git add -A`.
+data.db.bak*
+data.db.backup*
+*.db.bak*
 uploads/
 previews/
 

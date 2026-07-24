@@ -119,7 +119,13 @@ CREATE INDEX IF NOT EXISTS idx_stock_all  ON portal_stock (reported_at DESC);
 const posCols = db.prepare('PRAGMA table_info(positions)').all().map((c) => c.name);
 if (!posCols.includes('takes_tips')) {
   db.exec('ALTER TABLE positions ADD COLUMN takes_tips INTEGER NOT NULL DEFAULT 1');
-  db.prepare("UPDATE positions SET takes_tips = 0 WHERE slug IN ('kitchen', 'busser')").run();
+  // Off for the two that seed with it, and for anything already declared
+  // non-tipped — a position whose own kind says it takes no tips should not
+  // then be asked for them. Seeding by slug alone missed that: a "Training"
+  // position of kind non_tipped came out asked-to-submit, which is a defect
+  // rather than a preference.
+  db.prepare(`UPDATE positions SET takes_tips = 0
+    WHERE slug IN ('kitchen', 'busser') OR kind = 'non_tipped'`).run();
 }
 
 const q = {
