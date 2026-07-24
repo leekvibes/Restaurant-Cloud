@@ -230,7 +230,17 @@ const canSee = (user, key) => !user ? false : (user.master || !user.features.len
 const reqCtx = new AsyncLocalStorage();
 setViewContext(reqCtx);
 
-const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips(\/|$)/, /^\/version$/,
+// Paths the owner's password does not guard.
+//
+// /portal is here for the same reason /tips is: staff authenticate with a PIN,
+// not with the owner's password, and they must never be shown the owner's
+// login screen. Every route under it calls requirePortal(), which demands a
+// signed identity cookie and sends anyone without one back to the PIN screen —
+// so this opens the door to the PIN check, not to the data behind it. Adding a
+// /portal route that does not call requirePortal() would publish it; there is
+// a test that walks the list and fails if one appears.
+const OPEN_PATHS = [/^\/login$/, /^\/logout$/, /^\/tips(\/|$)/, /^\/portal(\/|$)/,
+  /^\/version$/,
   /^\/static\//, /^\/sw\.js$/, /^\/manifest/, /^\/apple-touch-icon\.png$/, /^\/webhook\//];
 
 app.use((req, res, next) => {
@@ -2919,9 +2929,23 @@ app.get('/portal/earnings', (req, res) => {
 
   const line = (k, v, tone) => `<div class="pt-line"><span>${k}</span><b${tone ? ` class="${tone}"` : ''}>${v}</b></div>`;
 
+  // Somebody who received nothing has their hours to show, not a zero.
+  //
+  // The engine lists a person on a shift's support side whether or not any of
+  // the tip-out reached them — a training position sits there with nothing,
+  // and so does anyone whose share worked out at zero. Leading with "You kept
+  // $0.00" tells them the one thing they already know and hides the one thing
+  // they came for. It also read, to the person holding the phone, like an
+  // answer about their pay rather than an absence of tips.
+  //
+  // Deliberately not keyed on the position's takes_tips setting: that says who
+  // is ASKED to hand tips in, and a busser is set to 0 while still receiving a
+  // share every service. What matters here is only whether anything arrived.
+  const gotNothing = (x) => !x.kept && !x.collected;
+
   const hero = !last ? `<p class="pt-quiet">Nothing recorded yet. Once your manager sends a shift
       you worked, what you made shows up here.</p>`
-    : last.kind === 'hours' ? `
+    : (last.kind === 'hours' || gotNothing(last)) ? `
       <div class="pt-hero"><span>You worked</span><b class="pt-huge">${last.hours || 0} hrs</b></div>
       ${line('Service', `${esc(niceDate(last.shift.date))} · ${esc(dp(last.shift.daypart))}`)}`
     : `
@@ -2938,7 +2962,7 @@ app.get('/portal/earnings', (req, res) => {
       ${last ? `<div class="pt-kick"><span>Last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>` : ''}
       ${hero}
 
-      ${paid.length ? `
+      ${paid.length && keptTotal ? `
       <div class="pt-kick"><span>All time</span>${since ? `<span>Since ${esc(niceDate(since))}</span>` : ''}</div>
       <div class="pt-stats">
         <div><b>${money(keptTotal)}</b><span>kept total</span></div>
@@ -2952,7 +2976,7 @@ app.get('/portal/earnings', (req, res) => {
         ${all.slice(1, 13).map((x) => `<div class="pt-pastrow">
           <span class="pt-pd">${esc(niceDate(x.shift.date))}</span>
           <span class="pt-ps">${esc(dp(x.shift.daypart))}</span>
-          <b class="${x.kind === 'hours' ? '' : 'ok'}">${x.kind === 'hours'
+          <b class="${x.kind === 'hours' || gotNothing(x) ? '' : 'ok'}">${x.kind === 'hours' || gotNothing(x)
             ? `${x.hours || 0} hrs` : money(x.kept)}</b>
         </div>`).join('')}
       </div>
@@ -7445,6 +7469,23 @@ function captureScript(kinds) {
 // portal.js and this reads and writes them; everything about money on this
 // page is the same engine figure the shift sheet shows.
 // ===========================================================================
+/**
+ * A stored timestamp as a person reads it.
+ *
+ * These are written with SQLite's datetime('now'), which is UTC — so the Z is
+ * not decoration. Without it a 6:12pm report reads as 10:12pm on the manager's
+ * screen, and the one thing this line exists to tell them is when it came in.
+ * Today shows the clock alone; anything older carries its date, because "5:48P"
+ * with no day is a report you think came in tonight.
+ */
+function atTime(ts) {
+  if (!ts) return '';
+  const d = new Date(String(ts).replace(' ', 'T') + 'Z');
+  if (Number.isNaN(d.getTime())) return String(ts);
+  const clock = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return isoDate(d) === isoDate(startOfToday()) ? clock : `${niceDate(isoDate(d))} · ${clock}`;
+}
+
 app.get('/staff-portal', (req, res) => {
   if (!navAllowed('staff')) return res.status(403).send(layout('Not allowed',
     '<div class="bs-blank"><b>Not your area</b><span>Ask the owner to turn on Team for your account.</span></div>'));
@@ -7476,11 +7517,36 @@ app.get('/staff-portal', (req, res) => {
   const takesTips = new Map(positions.all.all().map((p) => [p.slug, p.takes_tips !== 0]));
   const owing = expected.filter((p) => takesTips.get(p.role) && !p.sent);
 
-  const statTone = (n) => (n ? 'warn' : 'ok');
+  // Floor reports are red because somebody is waiting on the other end of one.
+  // Anything still to hand in is amber: it is the night not being finished
+  // yet, which is normal until it is late.
   const cell = (label, value, sub, tone) =>
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span>`
     + `<span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span>`
     + `<span class="bs-strip-s">${sub}</span></div>`;
+
+  // ---------------------------------------------------------------------------
+  // FOUR JOBS, FOUR TABS
+  //
+  // This was one page you scrolled: reports, then the board, then the note
+  // composer, then positions. Four jobs deep, and you passed three of them to
+  // reach the fourth. They are separate jobs done at separate moments — the
+  // board is set before service, reports are cleared during it — so only the
+  // one you came for renders. The strip above stays whole, because the point
+  // of it is to tell you which tab you came for.
+  // ---------------------------------------------------------------------------
+  const TABS = [
+    ['reports', 'Floor reports', openStock.length],
+    ['board', 'Specials &amp; 86', 0],
+    ['notes', 'Before-shift notes', 0],
+    ['positions', 'Who submits tips', 0],
+  ];
+  const tab = TABS.some((t) => t[0] === req.query.tab) ? req.query.tab : 'reports';
+  // The day only means anything to the board, so it only travels with it.
+  const tabHref = (t) => `/staff-portal?tab=${t}${t === 'board' && day !== today ? `&d=${day}` : ''}`;
+  const tabs = `<nav class="pa-tabs">${TABS.map(([id, name, count]) =>
+    `<a class="pa-tab${id === tab ? ' on' : ''}" href="${tabHref(id)}">${name}${count
+      ? `<b class="pa-badge">${count}</b>` : ''}</a>`).join('')}</nav>`;
 
   const STATUS_TONE = { out: 'bad', low: 'warn', order: '' };
 
@@ -7490,137 +7556,92 @@ app.get('/staff-portal', (req, res) => {
       <span class="pa-bar ${esc(r.status)}"></span>
       <span class="pa-what">
         <b>${esc(r.item)}</b>
+        <i class="pa-who">${esc((r.reported_by || 'Someone').toUpperCase())} &middot; ${esc(atTime(r.reported_at))}</i>
         ${r.product_name ? `<i class="pa-known">in Products${r.vendor_name
-          ? ` · ${esc(r.vendor_name)}` : ''}</i>` : '<i class="pa-new">not a product yet</i>'}
-        ${r.note ? `<span>${esc(r.note)}</span>` : ''}
+          ? ` &middot; ${esc(r.vendor_name)}` : ''}</i>` : '<i class="pa-new">not a product yet</i>'}
       </span>
+      <span class="pa-said">${r.note ? esc(r.note) : ''}</span>
       <span class="pa-meta">
         <b class="pa-st ${esc(r.status)}">${esc(r.status.toUpperCase())}</b>
-        <span>${esc(r.reported_by || 'Someone')} · ${esc(niceDate(String(r.reported_at || '').slice(0, 10)))}</span>
       </span>
       <span class="pa-do">
         ${done
           ? `<span class="bs-tag ok">${esc(r.resolution || 'done')}</span>
              <form method="post" action="/staff-portal/stock/${r.id}/reopen" style="margin:0">
                <button class="bs-act" type="submit">Reopen</button></form>`
-          : PORTAL.STOCK_RESOLUTION.map((x) => `
+          : `<form method="post" action="/staff-portal/stock/${r.id}/resolve" style="margin:0">
+               <input type="hidden" name="resolution" value="ordered">
+               <button class="bs-btn-sm" type="submit">Add to order</button></form>
              <form method="post" action="/staff-portal/stock/${r.id}/resolve" style="margin:0">
-               <input type="hidden" name="resolution" value="${x}">
-               <button class="bs-btn-sm" type="submit">${x[0].toUpperCase() + x.slice(1)}</button></form>`).join('')}
-        ${r.product_id ? `<a class="bs-act" href="/c/products/${r.product_id}">Product →</a>` : ''}
+               <input type="hidden" name="resolution" value="restocked">
+               <button class="bs-act" type="submit">Restocked</button></form>
+             <form method="post" action="/staff-portal/stock/${r.id}/resolve" style="margin:0">
+               <input type="hidden" name="resolution" value="dismissed">
+               <button class="bs-act" type="submit">Clear</button></form>`}
+        ${r.product_id ? `<a class="bs-act" href="/c/products/${r.product_id}">Product &rarr;</a>` : ''}
       </span>
     </div>`;
 
   // --- the board -----------------------------------------------------------
   const dishRow = (d) => `
     <div class="bs-srow pa-dish${d.eighty_sixed_at ? ' off' : ''}">
-      <span class="pa-dn"><b>${esc(d.name)}</b>${d.description
-        ? `<span>${esc(d.description)}</span>` : ''}</span>
-      <span class="pa-dp">${d.price_cents != null ? money(d.price_cents) : '—'}</span>
-      <span class="pa-dl">${d.low_note ? esc(d.low_note) : ''}</span>
+      <span class="pa-dn">
+        <b>${esc(d.name)}</b>${d.price_cents != null
+          ? `<u class="pa-dp">${money(d.price_cents)}</u>` : ''}
+        ${d.description ? `<span>${esc(d.description)}</span>` : ''}
+      </span>
       <span class="pa-do">
+        ${d.low_note ? `<span class="pa-dl">${esc(d.low_note)}</span>` : ''}
         ${d.eighty_sixed_at
           ? `<span class="bs-tag bad">${esc(d.sold_out_note || "86'd")}</span>
              <form method="post" action="/staff-portal/special/${d.id}/back" style="margin:0">
-               <button class="bs-act" type="submit">Put back on</button></form>`
+               <input type="hidden" name="d" value="${esc(day)}">
+               <button class="bs-act" type="submit">restore</button></form>`
           : `<form method="post" action="/staff-portal/special/${d.id}/86" style="margin:0" class="pa-86">
-               <input name="note" placeholder="Sold out" class="pa-mini">
-               <button class="bs-btn-sm" type="submit">86 it</button></form>`}
+               <input type="hidden" name="d" value="${esc(day)}">
+               <input name="note" placeholder="Sold out" class="pa-mini" aria-label="What to say on the board">
+               <button class="bs-act danger" type="submit">86 it</button></form>`}
         <form method="post" action="/staff-portal/special/${d.id}/delete" style="margin:0"
           onsubmit="return confirm('Remove ${esc(d.name.replace(/'/g, ''))} from the board?')">
-          <button class="bs-act danger" type="submit">Remove</button></form>
+          <input type="hidden" name="d" value="${esc(day)}">
+          <button class="bs-act quiet" type="submit">Remove</button></form>
       </span>
     </div>`;
 
-  res.send(layout('Portal', `
-    ${flash(req)}
-    <div class="bs-page">
-      <div class="bs-head">
-        <div class="bs-headwrap">
-          <h1 class="bs-headline">Portal — ${openStock.length
-            ? `<span class="warn">${openStock.length} thing${openStock.length === 1 ? '' : 's'} reported</span>`
-            : 'nothing reported'}${owing.length ? `, ${owing.length} still to hand in` : '.'}</h1>
-          <p class="bs-subline">What staff see on their phones, and what they send back.
-            <a class="bs-act" href="/portal">Open the staff view →</a></p>
-        </div>
-      </div>
+  // --- one note, as the manager sees it ------------------------------------
+  const noteRow = (n) => {
+    const isLive = n.starts_on <= today && (!n.ends_on || n.ends_on >= today);
+    return `<div class="bs-srow pa-note${isLive ? '' : ' done'}">
+      <span class="pa-bar ${esc(n.tone)}"></span>
+      <span class="pa-what"><b>${esc(n.title)}</b>${n.body ? `<span>${esc(n.body)}</span>` : ''}</span>
+      <span class="pa-meta"><b class="pa-st">${esc(n.tone.toUpperCase())}</b>
+        <span>${esc(niceDate(n.starts_on))}${n.ends_on ? ` &ndash; ${esc(niceDate(n.ends_on))}` : ' only'}</span></span>
+      <span class="pa-do">${isLive ? '<span class="bs-tag ok">live</span>' : '<span class="bs-tag">expired</span>'}
+        <form method="post" action="/staff-portal/note/${n.id}/delete" style="margin:0">
+          <button class="bs-act danger" type="submit">Delete</button></form></span>
+    </div>`;
+  };
 
-      <section class="bs-panel bs-strip">
-        ${cell('Reported', String(openStock.length),
-          openStock.length ? 'waiting on you' : 'all dealt with', statTone(openStock.length))}
-        ${cell('On the board', String(running.length),
-          `${off.length} 86'd · ${esc(niceDate(day))}`)}
-        ${cell('Notes live', String(live.length),
-          live.length ? 'showing on every phone' : 'nothing posted')}
-        ${cell('Still to hand in', String(owing.length),
-          openShift ? `${esc(dp(openShift.daypart))} tonight` : 'no service open',
-          statTone(owing.length))}
-      </section>
+  // --- the four bodies ------------------------------------------------------
+  const bodyReports = `
+    <p class="pa-lead">Everything staff reported from the floor. Clear each once it&rsquo;s handled.</p>
+    ${openStock.length
+      ? `<div class="bs-srows">${openStock.map((r) => stockRow(r, false)).join('')}</div>
+         <p class="pa-foot">Cleared reports drop off. Nothing else outstanding.</p>`
+      : '<p class="bs-quiet">Nothing outstanding. Anything staff report shows up here.</p>'}
+    ${recentStock.length ? `
+      <details class="bs-fold">
+        <summary>Recently dealt with &middot; ${recentStock.length}</summary>
+        <div class="bs-srows">${recentStock.slice(0, 15).map((r) => stockRow(r, true)).join('')}</div>
+      </details>` : ''}
 
-      ${/* 1. What came in. First because it is the only part with somebody
-             waiting on the other end. */''}
-      <div class="bs-kick2"><span>Reported from the floor</span>
-        <span class="bs-meta">${openStock.length} open</span></div>
-      ${openStock.length
-        ? `<div class="bs-srows">${openStock.map((r) => stockRow(r, false)).join('')}</div>`
-        : '<p class="bs-quiet">Nothing outstanding. Anything staff report shows up here.</p>'}
-      ${recentStock.length ? `
-        <details class="bs-fold">
-          <summary>Recently dealt with · ${recentStock.length}</summary>
-          <div class="bs-srows">${recentStock.slice(0, 15).map((r) => stockRow(r, true)).join('')}</div>
-        </details>` : ''}
-
-      ${/* 2. The board. */''}
-      <div class="bs-kick2"><span>Specials &amp; 86 board</span>
-        <form method="get" action="/staff-portal" class="pa-daypick">
-          <input type="date" name="d" value="${esc(day)}" onchange="this.form.submit()">
-        </form></div>
-      ${board.length
-        ? `<div class="bs-srows">${[...running, ...off].map(dishRow).join('')}</div>`
-        : `<p class="bs-quiet">Nothing on the board for ${esc(niceDate(day))} yet.</p>`}
-
-      <form method="post" action="/staff-portal/special" class="pa-add">
-        <input type="hidden" name="d" value="${esc(day)}">
-        <label class="fld">Dish<input name="name" required placeholder="Heirloom tomato tartine"></label>
-        <label class="fld">Price<input name="price" type="number" step="0.01" min="0" placeholder="14.00"></label>
-        <label class="fld wide">Description<input name="description" placeholder="Whipped ricotta, basil oil, sourdough. Veg."></label>
-        <label class="fld">Low note<input name="low_note" placeholder="6 left."></label>
-        <button class="bs-btn" type="submit">Add to the board</button>
-      </form>
-
-      ${/* 3. Before your shift. */''}
-      <div class="bs-kick2"><span>Before your shift</span>
-        <span class="bs-meta">${live.length} showing today</span></div>
-      ${notes.length ? `<div class="bs-srows">${notes.slice(0, 20).map((n) => {
-        const isLive = n.starts_on <= today && (!n.ends_on || n.ends_on >= today);
-        return `<div class="bs-srow pa-note${isLive ? '' : ' done'}">
-          <span class="pa-bar ${esc(n.tone)}"></span>
-          <span class="pa-what"><b>${esc(n.title)}</b>${n.body ? `<span>${esc(n.body)}</span>` : ''}</span>
-          <span class="pa-meta"><b class="pa-st">${esc(n.tone.toUpperCase())}</b>
-            <span>${esc(niceDate(n.starts_on))}${n.ends_on ? ` – ${esc(niceDate(n.ends_on))}` : ' only'}</span></span>
-          <span class="pa-do">${isLive ? '<span class="bs-tag ok">live</span>' : '<span class="bs-tag">expired</span>'}
-            <form method="post" action="/staff-portal/note/${n.id}/delete" style="margin:0">
-              <button class="bs-act danger" type="submit">Delete</button></form></span>
-        </div>`;
-      }).join('')}</div>` : '<p class="bs-quiet">No notes yet. Anything posted here shows on every phone until it expires.</p>'}
-
-      <form method="post" action="/staff-portal/note" class="pa-add">
-        <label class="fld wide">Note<input name="title" required placeholder="Private event 7–9pm"></label>
-        <label class="fld wide">One line<input name="body" placeholder="Back room booked. Keep walk-ins to the front."></label>
-        <label class="fld">How urgent<select name="tone">
-          <option value="urgent">Urgent — red</option>
-          <option value="caution">Caution — amber</option>
-          <option value="fyi" selected>For information — grey</option>
-        </select></label>
-        <label class="fld">Show from<input name="starts_on" type="date" value="${esc(today)}" required></label>
-        <label class="fld">Until<input name="ends_on" type="date" value="${esc(today)}"></label>
-        <button class="bs-btn" type="submit">Post it</button>
-      </form>
-
-      ${/* 4. Who still owes you a submission tonight. */''}
-      ${openShift ? `
+    ${/* Who still owes you a submission tonight. The strip counts them; this
+          says which of them, which is the part you act on. It lives here
+          because both halves of this tab are the same question — what has
+          come in from the floor tonight, and what has not. */''}
+    ${openShift ? `
       <div class="bs-kick2"><span>Handed in tonight</span>
-        <a class="bs-act" href="/shifts/${openShift.id}">Open the shift sheet →</a></div>
+        <a class="bs-act" href="/shifts/${openShift.id}">Open the shift sheet &rarr;</a></div>
       <div class="bs-srows">
         ${expected.map((p) => {
           const wants = takesTips.get(p.role);
@@ -7632,29 +7653,134 @@ app.get('/staff-portal', (req, res) => {
               : '<span class="bs-tag warn">waiting</span>'}</span>
           </div>`;
         }).join('') || '<p class="bs-quiet">Nobody is on this shift yet.</p>'}
-      </div>` : ''}
+      </div>` : ''}`;
 
-      ${/* 5. Who is asked for what, so the shapes above are explainable. */''}
-      <div class="bs-kick2"><span>Who the portal asks for tips</span>
-        <a class="bs-act" href="/positions">Positions →</a></div>
-      <div class="bs-srows">
-        ${positions.all.all().map((p) => `<div class="bs-srow pa-hand">
-          <span class="pa-what"><b>${esc(p.name)}</b><span>${p.kind === 'server'
-            ? 'sales and tips' : 'support'}</span></span>
-          <span class="pa-do">
-            <form method="post" action="/staff-portal/position/${p.id}/tips" style="margin:0">
-              <input type="hidden" name="on" value="${p.takes_tips !== 0 ? '0' : '1'}">
-              <button class="bs-btn-sm" type="submit">${p.takes_tips !== 0
-                ? 'Asked to submit' : 'Not asked'}</button></form>
-          </span>
-        </div>`).join('')}
+  const bodyBoard = `
+    <div class="pa-two">
+      <div class="pa-col">
+        <div class="bs-kick2"><span>On the board &middot; ${esc(niceDate(day))}</span>
+          <span class="bs-meta">${running.length} running &middot; ${off.length} 86&rsquo;d</span></div>
+        <form method="get" action="/staff-portal" class="pa-daypick">
+          <input type="hidden" name="tab" value="board">
+          <input type="date" name="d" value="${esc(day)}" onchange="this.form.submit()"
+            aria-label="Which day&rsquo;s board">
+        </form>
+        ${board.length
+          ? `<div class="bs-srows">${[...running, ...off].map(dishRow).join('')}</div>`
+          : `<p class="bs-quiet">Nothing on the board for ${esc(niceDate(day))} yet.</p>`}
       </div>
-      <p class="bs-quiet">A position that is not asked still sees the board, reports stock, and
-        gets their own hours and pay — they are simply never shown a tip form.</p>
+      <div class="pa-col">
+        <div class="bs-kick2"><span>Add a special</span></div>
+        <form method="post" action="/staff-portal/special" class="pa-add pa-form">
+          <input type="hidden" name="d" value="${esc(day)}">
+          <label class="fld wide">Dish<input name="name" required placeholder="Name"></label>
+          <label class="fld">Price<input name="price" type="number" step="0.01" min="0" placeholder="$0"></label>
+          <label class="fld wide">Description<input name="description"
+            placeholder="One line servers can read aloud."></label>
+          <label class="fld wide">Low note <i>optional</i><input name="low_note" placeholder="e.g. 6 left"></label>
+          <button class="bs-btn" type="submit">Add to the board</button>
+        </form>
+      </div>
+    </div>`;
+
+  const bodyNotes = `
+    <p class="pa-lead">Short notices staff read before service. Each one expires on its own
+      date &mdash; nothing here stays up until you remember to take it down.</p>
+    <div class="pa-two">
+      <div class="pa-col">
+        <div class="bs-kick2"><span>Showing today</span>
+          <span class="bs-meta">${live.length} live</span></div>
+        ${notes.length
+          ? `<div class="bs-srows">${notes.slice(0, 20).map(noteRow).join('')}</div>`
+          : '<p class="bs-quiet">No notes yet. Anything posted here shows on every phone until it expires.</p>'}
+      </div>
+      <div class="pa-col">
+        <div class="bs-kick2"><span>Post a note</span></div>
+        <form method="post" action="/staff-portal/note" class="pa-add pa-form">
+          <label class="fld wide">Note<input name="title" required placeholder="Private event 7&ndash;9pm"></label>
+          <label class="fld wide">One line<input name="body"
+            placeholder="Back room booked. Keep walk-ins to the front."></label>
+          <label class="fld wide">How urgent<select name="tone">
+            <option value="urgent">Urgent &mdash; red</option>
+            <option value="caution">Caution &mdash; amber</option>
+            <option value="fyi" selected>For information &mdash; grey</option>
+          </select></label>
+          <label class="fld">Show from<input name="starts_on" type="date" value="${esc(today)}" required></label>
+          <label class="fld">Until<input name="ends_on" type="date" value="${esc(today)}"></label>
+          <button class="bs-btn" type="submit">Post it</button>
+        </form>
+      </div>
+    </div>`;
+
+  const bodyPositions = `
+    <p class="pa-lead">A position that&rsquo;s <b>not asked</b> still sees the board, reports stock,
+      and gets their own hours &amp; pay &mdash; they&rsquo;re just never shown a tip form.
+      <a class="bs-act" href="/positions">Positions &rarr;</a></p>
+    <div class="bs-srows">
+      ${positions.all.all().map((p) => {
+        const on = p.takes_tips !== 0;
+        // What they are asked for, in the words the form uses: a server files
+        // sales as well, anybody else who is asked files cash tips, and a
+        // position that is not asked files nothing.
+        const what = !on ? 'support' : p.kind === 'server' ? 'sales and tips' : 'cash tips';
+        return `<div class="bs-srow pa-pos">
+          <span class="pa-what"><b>${esc(p.name)}</b> <i class="pa-kind">&middot; ${what}</i></span>
+          <span class="pa-do">
+            <form method="post" action="/staff-portal/position/${p.id}/tips" style="margin:0" class="pa-tog-f">
+              <input type="hidden" name="on" value="${on ? '0' : '1'}">
+              <span class="pa-tog-w ${on ? 'on' : 'off'}">${on ? 'ASKED' : 'NOT ASKED'}</span>
+              <button class="pa-tog${on ? ' on' : ''}" type="submit" role="switch"
+                aria-checked="${on}" aria-label="${esc(p.name)} submits tips"><i></i></button>
+            </form>
+          </span>
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  const bodies = { reports: bodyReports, board: bodyBoard, notes: bodyNotes, positions: bodyPositions };
+
+  res.send(layout('Portal', `
+    ${flash(req)}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Staff portal</h1>
+          <p class="bs-subline">What staff see on their phones, and what they send back.
+            <a class="bs-act" href="/portal">Open the staff view &rarr;</a></p>
+        </div>
+      </div>
+
+      <section class="bs-strip pa-strip">
+        ${cell('Floor reports', String(openStock.length),
+          openStock.length ? 'need a look' : 'all dealt with',
+          openStock.length ? 'bad' : 'ok')}
+        ${cell('On the board', String(running.length),
+          off.length ? `+ ${off.length} 86&rsquo;d` : `${esc(niceDate(day))}`)}
+        ${cell('Notes live', String(live.length),
+          live.length ? 'showing today' : 'nothing posted')}
+        ${cell('Still to hand in', String(owing.length),
+          openShift ? `${esc(dp(openShift.daypart))} open` : 'no service open',
+          owing.length ? 'warn' : 'ok')}
+      </section>
+
+      ${tabs}
+      <div class="pa-body">${bodies[tab]}</div>
     </div>`));
 });
 
 // --- the actions ------------------------------------------------------------
+//
+// Every action belongs to exactly one tab, so where it lands you afterwards is
+// derived here rather than carried in a hidden field: nothing a form sends can
+// point the redirect somewhere else, and there is no way to add an action and
+// forget to say where it goes. The day travels with the board's actions, so
+// 86'ing something on Friday does not bounce you back to today.
+const backTo = (res, tab, msg, extra = {}) =>
+  res.redirect('/staff-portal?' + new URLSearchParams({ tab, ...extra, msg }).toString());
+
+/** The board day a form was submitted from, when it sent one. */
+const dayOf = (req) => (/^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? { d: req.body.d } : {});
+
 const portalGuard = (req, res) => {
   if (canWrite() && navAllowed('staff')) return true;
   res.status(403).end();
@@ -7665,20 +7791,20 @@ app.post('/staff-portal/stock/:id/resolve', (req, res) => {
   if (!portalGuard(req, res)) return;
   const how = PORTAL.STOCK_RESOLUTION.includes(req.body.resolution) ? req.body.resolution : 'dismissed';
   PORTAL.q.resolveStock.run({ id: Number(req.params.id), resolution: how, resolved_by: 'manager' });
-  res.redirect('/staff-portal?msg=' + encodeURIComponent(`Marked ${how}.`));
+  backTo(res, 'reports', `Marked ${how}.`);
 });
 
 app.post('/staff-portal/stock/:id/reopen', (req, res) => {
   if (!portalGuard(req, res)) return;
   PORTAL.q.reopenStock.run(Number(req.params.id));
-  res.redirect('/staff-portal?msg=' + encodeURIComponent('Back on the list.'));
+  backTo(res, 'reports', 'Back on the list.');
 });
 
 app.post('/staff-portal/special', (req, res) => {
   if (!portalGuard(req, res)) return;
   const d = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? req.body.d : isoDate(startOfToday());
   const name = String(req.body.name || '').trim();
-  if (!name) return res.redirect('/staff-portal?err=1&msg=' + encodeURIComponent('A special needs a name.'));
+  if (!name) return backTo(res, 'board', 'A special needs a name.', { d, err: '1' });
   PORTAL.q.addSpecial.run({
     service_date: d, name: name.slice(0, 120),
     price_cents: req.body.price ? toCents(req.body.price) : null,
@@ -7686,7 +7812,7 @@ app.post('/staff-portal/special', (req, res) => {
     low_note: String(req.body.low_note || '').trim().slice(0, 60) || null,
     sort: 100,
   });
-  res.redirect(`/staff-portal?d=${d}&msg=` + encodeURIComponent('On the board.'));
+  backTo(res, 'board', 'On the board.', { d });
 });
 
 app.post('/staff-portal/special/:id/86', (req, res) => {
@@ -7696,25 +7822,25 @@ app.post('/staff-portal/special/:id/86', (req, res) => {
   const typed = String(req.body.note || '').trim();
   const when = new Date().toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
   PORTAL.q.eightySix.run({ id: Number(req.params.id), note: typed || `86'D ${when}` });
-  res.redirect('/staff-portal?msg=' + encodeURIComponent("86'd — the board updates on every phone."));
+  backTo(res, 'board', "86'd — the board updates on every phone.", dayOf(req));
 });
 
 app.post('/staff-portal/special/:id/back', (req, res) => {
   if (!portalGuard(req, res)) return;
   PORTAL.q.unEightySix.run(Number(req.params.id));
-  res.redirect('/staff-portal?msg=' + encodeURIComponent('Back on.'));
+  backTo(res, 'board', 'Back on.', dayOf(req));
 });
 
 app.post('/staff-portal/special/:id/delete', (req, res) => {
   if (!portalGuard(req, res)) return;
   PORTAL.q.delSpecial.run(Number(req.params.id));
-  res.redirect('/staff-portal?msg=' + encodeURIComponent('Removed from the board.'));
+  backTo(res, 'board', 'Removed from the board.', dayOf(req));
 });
 
 app.post('/staff-portal/note', (req, res) => {
   if (!portalGuard(req, res)) return;
   const title = String(req.body.title || '').trim();
-  if (!title) return res.redirect('/staff-portal?err=1&msg=' + encodeURIComponent('A note needs something to say.'));
+  if (!title) return backTo(res, 'notes', 'A note needs something to say.', { err: '1' });
   const starts = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.starts_on || '')) ? req.body.starts_on : isoDate(startOfToday());
   const ends = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.ends_on || '')) ? req.body.ends_on : null;
   PORTAL.q.addNote.run({
@@ -7727,20 +7853,20 @@ app.post('/staff-portal/note', (req, res) => {
     ends_on: ends && ends >= starts ? ends : null,
     created_by: 'manager',
   });
-  res.redirect('/staff-portal?msg=' + encodeURIComponent('Posted — it shows until it expires.'));
+  backTo(res, 'notes', 'Posted — it shows until it expires.');
 });
 
 app.post('/staff-portal/note/:id/delete', (req, res) => {
   if (!portalGuard(req, res)) return;
   PORTAL.q.delNote.run(Number(req.params.id));
-  res.redirect('/staff-portal?msg=' + encodeURIComponent('Note removed.'));
+  backTo(res, 'notes', 'Note removed.');
 });
 
 app.post('/staff-portal/position/:id/tips', (req, res) => {
   if (!portalGuard(req, res)) return;
   db.prepare('UPDATE positions SET takes_tips = ? WHERE id = ?')
     .run(req.body.on === '1' ? 1 : 0, Number(req.params.id));
-  res.redirect('/staff-portal?msg=' + encodeURIComponent('Updated who gets asked.'));
+  backTo(res, 'positions', 'Updated who gets asked.');
 });
 
 app.get('/c/documents', (req, res) => {

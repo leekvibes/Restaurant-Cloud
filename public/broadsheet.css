@@ -389,7 +389,7 @@ body {
   .bs-search {
     max-width: none; width: 34px; flex: none; margin-left: auto;
     padding: 0; border-color: transparent; background: transparent;
-    transition: width var(--ease), background-color .18s, border-color .18s;
+    transition: width .18s ease, background-color .18s, border-color .18s;
   }
   .bs-search input, .bs-search .bs-kbd { opacity: 0; visibility: hidden; transition: opacity .12s, visibility .12s; }
   .bs-masthead.search-on .bs-search {
@@ -2205,13 +2205,13 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 }
 
 /* Two copies of one invoice, and the way out of it. */
-.bs-pip.dupe { background: var(--negative); }
+.bs-pip.dupe { background: var(--danger); }
 .bs-srow[data-dupe="1"] .bs-ir-v > u::after {
   content: 'possible duplicate'; margin-left: 8px; font-family: var(--mono);
   font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--negative); border: 1px solid var(--negative); padding: 1px 5px;
+  color: var(--danger); border: 1px solid var(--danger); padding: 1px 5px;
 }
-.bs-act.danger { color: var(--negative); }
+.bs-act.danger { color: var(--danger); }
 .bs-ivdel { margin: 0 0 0 auto; }
 .bs-dupcmp { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
 .bs-dupc { padding: 18px 20px; display: flex; flex-direction: column; gap: 4px; }
@@ -2252,7 +2252,7 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .scanstate b { display: block; color: var(--headline); }
 .scanstate span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .scanstate.ok b { color: var(--positive); }
-.scanstate.warn b { color: var(--negative); }
+.scanstate.warn b { color: var(--danger); }
 
 @media (max-width: 900px) {
   .bs-dochead { display: none; }
@@ -2306,7 +2306,7 @@ body.cap-open { overflow: hidden; }
 
 .cap-head { display: flex; align-items: center; gap: 16px; padding: 16px 22px;
   border-bottom: 2px solid var(--ink); position: sticky; top: 0; background: var(--paper); z-index: 2; }
-.cap-back { font-family: var(--mono); font-size: 12px; color: var(--link); }
+.cap-back { font-family: var(--mono); font-size: 12px; color: var(--accent); }
 .cap-title { font-family: var(--serif); font-size: 25px; font-weight: 500; color: var(--headline); margin: 0; }
 .cap-pill { font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
   color: var(--muted); background: var(--panel); border: 1px solid var(--rule); padding: 4px 9px; }
@@ -2322,7 +2322,7 @@ body.cap-open { overflow: hidden; }
 
 .cap-drop { border: 2px dashed var(--dash, #b9a878); background: var(--dropfill, #faf3e6);
   padding: 54px 24px; text-align: center; }
-.cap-drop.over { border-color: var(--link); background: var(--panel); }
+.cap-drop.over { border-color: var(--accent); background: var(--panel); }
 .cap-drop-i { width: 56px; height: 56px; margin: 0 auto 18px; border: 1px solid var(--ink);
   display: grid; place-items: center; }
 .cap-drop-t { font-family: var(--serif); font-size: 27px; font-weight: 500; color: var(--headline); margin: 0 0 8px; }
@@ -2336,7 +2336,7 @@ body.cap-open { overflow: hidden; }
 .cap-doc-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px;
   font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .cap-doc-bar .cap-tool { margin-left: auto; display: flex; gap: 14px; }
-.cap-doc-bar a, .cap-doc-bar button { font-family: var(--mono); font-size: 11px; color: var(--link);
+.cap-doc-bar a, .cap-doc-bar button { font-family: var(--mono); font-size: 11px; color: var(--accent);
   background: none; border: 0; padding: 0; cursor: pointer; letter-spacing: .06em; text-transform: uppercase; }
 .cap-sheet { background: #fff; border: 1px solid #cabfa4; min-height: 340px; display: grid; place-items: center;
   overflow: auto; }
@@ -2347,7 +2347,7 @@ body.cap-open { overflow: hidden; }
 .cap-kick { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
   color: var(--muted); border-bottom: 1px solid var(--ink); padding-bottom: 6px; margin-bottom: 14px;
   display: flex; align-items: baseline; gap: 8px; }
-.cap-kick a { margin-left: auto; font-size: 11px; color: var(--link); text-transform: none; letter-spacing: 0; }
+.cap-kick a { margin-left: auto; font-size: 11px; color: var(--accent); text-transform: none; letter-spacing: 0; }
 .cap-grid { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--field-b, #d3c6ac); }
 .cap-f { padding: 11px 13px; border-right: 1px solid var(--field-b, #d3c6ac);
   border-bottom: 1px solid var(--field-b, #d3c6ac); background: var(--field, #fffdf9); }
@@ -2361,7 +2361,7 @@ body.cap-open { overflow: hidden; }
   width: 100%; border: 0; background: none; padding: 0; font: inherit;
   font-family: var(--mono); font-size: 15px; color: var(--headline); }
 .cap-f input:focus, .cap-f select:focus, .cap-f textarea:focus { outline: 0; }
-.cap-f:focus-within { box-shadow: inset 0 0 0 2px var(--link); background: var(--focusfill, #f5f8ff); }
+.cap-f:focus-within { box-shadow: inset 0 0 0 2px var(--accent); background: var(--focusfill, #f5f8ff); }
 .cap-f.warn { box-shadow: inset 0 0 0 2px var(--amber, #8a4a10); }
 .cap-f input[type="number"] { -moz-appearance: textfield; }
 .cap-f input[type="number"]::-webkit-outer-spin-button,
@@ -2378,17 +2378,17 @@ body.cap-open { overflow: hidden; }
 .cap-line-a { font-family: var(--mono); font-size: 13px; color: var(--headline); }
 .cap-line-m { font-family: var(--mono); font-size: 11.5px; }
 .cap-line-m.matched { color: var(--positive); }
-.cap-line-m.newlink { color: var(--link); }
+.cap-line-m.newlink { color: var(--accent); }
 .cap-recon { display: flex; align-items: baseline; padding: 11px 13px; background: var(--panel);
   border-top: 1px solid var(--field-b, #d3c6ac); }
 .cap-recon b { margin-left: auto; font-family: var(--mono); font-size: 15px; }
 .cap-recon b.ok { color: var(--positive); }
-.cap-recon b.off { color: var(--negative); }
+.cap-recon b.off { color: var(--danger); }
 .cap-note { font-size: 12.5px; color: var(--muted); margin: 14px 0 0; line-height: 1.5; max-width: 62ch; }
 
 /* --- the reading state --------------------------------------------------- */
 .cap-read { display: flex; align-items: center; gap: 10px; font-size: 17px; color: var(--headline); margin-bottom: 18px; }
-.cap-spin { width: 17px; height: 17px; border: 2px solid var(--rule); border-top-color: var(--link);
+.cap-spin { width: 17px; height: 17px; border: 2px solid var(--rule); border-top-color: var(--accent);
   border-radius: 50%; animation: cap-turn .8s linear infinite; }
 @keyframes cap-turn { to { transform: rotate(360deg); } }
 .cap-skel { height: 13px; background: var(--panel); margin-bottom: 11px; }
@@ -2401,7 +2401,7 @@ body.cap-open { overflow: hidden; }
 .cap-tile { border: 2px dashed var(--dash, #b9a878); background: var(--dropfill, #faf3e6);
   min-height: 186px; display: grid; place-content: center; justify-items: center; gap: 6px;
   text-align: center; cursor: pointer; padding: 16px; }
-.cap-tile.over { border-color: var(--link); }
+.cap-tile.over { border-color: var(--accent); }
 .cap-tile-p { width: 46px; height: 46px; border: 1px solid var(--ink); display: grid; place-items: center;
   font-size: 22px; color: var(--headline); }
 .cap-tile-t { font-size: 14px; font-weight: 600; color: var(--headline); }
@@ -2507,8 +2507,8 @@ body.cap-open.qx-open [data-cap] { display: none; }
 
 /* Hovering the header nudges only the parts that belong to it, so the row
    reads as one target without repainting the whole sticky bar. */
-.bs-month-h:hover .bs-kicker { color: var(--link); }
-.bs-month-h:hover::before { color: var(--link); }
+.bs-month-h:hover .bs-kicker { color: var(--accent); }
+.bs-month-h:hover::before { color: var(--accent); }
 
 /* The old far-right "open ▸ / close ▾" hint. Redundant now that the triangle
    sits beside the month — two arrows on one line saying the same thing is
@@ -2528,13 +2528,13 @@ body.cap-open.qx-open [data-cap] { display: none; }
   text-transform: uppercase; color: var(--muted);
   border-bottom: 1px solid var(--ink); padding-bottom: 7px; margin: 30px 0 0;
 }
-.bs-kick2 a { color: var(--link); text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+.bs-kick2 a { color: var(--accent); text-transform: none; letter-spacing: 0; font-size: 12.5px; }
 .bs-quiet { font-size: 13.5px; color: var(--muted); margin: 14px 0 0; }
 
 .pa-bar { width: 3px; align-self: stretch; background: var(--faint); flex: none; }
-.pa-bar.out, .pa-bar.urgent { background: var(--negative); }
+.pa-bar.out, .pa-bar.urgent { background: var(--danger); }
 .pa-bar.low, .pa-bar.caution { background: #c99a12; }
-.pa-bar.order { background: var(--link); }
+.pa-bar.order { background: var(--accent); }
 .pa-bar.fyi { background: var(--muted); }
 
 .pa-stock, .pa-note, .pa-dish, .pa-hand {
@@ -2552,11 +2552,11 @@ body.cap-open.qx-open [data-cap] { display: none; }
 .pa-meta { text-align: right; min-width: 130px; }
 .pa-meta span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .pa-st { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; font-weight: 600; color: var(--muted); }
-.pa-st.out { color: var(--negative); }
+.pa-st.out { color: var(--danger); }
 .pa-st.low { color: var(--warning); }
-.pa-st.order { color: var(--link); }
+.pa-st.order { color: var(--accent); }
 .pa-do { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; min-width: 210px; }
-.pa-do .bs-act.danger { color: var(--negative); }
+.pa-do .bs-act.danger { color: var(--danger); }
 
 .pa-dn { flex: 1; min-width: 0; }
 .pa-dn b { font-family: var(--serif); font-weight: 500; font-size: 17px; color: var(--headline); }
@@ -2582,4 +2582,150 @@ body.cap-open.qx-open [data-cap] { display: none; }
   .pa-stock, .pa-note, .pa-dish, .pa-hand { flex-wrap: wrap; }
   .pa-meta, .pa-do { min-width: 0; text-align: left; justify-content: flex-start; }
   .pa-add { grid-template-columns: 1fr 1fr; }
+}
+
+/* ===========================================================================
+   THE STAFF PORTAL, MANAGER SIDE
+   ---------------------------------------------------------------------------
+   Four jobs that used to be one scroll. The strip stays whole above the tabs
+   because it is what tells you which tab you came for; below it, only the
+   tab you chose renders.
+   =========================================================================== */
+.pa-strip { border-top: 2px solid var(--ink); }
+
+.pa-tabs {
+  display: flex; gap: 0; margin-top: 22px;
+  border-bottom: 1px solid var(--ink);
+}
+.pa-tab {
+  padding: 11px 18px; text-decoration: none;
+  font-size: 14px; font-weight: 500; color: var(--secondary);
+  /* The chip sits ON the rule, so its bottom edge and the rule are one line. */
+  margin-bottom: -1px; border: 1px solid transparent; border-bottom: 0;
+}
+.pa-tab:first-child { padding-left: 14px; }
+.pa-tab:hover { color: var(--ink); }
+.pa-tab.on { background: var(--ink); color: var(--paper); font-weight: 600; }
+.pa-tab.on:hover { color: var(--paper); }
+.pa-badge {
+  margin-left: 7px; font-family: var(--mono); font-size: 11px; font-weight: 500;
+  color: var(--danger);
+}
+.pa-tab.on .pa-badge { color: #e0a08f; }
+
+.pa-body { padding-top: 4px; }
+.pa-lead { margin: 16px 0 4px; font-size: 13.5px; color: var(--secondary); }
+.pa-lead b { font-weight: 600; color: var(--ink); }
+.pa-foot { margin: 10px 0 0; font-size: 12.5px; color: var(--faint); }
+
+/* Two columns: what is posted on the left, what you post on the right. They
+   are one job — you read the board while adding to it — so they belong side
+   by side rather than one above the other. */
+.pa-two { display: grid; grid-template-columns: 1.35fr 1fr; gap: 34px; align-items: start; }
+.pa-col { min-width: 0; }
+
+/* The one action that does something, filled; the ones that only close a row,
+   quiet. .bs-act was written for links, so on a <button> it inherited the
+   browser's chrome and three actions all read as equally weighty. */
+.pa-do .bs-btn-sm {
+  background: var(--btn-bg); color: var(--btn-ink); border: 0;
+  padding: 8px 14px; font-weight: 600;
+}
+.pa-do .bs-btn-sm:hover { color: var(--btn-ink); opacity: .88; }
+.pa-body button.bs-act {
+  border: 0; background: none; padding: 6px 2px; cursor: pointer;
+  font-family: var(--sans); font-size: 13px; color: var(--accent);
+}
+.pa-body button.bs-act:hover { color: var(--accent-hover); }
+.pa-body button.bs-act.danger { color: var(--danger); }
+.pa-body button.bs-act.quiet { color: var(--faint); }
+.pa-body button.bs-act.quiet:hover { color: var(--danger); }
+
+/* These rows are read one at a time, not scanned down a column of figures, so
+   they sit on the paper the way the handoff draws them — dotted rules and
+   nothing else. The ledger stripe is for the ledgers. */
+.pa-body .bs-srow:nth-child(even) { background: none; }
+
+/* Who reported it, on the row itself — a manager's first question. */
+.pa-who { color: var(--muted); }
+.pa-said { flex: 1.2; min-width: 0; font-size: 13px; color: var(--body); }
+
+/* A dish carries its price beside its name, the way a menu does. */
+.pa-dn u { text-decoration: none; }
+.pa-dn .pa-dp { margin-left: 8px; font-family: var(--mono); font-size: 13.5px; color: var(--headline); }
+.pa-dish.off .pa-dn .pa-dp { color: var(--muted); }
+.pa-dl { font-size: 12.5px; color: var(--warning); }
+.pa-do .bs-act.quiet { color: var(--faint); }
+.pa-do .bs-act.quiet:hover { color: var(--danger); }
+
+/* The handoff draws "86 it" on its own. This field is kept because it is what
+   writes "86'D — back tomorrow" instead of a bare time on every phone, but it
+   is a box on a page that has none, so it reads as a line to write on and
+   nothing more. Empty is the normal case and stamps the time by itself. */
+.pa-body .pa-mini {
+  width: 92px; border: 0; border-bottom: 1px solid var(--field-border);
+  background: transparent; padding: 4px 0; font-size: 12.5px;
+}
+.pa-body .pa-mini:focus { outline: 0; border-bottom-color: var(--ink); }
+
+/* Composer fields are underlines on the paper, not boxes on it. Scoped to
+   .pa-form so the rest of the app's forms are untouched. */
+.pa-form.pa-add { grid-template-columns: 1fr 1fr; gap: 16px 14px; border-bottom: 0; }
+.bs .pa-form .fld input, .bs .pa-form .fld select {
+  border: 0; border-bottom: 1px solid var(--field-border); background: transparent;
+  padding-left: 0; padding-right: 0;
+}
+.bs .pa-form .fld input:focus, .bs .pa-form .fld select:focus {
+  outline: 0; border-bottom-color: var(--ink); box-shadow: none;
+}
+.pa-form .fld i { font-style: normal; color: var(--faint); }
+
+/* Who submits tips: a real switch, because it is a state and not an errand.
+   It is a submit button — one press, one round trip, no script. */
+/* .pa-pos needs the same flex row the other four get, or the switch drops to
+   its own line and the list reads as twelve rows instead of six. */
+.pa-pos {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 0; border-bottom: 1px dotted var(--rule-dotted);
+}
+/* .pa-what i is mono caps — right for a status flag, wrong for a phrase.
+   Matched on the element too, or that rule outranks this one. */
+.pa-what i.pa-kind {
+  font-style: normal; font-family: var(--sans); font-size: 13px;
+  text-transform: none; letter-spacing: 0; color: var(--muted); font-weight: 400;
+}
+.pa-tog-f { display: flex; align-items: center; gap: 12px; }
+.pa-tog-w {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .08em; font-weight: 600;
+}
+.pa-tog-w.on { color: var(--positive); }
+.pa-tog-w.off { color: var(--faint); }
+/* The whole app is radius 0, enforced with !important at the top of this
+   file. A switch is the exception the rule needs: its shape is what says it
+   slides, and a square one reads as a button that is stuck down. Overridden
+   here only, at a specificity that beats the blanket. */
+.bs .pa-tog {
+  width: 46px; height: 26px; padding: 0; border: 0;
+  border-radius: 13px !important;
+  background: var(--rule); cursor: pointer; position: relative;
+  /* The track's colour is deliberately not transitioned. It comes from a
+     custom property, and a background-color transition on a var()-derived
+     value latches its old computed colour when the theme flips the variable —
+     the switch stayed day-green on a night page while every other themed
+     element changed, because this was the only animated themed background on
+     the screen. The knob's slide is the affordance; the colour can be instant. */
+}
+.bs .pa-tog i {
+  position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+  border-radius: 50% !important; background: var(--paper);
+  transition: transform .12s ease;
+}
+.bs .pa-tog.on { background: var(--positive); }
+.bs .pa-tog.on i { transform: translateX(20px); }
+.pa-tog:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 1000px) {
+  .pa-two { grid-template-columns: 1fr; gap: 22px; }
+  .pa-tabs { overflow-x: auto; }
+  .pa-tab { white-space: nowrap; }
 }

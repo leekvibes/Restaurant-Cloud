@@ -62,6 +62,9 @@ test.before(async () => {
   emp.run('Bella Reyes', 'server', 900, '1111');
   emp.run('Marco Diaz', 'kitchen', 1800, '2222');
   emp.run('Ana Ortiz', 'barista', 1500, '3333');
+  // A training position: on the shift, paid hourly, and on the receiving end
+  // of nothing. The engine still lists them among support, with zeroes.
+  emp.run('Nico Vance', 'training', 1600, '4444');
 
   // A sent shift with real figures, so the earnings page has the engine's own
   // numbers to show rather than a fixture of its own.
@@ -75,6 +78,7 @@ test.before(async () => {
   const work = w.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)');
   work.run(sh, ids['Bella Reyes'], 'server', 7.5);
   work.run(sh, ids['Marco Diaz'], 'kitchen', 8);
+  work.run(sh, ids['Nico Vance'], 'training', 4);
   w.prepare(`INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents, card_tips_cents, cash_tips_cents)
     VALUES (?,?,?,?,0,?,?)`).run(sh, ids['Bella Reyes'], 185075, 12050, 29999, 6400);
   w.prepare("INSERT INTO products (name, category, unit) VALUES ('Oat milk','Dairy','case')").run();
@@ -242,6 +246,85 @@ test('a cook is shown what they received, without a tip-out they never paid', as
   assert.ok(!/Nothing to submit/.test(html), 'without repeating what they are not asked for');
   assert.ok(!/Tipped out to support/.test(html),
     'and never bills them for a tip-out they are on the receiving end of');
+});
+
+test('somebody who received nothing is shown their hours, not a zero', async () => {
+  // The engine lists everyone who worked on the support side of a shift,
+  // including positions no tip-out ever reaches. Leading with "You kept $0.00"
+  // answers a question they did not ask and buries the one they did — and on a
+  // screen about pay, a zero reads like a statement about their pay.
+  const html = await (await asStaff('/portal/earnings', await signIn('4444'))).text();
+  assert.match(html, /You worked/, 'the headline is what they did');
+  assert.match(html, /4 hrs/, 'and it is their actual hours from the shift');
+  assert.ok(!/\$0\.00/.test(html), 'no zero anywhere on it');
+  assert.ok(!/All time/.test(html), 'and no all-time panel of three zeros');
+
+  // The rule is "nothing arrived", not "this position does not hand tips in".
+  // A busser hands nothing in and still gets a share every service, so keying
+  // it on that setting would hide real money from the person who earned it.
+  const cook = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
+  assert.match(cook, /You kept/, 'a cook who receives a share still sees it');
+  assert.ok(!/You worked/.test(cook), 'and is not demoted to an hours line');
+});
+
+// ---------------------------------------------------------------------------
+// The manager's page: four jobs, four tabs.
+// ---------------------------------------------------------------------------
+
+test('each tab renders only its own job', async () => {
+  // The page was one scroll of four jobs, and you passed three to reach the
+  // fourth. Only one renders now — which is worth asserting, because a tab
+  // that renders everything and hides the rest with CSS looks identical from
+  // the outside and still ships the whole page down the wire.
+  const marks = {
+    reports: 'Everything staff reported from the floor',
+    board: 'Add a special',
+    notes: 'Post a note',
+    positions: 'still sees the board, reports stock',
+  };
+  for (const [tab, mine] of Object.entries(marks)) {
+    const html = await (await fetch(`${BASE}/staff-portal?tab=${tab}`)).text();
+    assert.match(html, new RegExp(mine), `${tab} renders its own body`);
+    for (const [other, theirs] of Object.entries(marks)) {
+      if (other === tab) continue;
+      assert.ok(!new RegExp(theirs).test(html), `${tab} does not also render ${other}`);
+    }
+    // The strip above the tabs belongs to all four.
+    assert.match(html, /Floor reports/, `${tab} keeps the overview strip`);
+  }
+});
+
+test('the default tab is the one with someone waiting on it', async () => {
+  const html = await (await fetch(`${BASE}/staff-portal`)).text();
+  assert.match(html, /Everything staff reported from the floor/, 'floor reports open first');
+  // And a tab nobody asked for does not throw the page away.
+  const junk = await fetch(`${BASE}/staff-portal?tab=../../etc/passwd`);
+  assert.strictEqual(junk.status, 200, 'an unknown tab still renders');
+  assert.match(await junk.text(), /Everything staff reported from the floor/, 'falling back to the first');
+});
+
+test('an action puts you back on the tab you did it from', async () => {
+  // Otherwise every 86 dropped you on Floor reports and you navigated back to
+  // the board to do the next one.
+  const d = today();
+  await form('/staff-portal/special', { d, name: 'Qqz Tab Test', price: '9.00' });
+  const dish = db.prepare("SELECT id FROM portal_specials WHERE name = 'Qqz Tab Test'").get();
+
+  const off = await form(`/staff-portal/special/${dish.id}/86`, { d, note: '' });
+  const where = off.headers.get('location') || '';
+  assert.match(where, /tab=board/, 'back to the board');
+  assert.match(where, new RegExp(`d=${d}`), 'and to the day you were looking at');
+
+  const note = await form('/staff-portal/note', { title: 'Qqz note', tone: 'fyi', starts_on: d, ends_on: d });
+  assert.match(note.headers.get('location') || '', /tab=notes/, 'notes go back to notes');
+
+  const pos = db.prepare("SELECT id FROM positions WHERE slug = 'barista'").get();
+  const tog = await form(`/staff-portal/position/${pos.id}/tips`, { on: '0' });
+  assert.match(tog.headers.get('location') || '', /tab=positions/, 'and the switch stays put');
+  await form(`/staff-portal/position/${pos.id}/tips`, { on: '1' });
+
+  db.prepare('DELETE FROM portal_specials WHERE id = ?').run(dish.id);
+  db.prepare("DELETE FROM portal_notes WHERE title = 'Qqz note'").run();
 });
 
 // ---------------------------------------------------------------------------

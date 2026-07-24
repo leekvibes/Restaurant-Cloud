@@ -9,17 +9,53 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const PORT = 3987;
 const BASE = `http://127.0.0.1:${PORT}`;
+// Its own database, set before anything requires src/db.
+//
+// This file used to boot with no DB_PATH, which means the default — the real
+// one. It was not only reading it: the view-only tests create an account,
+// disable it, re-enable it and delete it, and they were doing all of that in
+// live data. Running the suite mutated the owner's own user table.
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-auth-'));
+const DB = path.join(dir, 'auth.db');
+process.env.DB_PATH = DB;
 let child;
 
+const ENV = { ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York',
+  APP_PASSWORD: 'test-manager-password', ZWIN_SKIP_BACKFILL: '1' };
+
 async function up() {
-  child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), APP_PASSWORD: 'test-manager-password', ZWIN_SKIP_BACKFILL: '1' },
-    stdio: 'ignore',
-  });
+  // Boot once to build the schema, seed somebody with a PIN, then boot the
+  // server the tests actually talk to.
+  const boot = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
+    { env: { ...ENV, PORT: String(PORT + 40) }, stdio: 'ignore' });
+  for (let i = 0; i < 90; i++) {
+    try { await fetch(`http://127.0.0.1:${PORT + 40}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+  boot.kill();
+  await new Promise((r) => setTimeout(r, 300));
+
+  const w = new (require('better-sqlite3'))(DB);
+  const emp = w.prepare('INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES (?,?,?,1,?)')
+    .run('Rosa Iglesias', 'server', 900, '5150').lastInsertRowid;
+  // One sent service, so the dashboard has a last one to show. This used to
+  // come free from the real database, which is exactly the kind of dependency
+  // that hides until the data changes.
+  const sh = w.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES (date('now','-1 day'), 'dinner', 'sent', datetime('now'))`).run().lastInsertRowid;
+  w.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)').run(sh, emp, 'server', 7);
+  w.prepare(`INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents,
+    alcohol_cents, card_tips_cents, cash_tips_cents) VALUES (?,?,?,?,?,?,?)`)
+    .run(sh, emp, 140000, 9000, 21000, 24000, 5000);
+  w.close();
+
+  child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
+    { env: ENV, stdio: 'ignore' });
   for (let i = 0; i < 60; i++) {
     try { await fetch(`${BASE}/version`); return; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
@@ -27,7 +63,7 @@ async function up() {
 }
 
 test.before(up);
-test.after(() => child && child.kill());
+test.after(() => { if (child) child.kill(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const get = (p) => fetch(BASE + p, { redirect: 'manual' });
 const post = (p, body) => fetch(BASE + p, {
@@ -43,6 +79,66 @@ test('staff can reach every step of the tips flow without the manager password',
   const start = await post('/tips/start', { pin: 'nope-not-a-real-pin' });
   assert.notStrictEqual(start.status, 401, 'must not hit the manager auth wall');
   assert.ok(start.status === 200 || start.status === 302, `got ${start.status}`);
+});
+
+test('a staff member signing in lands in their portal, not the owner\'s login', async () => {
+  // The bug this exists to stop: /tips/start hands out the portal cookie and
+  // redirects to /portal, and /portal was not on the open list. So on the host
+  // — where APP_PASSWORD is set, unlike every developer machine — a cook
+  // entering their PIN was bounced to the owner's password screen. The PIN was
+  // correct. The portal was working. They simply could not get to it.
+  const start = await post('/tips/start', { pin: '5150' });
+  assert.strictEqual(start.status, 302, 'the PIN is accepted');
+  assert.strictEqual(start.headers.get('location'), '/portal', 'and sends them to their portal');
+
+  const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+  const home = await fetch(BASE + '/portal', { headers: { cookie }, redirect: 'manual' });
+  assert.strictEqual(home.status, 200, 'which opens — no manager password in the way');
+  assert.match(await home.text(), /Rosa/, 'and it is hers');
+
+  // Every other door of theirs, too. A staff member who can reach the hub but
+  // not their own pay has been half-let-in.
+  for (const p of ['/portal/earnings', '/portal/specials', '/portal/stock']) {
+    const res = await fetch(BASE + p, { headers: { cookie }, redirect: 'manual' });
+    assert.strictEqual(res.status, 200, `${p} opens for signed-in staff`);
+  }
+});
+
+test('opening the portal to staff did not open it to the world', async () => {
+  // /portal is exempt from the owner's password. That is only safe because
+  // each route demands the signed PIN cookie for itself — so with no cookie,
+  // every one of them must send you to the PIN screen and show nothing.
+  for (const p of ['/portal', '/portal/earnings', '/portal/specials', '/portal/stock']) {
+    const res = await get(p);
+    assert.strictEqual(res.status, 302, `${p} is not served to a stranger`);
+    assert.match(res.headers.get('location') || '', /^\/tips/,
+      `${p} sends them to the PIN screen, not the owner's login`);
+  }
+  // A forged cookie is not a cookie.
+  const forged = 'zwin_portal=1.' + (Date.now() + 8.64e7) + '.deadbeefdeadbeefdeadbeefdeadbeef';
+  const res = await fetch(BASE + '/portal/earnings', { headers: { cookie: forged }, redirect: 'manual' });
+  assert.strictEqual(res.status, 302, 'a signature that does not check out gets nothing');
+});
+
+test('every route under /portal asks who you are', async () => {
+  // The exemption is written once, in OPEN_PATHS, and covers the whole prefix.
+  // A route added under it later that forgets requirePortal would be public,
+  // and nothing about writing it would say so. So the source is the test.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  // Each route runs to wherever the next one starts, so the body is whole
+  // however long it is.
+  const starts = [...src.matchAll(/^app\.(get|post)\('([^']+)'/gm)];
+  const routes = starts.map((m, i) => [
+    src.slice(m.index, i + 1 < starts.length ? starts[i + 1].index : src.length), m[1], m[2],
+  ]).filter(([, , route]) => /^\/portal(\/|$)/.test(route));
+  assert.ok(routes.length >= 6, `found ${routes.length} portal routes — the scan should see them all`);
+  for (const [block, verb, route] of routes) {
+    // /portal/out is the exception on purpose: it clears the cookie and sends
+    // you to the PIN screen, which needs no identity to do.
+    if (route === '/portal/out') continue;
+    assert.match(block, /requirePortal\(req, res\)/,
+      `${verb.toUpperCase()} ${route} is exempt from the manager password and must call requirePortal`);
+  }
 });
 
 test('the version check staff pages rely on is reachable', async () => {
@@ -265,8 +361,6 @@ test('a wrong password is refused, and a forged cookie gets nothing', async () =
 // rule somewhere in the stylesheets they load.
 // ---------------------------------------------------------------------------
 
-const fs = require('node:fs');
-
 /** Every class name that has at least one rule across the linked stylesheets. */
 function styledClasses() {
   const css = ['styles.css', 'broadsheet.css', 'staff.css']
@@ -311,6 +405,37 @@ test('the old sign-in styles are gone from the stylesheet too', () => {
   // reading styles.css has to work out which of two sign-in designs is live.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   assert.ok(!/\.tips-/.test(css), 'no .tips-* rules remain');
+});
+
+test('every custom property a stylesheet uses is one it defines', async () => {
+  // How this got written: .pa-bar.out and .pa-bar.urgent were painted
+  // var(--negative), and no stylesheet has ever defined --negative. The real
+  // name is --danger. An undefined custom property does not fail loudly — the
+  // declaration is simply dropped — so the red bar on the most urgent rows
+  // rendered as nothing at all, and only the amber ones (a literal) showed.
+  // Twelve rules across the app were painting with it, including every
+  // "Delete" link. Everything looked deliberate.
+  // The two sheets the whole app renders through. styles.css is the pre-
+  // broadsheet one, still loaded for the handful of pages not yet ported, and
+  // it has its own undefined names in rules that may already be dead —
+  // untangling that means judging old CSS, not guarding new.
+  const files = ['broadsheet.css', 'staff.css'];
+  const css = files.map((f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8')).join('\n');
+  // Some properties are legitimately set by the markup on the element itself.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  const defined = new Set([
+    ...[...css.matchAll(/(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1]),
+    ...[...server.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]),
+  ]);
+  const used = new Set([...css.matchAll(/var\((--[a-z0-9-]+)/gi)].map((m) => m[1]));
+  // A var() with a fallback still renders if the property is missing, so those
+  // are not broken — they are the one legitimate way to name something unset.
+  const withFallback = new Set([...css.matchAll(/var\((--[a-z0-9-]+)\s*,/gi)].map((m) => m[1]));
+
+  const missing = [...used].filter((v) => !defined.has(v) && !withFallback.has(v));
+  assert.deepStrictEqual(missing, [],
+    `painted with properties nothing defines: ${missing.join(', ')}`);
 });
 
 test('every class the staff-facing pages emit has a rule behind it', async () => {
