@@ -325,6 +325,40 @@ function sendPush(employeeId, payload) {
   }
 }
 
+/**
+ * Send a test push to one person's own devices and REPORT the result — used by
+ * the "Send test" button so a staff member (and the owner) can see whether push
+ * actually lands, and the real reason if it does not. Unlike sendPush this
+ * awaits each send and surfaces the error instead of swallowing it.
+ */
+async function sendTest(employeeId) {
+  if (!pushOn) return { enabled: false, devices: 0, sent: 0, failed: 0, errors: [] };
+  let subs = [];
+  try { subs = q.pushFor.all({ id: employeeId }); } catch { /* */ }
+  const data = JSON.stringify({
+    title: 'Test notification',
+    body: 'If you can see this, notifications are working.',
+    url: '/portal', tag: 'zwin-test',
+  });
+  let sent = 0, failed = 0;
+  const errors = [];
+  for (const row of subs) {
+    let sub;
+    try { sub = JSON.parse(row.sub); } catch { failed++; errors.push('bad subscription'); continue; }
+    try {
+      await webpush.sendNotification(sub, data);
+      sent++;
+    } catch (err) {
+      failed++;
+      const code = err && err.statusCode;
+      errors.push(code ? `HTTP ${code}${err.body ? ': ' + String(err.body).slice(0, 120) : ''}`
+        : (err && err.message ? String(err.message).slice(0, 120) : 'send failed'));
+      if (code === 404 || code === 410) { try { q.delPush.run(row.endpoint); } catch { /* */ } }
+    }
+  }
+  return { enabled: true, devices: subs.length, sent, failed, errors };
+}
+
 /** The three tones a note can carry, worst first — the order they render in. */
 const TONES = ['urgent', 'caution', 'fyi'];
 /** How a reporter can describe a shortage, most urgent first. */
@@ -362,5 +396,5 @@ function shapeFor(position) {
 
 module.exports = {
   q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify,
-  savePush, sendPush, VAPID_PUBLIC, pushEnabled: pushOn,
+  savePush, sendPush, sendTest, VAPID_PUBLIC, pushEnabled: pushOn,
 };

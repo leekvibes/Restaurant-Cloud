@@ -527,19 +527,26 @@ body.bare {
 
 /* --- turn on notifications ------------------------------------------------ */
 .pt-push {
-  display: flex; align-items: center; gap: 14px; margin-top: 26px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 26px;
   padding: 14px; border: 1px solid var(--pt-line); background: var(--pt-field);
 }
-.pt-push-l { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.pt-push-l { flex: 1 1 58%; min-width: 0; display: grid; gap: 2px; }
 .pt-push-l b { font-size: 15px; color: var(--pt-ink); font-weight: 650; }
 .pt-push-l span { font-size: 13px; color: var(--pt-muted); }
+.pt-push-acts { flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .pt-push-b {
-  flex-shrink: 0; border: 1px solid var(--pt-ink); background: var(--pt-ink);
+  border: 1px solid var(--pt-ink); background: var(--pt-ink);
   color: var(--pt-page); font-family: var(--sans, sans-serif);
   font-size: 14px; font-weight: 600; padding: 10px 16px; min-height: 44px; cursor: pointer;
 }
 .pt-push-b:disabled { opacity: .6; }
 .pt-push-b[data-on="1"] { background: none; color: var(--pt-second); }
+.pt-push-test {
+  border: 1px solid var(--pt-line); background: none; color: var(--pt-blue);
+  font-family: var(--sans, sans-serif); font-size: 13px; font-weight: 500;
+  padding: 9px 12px; min-height: 44px; cursor: pointer;
+}
+.pt-push-test:disabled { opacity: .6; }
 .pt-note i { color: var(--pt-faint); font-style: normal; }
 
 .pt-quiet { font-size: 14.5px; color: var(--pt-muted); margin: 14px 0 0; line-height: 1.5; }

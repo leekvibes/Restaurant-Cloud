@@ -3014,17 +3014,29 @@ app.get('/portal', (req, res) => {
     <div class="pt-push" id="ptpush" hidden data-vapid="${PORTAL.VAPID_PUBLIC}">
       <span class="pt-push-l"><b id="ptpush-t">Notifications</b>
         <span id="ptpush-s">Get a heads-up on your phone for specials, notes and your pay.</span></span>
-      <button type="button" class="pt-push-b" id="ptpush-b">Turn on</button>
+      <span class="pt-push-acts">
+        <button type="button" class="pt-push-test" id="ptpush-test" hidden>Send test</button>
+        <button type="button" class="pt-push-b" id="ptpush-b">Turn on</button>
+      </span>
     </div>
     <script>
     (function(){
       var box=document.getElementById('ptpush'); if(!box) return;
       if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
-      var btn=document.getElementById('ptpush-b'), t=document.getElementById('ptpush-t'), s=document.getElementById('ptpush-s');
+      var btn=document.getElementById('ptpush-b'), t=document.getElementById('ptpush-t'), s=document.getElementById('ptpush-s'), test=document.getElementById('ptpush-test');
       var vapid=box.getAttribute('data-vapid'); box.hidden=false;
       function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
-      function state(on){ if(on){t.textContent='Notifications on';s.textContent='You will get specials, notes and your pay on this phone.';btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Notifications';s.textContent='Get a heads-up on your phone for specials, notes and your pay.';btn.textContent='Turn on';btn.dataset.on='';} }
+      function state(on){ test.hidden=!on; if(on){t.textContent='Notifications on';s.textContent='You will get specials, notes and your pay on this phone.';btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Notifications';s.textContent='Get a heads-up on your phone for specials, notes and your pay.';btn.textContent='Turn on';btn.dataset.on='';} }
       navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
+      test.addEventListener('click', function(){
+        test.disabled=true; s.textContent='Sending a test…';
+        fetch('/portal/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){return r.json();}).then(function(d){
+          if(!d || !d.enabled) s.textContent='Push is off on the server — the owner still needs to finish setup.';
+          else if(!d.devices) s.textContent='This device is not subscribed. Turn it off, then on again.';
+          else if(d.sent) s.textContent='Sent to '+d.sent+' device'+(d.sent===1?'':'s')+' — check your lock screen.';
+          else s.textContent='Could not deliver: '+((d.errors&&d.errors[0])||'unknown');
+        }).catch(function(){ s.textContent='The test did not send — try again.'; }).then(function(){ test.disabled=false; });
+      });
       btn.addEventListener('click', function(){
         btn.disabled=true;
         navigator.serviceWorker.ready.then(function(reg){
@@ -3146,6 +3158,14 @@ app.post('/portal/push/unsubscribe', express.json(), (req, res) => {
   if (!who) return;
   try { if (req.body && req.body.endpoint) PORTAL.q.delPush.run(req.body.endpoint); } catch { /* already gone */ }
   res.json({ ok: true });
+});
+// "Send test" — pushes to this person's own devices and reports what happened,
+// so they can see push actually land (and the real reason if it does not).
+app.post('/portal/push/test', async (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  try { res.json(await PORTAL.sendTest(who.emp.id)); }
+  catch (e) { res.json({ enabled: PORTAL.pushEnabled === true, devices: 0, sent: 0, failed: 1, errors: [String(e && e.message || e).slice(0, 120)] }); }
 });
 
 app.get('/portal/out', (req, res) => {
