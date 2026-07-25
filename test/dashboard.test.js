@@ -701,34 +701,30 @@ test('the bottom bar says Home, and Sales rather than Cash', async () => {
   assert.ok(!/href="\/cash"/.test(bar), 'cash is in the index, not the bar');
 });
 
-test('the phone masthead shows the restaurant, and the search is a glyph until asked', async () => {
+test('a phone drops the global masthead; search and theme move to the Index', async () => {
   const owner = await login({ password: 'dash-owner-pw' });
   const html = await (await as(owner, '/')).text();
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
   const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
 
-  // The restaurant's name is the one thing on the bar that says which place
-  // this is. It was hidden on the width where that matters most.
-  assert.ok(!/\.bs-date, \.bs-loc \{[^}]*display:\s*none/.test(mob), 'the location is not hidden on a phone');
-  assert.match(mob, /\.bs-loc \{[^}]*display:\s*inline-flex/);
+  // No repeated global top bar on a phone — each page opens with its own header.
+  assert.match(mob, /\.bs-masthead \{[^}]*display:\s*none/, 'the masthead is hidden on a phone');
+  // The content owns the top of the screen now, so it reserves the status-bar
+  // inset the masthead used to sit in.
+  assert.match(mob, /\.bs-canvas \{[^}]*env\(safe-area-inset-top\)/, 'the content reserves the status-bar inset');
 
-  // Search collapses to its glyph; "+ New" goes entirely — the bottom bar and
-  // the footer both reach the same things.
-  assert.match(mob, /\.bs-search \{[^}]*width:\s*34px/, 'search starts collapsed');
-  assert.match(mob, /\.bs-masthead \.bs-btn \{[^}]*display:\s*none/, 'no + New on a phone');
+  // The Index sheet carries the utility row the shell fills with the global
+  // search and the theme toggle, moved from the (now hidden) masthead.
+  assert.match(html, /class="bs-index-util"/, 'the Index has a utility row');
+  assert.match(html, /id="bs-index-tools"/, 'with a slot for the moved controls');
+  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
+  assert.match(views, /getElementById\('bs-index-tools'\)/, 'the shell script targets the slot');
+  assert.match(views, /appendChild\(search\)/, 'and moves the real search element into it');
+  assert.match(views, /appendChild\(theme\)/, 'and the theme toggle');
 
-  // And the glyph is drawn, not typed — ⌕ renders as a nought at this size.
+  // The magnifier is drawn, not typed — an svg, wherever the field ends up.
   assert.match(html, /class="bs-search-ico"[\s\S]{0,200}<svg/, 'the magnifier is an svg');
   assert.ok(!/>⌕</.test(html), 'not the ⌕ character');
-
-  // The account chip is the last control on the bar, with the theme toggle to
-  // its left. This is the reverse of what it used to be — the topbar handoff
-  // orders the utility bar date · theme · account, and the chip is now a
-  // name-and-avatar block rather than a 28px circle, so it anchors the end of
-  // the row where a bare glyph could not.
-  const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
-  assert.ok(bar.indexOf('bs-acct') > bar.indexOf('bs-theme'), 'the account chip closes the bar');
-  assert.ok(!/class="bs-btn"/.test(bar), 'and "+ Log a shift" is gone from the bar entirely');
 });
 
 test('the index keeps its account block in view while the sections scroll', async () => {

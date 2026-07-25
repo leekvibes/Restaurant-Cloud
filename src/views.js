@@ -180,8 +180,13 @@ function searchScript() {
   // transition is the browser's from there.
   function rcMobile(){ return window.matchMedia('(max-width: 900px)').matches; }
   function rcBar(){ return document.querySelector('.bs-masthead') || document.querySelector('.topbar'); }
+  // On a phone the search is moved into the Index sheet, where the field is
+  // always open — so the collapse/expand dance (which measures the masthead)
+  // is skipped and the control just focuses.
+  function rcInIndex(){ var b=document.getElementById('rc-search'); return !!(b && b.closest('.bs-index')); }
 
   function rcExpand(focus){
+    if(rcInIndex()){ if(focus){ var qi=document.getElementById('rc-q'); if(qi) qi.focus(); } return; }
     var bar=rcBar(), box=document.getElementById('rc-search'), btn=document.getElementById('rc-sbtn');
     if(!bar || !box || bar.classList.contains('search-on')) { if(focus) document.getElementById('rc-q').focus(); return; }
     var barR=bar.getBoundingClientRect(), boxR=box.getBoundingClientRect();
@@ -200,6 +205,7 @@ function searchScript() {
   }
 
   function rcCollapse(){
+    if(rcInIndex()) return;                 // always open in the Index sheet
     var bar=rcBar(), btn=document.getElementById('rc-sbtn'), q=document.getElementById('rc-q');
     if(!bar) return;
     bar.classList.remove('search-on');
@@ -601,7 +607,15 @@ function bottomBar(path) {
                 onclick="this.closest('details').open=false">✕</button>
             </div>
             <div class="bs-index-scroll">
-              <h1 class="bs-index-title">Index</h1>
+              <!-- The utility row: the Index title, and — moved here on a phone
+                   by the shell script — the global search and the theme toggle,
+                   which is where they live now that the masthead is gone on
+                   mobile. Empty slots until the script fills them, so JS-off
+                   still gets a clean title. -->
+              <div class="bs-index-util" id="bs-index-util">
+                <h1 class="bs-index-title">Index</h1>
+                <span class="bs-index-tools" id="bs-index-tools"></span>
+              </div>
             ${groups.map((g) => `
               <div class="bs-index-grp">${esc(g.title || 'Front page')}</div>
               <div class="bs-index-links">
@@ -968,6 +982,23 @@ function layout(title, body, opts = {}) {
         })();
       </script>
       <script>${searchScript()}</script>
+      <script>
+        // On a phone the masthead is gone, so its two utilities move into the
+        // Index sheet's utility row: the global search and the day/night toggle.
+        // The real elements are moved (not copied), so their wiring — the
+        // search's input handler, the toggle's click handler — comes with them,
+        // and there is never a second #rc-q to confuse the search. Desktop keeps
+        // them in the masthead.
+        (function () {
+          if (!window.matchMedia('(max-width: 900px)').matches) return;
+          var slot = document.getElementById('bs-index-tools');
+          if (!slot) return;
+          var search = document.getElementById('rc-search');
+          var theme = document.getElementById('bs-theme');
+          if (theme) slot.appendChild(theme);
+          if (search) slot.appendChild(search);
+        })();
+      </script>
       <script>
         // The sidebar: collapse / expand, remembered. The active page and its
         // accent bar are CSS off the .on class, so there is nothing else to wire.

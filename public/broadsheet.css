@@ -476,35 +476,16 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 
 @media (max-width: 900px) {
   :root { --gutter: 16px; }
-  .bs-masthead { gap: 10px; padding: 10px var(--gutter); position: static; flex-wrap: nowrap; }
-  .bs-date { display: none; }
-  /* The restaurant's name belongs beside the wordmark — it is the one thing on
-     the bar that says which place this is. */
-  .bs-loc { display: inline-flex; font-size: 11px; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* No "+ New" on a phone. The bottom bar and the footer's file-an-entry row
-     both reach the same four things, and the bar is already four items wide. */
-  .bs-masthead .bs-btn { display: none; }
-
-  /* Search collapses to its glyph and opens on tap. It is the widest control
-     on the bar and the least used — the four things a phone does are on the
-     bottom bar. */
-  .bs-search {
-    max-width: none; width: 34px; flex: none; margin-left: auto;
-    padding: 0; border-color: transparent; background: transparent;
-    transition: width .18s ease, background-color .18s, border-color .18s;
-  }
-  .bs-search input, .bs-search .bs-kbd { opacity: 0; visibility: hidden; transition: opacity .12s, visibility .12s; }
-  .bs-masthead.search-on .bs-search {
-    width: auto; flex: 1; padding: 0 10px;
-    border-color: var(--field-border); background: var(--surface);
-  }
-  .bs-masthead.search-on .bs-search input {
-    opacity: 1; visibility: visible; transition: opacity .18s ease-out 60ms, visibility 0s;
-  }
-  .bs-masthead.search-on .bs-loc,
-  .bs-masthead.search-on .bs-wordmark { display: none; }
-  .bs-search-ico { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; }
+  /* No global top bar on a phone. The masthead's two live utilities — the
+     global search and the day/night toggle — are moved into the Index sheet by
+     the shell script; everything else it carried (wordmark, restaurant name,
+     date, account, + New) is either branding the page's own header already
+     states, or already lives in the Index. Each page opens with its own
+     contextual header instead of a repeated global bar. */
+  .bs-masthead { display: none; }
+  /* The content now owns the top of the screen, so it reserves the status-bar
+     inset the masthead used to sit in — nothing draws under the phone's clock. */
+  .bs-canvas { padding-top: calc(env(safe-area-inset-top) + 10px); }
   .bs-nav { position: static; }
   /* The sidebar is a desktop object. A phone gets the bottom bar and the Index
      sheet instead, exactly as before — so the shell stops being a two-column
@@ -1475,6 +1456,20 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
   font-family: var(--serif); font-weight: 500; font-size: 30px;
   color: var(--headline); margin: 18px 0 4px; letter-spacing: -.01em;
 }
+/* The utility row: the title, then the global search and the theme toggle the
+   shell script relocates here from the hidden masthead on a phone. The search
+   takes the row; the toggle sits at its end. Empty until the script fills it. */
+.bs-index-util { margin: 4px 0 16px; }
+.bs-index-util .bs-index-title { margin: 0 0 12px; }
+.bs-index-tools:not(:empty) { display: flex; align-items: center; gap: 10px; }
+.bs-index-tools .bs-search {
+  flex: 1; max-width: none; height: 44px; margin: 0;
+  border: 1px solid var(--field-border); background: var(--surface);
+}
+.bs-index-tools .bs-search input { font-size: 16px; opacity: 1; visibility: visible; }
+.bs-index-tools .bs-search .bs-kbd { display: none; }
+.bs-index-tools .bs-search-ico { width: 30px; height: 44px; display: flex; align-items: center; justify-content: center; }
+.bs-index-tools .bs-theme { width: 44px; height: 44px; flex-shrink: 0; font-size: 16px; }
 .bs-index-x {
   width: 38px; height: 38px; flex-shrink: 0;
   border: 1.5px solid var(--ink); background: var(--surface);
