@@ -640,73 +640,89 @@ test('both themes define every panel token', () => {
   }
 });
 
-test('the nav band carries both states, and the collapsed one is complete', async () => {
+// ---------------------------------------------------------------------------
+// The sidebar replaced the top nav band: a primary rail of sections and a
+// contextual panel of the section's pages. These guard the same invariants the
+// band tests did — every section reachable, exactly one active marker, hidden
+// on a phone, in flow rather than floating.
+// ---------------------------------------------------------------------------
+const cssRuleFor = (css, sel) => {
+  let body = null;
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === sel) body = (body || '') + m[2];
+  return body;
+};
+
+test('the sidebar lists every section and its pages', async () => {
   const html = await (await fetch(`${BASE}/`, { redirect: 'manual' })).text();
-  assert.match(html, /<nav class="bs-band"/, 'the band exists');
+  assert.match(html, /<aside class="bs-side"/, 'the sidebar exists');
+  const side = html.slice(html.indexOf('<aside class="bs-side"'), html.indexOf('</aside>'));
 
-  const band = html.slice(html.indexOf('<nav class="bs-band"'));
-  const collapsed = band.slice(band.indexOf('class="bs-band-c"'), band.indexOf('class="bs-band-x"'));
-  const expanded = band.slice(band.indexOf('class="bs-band-x"'), band.indexOf('</nav>'));
-
-  // Every GROUP the expanded state shows must have a way in from the
-  // collapsed row — not every link. A named group is one tab there, and its
-  // other pages appear in the sub-nav once you are inside it, which is how
-  // Team has reached Positions and Tip-out policy since long before the band.
-  // Asserting link-for-link would just be asserting that design away.
-  const hrefs = (str) => new Set([...str.matchAll(/href="([^"]+)"/g)].map((m) => m[1]));
-  const inRow = hrefs(collapsed);
-  // Split on the class rather than trying to regex balanced tags — the group
-  // block closes with one </div>, and a non-greedy match for two ran straight
-  // across every group into a single blob.
-  const groups = expanded.split('class="bs-bandg"').slice(1).map((chunk) => [...hrefs(chunk)]);
-  assert.ok(groups.length >= 4, `found ${groups.length} groups`);
-  const stranded = groups.filter((g) => g.length && !g.some((h) => inRow.has(h)));
-  assert.deepStrictEqual(stranded, [], 'every group has an entry point in the collapsed row');
-
-  // Group labels only appear in the expanded half.
-  assert.ok(/bs-bandg-t/.test(expanded), 'the expanded state names its groups');
-  assert.ok(!/bs-bandg-t/.test(collapsed), 'the collapsed row does not');
+  // Every section shows its title, and every day-to-day page sits under one.
+  const titles = [...side.matchAll(/class="bs-side-h">([^<]+)</g)].map((m) => m[1]);
+  assert.ok(titles.length >= 4, `found ${titles.length} section titles`);
+  const links = [...side.matchAll(/class="bs-side-i[^"]*" href="([^"]+)"/g)].map((m) => m[1]);
+  for (const href of ['/shifts', '/sales', '/costs', '/cash', '/payroll', '/c/invoices', '/c/vendors', '/employees']) {
+    assert.ok(links.some((h) => h === href || h.startsWith(href)), `${href} is in the sidebar`);
+  }
 });
 
-test('the band pushes content rather than floating over it', () => {
+test('exactly one page is marked active', async () => {
+  for (const p of ['/shifts', '/payroll', '/c/invoices']) {
+    const html = await (await fetch(`${BASE}${p}`, { redirect: 'manual' })).text();
+    const side = html.slice(html.indexOf('<aside class="bs-side"'), html.indexOf('</aside>'));
+    const on = (side.match(/class="bs-side-i on"/g) || []).length;
+    assert.strictEqual(on, 1, `${p}: exactly one page active, got ${on}`);
+  }
+});
+
+test('the active page is drawn, not just classed', () => {
   const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-  let band = null;
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === '.bs-band') band = m[2];
-  assert.ok(band, '.bs-band exists');
-  assert.ok(!/position:\s*(absolute|fixed)/.test(band),
-    'the band stays in flow — an overlay would cover the thing you reached for');
-
-  // The state is a class now, set by script — CSS :hover re-evaluates as the
-  // box resizes, which is what let the band chase its own layout.
-  assert.ok(!/\.bs-band:hover/.test(css), 'no :hover state on the band');
-  assert.match(css, /\.bs-band\.open \.bs-band-x/, 'one class drives it, for cursor, touch and keyboard alike');
-
-  // And the script only wires the cursor path where a cursor exists.
-  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
-  assert.match(views, /hover:\s*hover\) and \(pointer:\s*fine/, 'enter/leave only on a real pointer');
+  // A fill/weight and an accent bar, so where-you-are reads at a glance.
+  assert.match(cssRuleFor(css, '.bs-side-i.on') || '', /font-weight:\s*6\d\d|background:/, 'the active page is filled or weighted');
+  assert.match(cssRuleFor(css, '.bs-side-i.on::before') || '', /background:/, 'and carries an accent bar');
 });
 
-test('the band is not a third copy of the nav on a phone', () => {
-  // Below 900px every section is on the bottom bar and in the Index. The old
-  // rule named .bs-nav, which the rebuild replaced, so the strip came back.
+test('the sidebar sits in flow and sticks — it never floats over content', () => {
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  assert.match(cssRuleFor(css, '.bs-shell') || '', /display:\s*flex/, 'the shell lays the sidebar beside the content');
+  const side = cssRuleFor(css, '.bs-side') || '';
+  assert.match(side, /position:\s*sticky/, 'the sidebar sticks, holding its column');
+  assert.ok(!/position:\s*fixed/.test(side), 'never fixed over the page');
+});
+
+test('collapse is remembered, painted before first paint', () => {
+  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
+  // Read up front so a collapsed sidebar never expands-then-snaps on load.
+  assert.match(views, /localStorage\.getItem\('rc_nav'\)\s*===\s*'collapsed'/, 'the stored collapse state is read before paint');
+  assert.match(views, /classList\.add\('rc-collapsed'\)/, 'and applied as a class');
+  assert.match(views, /localStorage\.setItem\('rc_nav'/, 'toggling collapse is remembered');
+});
+
+test('collapsed is a skinny rail of section icons, each opening a flyout', () => {
+  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
+  const shell = cssRuleFor(css, '.bs-shell') || '';
+  const wc = parseFloat((shell.match(/--side-wc:\s*([\d.]+)px/) || [])[1]);
+  assert.ok(wc && wc <= 56, `the collapsed rail is skinny, got ${wc}px`);
+  // Collapsed: each section bunches into its icon, which is shown; the pages
+  // fold into a flyout that opens beside it.
+  assert.match(css, /html\.rc-collapsed[^{]*\.bs-side-gi\s*\{[^}]*opacity:\s*1/, 'the section icon shows when collapsed');
+  assert.match(css, /html\.rc-collapsed[^{]*\.bs-side-list\s*\{[^}]*position:\s*absolute/, 'the pages become a flyout');
+  assert.match(css, /html\.rc-collapsed[^{]*\.bs-side-grp:hover[^{]*\.bs-side-list/, 'hovering a section opens its flyout');
+});
+
+test('a phone gets no sidebar — the bottom bar takes over', () => {
   const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
   const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
-  assert.match(mob, /\.bs-band\s*\{[^}]*display:\s*none|\.bs-nav,\s*\.bs-band \{[^}]*display:\s*none/,
-    'the band is hidden on a phone');
+  assert.match(mob, /\.bs-side\s*\{[^}]*display:\s*none/, 'the sidebar is hidden on a phone');
+  assert.match(mob, /\.bs-shell\s*\{[^}]*display:\s*block/, 'and the shell stops being two columns so content fills the screen');
 });
 
-test('the active tab is a filled chip, and there is exactly one', async () => {
-  for (const p of ['/', '/shifts', '/payroll']) {
-    const html = await (await fetch(`${BASE}${p}`, { redirect: 'manual' })).text();
-    const band = html.slice(html.indexOf('<nav class="bs-band"'));
-    const collapsed = band.slice(band.indexOf('class="bs-band-c"'), band.indexOf('class="bs-band-x"'));
-    const on = (collapsed.match(/class="on"/g) || []).length;
-    assert.strictEqual(on, 1, `${p}: one tab is active in the collapsed row, got ${on}`);
-  }
+test('the section labels are legible, not fine print', () => {
   const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-  let chip = null;
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === '.bs-band a.on') chip = m[2];
-  assert.ok(chip && /background:\s*var\(--ink\)/.test(chip), 'the active tab is filled, not underlined');
+  const body = cssRuleFor(css, '.bs-side-h');
+  assert.ok(body, '.bs-side-h exists');
+  const size = parseFloat((body.match(/font-size:\s*([\d.]+)px/) || [])[1]);
+  assert.ok(size >= 10, `section labels are readable, got ${size}px`);
 });
 
 test('the shift button is gone from the bar, not just hidden', async () => {
@@ -716,93 +732,6 @@ test('the shift button is gone from the bar, not just hidden', async () => {
   const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
   assert.ok(!/Log a shift/.test(bar), 'not in the top bar');
   assert.match(html, /Log a shift/, 'still on the page it belongs to');
-});
-
-test('the nav band cannot shrink out from under the cursor', () => {
-  // The twitch: both states used to animate at once, the collapsed row
-  // shrinking while the groups grew. Measured, the band dipped from 58px to
-  // 42px in the first frames. If the cursor sat in the lower part of the row
-  // the band shrank away from it, :hover went false, it collapsed, the cursor
-  // was over it again, it reopened — several times a second.
-  //
-  // The fix is structural, not a tuned delay: both states occupy ONE grid
-  // cell, so the band is always as tall as its tallest child and the height
-  // can only go up. That holds only while the collapsed row keeps its height,
-  // so this checks the two things that make it true.
-  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-  const ruleFor = (sel) => {
-    let body = null;
-    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === sel) body = (body || '') + m[2];
-    return body;
-  };
-
-  assert.match(ruleFor('.bs-band') || '', /display:\s*grid/, 'the band is a grid');
-  assert.match(ruleFor('.bs-band-c, .bs-band-x') || '', /grid-area:\s*1\s*\/\s*1/,
-    'both states share one cell, so the band takes the taller of them');
-
-  // The collapsed row fades; it must never animate its box, or the dip is back.
-  const collapsedOpen = ruleFor('.bs-band.open .bs-band-c') || '';
-  assert.ok(!/max-height|height|padding/.test(collapsedOpen),
-    `opening must only fade the collapsed row, got: ${collapsedOpen.trim()}`);
-  assert.match(collapsedOpen, /opacity:\s*0/, 'it fades');
-
-  // And the state change is deferred, not immediate. Checking for the two
-  // constants by name proved worthless: renaming the declaration left the name
-  // behind at the usage site and the assertion sailed through. What matters is
-  // that opening goes through a timer at all — without one, brushing past the
-  // band flicks it open and shut.
-  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
-  const band = views.slice(views.indexOf('const bandScript'), views.indexOf('const swScript'));
-  assert.match(band, /mouseenter/, 'enter/leave, not :hover — :hover re-evaluates as the box resizes');
-  assert.match(band, /timer\s*=\s*setTimeout/, 'the state change runs on a timer');
-  // Two distinct delays declared, so opening and closing are not the same
-  // reflex — a quick pass should not open it, a diagonal move should not shut
-  // it. Read from the declarations, which a rename cannot fake past.
-  const delays = [...band.matchAll(/var\s+\w+\s*=\s*(\d{2,4})\s*;/g)]
-    .map((m) => Number(m[1])).filter((n) => n >= 50 && n <= 1000);
-  assert.ok(new Set(delays).size >= 2, `two distinct delays, got ${JSON.stringify(delays)}`);
-});
-
-test('the group labels are legible, not fine print', () => {
-  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-  let body = null;
-  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (m[1].trim() === '.bs-bandg-t') body = m[2];
-  assert.ok(body, '.bs-bandg-t exists');
-  const weight = Number((body.match(/font-weight:\s*(\d+)/) || [])[1]);
-  const size = parseFloat((body.match(/font-size:\s*([\d.]+)px/) || [])[1]);
-  assert.ok(weight >= 700, `group labels are bold, got ${weight}`);
-  assert.ok(size >= 10, `and readable, got ${size}px`);
-});
-
-test('a phone gets no tab strip at all — band or sub-nav', () => {
-  // This regressed once already and shipped. The 900px block hides .bs-band,
-  // but the twitch fix later added a bare `.bs-band { display: grid }` further
-  // down the file. Same single-class specificity, so source order handed every
-  // phone the grid back and the strip returned above every screen.
-  //
-  // So the check is not "a hide rule exists" — it is "the LAST rule that sets
-  // display on .bs-band under 900px hides it". That is the thing that was
-  // false while a hide rule sat in the file looking correct.
-  const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
-
-  const lastDisplayFor = (cls) => {
-    let winner = null;
-    // Walk every rule in order. A bare rule always applies; a rule inside a
-    // max-width query applies at 375px only if the breakpoint is >= 375.
-    for (const m of css.matchAll(/(@media[^{]*\{)|([^{}@]+)\{([^{}]*)\}/g)) {
-      if (m[1]) { const w = /max-width:\s*(\d+)px/.exec(m[1]); currentMax = w ? Number(w[1]) : null; continue; }
-      const sel = (m[2] || '').trim(); const body = m[3] || '';
-      if (!sel || !new RegExp(`\\.${cls}(?![\\w-])`).test(sel)) continue;
-      if (!/display:\s*([a-z-]+)/.test(body)) continue;
-      if (currentMax !== null && currentMax < 375) continue;
-      winner = /display:\s*([a-z-]+)/.exec(body)[1];
-    }
-    return winner;
-  };
-  let currentMax = null;
-  assert.strictEqual(lastDisplayFor('bs-band'), 'none', 'the band is hidden on a phone by the last rule that speaks');
-  assert.match(css, /\.bs-subnav[^{]*\{[^}]*display:\s*none|\.bs-band,\s*\.bs-subnav \{[^}]*display:\s*none/,
-    'and so is the sub-nav');
 });
 
 test('the mobile dashboard leads with the last service', () => {

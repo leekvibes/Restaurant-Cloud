@@ -651,11 +651,9 @@ test('a phone gets one navigation, not three', async () => {
   // Below 900px every section is reachable from the bottom bar and the Index,
   // so a scrolling row of tabs above the content is the same list a third time.
   const mob = [...css.matchAll(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
-  // .bs-band is the banded nav that replaced .bs-nav. Matching either name,
-  // in a shared selector or alone, so the assertion survives the rename
-  // without stopping checking anything.
-  assert.match(mob, /\.bs-band[^{]*\{[^}]*display:\s*none|\.bs-nav,\s*\.bs-band \{[^}]*display:\s*none/,
-    'the tab strip is hidden on a phone');
+  // The desktop navigation is the left sidebar now; on a phone it is hidden and
+  // the bottom bar + Index take over. (The old .bs-band strip is gone.)
+  assert.match(mob, /\.bs-side\s*\{[^}]*display:\s*none/, 'the sidebar is hidden on a phone');
 
   // The bottom bar's own links stack a glyph over a label. That rule must not
   // reach the Index sheet inside the same <nav>, or every row there stacks its

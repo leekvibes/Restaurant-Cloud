@@ -468,6 +468,62 @@ function subNav(path) {
     </div>`;
 }
 
+// ===========================================================================
+// SIDEBAR — one column, every page under its section title (desktop).
+//
+// Expanded: Dashboard on its own, then every page listed under its section
+// title (Operations, Purchasing, …). Collapse bunches each section's pages into
+// a single section icon; hovering that icon opens the section's pages as a
+// flyout right beside it, so every page is one hover-and-click away. Expanding
+// motions the full lists back open. Under 900px it hides entirely and the bottom
+// bar + Index sheet take over, untouched.
+// ===========================================================================
+
+// The glyph a whole section bunches into when collapsed. The pages keep their
+// own; a section is the drawer, so it gets one that stands for the set.
+const SECTION_ICON = {
+  Operations: 'calendar',
+  Purchasing: 'invoices',
+  Restaurant: 'equipment',
+  'Tasks & logs': 'recurring',
+  Team: 'staff',
+};
+
+function sideNav(path) {
+  const allowed = (g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) });
+  const groups = SECTIONS.map(allowed).filter((g) => g.links.length);
+  const activeG = groupFor(path);
+
+  const item = ([href, ico, label, accent, , tag]) =>
+    `<a class="bs-side-i${navOn(href, path) ? ' on' : ''}" href="${href}" style="${accentVars(accent)}" data-tip="${esc(label)}">
+      <span class="bs-side-ic">${icon(ico)}</span><span class="bs-side-lb">${esc(label)}${tag ? ` <i class="bs-side-tag">${esc(tag)}</i>` : ''}</span></a>`;
+
+  const body = groups.map((g) => {
+    const first = g.links[0];
+    // Dashboard is its own group: no title, and its "section icon" is its own.
+    const giIco = g.title ? (SECTION_ICON[g.title] || 'list') : first[1];
+    const giOn = g.title ? (activeG && activeG.title === g.title) : navOn(first[0], path);
+    const giTip = g.title || first[2];
+    const list = `${g.title ? `<div class="bs-side-h">${esc(g.title)}</div>` : ''}${g.links.map(item).join('')}`;
+    // The section icon links to the section's first page (one click in), and
+    // is aria-hidden because the same pages are the real, focusable links below.
+    return `<div class="bs-side-grp">
+      <a class="bs-side-gi${giOn ? ' on' : ''}" href="${first[0]}" data-tip="${esc(giTip)}" tabindex="-1" aria-hidden="true"><span class="bs-side-ic">${icon(giIco)}</span></a>
+      <div class="bs-side-list">${list}</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <aside class="bs-side" id="bs-side">
+      <nav class="bs-side-nav" aria-label="Navigation">${body}</nav>
+      <div class="bs-side-foot">
+        <button type="button" class="bs-side-i bs-side-pin" id="bs-rail-pin" onclick="rcNav()"
+          aria-label="Collapse or expand the menu" data-tip="Expand / collapse · ⌘B">
+          <span class="bs-side-ic">${icon('pin')}</span><span class="bs-side-lb">Collapse</span></button>
+      </div>
+    </aside>`;
+}
+
 /**
  * The four places a phone goes, plus Index.
  *
@@ -682,6 +738,11 @@ function head(title, opts = {}) {
         var t = localStorage.getItem('zwin_theme');
         document.documentElement.setAttribute('data-theme', t === 'night' ? 'night' : 'day');
       } catch (e) { document.documentElement.setAttribute('data-theme', 'day'); }
+      // Same for the sidebar: collapsed is remembered, and paints collapsed
+      // rather than expanding-then-snapping-shut on load. Expanded is default.
+      try {
+        if (localStorage.getItem('rc_nav') === 'collapsed') document.documentElement.classList.add('rc-collapsed');
+      } catch (e) {}
     </script>`;
 }
 
@@ -801,11 +862,14 @@ function layout(title, body, opts = {}) {
   return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
     <body class="bs">
       ${masthead(path)}
-      ${navRow(path)}
-      ${subNav(path)}
-      ${openWarning()}${viewerNote()}
-      <main class="bs-main">${body}</main>
-      ${bsFooter()}
+      <div class="bs-shell">
+        ${sideNav(path)}
+        <div class="bs-canvas">
+          ${openWarning()}${viewerNote()}
+          <main class="bs-main">${body}</main>
+          ${bsFooter()}
+        </div>
+      </div>
       ${bottomBar(path)}
       <script>
         (function () {
@@ -857,60 +921,17 @@ function layout(title, body, opts = {}) {
       </script>
       <script>${searchScript()}</script>
       <script>
-        // Pin / unpin the rail, remembered between sessions.
-        // One entry point for the arrow, the hamburger and the keyboard, so the
-        // three cannot drift into behaving differently. On a phone the sidebar
-        // is an overlay drawer; on a desktop it pins and reflows.
-        function rcSide() {
-          if (window.matchMedia('(max-width: 820px)').matches) {
-            document.body.classList.toggle('nav-open');
-            return;
-          }
-          rcPin();
-        }
-        document.addEventListener('keydown', function (e) {
-          if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); rcSide(); }
-        });
-
-        function rcPin() {
-          var root = document.documentElement;
-          var on = root.classList.toggle('side-pinned');
-          try { localStorage.setItem('rc_side', on ? 'pinned' : 'rail'); } catch (e) {}
-          if (on) root.classList.remove('no-peek');   // pinning ends the suppression
-          if (!on) {
-            // The pointer is still over the rail after the click, so hover
-            // would immediately re-open it. Hold the peek off until the mouse
-            // genuinely leaves, or the toggle looks like it did nothing.
-            root.classList.add('no-peek');
-            var sb = document.querySelector('.sidebar');
-            sb.addEventListener('mouseleave', function off() {
-              root.classList.remove('no-peek');
-              sb.removeEventListener('mouseleave', off);
-            });
-          }
-        }
-        // Highlight the active nav link, and let the page borrow its accent so
-        // each screen reads as its own place rather than another blue page.
+        // The sidebar: collapse / expand, remembered. The active page and its
+        // accent bar are CSS off the .on class, so there is nothing else to wire.
         (function () {
-          var p = location.pathname;
-          var best = null;
-          document.querySelectorAll('.side-link').forEach(function (a) {
-            var href = a.getAttribute('href');
-            // Longest matching prefix wins, so /c/recurring/3 still lights up
-            // Recurring tasks rather than falling back to Dashboard.
-            if (p === href || (href !== '/' && p.indexOf(href) === 0)) {
-              if (!best || href.length > best.getAttribute('href').length) best = a;
-            }
+          var root = document.documentElement;
+          window.rcNav = function () {
+            var on = root.classList.toggle('rc-collapsed');
+            try { localStorage.setItem('rc_nav', on ? 'collapsed' : 'expanded'); } catch (e) {}
+          };
+          document.addEventListener('keydown', function (e) {
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); rcNav(); }
           });
-          if (best) {
-            best.classList.add('active');
-            var ac = best.style.getPropertyValue('--ac');
-            if (ac) {
-              var r = document.documentElement.style;
-              r.setProperty('--accent', ac.trim());
-              r.setProperty('--accent-soft', ac.trim() + '14');
-            }
-          }
         })();
         // Copy each column's heading onto its cells so tables can restack as
         // cards on a phone (see the mobile table rules in styles.css). Doing it
@@ -930,7 +951,7 @@ function layout(title, body, opts = {}) {
           });
         })();
       </script>
-      ${bandScript}${swScript}${freshScript}
+      ${swScript}${freshScript}
     </body></html>`;
 }
 
