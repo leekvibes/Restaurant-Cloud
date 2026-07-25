@@ -732,6 +732,21 @@ function head(title, opts = {}) {
     <meta name="apple-mobile-web-app-status-bar-style" content="${staff ? 'default' : 'default'}">
     <meta name="apple-mobile-web-app-title" content="${staff ? 'Portal' : APP_NAME}">
     <meta name="mobile-web-app-capable" content="yes">
+    <style>
+      /* The launch splash: the logo on the brand ground, shown only while the
+         class below is set (first open as an installed app). Its ground matches
+         the manifest background_color, so it continues the OS launch screen
+         rather than flashing a new colour. */
+      #rc-splash { display: none; }
+      html.rc-splash #rc-splash {
+        display: flex; align-items: center; justify-content: center;
+        position: fixed; inset: 0; z-index: 2147483000; background: #f4ead9;
+        transition: opacity .45s ease;
+      }
+      html.rc-splash #rc-splash.rc-out { opacity: 0; pointer-events: none; }
+      #rc-splash img { width: 46vmin; max-width: 240px; height: auto; }
+      @media (prefers-reduced-motion: reduce) { html.rc-splash #rc-splash { transition: none; } }
+    </style>
     <script>
       // Before first paint, or the page flashes the wrong theme on every load.
       try {
@@ -742,6 +757,16 @@ function head(title, opts = {}) {
       // rather than expanding-then-snapping-shut on load. Expanded is default.
       try {
         if (localStorage.getItem('rc_nav') === 'collapsed') document.documentElement.classList.add('rc-collapsed');
+      } catch (e) {}
+      // The branded splash: only when opened as an installed app (standalone),
+      // and only once per launch — never on an ordinary in-browser page load,
+      // and never on every navigation. Set before paint so it covers the boot.
+      try {
+        var standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+        if (standalone && !sessionStorage.getItem('rc_splashed')) {
+          sessionStorage.setItem('rc_splashed', '1');
+          document.documentElement.classList.add('rc-splash');
+        }
       } catch (e) {}
     </script>`;
 }
@@ -794,6 +819,28 @@ const bandScript = `<script>
 </script>`;
 
 const swScript = `<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>`;
+
+// The launch splash — the restaurant's mark on the brand ground. Shown only
+// when the head script set html.rc-splash (first open as an installed app). The
+// same mark for both apps, since it is the owner's logo they asked to see, not
+// the software's. It holds briefly so the logo registers, then fades to reveal
+// the page underneath.
+const splashHtml = `<div id="rc-splash" aria-hidden="true"><img src="/static/palm-icon-512.png" alt="${esc(RESTAURANT)}"></div>`;
+const splashScript = `<script>
+(function () {
+  var root = document.documentElement;
+  if (!root.classList.contains('rc-splash')) return;
+  var el = document.getElementById('rc-splash');
+  if (!el) return;
+  function done() {
+    el.classList.add('rc-out');
+    setTimeout(function () { root.classList.remove('rc-splash'); if (el.parentNode) el.parentNode.removeChild(el); }, 500);
+  }
+  function go() { setTimeout(done, 850); }
+  if (document.readyState === 'complete') go();
+  else window.addEventListener('load', go);
+})();
+</script>`;
 
 // A build stamp that changes whenever the code does. Staff keep the tips page
 // on a home screen for months, so a copy can outlive a change to the form and
@@ -856,11 +903,12 @@ function layout(title, body, opts = {}) {
   if (opts.bare) {
     // No .wrap here — the staff screen owns the full viewport.
     return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
-      <body class="bare">${body}${swScript}${freshScript}</body></html>`;
+      <body class="bare">${splashHtml}${body}${swScript}${freshScript}${splashScript}</body></html>`;
   }
   const path = currentPath();
   return `<!doctype html><html lang="en"><head>${head(title, opts)}</head>
     <body class="bs">
+      ${splashHtml}
       ${masthead(path)}
       <div class="bs-shell">
         ${sideNav(path)}
@@ -951,7 +999,7 @@ function layout(title, body, opts = {}) {
           });
         })();
       </script>
-      ${swScript}${freshScript}
+      ${swScript}${freshScript}${splashScript}
     </body></html>`;
 }
 

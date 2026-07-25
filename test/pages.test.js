@@ -886,23 +886,29 @@ test('a closed service is answered, not outstanding', async () => {
   assert.match(await page(), /Needs sales entry/, 'reopening puts it back');
 });
 
-test('the app icon is the wordmark, white on black', () => {
-  // Asserted on the bytes, not on a filename: a PNG that is not actually
-  // black would sail past a check that only looked for the file.
+test('both apps launch on the cream the logo sits on', () => {
+  // Asserted on the bytes, not a filename: a PNG that is not the declared size
+  // would sail past a check that only looked for the file.
   const buf = fs.readFileSync(path.join(__dirname, '..', 'public', 'icon-512.png'));
   assert.strictEqual(buf.slice(1, 4).toString(), 'PNG', 'it is a PNG');
   const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20);
   assert.deepStrictEqual([w, h], [512, 512], 'at the declared size');
 
-  // Each app's launch splash matches the page it opens to, so there is no
-  // flash of the wrong colour before the first paint: the manager app is dark,
-  // the staff portal is the cream it renders on.
-  const splash = { 'manifest.webmanifest': '#000000', 'manifest-tips.webmanifest': '#f4ead9' };
-  for (const [f, bg] of Object.entries(splash)) {
+  // Both apps' launch ground is the cream the branded splash paints onto, so
+  // the OS launch screen continues into the logo splash without a colour flash.
+  for (const f of ['manifest.webmanifest', 'manifest-tips.webmanifest']) {
     const m = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'));
-    assert.strictEqual(m.background_color, bg, `${f}: the splash matches the page it opens to`);
+    assert.strictEqual(m.background_color, '#f4ead9', `${f}: launches on the splash cream`);
     assert.ok(m.icons.some((i) => i.purpose === 'maskable'), `${f}: has a maskable icon`);
   }
+});
+
+test('the launch splash is the logo, shown only for an installed app', () => {
+  const views = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.js'), 'utf8');
+  // The mark is painted, gated on standalone display mode, once per launch.
+  assert.match(views, /id="rc-splash"[\s\S]*?palm-icon-512\.png/, 'the splash shows the logo');
+  assert.match(views, /display-mode:\s*standalone/, 'only when opened as an installed app');
+  assert.match(views, /sessionStorage\.(get|set)Item\('rc_splashed'/, 'once per launch, not every navigation');
 });
 
 test('the manager app and the staff portal are two separate installs', async () => {
