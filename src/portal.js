@@ -280,14 +280,30 @@ function notify(kind, title, { body = null, employeeId = null, href = null } = {
 // one env var the deploy has to set (VAPID_PRIVATE_KEY). With no private key,
 // push is simply off and the in-app "What's new" feed carries on alone.
 const webpush = require('web-push');
-const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY
-  || 'BDBikVKwVdR0sS6xLWv6wODL4D7Vj1jFxz_bOgFVwnNzhWLilYGKmfb2XpYvB6R7WmeaYhV0uPyt7dl1EDSTihE';
+const crypto = require('crypto');
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || '';
+// Derive the public key from the private, so the key the client subscribes with
+// can never disagree with the key the server signs with (that mismatch is a
+// silent 403 and the #1 way push "just doesn't arrive"). An explicit
+// VAPID_PUBLIC_KEY still wins if set; otherwise we compute it, and only fall
+// back to a committed default when there is no private key at all.
+function derivePublic(priv) {
+  try {
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.setPrivateKey(Buffer.from(priv, 'base64url'));
+    return ecdh.getPublicKey().toString('base64url');
+  } catch { return ''; }
+}
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY
+  || (VAPID_PRIVATE && derivePublic(VAPID_PRIVATE))
+  || 'BDBikVKwVdR0sS6xLWv6wODL4D7Vj1jFxz_bOgFVwnNzhWLilYGKmfb2XpYvB6R7WmeaYhV0uPyt7dl1EDSTihE';
 const pushOn = !!VAPID_PRIVATE;
 if (pushOn) {
   try {
     webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:notifications@zwin.app', VAPID_PUBLIC, VAPID_PRIVATE);
-  } catch (e) { /* a malformed key pair leaves push off rather than crashing boot */ }
+  } catch (e) { console.error('[push] bad VAPID key pair — push disabled:', e && e.message); }
+} else {
+  console.warn('[push] VAPID_PRIVATE_KEY not set — web push is off (in-app notifications still work)');
 }
 
 /** Store (or refresh) a device's push subscription for a staff member. */
@@ -317,8 +333,13 @@ function sendPush(employeeId, payload) {
     try { sub = JSON.parse(row.sub); } catch { continue; }
     try {
       webpush.sendNotification(sub, data).catch((err) => {
-        if (err && (err.statusCode === 404 || err.statusCode === 410)) {
+        const code = err && err.statusCode;
+        if (code === 404 || code === 410) {
           try { q.delPush.run(row.endpoint); } catch { /* cleaned next time */ }
+        } else {
+          // A real failure (403 key mismatch, 401 subject, 4xx/5xx) — log it so
+          // "subscribed but no banner" is never invisible again.
+          console.error('[push] send failed', code || '', err && err.body ? String(err.body).slice(0, 200) : (err && err.message) || '');
         }
       });
     } catch { /* a malformed subscription — skip it, never throw into the caller */ }
