@@ -1235,9 +1235,11 @@ app.get('/shifts', (req, res) => {
         }
         var si = document.getElementById('ssearch');
         if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
-        document.querySelectorAll('.fchip').forEach(function (b) {
+        // The chips carry the class bs-fchip; this listener used to look for
+        // .fchip and bound nothing, so every status/service filter was dead.
+        document.querySelectorAll('.bs-fchip').forEach(function (b) {
           b.addEventListener('click', function () {
-            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
+            document.querySelectorAll('.bs-fchip').forEach(function (x) { x.classList.remove('on'); });
             b.classList.add('on');
             mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
           });
@@ -1247,16 +1249,27 @@ app.get('/shifts', (req, res) => {
 });
 
 app.get('/shifts/new', (req, res) => {
+  // The POST bounces back here with ?err=1&msg=… when the date or service is
+  // missing; show it rather than swallowing it. esc() because it round-trips
+  // through the query string.
+  const err = req.query.err
+    ? `<div class="bs-notice-bar crit"><span class="bs-notice-k">Hold on</span>${esc(req.query.msg || 'Pick a date and service.')}</div>`
+    : '';
   const body = `
-    <a class="back" href="/shifts">← Shifts</a>
+    <a class="bs-back" href="/shifts">← Shifts</a>
     <h1>Log a shift</h1>
-    <p class="sub">Pick the day and which service (café or dinner). You'll enter sales, tips &amp; hours next.</p>
-    <form method="post" action="/shifts" class="card form">
-      <label>Date <input type="date" name="date" required></label>
-      <label>Service
+    <p class="bs-lede">Pick the day and which service. You'll enter sales, tips &amp; hours on the next screen.</p>
+    ${err}
+    <form method="post" action="/shifts" class="bs-newshift">
+      <label class="bs-field">
+        <span class="bs-field-l">Date</span>
+        <input type="date" name="date" required>
+      </label>
+      <label class="bs-field">
+        <span class="bs-field-l">Service</span>
         <select name="daypart">${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}</select>
       </label>
-      <button class="btn btn-primary" type="submit">Start</button>
+      <button class="bs-btn bs-newshift-go" type="submit">Start shift →</button>
     </form>`;
   res.send(layout('Log a shift', body));
 });
@@ -2044,73 +2057,124 @@ app.get('/shifts/:id/results', (req, res) => {
   // everybody — and showing the address inline is how you spot the typo that
   // caused it in the first place.
   const emailOf = new Map([...inp.servers, ...inp.support].map((p) => [p.employeeId, p.email]));
+  // The send row lives on each person's card: their address (so a typo is
+  // caught by eye), a preview of the exact email, and a per-person send — one
+  // bounce shouldn't mean re-sending to the whole shift. On a phone the actions
+  // wrap to a full-width, thumb-sized row (see .bs-pay-send in broadsheet.css).
   const sendRow = (empId, name) => {
     const to = emailOf.get(empId);
     if (!to) {
-      return `<div class="card-send card-send-none">
+      return `<div class="bs-pay-send bs-pay-send-none">
         <span title="Add an address under Staff">No email on file</span>
-        <a class="btn btn-sm" href="/employees">Add it</a>
+        <a class="bs-pay-prev" href="/employees">Add it</a>
       </div>`;
     }
-    return `<div class="card-send">
-      <span class="send-to" title="${esc(to)}">${esc(to)}</span>
-      <span class="send-acts">
-        <a class="link" href="/shifts/${sh.id}/email/${empId}" target="_blank">Preview</a>
+    return `<div class="bs-pay-send">
+      <span class="bs-pay-to" title="${esc(to)}">${esc(to)}</span>
+      <span class="bs-pay-acts">
+        <a class="bs-pay-prev" href="/shifts/${sh.id}/email/${empId}" target="_blank">Preview</a>
         <form method="post" action="/shifts/${sh.id}/send-one" style="margin:0"
               onsubmit="return confirm('Send ${esc(name).replace(/'/g, "\\'")} their summary again?')">
           <input type="hidden" name="employee_id" value="${empId}">
-          <button class="link" type="submit">Send</button>
+          <button class="bs-pay-sendbtn" type="submit">Send</button>
         </form>
       </span>
     </div>`;
   };
 
   const serverCards = r.servers.map((p) => `
-    <div class="card">
-      <div class="card-head"><strong>${esc(p.name)}</strong><span class="pill">server · ${p.hours}h</span></div>
-      <div class="kv"><span>Total tips</span><b>${money(p.totalTips)}</b></div>
-      <div class="kv sub"><span>tip-out</span><span>-${money(p.tipoutTotal)}</span></div>
-      <div class="kv total"><span>Keeps</span><b class="pos">${money(p.tipsKept)}</b></div>
+    <article class="bs-pay">
+      <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">server · ${p.hours}h</span></div>
+      <dl class="bs-pay-figs">
+        <div><dt>Total tips</dt><dd>${money(p.totalTips)}</dd></div>
+        <div class="bs-pay-out"><dt>Tip-out</dt><dd>-${money(p.tipoutTotal)}</dd></div>
+        <div class="bs-pay-keep"><dt>Keeps</dt><dd>${money(p.tipsKept)}</dd></div>
+      </dl>
       ${sendRow(p.employeeId, p.name)}
-    </div>`).join('');
+    </article>`).join('');
 
   const poolLbl = { weekly_cash: 'Pool (weekly cash)', paycheck: 'Pool (paycheck)', nightly_cash: 'Pool (cash tonight)' };
   const supportCards = r.support.map((p) => {
     const poolLines = Object.keys(p.poolShares || {}).filter((k) => p.poolShares[k])
-      .map((k) => `<div class="kv"><span>${poolLbl[k] || 'Pool'}</span><b>${money(p.poolShares[k])}</b></div>`).join('');
+      .map((k) => `<div><dt>${poolLbl[k] || 'Pool'}</dt><dd>${money(p.poolShares[k])}</dd></div>`).join('');
     return `
-    <div class="card">
-      <div class="card-head"><strong>${esc(p.name)}</strong><span class="pill">${p.role} · ${p.hours}h</span></div>
-      ${p.tipShare ? `<div class="kv"><span>Tip-out (paycheck)</span><b>${money(p.tipShare)}</b></div>` : ''}
-      ${poolLines}
-      <div class="kv total"><span>Total</span><b class="pos">${money(p.tipShare + p.poolShare)}</b></div>
+    <article class="bs-pay">
+      <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">${esc(p.role)} · ${p.hours}h</span></div>
+      <dl class="bs-pay-figs">
+        ${p.tipShare ? `<div><dt>Tip-out (paycheck)</dt><dd>${money(p.tipShare)}</dd></div>` : ''}
+        ${poolLines}
+        <div class="bs-pay-keep"><dt>Total</dt><dd>${money(p.tipShare + p.poolShare)}</dd></div>
+      </dl>
       ${sendRow(p.employeeId, p.name)}
-    </div>`;
+    </article>`;
   }).join('');
-
-  const potTiles = Object.keys(r.pots).filter((role) => r.pots[role]).map((role) =>
-    `<div class="pot"><span>${role} pool</span><b>${money(r.pots[role])}</b></div>`).join('');
-  const poolTile = r.pool.total ? `<div class="pot"><span>Jar + to-go pool</span><b>${money(r.pool.total)}</b></div>` : '';
 
   const mailReady = mailStatus().ready;
   const totalTips = r.reconciliation.totalTipsCollected;
+  const peopleCount = r.servers.length + r.support.length;
+
+  // Header verdict + status, matching the entry sheet so the two read as one.
+  const todayStr = isoDate(startOfToday());
+  const dayLbl = sh.date === todayStr ? 'Today' : cashDayLabel(sh.date);
+  const verdict = `${esc(dayLbl)} · ${esc(dp(sh.daypart))} — <span class="${warn.length ? 'warn' : 'ok'}">review &amp; send.</span>`;
+  const statusWord = sh.status === 'emailed' ? 'Emails sent'
+    : warn.length ? 'Needs review'
+    : mailReady ? 'Ready to send' : 'Preview mode';
+  const statusCls = sh.status === 'emailed' ? 'ok' : warn.length ? 'warn' : 'ready';
+  const statusLine = `${peopleCount} on shift · ${warn.length ? `${warn.length} to sort out` : 'nothing outstanding'}`
+    + (mailReady ? '' : ' — mail not connected, previews only');
+  const sendLabel = mailReady ? 'Send emails to all' : 'Generate previews';
+
+  // Blockers pulled to the top, before the money, so nothing gets sent over a
+  // known problem. Same panel the entry sheet uses — warnings in red, notes in
+  // blue — and a green all-clear when there is nothing to fix.
+  const attention = (warn.length || notes.length) ? `
+    <section class="attn${warn.length ? '' : ' attn-soft'}">
+      <div class="attn-h">${icon(warn.length ? 'incidents' : 'expirations')}
+        <span>${warn.length ? `Before you send — ${warn.length} thing${warn.length === 1 ? '' : 's'} to sort out` : 'Worth knowing'}</span></div>
+      <ul class="attn-list">
+        ${warn.map((x) => `<li class="attn-bad">${esc(x)}</li>`).join('')}
+        ${notes.map((x) => `<li class="attn-note">${esc(x)}</li>`).join('')}
+      </ul>
+    </section>`
+    : `<section class="attn attn-ok">
+        <div class="attn-h">${icon('policy')}<span>Ready to send</span></div>
+        <p>Everyone's figures are in and reconciled, and nobody is missing an email. Send whenever you're ready.</p>
+      </section>`;
+
+  const sCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
   const body = `
     ${flash(req)}
-    <a class="back" href="/shifts/${sh.id}">← Back to entry</a>
-    <div class="page-head"><div><h1>${sh.date} · ${dp(sh.daypart)}</h1><p class="sub">Tip-out results — review, then send everyone their email.</p></div>
-      <form method="post" action="/shifts/${sh.id}/send" style="margin:0"><button class="btn btn-primary" type="submit">${mailReady ? 'Send emails to all' : 'Generate previews'}</button></form></div>
-    ${warn.length ? `<div class="flash flash-warn"><div><b>Before you send:</b><ul>${warn.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
-    ${notes.length ? `<div class="flash flash-info"><div><ul>${notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div></div>` : ''}
-    <div class="stats">
-      <div class="stat"><div class="stat-label">Total tips collected</div><div class="stat-value">${money(totalTips)}</div></div>
-      ${Object.keys(r.pots).filter((role) => r.pots[role]).map((role) => `<div class="stat"><div class="stat-label">${role} pool</div><div class="stat-value">${money(r.pots[role])}</div></div>`).join('')}
-      ${r.pool.total ? `<div class="stat"><div class="stat-label">Jar + to-go pool</div><div class="stat-value">${money(r.pool.total)}</div></div>` : ''}
-    </div>
-    <h2>Servers</h2><div class="cards">${serverCards || '<p class="muted">None.</p>'}</div>
-    <h2>Support</h2><div class="cards">${supportCards || '<p class="muted">None.</p>'}</div>
-    <div class="send-bar">
-      <form method="post" action="/shifts/${sh.id}/send" style="margin:0"><button class="btn btn-primary" type="submit">${mailReady ? 'Send emails to all staff' : 'Generate email previews'}</button></form>
-      <span class="muted">${mailReady ? 'Sends now to everyone with an email.' : 'No mail configured yet — this writes preview files you can open.'}</span>
+    <div class="bs-page bs-sheet">
+      <a class="bs-back" href="/shifts/${sh.id}">← Back to entry</a>
+      <div class="bs-head">
+        <div>
+          <h1 class="bs-headline">${verdict}</h1>
+          <p class="bs-status"><span class="bs-status-w ${statusCls}">${esc(statusWord.toUpperCase())}</span> ${esc(statusLine)}</p>
+        </div>
+        <form method="post" action="/shifts/${sh.id}/send" class="bs-sendform"><button class="bs-btn" type="submit">${sendLabel}</button></form>
+      </div>
+
+      ${attention}
+
+      <div class="bs-strip">
+        ${sCell('Total tips collected', money(totalTips), 'card + cash')}
+        ${Object.keys(r.pots).filter((role) => r.pots[role]).map((role) => sCell(`${role} pool`, money(r.pots[role]), 'shared out')).join('')}
+        ${r.pool.total ? sCell('Jar + to-go pool', money(r.pool.total), `${money(r.pool.cash)} cash · ${money(r.pool.togoCard)} card`) : ''}
+      </div>
+
+      <div class="bs-sec-h"><span class="bs-kicker">Servers · ${r.servers.length}</span></div>
+      <div class="bs-pays">${serverCards || '<p class="bs-clear">Nobody on this shift.</p>'}</div>
+
+      <div class="bs-sec-h"><span class="bs-kicker">Support · ${r.support.length}</span></div>
+      <div class="bs-pays">${supportCards || '<p class="bs-clear">Nobody on this shift.</p>'}</div>
+
+      <div class="bs-sendbar">
+        <form method="post" action="/shifts/${sh.id}/send" class="bs-sendform"><button class="bs-btn bs-btn-lg" type="submit">${mailReady ? 'Send emails to all staff' : 'Generate email previews'}</button></form>
+        <p class="bs-sendbar-note">${mailReady ? 'Sends now to everyone with an email.' : 'No mail configured yet — this writes preview files you can open.'}</p>
+      </div>
     </div>`;
   res.send(layout('Results', body));
 });

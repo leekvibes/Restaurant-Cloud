@@ -534,6 +534,22 @@ body {
 :root[data-theme="night"] .bs .panel,
 :root[data-theme="night"] .bs .pcard { background: var(--surface); }
 
+/* The attention panel (shift entry + review/send, and one costing page) paints
+   itself with light-mode hex gradients and dark text — mint-on-cream, rose-on-
+   cream. On a dark page that comes out as a washed band with barely-legible
+   body copy, which is the worst place for it: it is where the blockers live. In
+   night mode, drop the gradient for a faint colour wash and lift the text so a
+   warning still reads at a glance. Colour still carries the meaning. */
+:root[data-theme="night"] .attn {
+  background: rgba(220, 38, 38, .1); border-color: rgba(248, 113, 113, .5); color: #fca5a5;
+}
+:root[data-theme="night"] .attn-soft {
+  background: rgba(59, 130, 246, .1); border-color: rgba(96, 165, 250, .5); color: #93c5fd;
+}
+:root[data-theme="night"] .attn-ok {
+  background: rgba(16, 185, 129, .1); border-color: rgba(52, 211, 153, .5); color: #6ee7b7;
+}
+
 /* The old shell assumed a rail on the left and a topbar above. Both are gone. */
 .bs .app { display: block; }
 .bs .sidebar, .bs .topbar, .bs .scrim { display: none !important; }
@@ -791,18 +807,74 @@ body {
   .bs-open { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
-  /* The ledger keeps its shape but sheds the columns a phone cannot carry.
-     Nothing is lost — hours and staff are on the shift itself.
-     Scoped to .bs-shiftrow, not to the bare .bs-lr it is built on: payroll's
-     roster and drill-down are .bs-lr too, and this fold was reaching them and
-     hiding three columns their own grids had already accounted for. */
-  .bs-shifthead, .bs-shiftrow { grid-template-columns: 62px 1fr 92px 100px 20px; }
-  .bs-shifthead > :nth-child(5), .bs-shifthead > :nth-child(6), .bs-shifthead > :nth-child(7),
-  .bs-shiftrow > :nth-child(5), .bs-shiftrow > :nth-child(6), .bs-shiftrow > :nth-child(7) { display: none; }
   .bs-month-tot { flex-basis: 100%; margin-left: 0; }
   .bs-month-h, .bs-month-old > summary { flex-wrap: wrap; gap: 4px 12px; }
   .bs-strip-c { flex-basis: 100%; }
   .bs-strip-c + .bs-strip-c { border-left: 0; border-top: 1px solid var(--rule); padding-top: 14px; }
+
+  /* ---- the ledger becomes a stack of tappable cards -----------------------
+     A phone reads a shift as a task, not a table row. Every figure the desktop
+     row carries stays — sales, tips, hours, staff — but each is labelled and
+     sits in its own cell instead of being hidden to fit. Date, service and
+     status lead; a coloured left edge makes "needs action" jump out; the whole
+     card is one big tap into the shift. Scoped to .bs-shiftrow so payroll's own
+     .bs-lr rows are untouched. */
+  .bs-shifthead { display: none; }               /* the cards label themselves */
+  .bs-week { display: grid; gap: 10px; }
+  .bs-shiftrow {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px 10px; align-items: start;
+    padding: 14px; border: 1px solid var(--rule); border-radius: 0;
+    background: var(--surface); border-left: 3px solid var(--rule);
+  }
+  .bs-shiftrow:hover { background: var(--surface); }
+  /* Row one: date · service · status */
+  .bs-shiftrow > .bs-lr-d  { grid-column: 1; grid-row: 1; align-self: center; font-size: 12.5px; }
+  .bs-shiftrow > .bs-lr-s  { grid-column: 2 / 4; grid-row: 1; align-self: center; font-size: 16px; }
+  .bs-shiftrow > .bs-lr-st {
+    grid-column: 4; grid-row: 1; justify-self: end; align-self: center;
+    border: 1px solid currentColor; padding: 3px 7px; font-size: 9px; border-radius: 2px;
+    white-space: nowrap;
+  }
+  /* Row two: the four figures, each a labelled mini-stat, left-aligned */
+  .bs-shiftrow > .bs-lr-n { grid-row: 2; text-align: left; font-size: 15px; color: var(--headline); }
+  .bs-shiftrow > :nth-child(4) { grid-column: 1; }
+  .bs-shiftrow > :nth-child(5) { grid-column: 2; }
+  .bs-shiftrow > :nth-child(6) { grid-column: 3; }
+  .bs-shiftrow > :nth-child(7) { grid-column: 4; }
+  .bs-shiftrow > .bs-lr-n::before {
+    display: block; font-family: var(--mono); font-size: 9px; font-weight: 500;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px;
+  }
+  .bs-shiftrow > :nth-child(4)::before { content: 'Sales'; }
+  .bs-shiftrow > :nth-child(5)::before { content: 'Tips'; }
+  .bs-shiftrow > :nth-child(6)::before { content: 'Hours'; }
+  .bs-shiftrow > :nth-child(7)::before { content: 'Staff'; }
+  .bs-shiftrow .bs-lr-miss { font-weight: 600; margin-top: 1px; }
+  .bs-shiftrow > .bs-lr-go { display: none; }    /* the whole card is the target */
+
+  /* The coloured left edge, so what needs doing is obvious before you read a
+     word: red = review, blue = ready to send, green = open now, grey = empty.
+     Sent shifts sit quiet — done is not something to draw the eye. */
+  .bs-shiftrow[data-status="review"] { border-left-color: var(--danger); }
+  .bs-shiftrow[data-status="ready"]  { border-left-color: var(--accent); }
+  .bs-shiftrow[data-status="open"]   { border-left-color: var(--positive); }
+  .bs-shiftrow[data-status="empty"]  { border-left-color: var(--faint); }
+  .bs-shiftrow[data-status="sent"]   { border-left-color: var(--rule); }
+
+  /* Filters as real tappable pills, wrapping so every one is visible at once,
+     and the search on its own full-width line (16px, so focusing it never
+     zooms the page). The active filter is a filled pill — unmistakable. */
+  .bs-filter { gap: 8px; padding: 14px 0 4px; }
+  .bs-filter-l { display: none; }
+  .bs-filter-sp { display: none; }
+  .bs-fchip {
+    border: 1px solid var(--rule); border-radius: 999px !important;
+    padding: 8px 14px; min-height: 36px; font-size: 13px; color: var(--secondary);
+  }
+  .bs-fchip.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .bs-ytab { border: 1px solid var(--rule); border-radius: 999px; padding: 8px 12px; }
+  .bs-search-inline { order: 99; flex-basis: 100%; min-width: 0; padding: 11px 12px; font-size: 16px; }
 }
 
 /* ===========================================================================
@@ -1082,53 +1154,84 @@ body {
 .bs-toolpanes .bs-x[open] { border-bottom: 1px solid var(--field-border); padding-bottom: 6px; }
 
 @media (max-width: 900px) {
-  /* Kitchen and coffee are the point of this table, so role and wage go
-     before they do — both are on the person's own record.
-     Positions, applied to head and row alike: the two are the same eight
-     cells in the same order (nine with alcohol), so anything that hides a
-     column has to hide it in both or the headings stop naming the figures
-     underneath them.
+  /* Edit-form controls fill the width on tablet and phone alike. 16px so
+     focusing a field never triggers the iOS zoom that yanks the layout. */
+  .bs-pill input, .bs-pill select { width: 100%; font-size: 16px; }
+  .bs-pill { flex: 1 1 132px; }
+  .bs-inline { gap: 10px 8px; }
+  .bs-tool-danger { margin-left: 0; }
+}
+
+@media (min-width: 761px) and (max-width: 900px) {
+  /* Tablet: the ledger keeps its shape but sheds the columns the width can't
+     carry — the original fold, now scoped to the tablet band so the phone can
+     do something better below.
                 1        2      3        4       5         6      7      8/9
      plain:   Name     Role   Kitchen  Coffee  Tips      Hrs    Wage   Edit
      has-alc: Name     Role   Kitchen  Coffee  Alcohol   Tips   Hrs    Wage  Edit */
-  /* Scoped to .bs-staffhead / .bs-staffrow, not to the .bs-shead / .bs-sr they
-     are built on. The sales day ledger is .bs-shead + .bs-sr too, and inside a
-     .bs-srows container — so these folds were reaching it and blanking its
-     Service and Edit columns, leaving two empty tracks in its grid. */
-  /* The alcohol variant is named here too. A media query adds no specificity,
-     so `.bs-staffhead.has-alc` in the base section (two classes) outranks a
-     bare `.bs-staffhead` in this block (one) and the wide nine-column track
-     list survives onto the phone — six cells spread across nine columns. */
   .bs-staffhead, .bs-staffrow,
   .bs-staffhead.has-alc, .has-alc .bs-staffrow {
     grid-template-columns: 1fr 62px 62px 50px 40px;
   }
-
-  /* A phone keeps what the request is about: Name, Card, Cash, Hrs, Edit. The
-     sales columns fold — they are on the expanded row and on the desktop — so
-     the two tip figures have room to sit side by side rather than overflowing.
-     Card/Cash are positions 5·6 without alcohol and 6·7 with it, so the two
-     variants fold different cells to leave the same five standing.
-
-     no alc (9): keep 1 Name · 5 Card · 6 Cash · 7 Hrs · 9 Edit
-                 fold 2 Role · 3 Kitchen · 4 Coffee · 8 Wage */
   .bs-staffhead:not(.has-alc) > :nth-child(2), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(2),
   .bs-staffhead:not(.has-alc) > :nth-child(3), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(3),
   .bs-staffhead:not(.has-alc) > :nth-child(4), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(4),
   .bs-staffhead:not(.has-alc) > :nth-child(8), .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(8) { display: none; }
-
-  /* with alc (10): keep 1 Name · 6 Card · 7 Cash · 8 Hrs · 10 Edit
-                    fold 2 Role · 3 Kitchen · 4 Coffee · 5 Alcohol · 9 Wage */
   .bs-staffhead.has-alc > :nth-child(2), .has-alc .bs-staffrow > :nth-child(2),
   .bs-staffhead.has-alc > :nth-child(3), .has-alc .bs-staffrow > :nth-child(3),
   .bs-staffhead.has-alc > :nth-child(4), .has-alc .bs-staffrow > :nth-child(4),
   .bs-staffhead.has-alc > :nth-child(5), .has-alc .bs-staffrow > :nth-child(5),
   .bs-staffhead.has-alc > :nth-child(9), .has-alc .bs-staffrow > :nth-child(9) { display: none; }
+}
 
-  .bs-pill input, .bs-pill select { width: 100%; }
-  .bs-pill { flex: 1 1 132px; }
-  .bs-inline { gap: 10px 8px; }
-  .bs-tool-danger { margin-left: 0; }
+@media (max-width: 760px) {
+  /* Phone: each person on the shift becomes a labelled card, not a squeezed
+     ledger row. Name and role lead, Edit sits top-right, and every figure the
+     desktop row carries — Kitchen, Coffee, Alcohol, Card, Cash, Hours, Wage —
+     stays, each in its own labelled cell. Nothing is hidden; it is arranged.
+     A left edge turns amber the moment the row still needs something. The whole
+     summary is still the tap target that opens the same edit form. */
+  .bs-staffhead { display: none; }                 /* the cells label themselves */
+  .bs-srows { display: grid; gap: 10px; }
+  .bs-srow { border: 1px solid var(--rule); }
+  .bs-srow[open] { background: var(--surface); }
+  .bs-staffrow, .has-alc .bs-staffrow {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px 10px; padding: 14px 14px 4px; align-items: start;
+    border-left: 3px solid var(--rule);
+  }
+  .bs-staffrow.warn { border-left-color: var(--warning); }
+  .bs-staffrow > .bs-sr-n { grid-column: 1 / 4; grid-row: 1; font-size: 15px; }
+  .bs-staffrow > .bs-sr-e { grid-column: 4; grid-row: 1; justify-self: end; align-self: start; font-size: 13px; }
+  .bs-staffrow > .bs-sr-r { grid-column: 1 / -1; grid-row: 2; font-size: 12.5px; margin-bottom: 2px; }
+  /* Figures flow into the rows below (rows 1–2 are occupied, so auto-placement
+     drops them onto row 3+), left-aligned and labelled. */
+  .bs-staffrow > .bs-sr-f { text-align: left; font-size: 14px; }
+  .bs-staffrow > .bs-sr-f::before {
+    display: block; font-family: var(--mono); font-size: 8.5px; font-weight: 500;
+    letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px;
+  }
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(3)::before { content: 'Kitchen'; }
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(4)::before { content: 'Coffee'; }
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(5)::before { content: 'Card tips'; }
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(6)::before { content: 'Cash tips'; }
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(7)::before { content: 'Hours'; }
+  .bs-srows:not(.has-alc) .bs-staffrow > :nth-child(8)::before { content: 'Wage'; }
+  .has-alc .bs-staffrow > :nth-child(3)::before { content: 'Kitchen'; }
+  .has-alc .bs-staffrow > :nth-child(4)::before { content: 'Coffee'; }
+  .has-alc .bs-staffrow > :nth-child(5)::before { content: 'Alcohol'; }
+  .has-alc .bs-staffrow > :nth-child(6)::before { content: 'Card tips'; }
+  .has-alc .bs-staffrow > :nth-child(7)::before { content: 'Cash tips'; }
+  .has-alc .bs-staffrow > :nth-child(8)::before { content: 'Hours'; }
+  .has-alc .bs-staffrow > :nth-child(9)::before { content: 'Wage'; }
+
+  /* The tool actions stay text, but each gets a thumb-sized tap area and the
+     hairline dividers come off so a wrapped row of links doesn't read as a
+     broken grid. */
+  .bs-tools { gap: 2px 4px; padding: 4px 0; }
+  .bs-tool { padding: 11px 16px 11px 0; min-height: 44px; display: inline-flex; align-items: center; }
+  .bs-tool + .bs-tool { padding-left: 0; border-left: 0; }
+  .bs-tool-danger { padding-right: 0; }
 }
 
 /* --- the ledger, made scannable ------------------------------------------- */
@@ -1450,6 +1553,73 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-note-wide { max-width: none; padding: 12px 0; border-top: 1px solid var(--rule);
   border-bottom: 1px solid var(--rule); margin: 20px 0; }
 .bs-note b { color: var(--headline); font-weight: 600; }
+
+/* Log a shift — the front door to a service. Two controls and one clear
+   button, in the broadsheet idiom so it stops being the app's one blue island.
+   Box fields (a date picker and a select don't suit the entry sheet's big mono
+   underline) at 16px, so focusing one on a phone never triggers the zoom. */
+.bs-newshift { max-width: 420px; margin-top: 22px; display: grid; gap: 20px; }
+.bs-newshift .bs-field { gap: 7px; }
+.bs-newshift input, .bs-newshift select {
+  width: 100%; border: 1px solid var(--field-border); border-radius: 0;
+  background: var(--surface); color: var(--ink);
+  font-family: var(--sans); font-size: 16px; padding: 13px 12px;
+}
+.bs-newshift input:focus, .bs-newshift select:focus { outline: none; border-color: var(--accent); }
+.bs-newshift-go { align-self: start; min-height: 48px; padding: 13px 26px; font-size: 15px; }
+@media (max-width: 640px) {
+  /* One thumb-width button that spans the form. */
+  .bs-newshift-go { align-self: stretch; width: 100%; }
+}
+
+/* Review & send — each person's payout as a broadsheet card: the money, then
+   their address and the two actions (preview the exact email, send it). The
+   twin of the shift sheet's person rows, so the review screen and the entry
+   screen read as one product rather than two. */
+.bs-sendform { margin: 0; }
+.bs-pays { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; margin: 8px 0 26px; }
+.bs-pay { border: 1px solid var(--rule); border-left: 3px solid var(--rule);
+  background: var(--surface); padding: 15px 16px; display: grid; gap: 12px; }
+.bs-pay-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.bs-pay-n { font-size: 15px; font-weight: 600; color: var(--headline); }
+.bs-pay-r { font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.bs-pay-figs { margin: 0; display: grid; gap: 7px; }
+.bs-pay-figs > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.bs-pay-figs dt { font-size: 13px; color: var(--secondary); }
+.bs-pay-figs dd { margin: 0; font-family: var(--mono); font-size: 15px; color: var(--ink); }
+.bs-pay-out dd { color: var(--muted); }
+.bs-pay-keep { border-top: 1px solid var(--rule); padding-top: 8px; }
+.bs-pay-keep dt { font-weight: 600; color: var(--headline); font-size: 13.5px; }
+.bs-pay-keep dd { font-size: 17px; font-weight: 600; color: var(--positive); }
+.bs-pay-send { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border-top: 1px solid var(--rule); padding-top: 11px; }
+.bs-pay-to { font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.bs-pay-send-none { color: var(--danger); font-size: 12.5px; }
+.bs-pay-acts { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.bs-pay-acts form { margin: 0; }
+.bs-pay-prev { font-size: 12.5px; padding: 7px 10px; }
+.bs-pay-sendbtn { border: 1px solid var(--ink); background: none; color: var(--ink);
+  font-family: var(--sans); font-size: 12.5px; font-weight: 600; padding: 7px 14px; cursor: pointer; }
+.bs-pay-sendbtn:hover { background: var(--ink); color: var(--paper); }
+
+.bs-sendbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  border-top: 2px solid var(--rule-heavy); padding-top: 18px; margin-top: 8px; }
+.bs-sendbar-note { margin: 0; font-size: 12.5px; color: var(--muted); }
+.bs-btn-lg { padding: 13px 28px; font-size: 15px; min-height: 48px; }
+
+@media (max-width: 760px) {
+  /* One column, and the send action drops to its own full-width, thumb-sized
+     row under the address rather than crowding it. */
+  .bs-pays { grid-template-columns: 1fr; }
+  .bs-pay-send { flex-wrap: wrap; }
+  .bs-pay-acts { flex-basis: 100%; justify-content: flex-start; gap: 8px; }
+  .bs-pay-prev, .bs-pay-sendbtn { min-height: 44px; display: inline-flex; align-items: center; }
+  .bs-pay-sendbtn { flex: 1; justify-content: center; }
+  .bs-sendform .bs-btn { min-height: 46px; }
+  .bs-sendbar-note { flex-basis: 100%; }
+}
 
 .bs-pos { margin-top: 26px; border-top: 1px solid var(--field-border); }
 .bs-pos > summary { display: flex; align-items: baseline; gap: 9px; padding: 13px 0; cursor: pointer;
