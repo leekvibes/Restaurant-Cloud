@@ -445,13 +445,27 @@ body.bare {
 }
 .pt-back2 { color: var(--pt-blue); font-size: 14px; font-weight: 500; text-decoration: none; }
 
-.pt-body { flex: 1; padding: 22px 20px 28px; }
+/* With the top bar gone, the body reserves the status-bar inset itself, so the
+   greeting never draws under the phone's clock. */
+.pt-body { flex: 1; padding: calc(22px + env(safe-area-inset-top)) 20px 28px; }
+/* A sub-page's back crumb sits where the bar was — it reserves the inset, and
+   the body below it then does not, so the two never stack it twice. */
+.pt-crumb {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: calc(12px + env(safe-area-inset-top)) 20px 0;
+}
+.pt-crumb + .pt-body { padding-top: 14px; }
 .pt-foot, .pt-foot-in {
   padding: 15px 20px calc(18px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--pt-hair);
   font-size: 12.5px; color: var(--pt-muted); text-align: center; margin: 0;
 }
 .pt-foot-in { border: 0; padding: 9px 20px 0; }
+.pt-foot p { margin: 0; }
+.pt-signout {
+  display: inline-block; margin-top: 10px; color: var(--pt-blue);
+  font-size: 13px; font-weight: 500; text-decoration: none;
+}
 
 /* --- greeting ------------------------------------------------------------- */
 .pt-date {

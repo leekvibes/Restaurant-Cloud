@@ -594,26 +594,23 @@ test('the last service is the last one with figures, not the last one logged', a
 });
 
 
-test('the record is five rows, not the whole log', async () => {
+test('floor shortages surface on the dashboard, and the log does not', async () => {
+  // The activity feed ("The record") gave up the front page to the floor: a
+  // shortage the owner has to act on now shows in Needs attention, which is a
+  // to-do, where a scrolling log was not. Not date-dependent — an open stock
+  // report is open until resolved.
   const owner = await login({ password: 'dash-owner-pw' });
-  // Eight events, so a cap of five is observable. With four in the fixture the
-  // assertion passes whatever the cap is, which is no assertion at all.
   const w = new Database(DB);
-  const made = [];
-  for (let i = 0; i < 8; i++) {
-    made.push(w.prepare("INSERT INTO m_vendors (name, category, created_at) VALUES (?, 'Food', datetime('now'))")
-      .run(`Feed Test ${i}`).lastInsertRowid);
-  }
+  const id = w.prepare(`INSERT INTO portal_stock (item, status, note, reported_by, reported_at)
+    VALUES ('Oat milk audit', 'out', 'test', 'seed', datetime('now'))`).run().lastInsertRowid;
   w.close();
   try {
     const html = await page(owner);
-    const rows = (html.match(/class="bs-rec"/g) || []).length;
-    assert.ok(rows > 0, 'the feed has rows');
-    // Ten was a log, and there is somewhere else to read the log.
-    assert.strictEqual(rows, 5, `exactly five, got ${rows}`);
+    assert.match(html, /Oat milk audit — out of stock/, 'the shortage surfaces in attention');
+    assert.ok(!/class="bs-rec"/.test(html), 'the activity log is no longer on the front page');
   } finally {
     const w2 = new Database(DB);
-    for (const id of made) w2.prepare('DELETE FROM m_vendors WHERE id = ?').run(id);
+    w2.prepare('DELETE FROM portal_stock WHERE id = ?').run(id);
     w2.close();
   }
 });

@@ -735,7 +735,7 @@ test('the shift button is gone from the bar, not just hidden', async () => {
 });
 
 test('the mobile dashboard leads with the last service', () => {
-  // Order on a phone: last service, the week, attention, the record. The
+  // Order on a phone: last service, the week, attention, today's specials. The
   // columns become display:contents so the blocks themselves are the grid
   // items — without that, `order` has nothing to act on.
   const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
@@ -744,16 +744,14 @@ test('the mobile dashboard leads with the last service', () => {
     'the columns stop being boxes so their blocks can be reordered');
 
   const orderOf = (cls) => {
-    // \s* not a literal space — the declarations are aligned in the source and
-    // `.bs-dblk-rec  {` has two, which a single-space pattern misses.
     const m = new RegExp(`\\.bs-dblk-${cls}\\s*\\{([^}]*)\\}`).exec(stacked);
     assert.ok(m, `.bs-dblk-${cls} is ordered`);
     return Number(/order:\s*(\d+)/.exec(m[1])[1]);
   };
   assert.deepStrictEqual(
-    [orderOf('last'), orderOf('week'), orderOf('attn'), orderOf('rec')],
+    [orderOf('last'), orderOf('week'), orderOf('attn'), orderOf('specials')],
     [1, 2, 3, 4],
-    'last service · the week · attention · the record',
+    'last service · the week · attention · today\'s specials',
   );
 });
 

@@ -267,9 +267,11 @@ test('an owner does see the full dashboard', async () => {
   const html = await (await as(owner, '/')).text();
   // Today is a strip of notices rather than a headed section, so it is checked
   // by the notice markup. "Upcoming" is now "Coming up" and only renders when
-  // something is actually due; Insights moved to Performance, which is the
-  // page that exists to explain why a number moved.
-  for (const section of ['File an entry', 'The week in numbers', 'Last service', 'The record']) {
+  // something is actually due; Insights moved to Performance. "The record" was
+  // replaced by the floor: shortages surface in Needs attention and today's
+  // specials get their own board — both only render when there is data, so they
+  // are not asserted unconditionally here.
+  for (const section of ['File an entry', 'The week in numbers', 'Last service']) {
     assert.ok(html.includes(section), `${section} renders for the owner`);
   }
   assert.match(html, /id="bs-bb"/, 'and the billboard');

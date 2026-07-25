@@ -554,6 +554,13 @@ app.get('/', (req, res) => {
   const openToday = todays.filter((x) => x.status !== 'emailed');
   const todaySales = todays.reduce((a, x) => a + shiftSales(x), 0);
 
+  // --- the floor -----------------------------------------------------------
+  // What staff reported from the floor and the owner still has to act on, and
+  // today's specials board — both posted through the portal, both things the
+  // owner opens the day wanting to see.
+  const floor = may('staff') ? PORTAL.q.stockOpen.all() : [];
+  const specialsBoard = may('staff') ? PORTAL.q.specialsFor.all(toStr) : [];
+
   // --- needs attention -----------------------------------------------------
   // Every entry names the specific thing and links to it. A count with no
   // route attached is a nag, not a to-do.
@@ -609,6 +616,20 @@ app.get('/', (req, res) => {
     // Products deliberately doesn't show one — so the alert had no page left
     // to send you to. The columns are still on the table for when inventory
     // counts exist and it can come back meaning something.
+  }
+
+  // What the floor reported it is out of or low on. Out is red — a dish is
+  // about to come off the menu; low or needs-ordering is a warning you have a
+  // day to act on. Each links to the portal board where it gets resolved.
+  if (may('staff')) {
+    for (const s of floor) {
+      const what = s.product_name || s.item;
+      const from = s.vendor_name ? `Reorder from ${s.vendor_name}`
+        : s.reported_by ? `Reported by ${s.reported_by}` : 'Reported from the floor';
+      if (s.status === 'out') push('red', 'par', `${what} — out of stock`, from, '/staff-portal');
+      else if (s.status === 'low') push('amber', 'par', `${what} — running low`, from, '/staff-portal');
+      else push('blue', 'par', `${what} — needs ordering`, from, '/staff-portal');
+    }
   }
 
   if (may('cash')) {
@@ -804,6 +825,7 @@ app.get('/', (req, res) => {
     equipment: (n) => `${n === 1 ? 'A warranty is' : `${n} warranties are`} running out.`,
     payroll: () => 'Payroll is ready to send.',
     notes: (n) => `${n === 1 ? 'A note' : `${n} notes`} from staff to read.`,
+    par: (n) => `${n === 1 ? 'An item is' : `${n} items are`} out or low on the floor.`,
   };
   const headline = (() => {
     const day = openToday.length
@@ -928,14 +950,22 @@ app.get('/', (req, res) => {
       ${row('Staff', lastShift.people || '—')}
     </div>` : '';
 
-  const feedRows = events.slice(0, 5).map((r) => {
-    const f = FEED[r.kind](r);
-    const inner = `<span class="bs-rec-t">${f.text}</span> <span class="bs-rec-w">— ${ago(r.at, now)}</span>`;
-    return f.href ? `<a class="bs-rec" href="${f.href}">${inner}</a>` : `<div class="bs-rec">${inner}</div>`;
-  }).join('');
-  const record = `
-    <div class="bs-sec-h bs-rec-h"><span class="bs-kicker">The record</span></div>
-    ${feedRows ? `<div class="bs-recs">${feedRows}</div>` : '<p class="bs-clear">Nothing has happened yet.</p>'}`;
+  // Today's specials board, as it reads on the floor — the price, or the low
+  // note ("6 left"), or an 86'd line struck through. Same source the portal
+  // shows staff, so the owner sees exactly what the floor sees.
+  const specialsBlock = specialsBoard.length ? `
+    <div class="bs-sec-h"><span class="bs-kicker">Today's specials</span>
+      ${may('staff') ? '<a class="bs-act" href="/staff-portal">Board →</a>' : ''}</div>
+    <div class="bs-soon bs-board">
+      ${specialsBoard.map((s) => {
+        const off = !!s.eighty_sixed_at;
+        const price = s.price_cents != null ? money(s.price_cents) : '';
+        const meta = off ? (s.sold_out_note ? `86 · ${esc(s.sold_out_note)}` : '86’d')
+          : (s.low_note ? esc(s.low_note) : price || '—');
+        return `<a class="bs-soon-r${off ? ' off' : ''}" href="/staff-portal">
+          <span>${esc(s.name)}</span><b class="bs-fig">${meta}</b></a>`;
+      }).join('')}
+    </div>` : '';
 
   const dblk = (cls, inner) => (inner ? `<section class="bs-dblk bs-dblk-${cls}">${inner}</section>` : '');
 
@@ -954,13 +984,13 @@ app.get('/', (req, res) => {
       <!-- Each block is wrapped so a phone can reorder them without the desktop
            columns moving. On a wide screen these wrappers style nothing; below
            1180px the columns become display:contents and the wrappers are the
-           grid items, ordered last service · the week · attention · the record.
+           grid items, ordered last service · the week · attention · specials.
            Wrapped only when it has content, so an absent block leaves no stray
            gap in the stack. -->
       <div class="bs-cols3">
         <div class="bs-col">${dblk('attn', attnBlock)}</div>
         <div class="bs-col">${dblk('week', weekBand)}</div>
-        <div class="bs-col">${dblk('last', lastBand)}${dblk('rec', record)}</div>
+        <div class="bs-col">${dblk('last', lastBand)}${dblk('specials', specialsBlock)}</div>
       </div>
     </div>`;
 
@@ -2822,19 +2852,18 @@ const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || 'there';
 // when it is not, and never a trailing zero. "8 hrs", "8.27 hrs", "8.5 hrs".
 const hrsShort = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$/, '') : Number(h || 0)} hrs`;
 
-/** The portal's own chrome: wordmark, restaurant, sign out. */
-const portalHead = (right) => `
-  <div class="pt-top">
-    <span class="pt-mark">ZWIN</span>
-    <span class="pt-house">${esc(RESTAURANT)}</span>
-    ${right || '<a class="pt-out" href="/portal/out">Sign out</a>'}
-  </div>`;
+// The portal's branding top bar (ZWIN + restaurant, repeated on every screen)
+// is gone: each screen already opens with its own contextual header — the home
+// with a greeting, a sub-page with the page's own title. Sign out moved to the
+// foot of the home; the status-bar inset is reserved on the body now, not here.
+const portalHead = () => '';
 
-/** A sub-page's chrome: back to the hub, and who you are. */
+/** A sub-page's only chrome: a back link to the hub, and who you are — an
+ *  inline crumb, not a bar. */
 const portalSub = (right) => `
-  <div class="pt-top">
+  <div class="pt-crumb">
     <a class="pt-back" href="/portal">← Home</a>
-    <span class="pt-who">${right || ''}</span>
+    ${right ? `<span class="pt-who">${right}</span>` : ''}
   </div>`;
 
 const portalPage = (title, body) => layout(title, `<div class="pt">${body}</div>`, { bare: true, staff: true });
@@ -2993,7 +3022,6 @@ app.get('/portal', (req, res) => {
     </a>`;
 
   res.send(portalPage('Your portal', `
-    ${portalHead()}
     <div class="pt-body">
       <p class="pt-date">${esc(now.toLocaleDateString('en-US',
         { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase())} — ${GREETING(now.getHours()).toUpperCase()}</p>
@@ -3012,7 +3040,10 @@ app.get('/portal', (req, res) => {
         ${row('/portal/stock', '⊞', 'Report out of stock', 'Out of something, or running low')}
       </div>
     </div>
-    <p class="pt-foot">Anything you submit stays editable until your manager sends the shift.</p>`));
+    <div class="pt-foot">
+      <p>Anything you submit stays editable until your manager sends the shift.</p>
+      <a class="pt-signout" href="/portal/out">Sign out</a>
+    </div>`));
 });
 
 // Opening the submission form. Available as GET so the hub can link to it the
