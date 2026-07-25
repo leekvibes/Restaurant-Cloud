@@ -839,19 +839,28 @@ test('payroll opens on the period running now', async () => {
     `expected ${labelFor(cur)}, got ${sub[1].replace(/\s+/g, ' ').trim().slice(0, 60)}`);
 });
 
-test('the payroll roster leads with take-home, not card tips', async () => {
-  // The per-person line was carrying cash tips and card payout columns; the
-  // one number being read is what they take home. Card payout still lives in
-  // the totals strip and the drill-down, just not as a column on every row.
+test('payroll keeps every column on the web, shows take-home on mobile', async () => {
+  // The web roster is unchanged — all its columns are there. What changed is
+  // the phone: it used to fold down to card payout, and now folds to
+  // take-home. That is a CSS choice, so the columns stay in the markup and the
+  // narrow breakpoint hides card payout and keeps the take-home cell.
   const P = require('../src/periods');
   const cur = P.currentPeriod();
   const html = await (await fetch(`${BASE}/payroll?from=${cur.start}&to=${cur.end}`, { redirect: 'manual' })).text();
   const head = (html.match(/class="bs-lhead bs-rhead">([\s\S]*?)<\/div>/) || [])[1] || '';
-  assert.match(head, /Take-home/, 'the roster header names take-home');
-  assert.ok(!/Cash tips/.test(head), 'and no longer a cash-tips column');
-  assert.ok(!/Card payout/.test(head), 'nor a card-payout column');
-  // The how-it-works explainer is gone.
-  assert.ok(!/is what goes into Gusto — card tips net of tip-out/.test(html), 'the explainer is removed');
+  assert.match(head, /Cash tips/, 'the web keeps the cash-tips column');
+  assert.match(head, /Card payout/, 'and card payout');
+  assert.match(head, /On the check/, 'and the take-home column');
+  assert.match(html, /class="bs-lr-n strong bs-takehome"/, 'take-home is tagged for the phone to promote');
+
+  // At the phone breakpoint: card payout (5th cell) is hidden, take-home stays
+  // and is promoted.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css, /\.bs-rrow > :nth-child\(5\)[^}]*display: none/, 'card payout folds away on a phone');
+  assert.match(css, /\.bs-rrow \.bs-takehome \{[^}]*font-size/, 'and take-home is promoted there');
+
+  // The how-it-works explainer is still gone.
+  assert.ok(!/is what goes into Gusto — card tips net of tip-out/.test(html), 'the explainer stays removed');
 });
 
 test('the payroll summary shows each person and the total, printable', async () => {

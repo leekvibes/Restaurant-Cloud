@@ -3978,7 +3978,9 @@ app.get('/payroll', (req, res) => {
         <i>${esc(r.roles)} · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
       <span class="bs-lr-n">${r.hours}<i>${r.wk1Hours} + ${r.wk2Hours}</i></span>
       <span class="bs-lr-n">${money(r.wage)}</span>
-      <span class="bs-lr-n strong big">${money(r.takeHome)}</span>
+      <span class="bs-lr-n muted">${r.cashTips ? money(r.cashTips) : '<span class="bs-em">—</span>'}</span>
+      <span class="bs-lr-n strong">${money(r.paycheckTips)}</span>
+      <span class="bs-lr-n strong bs-takehome">${money(r.takeHome)}</span>
       <span class="bs-lr-go">→</span>
     </a>`).join('');
 
@@ -4015,7 +4017,7 @@ app.get('/payroll', (req, res) => {
       ${rows.length ? `
       <div class="bs-lhead bs-rhead">
         <span>Person</span><span class="r">Hours</span><span class="r">Wages</span>
-        <span class="r">Take-home</span><span></span>
+        <span class="r">Cash tips</span><span class="r">Card payout</span><span class="r">On the check</span><span></span>
       </div>
       <div class="bs-lrows">${roster}</div>
       <div class="bs-lr bs-rrow bs-rtot">
@@ -4023,7 +4025,9 @@ app.get('/payroll', (req, res) => {
           across ${shiftCount} service${shiftCount === 1 ? '' : 's'}</i></span>
         <span class="bs-lr-n">${totals.hours}<i>${totals.wk1Hours} + ${totals.wk2Hours}</i></span>
         <span class="bs-lr-n">${money(totals.wage)}</span>
-        <span class="bs-lr-n strong big">${money(totals.takeHome)}</span>
+        <span class="bs-lr-n muted">${money(totals.cashTips)}</span>
+        <span class="bs-lr-n strong">${money(totals.paycheckTips)}</span>
+        <span class="bs-lr-n strong bs-takehome">${money(totals.takeHome)}</span>
         <span></span>
       </div>` : '<p class="bs-clear">Nobody worked in this range.</p>'}
       </section>

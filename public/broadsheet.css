@@ -1487,9 +1487,8 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    they take home. Card and cash tips are dropped from the line: card payout
    lives in the totals strip and every drill-down, and take-home already
    contains it, so a column for it here was noise. */
-.bs-rhead, .bs-rrow { grid-template-columns: 1fr 84px 104px 120px 22px; }
+.bs-rhead, .bs-rrow { grid-template-columns: 1fr 96px 104px 100px 116px 118px 24px; }
 .bs-lr-n.big { font-size: 16px; font-weight: 700; color: var(--headline); }
-.bs-rhead > :nth-child(4) { color: var(--ink); font-weight: 600; }
 
 /* Two actions in the page head (View summary · Export) sit as a group. */
 .bs-head-acts { display: flex; gap: 8px; align-items: center; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
@@ -1560,11 +1559,20 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    positional selector governs both and they cannot drift apart.
    :nth-child, never :nth-of-type — every cell here is a <span>, so
    :nth-of-type counts spans and ignores the class you wrote next to it. */
+@media (max-width: 1000px) {
+  /* Cash tips fold away first — reference only, never typed into anything. */
+  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
+  .bs-rhead > :nth-child(4), .bs-rrow > :nth-child(4) { display: none; }
+}
 @media (max-width: 640px) {
-  /* On a phone: the name, the hours, and the take-home. Wages fold away — it
-     is the drill-down's job, and take-home is the number being read here. */
+  /* On a phone: the name, the hours, and what they take home — NOT card payout,
+     which is what used to survive here. Wages and card payout fold away; the
+     take-home column (the 6th cell) stays and reads a touch larger. The full
+     set of columns is unchanged on the web. */
   .bs-rhead, .bs-rrow { grid-template-columns: 1fr 62px 108px 16px; }
-  .bs-rhead > :nth-child(3), .bs-rrow > :nth-child(3) { display: none; }
+  .bs-rhead > :nth-child(3), .bs-rrow > :nth-child(3),
+  .bs-rhead > :nth-child(5), .bs-rrow > :nth-child(5) { display: none; }
+  .bs-rrow .bs-takehome { font-size: 16px; font-weight: 700; color: var(--headline); }
   .bs-checks li { flex-wrap: wrap; gap: 3px 12px; }
   .bs-check-k { flex-basis: 100%; width: auto; }
 }
