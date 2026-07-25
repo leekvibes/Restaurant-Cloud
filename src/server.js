@@ -8452,7 +8452,11 @@ app.get('/c/expenses', (req, res) => {
 
   const years = [...new Set(all.map((r) => (r.spent_on || '').slice(0, 4)).filter(Boolean))].sort().reverse();
   const year = years.includes(req.query.y) ? req.query.y : (years[0] || today.slice(0, 4));
-  const rows = all.filter((r) => (r.spent_on || '').slice(0, 4) === year);
+  // Undated rows (saved before dates defaulted to today) still belong in
+  // history: show them alongside whichever year is open, under the "No date"
+  // group, rather than dropping them off the page. Nothing an owner uploaded
+  // should ever be invisible.
+  const rows = all.filter((r) => { const y = (r.spent_on || '').slice(0, 4); return y === year || !y; });
 
   const brief = (cents) => (Math.abs(cents) >= 100000
     ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));

@@ -732,6 +732,14 @@ function mountModules(app) {
         data[f.name] = toCents(req.body[f.name]);
       } else if (f.type === 'number') {
         data[f.name] = req.body[f.name] === '' ? null : Number(req.body[f.name]);
+      } else if (f.type === 'date') {
+        // A required date left blank falls back to today — the day it was
+        // recorded. `required` is only an HTML hint; nothing enforced it on the
+        // server, so an entry could save with no date and then drop out of a
+        // date-keyed list. An expense marked paid on the company card, whose
+        // receipt scan missed the date, was exactly this: saved, but nowhere in
+        // history. Now every entry lands with a date and has a place to show.
+        data[f.name] = (req.body[f.name] || '').trim() || (f.required ? isoDate(startOfToday()) : null);
       } else {
         data[f.name] = (req.body[f.name] || '').trim() || null;
       }

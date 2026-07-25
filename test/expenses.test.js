@@ -363,3 +363,32 @@ test('moving the description off the row does not make it unsearchable', async (
   assert.match(search, /baguettes, croissants and pastries/, 'the description is still searchable');
   assert.match(search, /mighty bread/, 'and so is the shop');
 });
+
+test('an expense saved without a date still lands in history — dated today', async () => {
+  // A receipt scan can miss the date; a company-card expense used to save with
+  // spent_on = null and then vanish from the year-grouped history. A blank
+  // required date now falls back to today, so every entry has a place to show.
+  // Placed last: it adds rows, so it must not perturb the exact-total tests.
+  const res = await logExpense({
+    name: 'Undated register tape', amount_cents: '9.00',
+    paid_by: 'Malek', paid_with: 'Company card', category: 'Supplies',   // no spent_on
+  });
+  assert.strictEqual(res.status, 302);
+  const r = rows().find((x) => x.name === 'Undated register tape');
+  assert.ok(r, 'it was stored');
+  assert.match(r.spent_on || '', /^\d{4}-\d{2}-\d{2}$/, `it got a real date, not null (got ${r.spent_on})`);
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(html, /Undated register tape/, 'and it is on the history page');
+});
+
+test('a legacy expense with no date is still shown, under "No date"', async () => {
+  // Rows saved before the default existed must not stay invisible: the history
+  // shows undated rows alongside the open year, in a No date group.
+  const w = new Database(DB);
+  w.prepare(`INSERT INTO m_expenses (spent_on, name, amount_cents, paid_by, paid_with)
+    VALUES (NULL, 'Ghost expense', 500, 'Malek', 'Company card')`).run();
+  w.close();
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(html, /Ghost expense/, 'the undated row shows');
+  assert.match(html, /No date/, 'grouped under No date');
+});
