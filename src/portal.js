@@ -104,6 +104,34 @@ CREATE INDEX IF NOT EXISTS idx_stock_open ON portal_stock (reported_at DESC) WHE
 CREATE INDEX IF NOT EXISTS idx_stock_all  ON portal_stock (reported_at DESC);
 `);
 
+// --- notifications ---------------------------------------------------------
+// A small event feed the staff portal reads. Anything the floor should know the
+// moment it changes — a special posted, a dish 86'd, a before-shift note, a
+// shift's pay sent — is written here as one row, and each person sees what is
+// new since they last looked. employee_id NULL means everyone; a value means
+// just that person (their own earnings). This is also the seam push
+// notifications hang off later: one place every event is born.
+db.exec(`
+CREATE TABLE IF NOT EXISTS portal_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind        TEXT NOT NULL,            -- special | special_86 | note | earnings
+  title       TEXT NOT NULL,
+  body        TEXT,
+  employee_id INTEGER,                  -- NULL = every staff member
+  href        TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pevents ON portal_events (created_at DESC);
+
+-- The highest event id each person has already seen, so "new" is per person
+-- and immune to timestamp granularity — an event posted in the same second the
+-- hub was opened still counts as new, because ids only ever go up.
+CREATE TABLE IF NOT EXISTS portal_seen (
+  employee_id INTEGER PRIMARY KEY,
+  seen_id     INTEGER NOT NULL DEFAULT 0
+);
+`);
+
 // Which positions hand in tips at the end of a shift.
 //
 // The portal has to know, because a kitchen cook opening it should not be
@@ -187,7 +215,39 @@ const q = {
     WHERE id = @id`),
   reopenStock: db.prepare('UPDATE portal_stock SET resolution = NULL, resolved_at = NULL, resolved_by = NULL WHERE id = ?'),
   openCount: db.prepare('SELECT COUNT(*) n FROM portal_stock WHERE resolved_at IS NULL'),
+
+  // --- notifications -------------------------------------------------------
+  addEvent: db.prepare(`INSERT INTO portal_events (kind, title, body, employee_id, href)
+    VALUES (@kind, @title, @body, @employee_id, @href)`),
+  // Everything addressed to this person or to everyone, newest first.
+  eventsFor: db.prepare(`SELECT * FROM portal_events
+    WHERE employee_id IS NULL OR employee_id = @id
+    ORDER BY created_at DESC, id DESC LIMIT 40`),
+  // New since they last looked, by id. A first-time viewer (no seen row) sees
+  // only events from the last two days, so a fresh sign-in never dumps the whole
+  // history as "new".
+  unseenFor: db.prepare(`SELECT * FROM portal_events
+    WHERE (employee_id IS NULL OR employee_id = @id)
+      AND id > COALESCE(
+        (SELECT seen_id FROM portal_seen WHERE employee_id = @id),
+        (SELECT COALESCE(MAX(id), 0) FROM portal_events WHERE created_at <= datetime('now','-2 days')))
+    ORDER BY id DESC LIMIT 40`),
+  // Mark everything up to the newest event as seen for this person.
+  markSeen: db.prepare(`INSERT INTO portal_seen (employee_id, seen_id)
+      VALUES (@id, (SELECT COALESCE(MAX(id), 0) FROM portal_events))
+    ON CONFLICT(employee_id) DO UPDATE SET seen_id = excluded.seen_id`),
 };
+
+/**
+ * Record a portal event for the staff feed. employeeId null = every staff
+ * member; a value = just that person (their own earnings). Never throws — a
+ * notification failing must not fail the action that raised it.
+ */
+function notify(kind, title, { body = null, employeeId = null, href = null } = {}) {
+  try {
+    q.addEvent.run({ kind, title, body, employee_id: employeeId ?? null, href });
+  } catch { /* best effort — the board/note/pay change still stands */ }
+}
 
 /** The three tones a note can carry, worst first — the order they render in. */
 const TONES = ['urgent', 'caution', 'fyi'];
@@ -224,4 +284,4 @@ function shapeFor(position) {
   };
 }
 
-module.exports = { q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor };
+module.exports = { q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify };

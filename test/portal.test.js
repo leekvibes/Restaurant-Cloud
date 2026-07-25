@@ -587,3 +587,30 @@ test('signing out of the portal actually ends it', async () => {
   const out = await fetch(`${BASE}/portal/out`, { redirect: 'manual', headers: { cookie } });
   assert.match(out.headers.get('set-cookie') || '', /zwin_portal=;/, 'the cookie is cleared');
 });
+
+test("the floor gets a What's-new heads-up when a special is posted", async () => {
+  await form('/staff-portal/special', { name: 'Qqx Heads-up branzino', price: '30.00' });
+  const cookie = await signIn('1111');
+  const first = await (await asStaff('/portal', cookie)).text();
+  assert.match(first, /What's new/, "the What's-new block shows");
+  assert.match(first, /Qqx Heads-up branzino/, 'naming the special');
+  // Opening the hub is reading it — it does not nag on the next load.
+  const second = await (await asStaff('/portal', cookie)).text();
+  assert.ok(!/Qqx Heads-up branzino/.test(second), 'and clears once seen');
+});
+
+test('an earnings notification reaches only the person it is for', async () => {
+  const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get('1111');
+  assert.ok(me, 'the test employee exists');
+  // Fresh eyes: clear any seen-marker so the two events below both count as new.
+  db.prepare('DELETE FROM portal_seen WHERE employee_id = ?').run(me.id);
+  db.prepare(`INSERT INTO portal_events (kind, title, employee_id, href)
+    VALUES ('earnings', 'Qqx Your pay is ready', ?, '/portal/earnings')`).run(me.id);
+  db.prepare(`INSERT INTO portal_events (kind, title, employee_id, href)
+    VALUES ('earnings', 'Qqx Someone elses pay', ?, '/portal/earnings')`).run(me.id + 100000);
+
+  const cookie = await signIn('1111');
+  const html = await (await asStaff('/portal', cookie)).text();
+  assert.match(html, /Qqx Your pay is ready/, 'their own earnings event shows');
+  assert.ok(!/Qqx Someone elses pay/.test(html), "but not another person's");
+});

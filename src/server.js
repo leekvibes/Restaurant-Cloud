@@ -2256,6 +2256,14 @@ app.post('/shifts/:id/send', async (req, res) => {
   const result = await sendEmails(emails);
   s.markEmailed.run(sh.id);
 
+  // Tell each person on the shift, on their portal, that their pay is ready —
+  // the same moment the email goes out. Their own event, so only they see it.
+  const shiftLabel = whenOf(sh.date, sh.daypart);
+  for (const p of [...inp.servers, ...inp.support]) {
+    if (p.employeeId) PORTAL.notify('earnings', `Your pay for ${shiftLabel} is ready`,
+      { employeeId: p.employeeId, href: `/portal/earnings/${sh.id}` });
+  }
+
   // Your own copy: confirmation of who received what, and the totals. Sent
   // after the staff emails so it reports what actually happened, and kept
   // separate so a failure here can't stop staff getting theirs.
@@ -2977,6 +2985,24 @@ app.get('/portal', (req, res) => {
   const hist = earningsFor(emp.id, 12);
   const last = hist[0];
 
+  // What's changed since this person last opened the hub — a special posted, a
+  // dish 86'd, a before-shift note, their pay sent. Opening the hub is reading
+  // the heads-up, so it is marked seen now; the block shows what was new this
+  // visit and clears next time. The events also live in their own sections, so
+  // nothing is lost by the block clearing.
+  const unseen = PORTAL.q.unseenFor.all({ id: emp.id });
+  if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
+  const NEW_GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖' };
+  const newBlock = unseen.length ? `
+    <div class="pt-kick"><span>What's new</span><span>${unseen.length}</span></div>
+    <div class="pt-news">
+      ${unseen.map((e) => `<a class="pt-newr" href="${esc(e.href || '/portal')}">
+        <span class="pt-new-g" aria-hidden="true">${NEW_GLYPH[e.kind] || '•'}</span>
+        <span class="pt-new-t"><b>${esc(e.title)}</b>${e.body ? `<span>${esc(e.body)}</span>` : ''}</span>
+        <span class="pt-new-w">${esc(atTime(e.created_at))}</span>
+      </a>`).join('')}
+    </div>` : '';
+
   const noteBlock = notes.length ? `
     <div class="pt-kick"><span>Before your shift</span><span>For today</span></div>
     <div class="pt-notes">
@@ -3027,6 +3053,7 @@ app.get('/portal', (req, res) => {
         { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase())} — ${GREETING(now.getHours()).toUpperCase()}</p>
       <h1 class="pt-hi">${GREETING(now.getHours())}, ${esc(firstName(emp.name))}.</h1>
 
+      ${newBlock}
       ${noteBlock}
       ${lastBlock}
 
@@ -8176,6 +8203,11 @@ app.post('/staff-portal/special', (req, res) => {
     low_note: String(req.body.low_note || '').trim().slice(0, 60) || null,
     sort: 100,
   });
+  PORTAL.notify('special', `New special: ${name.slice(0, 120)}`, {
+    body: [String(req.body.description || '').trim(), req.body.price ? money(toCents(req.body.price)) : '']
+      .filter(Boolean).join(' · ') || null,
+    href: '/portal/specials',
+  });
   backTo(res, 'board', 'On the board.', { d });
 });
 
@@ -8193,6 +8225,7 @@ app.post('/staff-portal/special/86-item', (req, res) => {
     description: null, low_note: null, sort: 100,
   }).lastInsertRowid;
   PORTAL.q.eightySix.run({ id, note });
+  PORTAL.notify('special_86', `86: ${name.slice(0, 120)}`, { body: note, href: '/portal/specials' });
   backTo(res, 'board', "86'd — it’s on every phone.", { d });
 });
 
@@ -8216,7 +8249,9 @@ app.post('/staff-portal/special/:id/86', (req, res) => {
   // or after they last looked at the board.
   const typed = String(req.body.note || '').trim();
   const when = new Date().toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
+  const sp = PORTAL.q.oneSpecial.get(Number(req.params.id));
   PORTAL.q.eightySix.run({ id: Number(req.params.id), note: typed || `86'D ${when}` });
+  if (sp) PORTAL.notify('special_86', `86: ${sp.name}`, { body: typed || null, href: '/portal/specials' });
   backTo(res, 'board', "86'd — the board updates on every phone.", dayOf(req));
 });
 
@@ -8236,6 +8271,7 @@ app.post('/staff-portal/note', (req, res) => {
   if (!portalGuard(req, res)) return;
   const title = String(req.body.title || '').trim();
   if (!title) return backTo(res, 'notes', 'A note needs something to say.', { err: '1' });
+  const today = isoDate(startOfToday());
   const starts = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.starts_on || '')) ? req.body.starts_on : isoDate(startOfToday());
   const ends = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.ends_on || '')) ? req.body.ends_on : null;
   PORTAL.q.addNote.run({
@@ -8248,6 +8284,15 @@ app.post('/staff-portal/note', (req, res) => {
     ends_on: ends && ends >= starts ? ends : null,
     created_by: 'manager',
   });
+  // Only tell the floor when the note is live today — a note post-dated to next
+  // week, or one that already ended, is not news now. It will still show in the
+  // before-shift list on the day it starts.
+  const effEnds = ends && ends >= starts ? ends : null;
+  if (starts <= today && (!effEnds || effEnds >= today)) {
+    PORTAL.notify('note', title.slice(0, 120), {
+      body: String(req.body.body || '').trim().slice(0, 160) || null, href: '/portal',
+    });
+  }
   backTo(res, 'notes', 'Posted — it shows until it expires.');
 });
 
