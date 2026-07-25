@@ -3342,3 +3342,68 @@ body.cap-open.qx-open [data-cap] { display: none; }
   .pa-tab:nth-child(odd) { border-right: 1px solid var(--rule); }
   .pa-tab:nth-child(3), .pa-tab:nth-child(4) { border-bottom: 0; }
 }
+
+/* ===========================================================================
+   LEGACY PRIMITIVES → BROADSHEET
+   The pages still built on the old styles.css system (Cash, Performance,
+   Products, Menu costing, Expirations, Contacts, Incidents, Decisions, Team)
+   share a handful of components: .mcard metric tiles, .btn buttons, .rchip
+   filters, .empty2 empty states. Reskinning them here — broadsheet.css loads
+   after styles.css, so `.bs .x` (0,2,0) beats `.x` (0,1,0) without !important —
+   retires the blue-SaaS look across every one of them at once, ahead of the
+   deeper per-page rebuilds. Markup, routes, forms and behaviour are untouched.
+   ======================================================================== */
+
+/* --- metric tiles: pastel gradient cards → restrained figure cells --------- */
+.bs .mcards { margin: 20px 0 24px; gap: 12px; }
+.bs .mcard {
+  border: 1px solid var(--rule); border-top: 2px solid var(--rule);
+  border-radius: 0; box-shadow: none; background: var(--surface);
+  color: var(--body); padding: 15px 17px; gap: 12px; transition: none;
+}
+.bs .mcard:hover { transform: none; box-shadow: none; }
+.bs .mcard-ico {
+  width: 30px; height: 30px; border-radius: 0;
+  border: 1px solid var(--rule); background: none; color: var(--faint);
+}
+.bs .mcard-ico svg { width: 16px; height: 16px; }
+.bs .mcard-label { color: var(--secondary); font-weight: 500; }
+.bs .mcard-value {
+  font-family: var(--mono); font-weight: 600; font-size: 25px;
+  letter-spacing: 0; color: var(--headline);
+}
+.bs .mcard-sub { color: var(--muted); opacity: 1; }
+/* The tone is one top rule and the figure's colour — never a wash. */
+.bs .mcard-red    { border-top-color: var(--danger); }
+.bs .mcard-red    .mcard-value, .bs .mcard-red .mcard-ico { color: var(--danger); }
+.bs .mcard-amber  { border-top-color: var(--warning); }
+.bs .mcard-amber  .mcard-value, .bs .mcard-amber .mcard-ico { color: var(--warning); }
+.bs .mcard-green  { border-top-color: var(--positive); }
+.bs .mcard-green  .mcard-value, .bs .mcard-green .mcard-ico { color: var(--positive); }
+.bs .mcard-blue,
+.bs .mcard-violet { border-top-color: var(--accent); }
+.bs .mcard-blue   .mcard-value, .bs .mcard-blue .mcard-ico,
+.bs .mcard-violet .mcard-value, .bs .mcard-violet .mcard-ico { color: var(--accent); }
+
+/* --- buttons: blue / rounded / shadowed → ink / square / flat -------------- */
+.bs .btn {
+  border-radius: 0; border: 1px solid var(--field-border);
+  background: var(--surface); color: var(--ink); box-shadow: none; font-weight: 500;
+}
+.bs .btn:hover { background: var(--row-hover); border-color: var(--ink); color: var(--ink); }
+.bs .btn-sm, .bs .btn-lg { border-radius: 0; }
+.bs .btn-primary { background: var(--btn-bg); border-color: var(--btn-bg); color: var(--btn-ink); box-shadow: none; }
+.bs .btn-primary:hover { background: var(--btn-bg); border-color: var(--btn-bg); color: var(--btn-ink); opacity: .88; }
+.bs .btn-danger { background: var(--danger); border-color: var(--danger); color: var(--paper); box-shadow: none; }
+.bs .btn-danger:hover { background: var(--danger); border-color: var(--danger); color: var(--paper); opacity: .88; }
+.bs .btn-ghost { border-color: transparent; background: none; color: var(--muted); }
+
+/* --- range / filter chips: broadsheet tones -------------------------------- */
+.bs .rchip { border: 1px solid var(--rule); color: var(--secondary); background: none; }
+.bs .rchip:hover { border-color: var(--ink); color: var(--ink); text-decoration: none; }
+.bs .rchip.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+
+/* --- empty states: drop the blue icon chip, hairline frame ----------------- */
+.bs .empty2 { background: var(--surface); border: 1px solid var(--rule); border-radius: 0; }
+.bs .empty2-ico { border-radius: 0; background: none; border: 1px solid var(--rule); color: var(--faint); }
+.bs .empty2-t { font-family: var(--serif); font-weight: 500; letter-spacing: 0; }
