@@ -134,6 +134,24 @@ test('a record opens as well as a list', async () => {
   assert.deepStrictEqual(broken, []);
 });
 
+test('equipment uses the broadsheet treatment rather than the old admin table shell', async () => {
+  const res = await fetch(`${BASE}/c/equipment`, { redirect: 'manual' });
+  assert.strictEqual(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /class="bs-page eq-page"/, 'equipment list uses the broadsheet page shell');
+  assert.match(html, /class="bs-panel bs-strip eq-strip"/, 'equipment gets the summary strip');
+  assert.match(html, /class="bs-lr eq-row"/, 'equipment rows render as ledger rows, not only a table');
+});
+
+test('equipment detail follows the same page language after opening a row', async () => {
+  const res = await fetch(`${BASE}/c/equipment/1`, { redirect: 'manual' });
+  assert.strictEqual(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /class="bs-page eq-page eq-detail"/, 'detail view keeps the broadsheet shell');
+  assert.match(html, /class="eq-facts"/, 'detail facts are grouped into a dedicated section');
+  assert.match(html, /Edit<\/a>/, 'the existing edit workflow is still present');
+});
+
 test('no two things share a class name and fight over it', async () => {
   // .bs-form belonged to the shift sheet's add-staff forms — a multi-column
   // grid — and the sales entry form reused the name. It silently became a grid

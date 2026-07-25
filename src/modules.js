@@ -451,6 +451,194 @@ function detailValue(m, f, row) {
 const titleField = (m) => m.fields.find((f) => f.list) || m.fields[0];
 const rowTitle = (m, row) => String(row[titleField(m).name] || `#${row.id}`);
 
+function equipmentState(row) {
+  const days = daysUntil(row.warranty_expires);
+  if (days === null) return { key: 'unknown', label: 'Warranty not recorded', sub: 'Add a date to track coverage.', cls: 'empty' };
+  if (days < 0) return { key: 'expired', label: `Expired ${-days}d ago`, sub: 'Warranty has run out.', cls: 'review' };
+  if (days <= 14) return { key: 'soon', label: `${days}d left`, sub: 'Warranty ends soon.', cls: 'review' };
+  if (days <= 45) return { key: 'watch', label: `${days}d left`, sub: 'Coming up next.', cls: 'ready' };
+  return { key: 'covered', label: `${days}d left`, sub: 'Coverage still active.', cls: 'sent' };
+}
+
+function equipmentField(row, name) {
+  return row[name] ? esc(row[name]) : '<span class="unset">—</span>';
+}
+
+function renderEquipmentList(m, req, rows) {
+  const urgent = rows.filter((r) => {
+    const days = daysUntil(r.warranty_expires);
+    return days !== null && days <= 30;
+  }).length;
+  const withContact = rows.filter((r) => r.service_contact || r.phone).length;
+  const located = rows.filter((r) => r.location).length;
+  const searchBar = rows.length > 6
+    ? `<div class="toolbar2">
+        <label class="bs-isearch">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input type="search" id="eq-search" placeholder="Search equipment, model, serial, contact…" oninput="eqFilter()">
+        </label>
+        <span class="toolbar2-meta" id="eq-count">${rows.length} item${rows.length === 1 ? '' : 's'}</span>
+      </div>`
+    : '';
+  const stripCell = (label, value, sub, tone = '') => `<div class="bs-strip-c">
+    <span class="bs-strip-l">${label}</span>
+    <span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span>
+    <span class="bs-strip-s">${sub}</span>
+  </div>`;
+  const body = rows.map((row) => {
+    const st = equipmentState(row);
+    const meta = [row.model, row.location].filter(Boolean).join(' · ');
+    const contact = row.service_contact || row.phone || 'No contact yet';
+    const serial = row.serial || 'No serial';
+    return `<a class="bs-lr eq-row" href="/c/${m.slug}/${row.id}" data-eq-search="${esc(
+      [row.name, row.model, row.serial, row.location, row.service_contact, row.phone].filter(Boolean).join(' ').toLowerCase())}">
+      <span class="eq-row-main">
+        <span class="bs-lr-d">Equipment</span>
+        <span class="bs-lr-s">${esc(row.name || `#${row.id}`)}</span>
+        <span class="eq-row-meta">${meta ? esc(meta) : 'Model or location not recorded yet.'}</span>
+      </span>
+      <span class="eq-row-facts">
+        <span class="eq-row-pill ${st.cls}">${esc(st.label)}</span>
+        <span class="eq-row-pair"><i>Service</i><b>${esc(contact)}</b></span>
+        <span class="eq-row-pair"><i>Serial</i><b>${esc(serial)}</b></span>
+      </span>
+      <span class="bs-lr-go">Open ›</span>
+    </a>`;
+  }).join('');
+  const isMultipart = m.fields.some((f) => f.type === 'file');
+  const formFields = m.fields.filter((f) => f.type !== 'pages')
+    .map((f) => `<label>${esc(f.label)} ${renderInput(f)}</label>`).join('');
+
+  return layout(m.title, `
+    ${flash(req)}
+    <div class="bs-page eq-page">
+      <a class="bs-back" href="/">← Dashboard</a>
+      <div class="phead">
+        <div class="phead-t">
+          <div class="bs-kicker">Restaurant · Equipment</div>
+          <h1>Equipment</h1>
+          <p class="phead-s">Every machine, its warranty window, and who to call when it stops helping service.</p>
+        </div>
+        ${canWrite() ? `<div class="phead-acts"><a class="bs-btn" href="#eq-add">Add equipment</a></div>` : ''}
+      </div>
+
+      <section class="bs-panel bs-strip eq-strip">
+        ${stripCell('Equipment', String(rows.length), rows.length === 1 ? '1 item on file' : 'tracked across the restaurant')}
+        ${stripCell('Needs attention', String(urgent), urgent ? 'warranty expires within 30 days' : 'nothing due in the next 30 days', urgent ? 'warn' : '')}
+        ${stripCell('Service contact', String(withContact), withContact ? 'someone to call is saved' : 'none recorded yet')}
+        ${stripCell('Located', String(located), located ? 'items have a room or station' : 'locations still missing')}
+      </section>
+
+      <section class="bs-panel">
+        <div class="bs-sec-h info"><span class="bs-kicker">On File</span><a class="bs-act" href="/c/expirations">See expirations →</a></div>
+        <p class="bs-inline-note">Keep the numbers you need when something breaks close at hand: model, serial, warranty date, and the service contact.</p>
+        ${searchBar}
+        ${rows.length
+          ? `<div class="bs-lrows" id="eq-list">${body}</div>`
+          : `<div class="empty2 eq-empty"><div class="empty2-t">No equipment on file yet</div><div class="empty2-s">Start with the machines that stop service when they go down — the walk-in, espresso machine, ice machine, or dishwasher.</div></div>`}
+      </section>
+
+      ${!canWrite() ? '' : `
+      <details class="bs-panel eq-add" id="eq-add-panel"${rows.length ? '' : ' open'}>
+        <summary id="eq-add"><span class="bs-kicker">Add Equipment</span><b>Record a machine</b><i>Model, serial, warranty, service contact.</i></summary>
+        <form method="post" action="/c/${m.slug}" class="card form grid eq-form"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
+          ${formFields}
+          <button class="bs-btn" type="submit">Save equipment</button>
+        </form>
+      </details>`}
+    </div>
+    <script>
+      function eqFilter(){
+        var q=(document.getElementById('eq-search')||{}).value||'';
+        q=q.toLowerCase().trim();
+        var n=0;
+        document.querySelectorAll('#eq-list .eq-row').forEach(function(r){
+          var hay=(r.getAttribute('data-eq-search')||'');
+          var show=!q || hay.indexOf(q)!==-1;
+          r.style.display=show?'':'none';
+          if(show) n++;
+        });
+        var c=document.getElementById('eq-count');
+        if(c) c.textContent=n+' item'+(n===1?'':'s');
+      }
+    </script>`);
+}
+
+function renderEquipmentDetail(m, req, row) {
+  const st = equipmentState(row);
+  const nice = (label, value) => `<div class="eq-fact"><span>${label}</span><b>${value}</b></div>`;
+  const note = row.notes
+    ? `<section class="bs-panel"><div class="bs-sec-h"><span class="bs-kicker">Service Notes</span></div><div class="detail-long eq-notes">${esc(row.notes)}</div></section>`
+    : '';
+  return layout(rowTitle(m, row), `
+    ${flash(req)}
+    <div class="bs-page eq-page eq-detail">
+      <a class="bs-back" href="/c/${m.slug}">← Equipment</a>
+      <div class="phead">
+        <div class="phead-t">
+          <div class="bs-kicker">Equipment Record</div>
+          <h1>${esc(rowTitle(m, row))}</h1>
+          <p class="phead-s">${esc(st.sub)} ${row.location ? 'Located in ' + esc(row.location) + '.' : 'Location not recorded yet.'}</p>
+        </div>
+        ${m.appendOnly || !canWrite() ? '' : `<div class="phead-acts"><a class="bs-btn" href="/c/${m.slug}/${row.id}/edit">Edit</a></div>`}
+      </div>
+
+      <section class="bs-panel bs-strip eq-strip">
+        <div class="bs-strip-c"><span class="bs-strip-l">Warranty</span><span class="bs-stat ${st.cls === 'review' ? 'warn' : ''}">${esc(st.label)}</span><span class="bs-strip-s">${esc(st.sub)}</span></div>
+        <div class="bs-strip-c"><span class="bs-strip-l">Contact</span><span class="bs-stat eq-mini">${row.service_contact ? esc(row.service_contact) : '—'}</span><span class="bs-strip-s">${row.phone ? esc(row.phone) : 'phone not recorded'}</span></div>
+        <div class="bs-strip-c"><span class="bs-strip-l">Model</span><span class="bs-stat eq-mini">${row.model ? esc(row.model) : '—'}</span><span class="bs-strip-s">${row.serial ? 'Serial on file' : 'serial not recorded'}</span></div>
+      </section>
+
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">At A Glance</span></div>
+        <div class="eq-facts">
+          ${nice('Model', equipmentField(row, 'model'))}
+          ${nice('Serial #', equipmentField(row, 'serial'))}
+          ${nice('Location', equipmentField(row, 'location'))}
+          ${nice('Warranty expires', row.warranty_expires ? `${esc(row.warranty_expires)} ${expiryBadge(daysUntil(row.warranty_expires))}` : '<i class="unset">—</i>')}
+          ${nice('Service contact', equipmentField(row, 'service_contact'))}
+          ${nice('Phone', detailValue(m, m.fields.find((f) => f.name === 'phone') || { type: 'text' }, row))}
+        </div>
+      </section>
+
+      ${note}
+
+      ${m.appendOnly || !canWrite() ? '' : `
+      <div class="danger-zone">
+        <div><b>Delete this record</b><p class="muted">Remove it permanently if this machine was added by mistake.</p></div>
+        <form method="post" action="/c/${m.slug}/${row.id}/delete" onsubmit="return confirm('Delete ${esc(rowTitle(m, row)).replace(/'/g, "\\'")}?')" style="margin:0">
+          <button class="btn btn-danger" type="submit">Delete</button>
+        </form>
+      </div>`}
+    </div>`);
+}
+
+function renderEquipmentEdit(m, req, row) {
+  const isMultipart = m.fields.some((f) => f.type === 'file');
+  return layout(`Edit ${rowTitle(m, row)}`, `
+    ${flash(req)}
+    <div class="bs-page eq-page eq-detail">
+      <a class="bs-back" href="/c/${m.slug}/${row.id}">← ${esc(rowTitle(m, row))}</a>
+      <div class="phead">
+        <div class="phead-t">
+          <div class="bs-kicker">Equipment Record</div>
+          <h1>Edit ${esc(rowTitle(m, row))}</h1>
+          <p class="phead-s">Keep the service details current so the next breakdown is one phone call, not a hunt.</p>
+        </div>
+      </div>
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">Update Details</span></div>
+        <form method="post" action="/c/${m.slug}/${row.id}" class="card form grid eq-form"${isMultipart ? ' enctype="multipart/form-data"' : ''}>
+          ${m.fields.filter((f) => f.type !== 'pages').map((f) => `<label>${esc(f.label)} ${renderInput(f, row)}</label>`).join('')}
+          <div class="eq-form-actions">
+            <button class="bs-btn" type="submit">Save changes</button>
+            <a class="bs-btn-quiet" href="/c/${m.slug}/${row.id}">Cancel</a>
+          </div>
+        </form>
+      </section>
+    </div>`);
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -461,6 +649,7 @@ function mountModules(app) {
     const m = bySlug[req.params.slug];
     if (!m) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
     const rows = db.prepare(`SELECT * FROM ${m.table} ORDER BY ${m.orderBy}`).all();
+    if (m.slug === 'equipment') return res.send(renderEquipmentList(m, req, rows));
     const listFields = m.fields.filter((f) => f.list);
 
     const head = listFields.map((f) => `<th${['money'].includes(f.type) ? ' class="num"' : ''}>${esc(f.label)}</th>`).join('')
@@ -559,6 +748,7 @@ function mountModules(app) {
     if (!m) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
     const row = db.prepare(`SELECT * FROM ${m.table} WHERE id = ?`).get(req.params.id);
     if (!row) return res.status(404).send(layout('Not found', `<h1>That ${esc(m.title.toLowerCase())} entry no longer exists</h1><a class="btn" href="/c/${m.slug}">← Back</a>`));
+    if (m.slug === 'equipment') return res.send(renderEquipmentDetail(m, req, row));
 
     const rows = m.fields.map((f) => `
       <div class="detail-row"><div class="detail-k">${esc(f.label)}</div><div class="detail-v">${detailValue(m, f, row)}</div></div>`).join('');
@@ -589,6 +779,7 @@ function mountModules(app) {
     if (!m || m.appendOnly) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
     const row = db.prepare(`SELECT * FROM ${m.table} WHERE id = ?`).get(req.params.id);
     if (!row) return res.status(404).send(layout('Not found', '<h1>Not found</h1>'));
+    if (m.slug === 'equipment') return res.send(renderEquipmentEdit(m, req, row));
     const isMultipart = m.fields.some((f) => f.type === 'file');
 
     res.send(layout(`Edit ${rowTitle(m, row)}`, `

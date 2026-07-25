@@ -1998,6 +1998,182 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-hero-t { font-size: 24px; }
 }
 
+/* ===========================================================================
+   EQUIPMENT
+   ---------------------------------------------------------------------------
+   A machine register is not an admin table. On the stronger pages the eye gets
+   a verdict, then a short strip of state, then a ledger to scan. Equipment now
+   follows that same order so it stops looking like legacy CRUD sitting inside
+   a newer shell.
+   ======================================================================== */
+
+.phead {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 18px; margin-bottom: 20px;
+}
+.phead-acts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.eq-page .phead { margin-bottom: 18px; }
+.eq-strip { margin-bottom: 14px; }
+.eq-strip .bs-stat.warn { color: var(--warning); }
+.eq-strip .bs-stat.eq-mini {
+  font-family: var(--sans);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -.02em;
+  color: var(--headline);
+}
+
+.eq-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, .95fr) 40px;
+  align-items: center;
+  gap: 16px;
+  color: inherit;
+}
+.eq-row-main { min-width: 0; display: grid; gap: 3px; }
+.eq-row-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  min-width: 0;
+}
+.eq-row-facts {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 10px 16px; flex-wrap: wrap;
+}
+.eq-row-pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 88px; padding: 4px 8px;
+  border: 1px solid var(--field-border);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--secondary);
+}
+.eq-row-pill.sent { color: var(--positive); border-color: currentColor; }
+.eq-row-pill.ready { color: var(--accent); border-color: currentColor; }
+.eq-row-pill.review { color: var(--danger); border-color: currentColor; }
+.eq-row-pill.empty { color: var(--faint); }
+.eq-row-pair { display: grid; gap: 2px; min-width: 0; text-align: right; }
+.eq-row-pair i {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.eq-row-pair b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--headline);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.eq-add > summary {
+  list-style: none;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+}
+.eq-add > summary::-webkit-details-marker { display: none; }
+.eq-add > summary b {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 24px;
+  line-height: 1.15;
+  color: var(--headline);
+}
+.eq-add > summary i {
+  font-style: normal;
+  font-size: 13px;
+  color: var(--muted);
+}
+.eq-add[open] > summary { padding-bottom: 14px; border-bottom: 1px solid var(--panel-line); margin-bottom: 14px; }
+.eq-form {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.eq-form-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+
+.eq-detail .phead { margin-bottom: 16px; }
+.eq-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  border-top: 1px solid var(--panel-line);
+}
+.eq-fact {
+  display: grid;
+  gap: 4px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--panel-line);
+}
+.eq-fact:nth-child(odd) { padding-right: 18px; }
+.eq-fact:nth-child(even) {
+  padding-left: 18px;
+  border-left: 1px solid var(--panel-line);
+}
+.eq-fact span {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.eq-fact b {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--headline);
+}
+.eq-fact .pill { vertical-align: middle; margin-left: 8px; }
+.eq-notes { padding-top: 4px; }
+.eq-empty { margin-top: 6px; }
+
+@media (max-width: 900px) {
+  .phead { gap: 12px; flex-direction: column; }
+  .phead-acts { width: 100%; }
+  .phead-acts > * { width: 100%; }
+  .phead-acts > .bs-btn, .phead-acts > .bs-btn-quiet { justify-content: center; }
+
+  .eq-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'main go'
+      'facts facts';
+    gap: 10px 12px;
+    padding: 13px 0;
+  }
+  .eq-row-main { grid-area: main; }
+  .eq-row .bs-lr-go { grid-area: go; align-self: start; }
+  .eq-row-facts {
+    grid-area: facts;
+    justify-content: flex-start;
+  }
+  .eq-row-pill { min-width: 0; }
+  .eq-row-pair { text-align: left; }
+
+  .eq-add > summary b { font-size: 21px; }
+
+  .eq-facts { grid-template-columns: 1fr; }
+  .eq-fact:nth-child(odd),
+  .eq-fact:nth-child(even) {
+    padding-left: 0;
+    padding-right: 0;
+    border-left: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .eq-strip .bs-stat.eq-mini { font-size: 21px; }
+  .eq-row-facts { gap: 10px; }
+  .eq-row-pair { min-width: calc(50% - 6px); }
+}
+
 /* --- an opened invoice ---------------------------------------------------- */
 /* The original on the left because that is the thing being checked against;
    the figures read down the right. Fetched on open, so it arrives into an
