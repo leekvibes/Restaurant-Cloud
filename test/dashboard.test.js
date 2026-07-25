@@ -662,7 +662,9 @@ test('a phone gets one navigation, not three', async () => {
   // status under its name instead of sitting on the end of the line.
   assert.ok(!/^\.bs-bottom a \{/m.test(css) && !/\n  \.bs-bottom a \{/.test(css),
     'the tab rule is scoped to direct children');
-  assert.match(css, /\.bs-bottom > a \{/, 'via .bs-bottom > a');
+  // Direct child, whether alone or grouped with the Index summary (which is
+  // also a direct child) — never a bare descendant that reaches the sheet.
+  assert.match(css, /\.bs-bottom > a[ ,]/, 'via .bs-bottom > a');
 });
 
 test('the index reaches every section, and the account', async () => {

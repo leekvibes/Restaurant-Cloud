@@ -839,6 +839,33 @@ test('payroll opens on the period running now', async () => {
     `expected ${labelFor(cur)}, got ${sub[1].replace(/\s+/g, ' ').trim().slice(0, 60)}`);
 });
 
+test('the payroll roster leads with take-home, not card tips', async () => {
+  // The per-person line was carrying cash tips and card payout columns; the
+  // one number being read is what they take home. Card payout still lives in
+  // the totals strip and the drill-down, just not as a column on every row.
+  const P = require('../src/periods');
+  const cur = P.currentPeriod();
+  const html = await (await fetch(`${BASE}/payroll?from=${cur.start}&to=${cur.end}`, { redirect: 'manual' })).text();
+  const head = (html.match(/class="bs-lhead bs-rhead">([\s\S]*?)<\/div>/) || [])[1] || '';
+  assert.match(head, /Take-home/, 'the roster header names take-home');
+  assert.ok(!/Cash tips/.test(head), 'and no longer a cash-tips column');
+  assert.ok(!/Card payout/.test(head), 'nor a card-payout column');
+  // The how-it-works explainer is gone.
+  assert.ok(!/is what goes into Gusto — card tips net of tip-out/.test(html), 'the explainer is removed');
+});
+
+test('the payroll summary shows each person and the total, printable', async () => {
+  const P = require('../src/periods');
+  const cur = P.currentPeriod();
+  const res = await fetch(`${BASE}/payroll/summary?from=${cur.start}&to=${cur.end}`, { redirect: 'manual' });
+  assert.strictEqual(res.status, 200, 'the summary opens');
+  const html = await res.text();
+  assert.match(html, /Payroll summary/, 'it is the summary');
+  assert.match(html, /What each person takes home/i, 'listing take-home per person');
+  assert.match(html, /window\.print\(\)/, 'with a print action');
+  assert.match(html, /Total on the checks/, 'and a total');
+});
+
 test('a skipped period stops the dashboard asking, without looking sent', async () => {
   const P = require('../src/periods');
   const { start, end } = P.recentPeriods(2)[1];

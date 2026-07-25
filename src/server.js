@@ -1658,7 +1658,7 @@ app.get('/shifts/:id', (req, res) => {
       ${attention}
 
       ${canWrite() ? `<div class="bs-tools">
-        <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add a server or edit their numbers</button>
+        <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add employee to shift</button>
         <button type="button" class="bs-tool" onclick="bsTool('read-photo')">Read from a report photo</button>
         <button type="button" class="bs-tool" onclick="bsTool('the-record')">The record</button>
         <button type="button" class="bs-tool bs-tool-danger" onclick="bsTool('danger')">Delete this shift</button>
@@ -1675,24 +1675,41 @@ app.get('/shifts/:id', (req, res) => {
           </details>
 
           <details class="bs-x" id="add-staff">
-            <summary>Add a server, or edit their numbers</summary>
-            <form method="post" action="/shifts/${sh.id}/server" class="bs-form" id="server-form">
-              <label>Server <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
-              <label>Food sales <input name="food" type="number" step="0.01" min="0" placeholder="0.00"></label>
-              <label>Coffee sales <input name="coffee" type="number" step="0.01" min="0" placeholder="0.00"></label>
-              <label>Alcohol sales <input name="alcohol" type="number" step="0.01" min="0" placeholder="0.00"></label>
-              <label>Card tips <input name="card_tips" type="number" step="0.01" min="0" placeholder="0.00"></label>
-              <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
-              <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
-              <button class="bs-btn-quiet" type="submit">Save server</button>
-            </form>
-            <form method="post" action="/shifts/${sh.id}/support" class="bs-form" id="support-form">
-              <label>Support <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
-              <label>Role <select name="role" id="support-role">${roleOpts('kitchen')}</select></label>
-              <label>Hours <input name="hours" type="number" step="0.01" min="0" placeholder="0"></label>
-              <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="staff default"></label>
-              <button class="bs-btn-quiet" type="submit">Save support</button>
-            </form>
+            <summary>Add employee to shift</summary>
+            <div class="bs-addemp">
+              <p class="bs-addemp-lead">Pick who worked and how, then enter their numbers.
+                Choosing someone already on the shift loads what they have so you can edit it.</p>
+              <div class="bs-seg" id="add-seg" role="tablist">
+                <button type="button" data-kind="server" class="on">Server</button>
+                <button type="button" data-kind="support">Support</button>
+              </div>
+
+              <form method="post" action="/shifts/${sh.id}/server" class="bs-addform" id="server-form">
+                <label class="fld wide">Who worked
+                  <select name="employee_id" required id="server-emp">${staffOptions}</select></label>
+                <div class="bs-addgrid">
+                  <label class="fld">Food sales<input name="food" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+                  <label class="fld">Coffee sales<input name="coffee" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+                  <label class="fld">Alcohol sales<input name="alcohol" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+                  <label class="fld">Card tips<input name="card_tips" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
+                  <label class="fld">Hours<input name="hours" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>
+                  <label class="fld">Wage / hr<input name="wage" type="number" step="0.01" min="0" inputmode="decimal" placeholder="staff default"></label>
+                </div>
+                <button class="bs-btn" type="submit">Add to shift</button>
+              </form>
+
+              <form method="post" action="/shifts/${sh.id}/support" class="bs-addform" id="support-form" hidden>
+                <div class="bs-addgrid">
+                  <label class="fld wide">Who worked
+                    <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
+                  <label class="fld wide">Position
+                    <select name="role" id="support-role">${roleOpts('kitchen')}</select></label>
+                  <label class="fld">Hours<input name="hours" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>
+                  <label class="fld">Wage / hr<input name="wage" type="number" step="0.01" min="0" inputmode="decimal" placeholder="staff default"></label>
+                </div>
+                <button class="bs-btn" type="submit">Add to shift</button>
+              </form>
+            </div>
           </details>` : ''}
 
           <details class="bs-x" id="the-record"><summary>The record</summary>${submissionsPanel(sh.id)}</details>
@@ -1767,6 +1784,19 @@ app.get('/shifts/:id', (req, res) => {
     <script>
       var ENTRIES = ${JSON.stringify(entries)};
       function setVal(form, name, v) { var el = form.querySelector('[name="' + name + '"]'); if (el) el.value = v == null ? '' : v; }
+      // Server / Support toggle: one panel, one form showing at a time.
+      (function () {
+        var seg = document.getElementById('add-seg');
+        var sf = document.getElementById('server-form'), pf = document.getElementById('support-form');
+        if (!seg || !sf || !pf) return;
+        seg.addEventListener('click', function (e) {
+          var b = e.target.closest('[data-kind]');
+          if (!b) return;
+          [].forEach.call(seg.children, function (c) { c.classList.toggle('on', c === b); });
+          var server = b.dataset.kind === 'server';
+          sf.hidden = !server; pf.hidden = server;
+        });
+      })();
       (function () {
         var f = document.getElementById('server-form'), emp = document.getElementById('server-emp');
         if (!f || !emp) return;
@@ -3948,9 +3978,7 @@ app.get('/payroll', (req, res) => {
         <i>${esc(r.roles)} · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
       <span class="bs-lr-n">${r.hours}<i>${r.wk1Hours} + ${r.wk2Hours}</i></span>
       <span class="bs-lr-n">${money(r.wage)}</span>
-      <span class="bs-lr-n muted">${r.cashTips ? money(r.cashTips) : '<span class="bs-em">—</span>'}</span>
-      <span class="bs-lr-n strong">${money(r.paycheckTips)}</span>
-      <span class="bs-lr-n strong">${money(r.takeHome)}</span>
+      <span class="bs-lr-n strong big">${money(r.takeHome)}</span>
       <span class="bs-lr-go">→</span>
     </a>`).join('');
 
@@ -3963,7 +3991,10 @@ app.get('/payroll', (req, res) => {
           <p class="bs-subline">${esc(period ? labelFor({ start: from, end: to }) : `${from} to ${to}`)} ·
             ${shiftCount} shift${shiftCount === 1 ? '' : 's'}. Hours and card tip payout are what Gusto asks for.</p>
         </div>
-        <a class="bs-btn-sm" href="/payroll/export?from=${from}&to=${to}">Export to Excel</a>
+        <div class="bs-head-acts">
+          <a class="bs-btn-sm" href="/payroll/summary?from=${from}&to=${to}">View summary</a>
+          <a class="bs-btn-sm" href="/payroll/export?from=${from}&to=${to}">Export to Excel</a>
+        </div>
       </div>
 
       ${periodBar(from, to)}
@@ -3984,7 +4015,7 @@ app.get('/payroll', (req, res) => {
       ${rows.length ? `
       <div class="bs-lhead bs-rhead">
         <span>Person</span><span class="r">Hours</span><span class="r">Wages</span>
-        <span class="r">Cash tips</span><span class="r">Card payout</span><span class="r">On the check</span><span></span>
+        <span class="r">Take-home</span><span></span>
       </div>
       <div class="bs-lrows">${roster}</div>
       <div class="bs-lr bs-rrow bs-rtot">
@@ -3992,19 +4023,65 @@ app.get('/payroll', (req, res) => {
           across ${shiftCount} service${shiftCount === 1 ? '' : 's'}</i></span>
         <span class="bs-lr-n">${totals.hours}<i>${totals.wk1Hours} + ${totals.wk2Hours}</i></span>
         <span class="bs-lr-n">${money(totals.wage)}</span>
-        <span class="bs-lr-n muted">${money(totals.cashTips)}</span>
-        <span class="bs-lr-n strong">${money(totals.paycheckTips)}</span>
-        <span class="bs-lr-n strong">${money(totals.takeHome)}</span>
+        <span class="bs-lr-n strong big">${money(totals.takeHome)}</span>
         <span></span>
       </div>` : '<p class="bs-clear">Nobody worked in this range.</p>'}
       </section>
+    </div>`));
+});
 
-      <p class="bs-note bs-note-wide">
-        <b>Card tip payout</b> is what goes into Gusto — card tips net of tip-out, owed on the paycheck.
-        <b>On the check</b> is wages plus that payout.
-        <b>Cash tips</b> — taken home nightly, plus the weekly jar and to-go share — are here for reference
-        and are deliberately not in the check total: they already walked out with that money.
-        Wk&nbsp;1 is ${esc(from)} → ${esc(shiftBack(midDate, 1))}, Wk&nbsp;2 is ${esc(midDate)} → ${esc(to)}.</p>
+// A clean one-screen summary of a run — every person and what they take home,
+// with the total, stripped of the checks and the send controls. The thing you
+// pull up to review a period at a glance, hand to a partner, or print.
+app.get('/payroll/summary', (req, res) => {
+  const cur = currentPeriod();
+  const from = req.query.from || cur.start;
+  const to = req.query.to || cur.end;
+  const { rows, totals, shiftCount } = aggregatePayroll(from, to);
+  const period = isPeriod(from, to);
+  const paid = rows.filter((r) => r.hours > 0 || r.takeHome > 0);
+
+  const statCellSum = (label, value, sub) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const line = (r) => `
+    <div class="bs-lr bs-sumrow">
+      <span class="bs-rr-n">${esc(r.name)}<i>${esc(r.roles)} · ${r.shifts} shift${r.shifts === 1 ? '' : 's'} · ${r.hours} hrs</i></span>
+      <span class="bs-lr-n big strong">${money(r.takeHome)}</span>
+    </div>`;
+
+  res.send(layout('Payroll summary', `
+    ${flash(req)}
+    <div class="bs-page bs-sum">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Payroll summary</h1>
+          <p class="bs-subline">${esc(period ? labelFor({ start: from, end: to }) : `${from} to ${to}`)} ·
+            ${paid.length} ${paid.length === 1 ? 'person' : 'people'} · ${shiftCount} shift${shiftCount === 1 ? '' : 's'}</p>
+        </div>
+        <div class="bs-head-acts">
+          <button type="button" class="bs-btn-sm" onclick="window.print()">Print</button>
+          <a class="bs-btn-sm" href="/payroll?from=${from}&to=${to}">Back to payroll</a>
+        </div>
+      </div>
+
+      <section class="bs-panel bs-strip">
+        ${statCellSum('On the checks', money(totals.takeHome), 'wages + card tips')}
+        ${statCellSum('Hours', totals.hours, `${paid.length} worked`)}
+        ${statCellSum('Card tip payout', money(totals.paycheckTips), 'into Gusto')}
+      </section>
+
+      ${rows.length ? `
+      <div class="bs-kick2"><span>What each person takes home</span></div>
+      <div class="bs-lrows">${rows.map(line).join('')}</div>
+      <div class="bs-lr bs-sumrow bs-sumtot">
+        <span class="bs-rr-n">Total on the checks</span>
+        <span class="bs-lr-n big strong">${money(totals.takeHome)}</span>
+      </div>`
+      : '<p class="bs-clear">Nobody worked in this range.</p>'}
+
+      <p class="bs-note">Cash tips are not in these figures — they were taken home nightly.
+        Take-home here is wages plus card-tip payout, what lands on the paycheck.</p>
     </div>`));
 });
 

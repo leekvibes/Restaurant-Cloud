@@ -417,20 +417,39 @@ body {
   /* The greeting was against the rule above it. */
   .bs-page { padding-top: 20px; }
 
+  /* No page inside the main column may push the body wider than the screen —
+     a horizontal overflow there is what lets iOS widen the layout viewport and
+     drop the fixed bottom bar into the middle of the page. clip contains it
+     without creating a scroll container, so the sticky masthead is untouched. */
+  .bs-main { overflow-x: clip; }
+
   /* The five places a phone actually goes. Everything else is one tap further
-     in, under Index — nothing is unreachable, it is just not underfoot. */
+     in, under Index — nothing is unreachable, it is just not underfoot.
+     Taller and louder than it was: it read as a hairline nobody noticed. */
   .bs-bottom {
     display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
-    background: var(--paper); border-top: 2px solid var(--rule-heavy);
+    background: var(--paper); border-top: 1px solid var(--rule);
+    box-shadow: 0 -6px 20px rgba(31, 29, 26, .07);
     padding-bottom: env(safe-area-inset-bottom);
   }
-  .bs-bottom > a {
-    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
-    padding: 9px 2px 8px; min-height: 54px;
-    font-size: 11px; color: var(--muted); font-weight: 500;
+  .bs-bottom > a, .bs-bottom > .bs-index > summary {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px; padding: 9px 2px 8px; min-height: 62px;
+    font-size: 10.5px; letter-spacing: .01em; color: var(--muted); font-weight: 500;
+    position: relative;
   }
+  /* The active tab: ink, heavier, its icon lifted in a soft accent tile, and a
+     short accent bar riding the top edge — the modern "you are here" cue. */
   .bs-bottom > a.on { color: var(--ink); font-weight: 600; }
-  .bs-bottom .bs-bottom-g { font-size: 16px; line-height: 1; }
+  .bs-bottom > a.on::before {
+    content: ''; position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
+    width: 30px; height: 2.5px; background: var(--accent); border-radius: 0 0 3px 3px;
+  }
+  .bs-bottom .bs-bottom-g {
+    font-size: 22px; line-height: 1; width: 40px; height: 30px;
+    display: grid; place-items: center; border-radius: 9px;
+  }
+  .bs-bottom > a.on .bs-bottom-g { background: var(--accent-fill, #edf0fb); color: var(--accent); }
 }
 
 @media (max-width: 560px) {
@@ -527,12 +546,13 @@ body {
 .bs-index { flex: 1; }
 .bs-index > summary {
   list-style: none; cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 3px;
-  padding: 9px 2px 8px; min-height: 54px;
-  font-size: 11px; color: var(--muted); font-weight: 500;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  padding: 9px 2px 8px; min-height: 62px;
+  font-size: 10.5px; color: var(--muted); font-weight: 500;
 }
 .bs-index > summary::-webkit-details-marker { display: none; }
 .bs-index[open] > summary { color: var(--ink); font-weight: 600; }
+.bs-index[open] > summary .bs-bottom-g { background: var(--accent-fill, #edf0fb); color: var(--accent); }
 /* The old index-sheet rules lived here; the full-screen version below
    replaces them. A two-column grid on the container survived the rewrite and
    put Shifts and Sales side by side with their status wrapped underneath. */
@@ -931,6 +951,42 @@ body {
 .bs-form > p { grid-column: 1 / -1; margin: 0; }
 .bs-danger { border-color: var(--danger); color: var(--danger); }
 .bs-danger:hover { background: var(--danger); color: var(--paper); }
+
+/* Add employee to shift — the redesign of the old stacked-label form.
+   A Server / Support toggle picks the field set; the fields are labelled
+   cells, numbers in mono, and one clear primary button. */
+.bs-addemp { padding: 4px 0 8px; }
+.bs-addemp-lead { margin: 0 0 14px; font-size: 13px; color: var(--secondary); max-width: 60ch; }
+.bs-seg { display: inline-flex; border: 1px solid var(--rule); margin-bottom: 18px; }
+.bs-seg button {
+  font: inherit; font-size: 13.5px; font-weight: 500; padding: 9px 22px;
+  background: transparent; color: var(--secondary); border: 0; cursor: pointer;
+}
+.bs-seg button + button { border-left: 1px solid var(--rule); }
+.bs-seg button.on { background: var(--ink); color: var(--paper); font-weight: 600; }
+.bs-addform { display: block; }
+/* [hidden] and a class both carry one point of specificity, so a bare
+   `.bs-addform { display: block }` would beat the attribute and show the
+   hidden form. Say it explicitly. */
+.bs-addform[hidden] { display: none; }
+.bs-addgrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px 16px; margin: 14px 0 18px;
+}
+.bs .bs-addform .fld { font-family: var(--mono); font-size: 9.5px; font-weight: 400;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  display: grid; gap: 6px; }
+.bs-addform .fld.wide { grid-column: 1 / -1; }
+.bs-addgrid .fld.wide { grid-column: 1 / -1; }
+.bs .bs-addform .fld input, .bs .bs-addform .fld select {
+  border: 0; border-bottom: 1px solid var(--field-border); background: transparent;
+  padding: 6px 0; font-family: var(--sans); font-size: 15px; color: var(--ink);
+  text-transform: none; letter-spacing: 0;
+}
+.bs .bs-addform .fld input[type="number"] { font-family: var(--mono); font-size: 15px; }
+.bs .bs-addform .fld input:focus, .bs .bs-addform .fld select:focus {
+  outline: 0; border-bottom-color: var(--ink); box-shadow: none;
+}
 
 @media (max-width: 1100px) {
   .bs-cols2 { grid-template-columns: 1fr; }
@@ -1427,10 +1483,28 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    PAYROLL — the fortnightly run.
    ======================================================================== */
 
-/* The roster. Six columns, not the old nine: the shift count sits under the
-   name and the week split under the hours, because both are readings of the
-   column above them rather than columns in their own right. */
-.bs-rhead, .bs-rrow { grid-template-columns: 1fr 96px 104px 100px 116px 118px 24px; }
+/* The roster. Person, hours, wages, and the one number that matters — what
+   they take home. Card and cash tips are dropped from the line: card payout
+   lives in the totals strip and every drill-down, and take-home already
+   contains it, so a column for it here was noise. */
+.bs-rhead, .bs-rrow { grid-template-columns: 1fr 84px 104px 120px 22px; }
+.bs-lr-n.big { font-size: 16px; font-weight: 700; color: var(--headline); }
+.bs-rhead > :nth-child(4) { color: var(--ink); font-weight: 600; }
+
+/* Two actions in the page head (View summary · Export) sit as a group. */
+.bs-head-acts { display: flex; gap: 8px; align-items: center; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+
+/* Payroll summary — a spare person → take-home list, print-friendly. */
+.bs-sumrow { grid-template-columns: 1fr auto; align-items: baseline; padding: 13px 0; }
+.bs-sumtot { grid-template-columns: 1fr auto; border-top: 2px solid var(--rule-heavy);
+  border-bottom: 0; margin-top: 2px; padding-top: 13px; }
+.bs-sumtot .bs-rr-n { font-weight: 700; }
+@media print {
+  .bs-masthead, .bs-nav, .bs-subnav, .bs-bottom, .bs-foot, .bs-head-acts,
+  .openwarning, .bs-billboard, #bs-bb { display: none !important; }
+  .bs-main { padding: 0; }
+  .bs-sum .bs-panel { border: 0; }
+}
 .bs-rr-n { font-size: 14px; font-weight: 600; color: var(--headline); min-width: 0; }
 .bs-rr-n i {
   display: block; font-style: normal; font-weight: 400;
@@ -1486,16 +1560,11 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    positional selector governs both and they cannot drift apart.
    :nth-child, never :nth-of-type — every cell here is a <span>, so
    :nth-of-type counts spans and ignores the class you wrote next to it. */
-@media (max-width: 1000px) {
-  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
-  /* Cash tips go first — reference only, and never typed into anything. */
-  .bs-rhead > :nth-child(4), .bs-rrow > :nth-child(4) { display: none; }
-}
 @media (max-width: 640px) {
-  /* What survives is the name and the two figures Gusto asks for. */
-  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 66px 98px 18px; }
-  .bs-rhead > :nth-child(3), .bs-rrow > :nth-child(3),
-  .bs-rhead > :nth-child(6), .bs-rrow > :nth-child(6) { display: none; }
+  /* On a phone: the name, the hours, and the take-home. Wages fold away — it
+     is the drill-down's job, and take-home is the number being read here. */
+  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 62px 108px 16px; }
+  .bs-rhead > :nth-child(3), .bs-rrow > :nth-child(3) { display: none; }
   .bs-checks li { flex-wrap: wrap; gap: 3px 12px; }
   .bs-check-k { flex-basis: 100%; width: auto; }
 }
@@ -2761,6 +2830,25 @@ body.cap-open.qx-open [data-cap] { display: none; }
 
 @media (max-width: 1000px) {
   .pa-two { grid-template-columns: 1fr; gap: 22px; }
-  .pa-tabs { overflow-x: auto; }
-  .pa-tab { white-space: nowrap; }
+  /* The composer above the list, so adding a special / 86 / note is the first
+     thing under the tab — not something you scroll past the whole board to
+     reach and type into at the very bottom. */
+  .pa-two > .pa-col:last-child { order: -1; }
+}
+
+/* On a phone the four tabs do not fit on one line, so they used to scroll
+   sideways and "Who submits tips" hid off the right edge. A 2×2 grid shows all
+   four at once — nothing to scroll to. */
+@media (max-width: 620px) {
+  .pa-tabs {
+    display: grid; grid-template-columns: 1fr 1fr; margin-top: 18px;
+    border: 1px solid var(--rule); overflow: visible;
+  }
+  .pa-tab {
+    padding: 12px 8px; margin-bottom: 0; border: 0; white-space: normal;
+    text-align: center; justify-content: center; border-bottom: 1px solid var(--rule);
+  }
+  .pa-tab:first-child { padding-left: 8px; }
+  .pa-tab:nth-child(odd) { border-right: 1px solid var(--rule); }
+  .pa-tab:nth-child(3), .pa-tab:nth-child(4) { border-bottom: 0; }
 }

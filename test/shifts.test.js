@@ -179,6 +179,12 @@ test('the sheet keeps every form the workspace had', async () => {
   }
   assert.match(h, new RegExp(`href="/shifts/${sent}/results"`), 'and preview & send');
 
+  // The redesigned add form: renamed away from "add a server", with the
+  // Server/Support toggle picking which field set shows.
+  assert.match(h, /Add employee to shift/, 'the form is renamed');
+  assert.match(h, /id="add-seg"/, 'and has the Server / Support toggle');
+  assert.match(h, /class="bs-addform"[^>]*id="support-form" hidden/, 'support starts hidden behind the toggle');
+
   // Every row edits in place, and posts to the endpoint for what that person
   // is. Asserted in the TABLE, not merely somewhere on the page.
   const table = h.slice(h.indexOf('bs-srows'), h.indexOf('bs-sheet-note'));
