@@ -2328,6 +2328,9 @@ app.get('/version', (req, res) => {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown',
     businessDate: isoDate(now),
     localTime: now.toLocaleString('en-US', { hour12: true }),
+    // Whether Web Push can actually send — i.e. VAPID_PRIVATE_KEY is set. A
+    // boolean, not the key. Lets the owner confirm the env var took effect.
+    push: PORTAL.pushEnabled === true,
   });
 });
 
