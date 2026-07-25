@@ -559,7 +559,7 @@ app.get('/', (req, res) => {
   // today's specials board — both posted through the portal, both things the
   // owner opens the day wanting to see.
   const floor = may('staff') ? PORTAL.q.stockOpen.all() : [];
-  const specialsBoard = may('staff') ? PORTAL.q.specialsFor.all(toStr) : [];
+  const specialsBoard = may('staff') ? PORTAL.q.specialsAll.all() : [];
 
   // --- needs attention -----------------------------------------------------
   // Every entry names the specific thing and links to it. A count with no
@@ -2970,7 +2970,7 @@ app.get('/portal', (req, res) => {
       .get(openToday.id, emp.id) : null;
 
   const notes = PORTAL.q.notesFor.all({ on: today });
-  const board = PORTAL.q.specialsFor.all(today);
+  const board = PORTAL.q.specialsAll.all();
   const running = board.filter((b) => !b.eighty_sixed_at).length;
   const off = board.length - running;
 
@@ -3035,8 +3035,8 @@ app.get('/portal', (req, res) => {
         ${submitRow}
         ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
           hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
-        ${row('/portal/specials', '✦', "Today's specials",
-          board.length ? `${running} running · ${off} on the 86 board` : 'Nothing posted today')}
+        ${row('/portal/specials', '✦', 'Specials &amp; 86 board',
+          board.length ? `${running} running · ${off} on the 86 board` : 'Nothing on the board')}
         ${row('/portal/stock', '⊞', 'Report out of stock', 'Out of something, or running low')}
       </div>
     </div>
@@ -3210,10 +3210,10 @@ app.get('/portal/specials', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const today = isoDate(startOfToday());
-  const board = PORTAL.q.specialsFor.all(today);
+  const board = PORTAL.q.specialsAll.all();
   const running = board.filter((b) => !b.eighty_sixed_at);
   const off = board.filter((b) => b.eighty_sixed_at);
-  const touched = PORTAL.q.boardTouched.get(today);
+  const touched = PORTAL.q.boardTouched.get();
   const when = touched && touched.at
     ? new Date(touched.at.replace(' ', 'T') + 'Z').toLocaleTimeString('en-US',
       { hour: 'numeric', minute: '2-digit' }) : null;
@@ -3226,7 +3226,7 @@ app.get('/portal/specials', (req, res) => {
       <p class="pt-sub">Know these before your shift.</p>
 
       ${running.length ? `
-      <div class="pt-kick"><span>Running today · ${running.length}</span></div>
+      <div class="pt-kick"><span>Running · ${running.length}</span></div>
       <div class="pt-dishes">
         ${running.map((d) => `<div class="pt-dish">
           <div class="pt-dish-h"><b>${esc(d.name)}</b>${d.price_cents != null
@@ -3245,7 +3245,7 @@ app.get('/portal/specials', (req, res) => {
         </div>`).join('')}
       </div>` : ''}
 
-      ${!board.length ? `<p class="pt-quiet">Nothing posted for today yet. Check back before service —
+      ${!board.length ? `<p class="pt-quiet">Nothing on the board yet. Check back before service —
         your manager updates this.</p>` : ''}
     </div>
     <p class="pt-foot">Manager updates this — check back before each service.</p>`));
@@ -7822,7 +7822,7 @@ app.get('/staff-portal', (req, res) => {
 
   const openStock = PORTAL.q.stockOpen.all();
   const recentStock = PORTAL.q.stockRecent.all().filter((r) => r.resolved_at);
-  const board = PORTAL.q.specialsFor.all(day);
+  const board = PORTAL.q.specialsAll.all();
   const running = board.filter((b) => !b.eighty_sixed_at);
   const off = board.filter((b) => b.eighty_sixed_at);
   const notes = PORTAL.q.notesAll.all();
@@ -8036,16 +8036,13 @@ app.get('/staff-portal', (req, res) => {
   const bodyBoard = `
     <div class="pa-two">
       <div class="pa-col">
-        <div class="bs-kick2"><span>On the board &middot; ${esc(niceDate(day))}</span>
+        <div class="bs-kick2"><span>On the board</span>
           <span class="bs-meta">${running.length} running &middot; ${off.length} 86&rsquo;d</span></div>
-        <form method="get" action="/staff-portal" class="pa-daypick">
-          <input type="hidden" name="tab" value="board">
-          <input type="date" name="d" value="${esc(day)}" onchange="this.form.submit()"
-            aria-label="Which day&rsquo;s board">
-        </form>
+        <p class="pa-lead">The board stays up until you take a special down — it does not clear
+          overnight. 86 a dish when it sells out; delete it when it comes off for good.</p>
         ${board.length
           ? `<div class="bs-srows">${[...running, ...off].map(dishRow).join('')}</div>`
-          : `<p class="bs-quiet">Nothing on the board for ${esc(niceDate(day))} yet.</p>`}
+          : `<p class="bs-quiet">Nothing on the board yet. Add a special on the right.</p>`}
       </div>
       <div class="pa-col">${composer}</div>
     </div>`;

@@ -432,7 +432,7 @@ test("a manager's 86 reaches the floor", async () => {
 
   const cookie = await signIn('1111');
   const before = await (await asStaff('/portal/specials', cookie)).text();
-  assert.match(before, /Running today/, 'and running');
+  assert.match(before, /Running ·/, 'and running');
 
   await form(`/staff-portal/special/${dish.id}/86`, { note: '' });
   const after = await (await asStaff('/portal/specials', cookie)).text();
@@ -474,6 +474,26 @@ test('any item can be 86’d, not only a running special', async () => {
 
   const floor = await (await asStaff('/portal/specials', await signIn('1111'))).text();
   assert.match(floor, /Qqx Fresh oysters/, 'and the floor sees it on the 86 board');
+});
+
+test('the board is evergreen — a special stays up until it is deleted', async () => {
+  // A special posted eight days ago must still be on the board today: it comes
+  // off when the manager takes it down, not when the date rolls over.
+  const old = isoDate(new Date(startOfToday().getTime() - 8 * 86400000));
+  db.prepare(`INSERT INTO portal_specials (service_date, name, price_cents, sort)
+    VALUES (?, 'Qqx Evergreen lamb', 2600, 5)`).run(old);
+
+  const floor = await (await asStaff('/portal/specials', await signIn('1111'))).text();
+  assert.match(floor, /Qqx Evergreen lamb/, 'an 8-day-old special still shows on the floor');
+
+  const mgr = await (await fetch(`${BASE}/staff-portal?tab=board`)).text();
+  assert.match(mgr, /Qqx Evergreen lamb/, 'and on the manager board');
+
+  // Deleting is what takes it down.
+  const dish = db.prepare("SELECT id FROM portal_specials WHERE name = 'Qqx Evergreen lamb'").get();
+  await form(`/staff-portal/special/${dish.id}/delete`, {});
+  const gone = db.prepare('SELECT id FROM portal_specials WHERE id = ?').get(dish.id);
+  assert.ok(!gone, 'and only deleting removes it');
 });
 
 test('a note stops showing the day after it expires', async () => {

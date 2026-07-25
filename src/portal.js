@@ -140,6 +140,10 @@ const q = {
   delNote: db.prepare('DELETE FROM portal_notes WHERE id = ?'),
 
   // --- specials ------------------------------------------------------------
+  // The board is evergreen: a special stays up until the manager deletes it, so
+  // this — every special, ordered — is what the board shows everywhere. The
+  // per-day specialsFor is kept for anything that still asks for a single day.
+  specialsAll: db.prepare('SELECT * FROM portal_specials ORDER BY sort, id'),
   specialsFor: db.prepare('SELECT * FROM portal_specials WHERE service_date = ? ORDER BY sort, id'),
   specialsRecent: db.prepare(`SELECT * FROM portal_specials
     WHERE service_date >= ? ORDER BY service_date DESC, sort, id`),
@@ -156,9 +160,10 @@ const q = {
     SET eighty_sixed_at = datetime('now'), sold_out_note = @note WHERE id = @id`),
   unEightySix: db.prepare("UPDATE portal_specials SET eighty_sixed_at = NULL, sold_out_note = NULL WHERE id = ?"),
   delSpecial: db.prepare('DELETE FROM portal_specials WHERE id = ?'),
-  // The board's "UPDATED 2:15 PM" — the latest thing that happened to it today.
+  // The board's "UPDATED 2:15 PM" — the latest thing that happened to the board,
+  // whenever it was; the board no longer resets by day.
   boardTouched: db.prepare(`SELECT MAX(COALESCE(eighty_sixed_at, created_at)) AS at
-    FROM portal_specials WHERE service_date = ?`),
+    FROM portal_specials`),
 
   // --- stock ---------------------------------------------------------------
   stockOpen: db.prepare(`SELECT s.*, p.name AS product_name, v.name AS vendor_name
