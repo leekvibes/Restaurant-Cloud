@@ -3403,6 +3403,18 @@ body.cap-open.qx-open [data-cap] { display: none; }
 .bs .rchip:hover { border-color: var(--ink); color: var(--ink); text-decoration: none; }
 .bs .rchip.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 
+/* --- avatars + tag pills: the last of the blue ----------------------------- */
+.bs .avatar {
+  border-radius: 0; background: var(--surface); border: 1px solid var(--ink);
+  color: var(--ink); font-weight: 600;
+}
+/* The role/info tag stops being a lavender fill and becomes a hairline tag.
+   Status pills keep their meaning but carry it in a coloured border, not a
+   pastel wash. */
+.bs .pill-blue { background: none; border: 1px solid var(--rule); color: var(--secondary); font-weight: 500; }
+.bs .pill-ok  { background: none; border: 1px solid var(--positive); color: var(--positive); font-weight: 500; }
+.bs .pill-red { background: none; border: 1px solid var(--danger); color: var(--danger); font-weight: 500; }
+
 /* --- empty states: drop the blue icon chip, hairline frame ----------------- */
 .bs .empty2 { background: var(--surface); border: 1px solid var(--rule); border-radius: 0; }
 .bs .empty2-ico { border-radius: 0; background: none; border: 1px solid var(--rule); color: var(--faint); }
