@@ -856,7 +856,7 @@ test('payroll keeps every column on the web, shows take-home on mobile', async (
   // At the phone breakpoint: card payout (5th cell) is hidden, take-home stays
   // and is promoted.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
-  assert.match(css, /\.bs-rrow > :nth-child\(5\)[^}]*display: none/, 'card payout folds away on a phone');
+  assert.match(css, /\.bs-rrow(:not\(\.has-ot\))? > :nth-child\(5\)[^}]*display: none/, 'card payout folds away on a phone');
   assert.match(css, /\.bs-rrow \.bs-takehome \{[^}]*font-size/, 'and take-home is promoted there');
 
   // The how-it-works explainer is still gone.

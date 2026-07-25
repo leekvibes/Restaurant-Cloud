@@ -957,6 +957,12 @@ body {
    cells, numbers in mono, and one clear primary button. */
 .bs-addemp { padding: 4px 0 8px; }
 .bs-addemp-lead { margin: 0 0 14px; font-size: 13px; color: var(--secondary); max-width: 60ch; }
+.bs-addemp-lead a { color: var(--accent); }
+
+/* The overtime on/off — a plain, unmissable checkbox line above the numbers. */
+.bs-ot-switch { display: flex; align-items: center; gap: 10px; margin: 4px 0 16px;
+  font-size: 15px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.bs-ot-switch input { width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer; }
 .bs-seg { display: inline-flex; border: 1px solid var(--rule); margin-bottom: 18px; }
 .bs-seg button {
   font: inherit; font-size: 13.5px; font-weight: 500; padding: 9px 22px;
@@ -1488,6 +1494,14 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    lives in the totals strip and every drill-down, and take-home already
    contains it, so a column for it here was noise. */
 .bs-rhead, .bs-rrow { grid-template-columns: 1fr 96px 104px 100px 116px 118px 24px; }
+/* With overtime on, three columns slot in after Hours — Wk 1, Wk 2, OT — so
+   the split the overtime is measured on is on the page beside the number it
+   produced. Only ever on the web; the phone folds them away below. */
+.bs-rhead.has-ot, .bs-rrow.has-ot {
+  grid-template-columns: minmax(110px, 1fr) 60px 48px 48px 52px 86px 86px 94px 102px 20px;
+}
+.bs-lr-n.subtle { color: var(--muted); }
+.bs-lr-n.ot, .bs-rhead .r.ot { color: var(--warning); }
 .bs-lr-n.big { font-size: 16px; font-weight: 700; color: var(--headline); }
 
 /* Two actions in the page head (View summary · Export) sit as a group. */
@@ -1561,17 +1575,30 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    :nth-of-type counts spans and ignores the class you wrote next to it. */
 @media (max-width: 1000px) {
   /* Cash tips fold away first — reference only, never typed into anything. */
-  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
-  .bs-rhead > :nth-child(4), .bs-rrow > :nth-child(4) { display: none; }
+  .bs-rhead:not(.has-ot), .bs-rrow:not(.has-ot) { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
+  .bs-rhead:not(.has-ot) > :nth-child(4), .bs-rrow:not(.has-ot) > :nth-child(4) { display: none; }
+  /* With OT on, the OT-detail columns (Wk 1, Wk 2, OT) and cash tips fold, so a
+     tablet still reads Person · Hours · Wages · Card · Take-home. */
+  .bs-rhead.has-ot, .bs-rrow.has-ot { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
+  .bs-rhead.has-ot > :nth-child(3), .bs-rrow.has-ot > :nth-child(3),
+  .bs-rhead.has-ot > :nth-child(4), .bs-rrow.has-ot > :nth-child(4),
+  .bs-rhead.has-ot > :nth-child(5), .bs-rrow.has-ot > :nth-child(5),
+  .bs-rhead.has-ot > :nth-child(7), .bs-rrow.has-ot > :nth-child(7) { display: none; }
 }
 @media (max-width: 640px) {
   /* On a phone: the name, the hours, and what they take home — NOT card payout,
-     which is what used to survive here. Wages and card payout fold away; the
-     take-home column (the 6th cell) stays and reads a touch larger. The full
-     set of columns is unchanged on the web. */
-  .bs-rhead, .bs-rrow { grid-template-columns: 1fr 62px 108px 16px; }
-  .bs-rhead > :nth-child(3), .bs-rrow > :nth-child(3),
-  .bs-rhead > :nth-child(5), .bs-rrow > :nth-child(5) { display: none; }
+     which is what used to survive here. The full set of columns is unchanged on
+     the web, and the OT-detail columns are web-only too. */
+  .bs-rhead:not(.has-ot), .bs-rrow:not(.has-ot) { grid-template-columns: 1fr 62px 108px 16px; }
+  .bs-rhead:not(.has-ot) > :nth-child(3), .bs-rrow:not(.has-ot) > :nth-child(3),
+  .bs-rhead:not(.has-ot) > :nth-child(5), .bs-rrow:not(.has-ot) > :nth-child(5) { display: none; }
+  .bs-rhead.has-ot, .bs-rrow.has-ot { grid-template-columns: 1fr 62px 108px 16px; }
+  .bs-rhead.has-ot > :nth-child(3), .bs-rrow.has-ot > :nth-child(3),
+  .bs-rhead.has-ot > :nth-child(4), .bs-rrow.has-ot > :nth-child(4),
+  .bs-rhead.has-ot > :nth-child(5), .bs-rrow.has-ot > :nth-child(5),
+  .bs-rhead.has-ot > :nth-child(6), .bs-rrow.has-ot > :nth-child(6),
+  .bs-rhead.has-ot > :nth-child(7), .bs-rrow.has-ot > :nth-child(7),
+  .bs-rhead.has-ot > :nth-child(8), .bs-rrow.has-ot > :nth-child(8) { display: none; }
   .bs-rrow .bs-takehome { font-size: 16px; font-weight: 700; color: var(--headline); }
   .bs-checks li { flex-wrap: wrap; gap: 3px 12px; }
   .bs-check-k { flex-basis: 100%; width: auto; }

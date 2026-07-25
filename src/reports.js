@@ -10,6 +10,7 @@ const { runShift } = require('./engine');
 const { policyForShift } = require('./policy');
 const { toCents, toDollars } = require('./money');
 const { addDays } = require('./dates');
+const OT = require('./overtime');
 
 // COGS categories from the invoices module (what you buy to sell food & drink).
 const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
@@ -108,16 +109,18 @@ function aggregatePayroll(from, to) {
     if (!people.has(id)) {
       people.set(id, { employeeId: id, name, email: emails.get(id) || null, roles: new Set(),
         hours: 0, wage: 0, paycheckTips: 0,
-        cashHome: 0, weeklyCash: 0, tipsEarned: 0, shifts: 0, wk1Hours: 0, wk2Hours: 0 });
+        cashHome: 0, weeklyCash: 0, tipsEarned: 0, shifts: 0,
+        wk1Hours: 0, wk2Hours: 0, wk1Wage: 0, wk2Wage: 0 });
     }
     const rec = people.get(id);
     if (!rec.email && emails.get(id)) rec.email = emails.get(id);
     return rec;
   };
 
-  // Split the period into week 1 / week 2 (Gusto runs a two-week cycle).
+  // Split the period into week 1 / week 2 (Gusto runs a two-week cycle). These
+  // two halves are the workweeks overtime is measured against.
   const midDate = shiftDate(from, 7); // first day of week 2
-  const weekKey = (date) => (date < midDate ? 'wk1Hours' : 'wk2Hours');
+  const weekKey = (date) => (date < midDate ? 'wk1' : 'wk2');
 
   const detail = []; // per-shift, per-person rows for the "Shift detail" sheet
 
@@ -132,7 +135,8 @@ function aggregatePayroll(from, to) {
       const rec = bump(p.employeeId, p.name);
       const wage = Math.round(toCents(rateMap.get(p.employeeId) || 0) * p.hours);
       const paycheck = p.tipsKept - p.cashTips;
-      rec.roles.add('server'); rec.hours += p.hours; rec.wage += wage; rec[wk] += p.hours;
+      rec.roles.add('server'); rec.hours += p.hours; rec.wage += wage;
+      rec[wk + 'Hours'] += p.hours; rec[wk + 'Wage'] += wage;
       rec.paycheckTips += paycheck; rec.cashHome += p.cashTips; rec.tipsEarned += p.tipsKept; rec.shifts += 1;
       detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: 'server', hours: p.hours,
         wage, cardTips: p.cardTips, cashTips: p.cashTips, tipout: p.tipoutTotal, tipsKept: p.tipsKept, paycheck });
@@ -143,7 +147,8 @@ function aggregatePayroll(from, to) {
       const shares = p.poolShares || {};
       const poolPaycheck = shares.paycheck || 0;                          // e.g. to-go card
       const poolCash = (shares.weekly_cash || 0) + (shares.nightly_cash || 0); // jar + to-go cash
-      rec.roles.add(p.role); rec.hours += p.hours; rec.wage += wage; rec[wk] += p.hours;
+      rec.roles.add(p.role); rec.hours += p.hours; rec.wage += wage;
+      rec[wk + 'Hours'] += p.hours; rec[wk + 'Wage'] += wage;
       rec.paycheckTips += p.tipShare + poolPaycheck;   // role tip-out + card pool → paycheck
       rec.weeklyCash += poolCash;                      // jar + to-go cash → handed out
       rec.tipsEarned += p.tipShare + (p.poolShare || 0); rec.shifts += 1;
@@ -159,11 +164,28 @@ function aggregatePayroll(from, to) {
   // payroll page nobody trusts. Rounded once, where the totals are built.
   const hrs = (n) => Math.round(n * 100) / 100;
 
+  // Overtime, only if it is switched on. Off (the default) or exempt, otPay is
+  // 0 and wage is exactly the straight-time total it always was — nothing about
+  // this branch changes a figure until the owner turns it on.
+  const otRule = OT.rule();
+  const exempt = otRule.enabled ? OT.exemptSet() : null;
+
   const rows = [...people.values()].sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
     const cashTips = r.cashHome + r.weeklyCash;   // shown for reference only
+    let otHours = 0;
+    let otPay = 0;
+    if (otRule.enabled && !exempt.has(r.employeeId)) {
+      const ot = OT.overtimeFor(
+        [{ hours: r.wk1Hours, wage: r.wk1Wage }, { hours: r.wk2Hours, wage: r.wk2Wage }],
+        otRule);
+      otHours = ot.otHours;
+      otPay = ot.otPay;
+    }
+    const wage = r.wage + otPay;   // straight time + the overtime premium
     // Take-home = what actually lands on the paycheck. Cash is excluded
     // because they already walked out with it.
-    return { ...r, roles: [...r.roles].join(', '), cashTips, takeHome: r.wage + r.paycheckTips,
+    return { ...r, roles: [...r.roles].join(', '), cashTips, wage, otHours, otPay,
+      takeHome: wage + r.paycheckTips,
       hours: hrs(r.hours), wk1Hours: hrs(r.wk1Hours), wk2Hours: hrs(r.wk2Hours) };
   });
   const sum = (k) => rows.reduce((t, r) => t + r[k], 0);
@@ -171,10 +193,11 @@ function aggregatePayroll(from, to) {
     shifts: sum('shifts'), hours: hrs(sum('hours')), wage: sum('wage'), paycheckTips: sum('paycheckTips'),
     cashHome: sum('cashHome'), weeklyCash: sum('weeklyCash'), cashTips: sum('cashTips'),
     takeHome: sum('takeHome'), tipsEarned: sum('tipsEarned'),
+    otHours: hrs(sum('otHours')), otPay: sum('otPay'),
     wk1Hours: hrs(sum('wk1Hours')), wk2Hours: hrs(sum('wk2Hours')),
   };
 
-  return { rows, totals, detail, shiftCount: shifts.length, midDate };
+  return { rows, totals, detail, shiftCount: shifts.length, midDate, ot: otRule };
 }
 
 const MONEY_FMT = '$#,##0.00';
@@ -192,18 +215,18 @@ async function buildWorkbook(from, to, restaurant) {
 
   // --- Payroll sheet (per employee) ---
   const pay = wb.addWorksheet('Payroll');
-  pay.mergeCells('A1:G1');
+  pay.mergeCells('A1:K1');
   pay.getCell('A1').value = `${restaurant || 'Restaurant'} — Payroll  ${from} to ${to}`;
   pay.getCell('A1').font = { bold: true, size: 14 };
   pay.addRow([]);
-  const payHead = pay.addRow(['Employee', 'Role(s)', 'Shifts', 'Total hours', 'Wage earning', 'Cash tips', 'Card tip payout', 'Total take-home', 'Wk 1 hours', 'Wk 2 hours']);
+  const payHead = pay.addRow(['Employee', 'Role(s)', 'Shifts', 'Total hours', 'Wk 1 hours', 'Wk 2 hours', 'OT hours', 'Wage earning', 'Cash tips', 'Card tip payout', 'Total take-home']);
   styleHeader(payHead);
   for (const r of rows) {
-    pay.addRow([r.name, r.roles, r.shifts, r.hours, toDollars(r.wage), toDollars(r.cashTips), toDollars(r.paycheckTips), toDollars(r.takeHome), r.wk1Hours, r.wk2Hours]);
+    pay.addRow([r.name, r.roles, r.shifts, r.hours, r.wk1Hours, r.wk2Hours, r.otHours || 0, toDollars(r.wage), toDollars(r.cashTips), toDollars(r.paycheckTips), toDollars(r.takeHome)]);
   }
-  const totalRow = pay.addRow(['TOTAL', '', totals.shifts, totals.hours, toDollars(totals.wage), toDollars(totals.cashTips), toDollars(totals.paycheckTips), toDollars(totals.takeHome), totals.wk1Hours, totals.wk2Hours]);
+  const totalRow = pay.addRow(['TOTAL', '', totals.shifts, totals.hours, totals.wk1Hours, totals.wk2Hours, totals.otHours || 0, toDollars(totals.wage), toDollars(totals.cashTips), toDollars(totals.paycheckTips), toDollars(totals.takeHome)]);
   totalRow.font = { bold: true };
-  pay.columns = [{ width: 20 }, { width: 16 }, { width: 8 }, { width: 12 }, { width: 14 }, { width: 12 }, { width: 16 }, { width: 16 }, { width: 11 }, { width: 11 }];
+  pay.columns = [{ width: 20 }, { width: 16 }, { width: 8 }, { width: 12 }, { width: 11 }, { width: 11 }, { width: 10 }, { width: 14 }, { width: 12 }, { width: 16 }, { width: 16 }];
   [5, 6, 7, 8].forEach((i) => pay.getColumn(i).numFmt = MONEY_FMT);
   pay.getCell('A' + (pay.rowCount + 2)).value = 'Card tip payout = what to enter into Gusto (tips owed on the check). Total take-home = wages + card tip payout (what lands on the check). Cash tips = cash taken home + weekly jar/to-go — reference only, NOT included in take-home since they already received it.';
 

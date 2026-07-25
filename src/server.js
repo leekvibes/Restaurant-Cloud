@@ -16,6 +16,7 @@ const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
+const OT = require('./overtime');
 const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const MX = require('./metrics');
@@ -3543,6 +3544,9 @@ app.get('/employees/:id/edit', (req, res) => {
       <label>Default hourly wage <input name="rate" type="number" step="0.01" min="0" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}"></label>
       <label>Salary (if salaried) <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" placeholder="per pay period"></label>
       <label>Benugin ID <input name="pos_id" value="${val(e.pos_id)}"></label>
+      <label class="emp-check" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:9px;font-weight:600">
+        <input type="checkbox" name="ot_eligible" value="1"${e.ot_exempt ? '' : ' checked'} style="width:18px;height:18px">
+        Eligible for overtime <span class="sub" style="font-weight:400">— uncheck for salaried or exempt staff. Only applies when overtime is switched on in Payroll.</span></label>
       <button class="btn btn-primary" type="submit">Save changes</button>
     </form>
 
@@ -3581,6 +3585,9 @@ app.post('/employees/:id', (req, res) => {
     pin: (pin || '').trim() || null, hourly_rate_cents: toCents(rate), pos_id: (pos_id || '').trim() || null,
     pay_type: pay_type === 'salary' ? 'salary' : 'hourly', salary_cents: toCents(req.body.salary),
   });
+  // Overtime eligibility is its own column, set here — the checkbox only arrives
+  // when ticked, so an absent value means exempt.
+  OT.setExempt(e.id, req.body.ot_eligible !== '1');
   res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.`));
 });
 
@@ -3814,6 +3821,21 @@ app.post('/payroll/unskip', (req, res) => {
     + encodeURIComponent(`${labelFor({ start: from, end: to })} is back on the list.`));
 });
 
+app.post('/payroll/overtime', (req, res) => {
+  OT.saveRule({
+    enabled: req.body.enabled === '1' || req.body.enabled === 'on',
+    threshold: req.body.threshold,
+    multiplier: req.body.multiplier,
+  });
+  const r = OT.rule();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.from || '')) ? req.body.from : currentPeriod().start;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.to || '')) ? req.body.to : currentPeriod().end;
+  return res.redirect(`/payroll?from=${from}&to=${to}&msg=`
+    + encodeURIComponent(r.enabled
+      ? `Overtime on — over ${r.threshold} hrs a week at ${r.multiplier}×.`
+      : 'Overtime off — payroll pays straight time.'));
+});
+
 app.post('/payroll/send', async (req, res) => {
   const from = String(req.body.from || '');
   const to = String(req.body.to || '');
@@ -3933,7 +3955,7 @@ app.get('/payroll', (req, res) => {
   const justEnded = recentPeriods(2)[1];
   const from = req.query.from || cur.start;
   const to = req.query.to || cur.end;
-  const { rows, totals, shiftCount, midDate } = aggregatePayroll(from, to);
+  const { rows, totals, shiftCount, midDate, ot } = aggregatePayroll(from, to);
 
   // =========================================================================
   // BROADSHEET — the payroll run
@@ -3972,11 +3994,24 @@ app.get('/payroll', (req, res) => {
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
   // --- the roster ------------------------------------------------------------
+  // The overtime columns only render when overtime is switched on — off, the
+  // roster is exactly the table it was, and there is no empty OT column of
+  // zeros to explain.
+  const otCols = ot.enabled;
+  const otHead = otCols
+    ? '<span class="r">Wk 1</span><span class="r">Wk 2</span><span class="r ot">OT</span>' : '';
+  const otCells = (r) => otCols
+    ? `<span class="bs-lr-n subtle">${r.wk1Hours}</span>`
+      + `<span class="bs-lr-n subtle">${r.wk2Hours}</span>`
+      + `<span class="bs-lr-n ot">${r.otHours ? r.otHours : '<span class="bs-em">—</span>'}</span>`
+    : '';
+
   const roster = rows.map((r) => `
-    <a class="bs-lr bs-rrow" href="/payroll/${r.employeeId}?from=${from}&to=${to}">
+    <a class="bs-lr bs-rrow${otCols ? ' has-ot' : ''}" href="/payroll/${r.employeeId}?from=${from}&to=${to}">
       <span class="bs-rr-n">${esc(r.name)}
         <i>${esc(r.roles)} · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
-      <span class="bs-lr-n">${r.hours}<i>${r.wk1Hours} + ${r.wk2Hours}</i></span>
+      <span class="bs-lr-n">${r.hours}${otCols ? '' : `<i>${r.wk1Hours} + ${r.wk2Hours}</i>`}</span>
+      ${otCells(r)}
       <span class="bs-lr-n">${money(r.wage)}</span>
       <span class="bs-lr-n muted">${r.cashTips ? money(r.cashTips) : '<span class="bs-em">—</span>'}</span>
       <span class="bs-lr-n strong">${money(r.paycheckTips)}</span>
@@ -4001,6 +4036,31 @@ app.get('/payroll', (req, res) => {
 
       ${periodBar(from, to)}
 
+      ${canWrite() ? `
+      <details class="bs-x" id="ot-rules"${req.query.ot ? ' open' : ''}>
+        <summary>Overtime rules — ${ot.enabled
+          ? `<b class="ok">on</b> · over ${ot.threshold} hrs/wk at ${ot.multiplier}×`
+          : '<b>off</b> · straight time only'}</summary>
+        <div class="bs-addemp">
+          <p class="bs-addemp-lead">The federal rule: hours over the weekly threshold are paid at the
+            multiplier, measured per workweek — this period is two of them. Off applies nothing and the
+            numbers are straight time. To leave a specific person out (salaried, exempt), turn it off for
+            them on <a class="bs-act" href="/employees">Staff</a>.</p>
+          <form method="post" action="/payroll/overtime" class="bs-addform">
+            <input type="hidden" name="from" value="${esc(from)}"><input type="hidden" name="to" value="${esc(to)}">
+            <label class="bs-ot-switch">
+              <input type="checkbox" name="enabled" value="1"${ot.enabled ? ' checked' : ''}>
+              <span>Apply overtime to payroll</span>
+            </label>
+            <div class="bs-addgrid" style="max-width:420px">
+              <label class="fld">Over how many hours / week<input name="threshold" type="number" step="1" min="1" max="80" value="${ot.threshold}"></label>
+              <label class="fld">Paid at (multiplier)<input name="multiplier" type="number" step="0.1" min="1" max="3" value="${ot.multiplier}"></label>
+            </div>
+            <button class="bs-btn" type="submit">Save overtime rules</button>
+          </form>
+        </div>
+      </details>` : ''}
+
       <section class="bs-panel bs-strip">
         ${statCell('Hours', totals.hours, `wk 1 ${totals.wk1Hours} · wk 2 ${totals.wk2Hours}`)}
         ${statCell('Wages', money(totals.wage), `${paid.length} ${paid.length === 1 ? 'person' : 'people'} worked`)}
@@ -4015,15 +4075,18 @@ app.get('/payroll', (req, res) => {
       <div class="bs-sec-h"><span class="bs-kicker">Everyone who worked</span>
         <span class="bs-sec-note">hours and card tip payout are the two figures Gusto asks for</span></div>
       ${rows.length ? `
-      <div class="bs-lhead bs-rhead">
-        <span>Person</span><span class="r">Hours</span><span class="r">Wages</span>
+      <div class="bs-lhead bs-rhead${otCols ? ' has-ot' : ''}">
+        <span>Person</span><span class="r">Hours</span>${otHead}<span class="r">Wages</span>
         <span class="r">Cash tips</span><span class="r">Card payout</span><span class="r">On the check</span><span></span>
       </div>
       <div class="bs-lrows">${roster}</div>
-      <div class="bs-lr bs-rrow bs-rtot">
+      <div class="bs-lr bs-rrow bs-rtot${otCols ? ' has-ot' : ''}">
         <span class="bs-rr-n">Total<i>${totals.shifts} shift${totals.shifts === 1 ? '' : 's'} between them,
           across ${shiftCount} service${shiftCount === 1 ? '' : 's'}</i></span>
-        <span class="bs-lr-n">${totals.hours}<i>${totals.wk1Hours} + ${totals.wk2Hours}</i></span>
+        <span class="bs-lr-n">${totals.hours}${otCols ? '' : `<i>${totals.wk1Hours} + ${totals.wk2Hours}</i>`}</span>
+        ${otCols ? `<span class="bs-lr-n subtle">${totals.wk1Hours}</span>
+          <span class="bs-lr-n subtle">${totals.wk2Hours}</span>
+          <span class="bs-lr-n ot">${totals.otHours || '<span class="bs-em">—</span>'}</span>` : ''}
         <span class="bs-lr-n">${money(totals.wage)}</span>
         <span class="bs-lr-n muted">${money(totals.cashTips)}</span>
         <span class="bs-lr-n strong">${money(totals.paycheckTips)}</span>
