@@ -3407,3 +3407,19 @@ body.cap-open.qx-open [data-cap] { display: none; }
 .bs .empty2 { background: var(--surface); border: 1px solid var(--rule); border-radius: 0; }
 .bs .empty2-ico { border-radius: 0; background: none; border: 1px solid var(--rule); color: var(--faint); }
 .bs .empty2-t { font-family: var(--serif); font-weight: 500; letter-spacing: 0; }
+
+@media (max-width: 900px) {
+  /* Part 6: a phone should not open a filtered page under four stacked rows of
+     chips. Each filter group becomes one swipeable row instead of wrapping, so
+     the content is a thumb-flick away, not a scroll. The active chip is scrolled
+     into view by the browser's default when the page loads with one selected. */
+  .bs .rangebar {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    -webkit-overflow-scrolling: touch; padding-bottom: 2px; margin-bottom: 6px;
+  }
+  .bs .rangebar::-webkit-scrollbar { display: none; }
+  .bs .rchip { flex-shrink: 0; }
+  /* Metric tiles: two up is fine, but let a lone card on a narrow phone fill the
+     width rather than sit half-empty beside a gap. */
+  .bs .mcard-value { font-size: 23px; }
+}
