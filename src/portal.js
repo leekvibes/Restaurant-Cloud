@@ -302,6 +302,13 @@ const q = {
   markSeen: db.prepare(`INSERT INTO portal_seen (employee_id, seen_id)
       VALUES (@id, (SELECT COALESCE(MAX(id), 0) FROM portal_events))
     ON CONFLICT(employee_id) DO UPDATE SET seen_id = excluded.seen_id`),
+  // The first time we ever see a person, pin their baseline to right now — so a
+  // brand-new employee (or one on a new device) starts with a clean slate and
+  // only ever sees notifications posted after they arrive, never the backlog.
+  // INSERT OR IGNORE: it sets the baseline once and never disturbs it again, so
+  // it can't reset someone who has already been keeping up.
+  ensureSeen: db.prepare(`INSERT OR IGNORE INTO portal_seen (employee_id, seen_id)
+    VALUES (@id, (SELECT COALESCE(MAX(id), 0) FROM portal_events))`),
 
   // --- push subscriptions --------------------------------------------------
   savePush: db.prepare(`INSERT INTO portal_push (employee_id, endpoint, sub)
@@ -330,6 +337,11 @@ const q = {
   adminMarkSeen: db.prepare(`INSERT INTO admin_seen (uid, seen_id)
       VALUES (@uid, (SELECT COALESCE(MAX(id), 0) FROM admin_events))
     ON CONFLICT(uid) DO UPDATE SET seen_id = excluded.seen_id`),
+  // The admin twin of ensureSeen: the first time an account (owner or manager)
+  // is seen, baseline it to now so it never inherits the backlog. INSERT OR
+  // IGNORE, so an account that already has a baseline is left exactly as it is.
+  ensureAdminSeen: db.prepare(`INSERT OR IGNORE INTO admin_seen (uid, seen_id)
+    VALUES (@uid, (SELECT COALESCE(MAX(id), 0) FROM admin_events))`),
   adminSavePush: db.prepare(`INSERT INTO admin_push (uid, endpoint, sub)
       VALUES (@uid, @endpoint, @sub)
     ON CONFLICT(endpoint) DO UPDATE SET uid = excluded.uid, sub = excluded.sub`),

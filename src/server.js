@@ -241,7 +241,12 @@ setViewContext(reqCtx);
 // COUNT — so it costs nothing on POSTs, API calls or static assets.
 setAdminUnseenGetter((user) => {
   const uid = user ? (user.master ? 'm' : String(user.id)) : 'm';
-  try { return PORTAL.q.adminUnseenCount.get({ uid }).n || 0; } catch { return 0; }
+  try {
+    // The first page an account ever renders pins its baseline to now, so a new
+    // manager's bell starts at zero rather than counting the whole backlog.
+    PORTAL.q.ensureAdminSeen.run({ uid });
+    return PORTAL.q.adminUnseenCount.get({ uid }).n || 0;
+  } catch { return 0; }
 });
 
 // Paths the owner's password does not guard.
@@ -3012,6 +3017,7 @@ app.get('/portal', (req, res) => {
   // the heads-up, so it is marked seen now; the block shows what was new this
   // visit and clears next time. The events also live in their own sections, so
   // nothing is lost by the block clearing.
+  PORTAL.q.ensureSeen.run({ id: emp.id }); // first time we ever see them → baseline now, no backlog
   const unseen = PORTAL.q.unseenFor.all({ id: emp.id });
   if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
   const NEW_GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖' };
@@ -3215,6 +3221,7 @@ app.post('/notifications/push/test', async (req, res) => {
 // Opening the page marks everything seen, which is what clears the masthead dot.
 app.get('/notifications', (req, res) => {
   const uid = adminUid(req);
+  PORTAL.q.ensureAdminSeen.run({ uid }); // a first-time viewer starts clean — nothing here counts as "new"
   const events = PORTAL.q.adminEvents.all();
   const unseen = PORTAL.q.adminUnseenFor.all({ uid });
   const freshIds = new Set(unseen.map((e) => e.id));

@@ -589,8 +589,11 @@ test('signing out of the portal actually ends it', async () => {
 });
 
 test("the floor gets a What's-new heads-up when a special is posted", async () => {
-  await form('/staff-portal/special', { name: 'Qqx Heads-up branzino', price: '30.00' });
   const cookie = await signIn('1111');
+  // First visit sets their baseline — a returning user, not brand-new, is the
+  // one who should be told about something posted *after* they last looked.
+  await (await asStaff('/portal', cookie)).text();
+  await form('/staff-portal/special', { name: 'Qqx Heads-up branzino', price: '30.00' });
   const first = await (await asStaff('/portal', cookie)).text();
   assert.match(first, /What's new/, "the What's-new block shows");
   assert.match(first, /Qqx Heads-up branzino/, 'naming the special');
@@ -602,14 +605,15 @@ test("the floor gets a What's-new heads-up when a special is posted", async () =
 test('an earnings notification reaches only the person it is for', async () => {
   const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get('1111');
   assert.ok(me, 'the test employee exists');
-  // Fresh eyes: clear any seen-marker so the two events below both count as new.
-  db.prepare('DELETE FROM portal_seen WHERE employee_id = ?').run(me.id);
+  const cookie = await signIn('1111');
+  // Establish their baseline first, so the two events posted after it both count
+  // as new (a returning user, not a first-time one with a clean slate).
+  await (await asStaff('/portal', cookie)).text();
   db.prepare(`INSERT INTO portal_events (kind, title, employee_id, href)
     VALUES ('earnings', 'Qqx Your pay is ready', ?, '/portal/earnings')`).run(me.id);
   db.prepare(`INSERT INTO portal_events (kind, title, employee_id, href)
     VALUES ('earnings', 'Qqx Someone elses pay', ?, '/portal/earnings')`).run(me.id + 100000);
 
-  const cookie = await signIn('1111');
   const html = await (await asStaff('/portal', cookie)).text();
   assert.match(html, /Qqx Your pay is ready/, 'their own earnings event shows');
   assert.ok(!/Qqx Someone elses pay/.test(html), "but not another person's");
@@ -784,4 +788,17 @@ test('overriding a duplicate-invoice warning notifies the office', async () => {
   assert.strictEqual(after, before + 1, 'saving over the warning raises one event');
   const ev = db.prepare("SELECT * FROM admin_events WHERE kind = 'invoice_dup' ORDER BY id DESC LIMIT 1").get();
   assert.match(ev.href, /^\/c\/invoices#inv-\d+$/, 'and links to the invoice that was filed');
+});
+
+test('a brand-new user starts clean — no backlog, only what arrives after them', async () => {
+  db.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Fresh Newbie','server',900,1,'9090')").run();
+  // Posted before they ever sign in — the backlog a new arrival must NOT be shown.
+  await form('/staff-portal/special', { name: 'Zzq Before-you-arrived special', price: '20.00' });
+  const cookie = await signIn('9090');
+  const first = await (await asStaff('/portal', cookie)).text();
+  assert.ok(!/Zzq Before-you-arrived special/.test(first), 'the pre-existing backlog is not shown as new');
+  // But anything posted after their first visit still reaches them.
+  await form('/staff-portal/special', { name: 'Zzq After-you-arrived special', price: '22.00' });
+  const second = await (await asStaff('/portal', cookie)).text();
+  assert.match(second, /Zzq After-you-arrived special/, 'genuinely new notifications still show');
 });
