@@ -130,6 +130,19 @@ CREATE TABLE IF NOT EXISTS portal_seen (
   employee_id INTEGER PRIMARY KEY,
   seen_id     INTEGER NOT NULL DEFAULT 0
 );
+
+-- Web Push subscriptions: one per device a staff member turned notifications on
+-- from. Keyed by endpoint (the browser's unique push address) so re-subscribing
+-- the same device updates rather than duplicates. A person can have several — a
+-- phone and a tablet — and they all get the push.
+CREATE TABLE IF NOT EXISTS portal_push (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  endpoint    TEXT NOT NULL UNIQUE,
+  sub         TEXT NOT NULL,            -- the full PushSubscription JSON
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_push_emp ON portal_push (employee_id);
 `);
 
 // Which positions hand in tips at the end of a shift.
@@ -236,6 +249,15 @@ const q = {
   markSeen: db.prepare(`INSERT INTO portal_seen (employee_id, seen_id)
       VALUES (@id, (SELECT COALESCE(MAX(id), 0) FROM portal_events))
     ON CONFLICT(employee_id) DO UPDATE SET seen_id = excluded.seen_id`),
+
+  // --- push subscriptions --------------------------------------------------
+  savePush: db.prepare(`INSERT INTO portal_push (employee_id, endpoint, sub)
+      VALUES (@employee_id, @endpoint, @sub)
+    ON CONFLICT(endpoint) DO UPDATE SET employee_id = excluded.employee_id, sub = excluded.sub`),
+  delPush: db.prepare('DELETE FROM portal_push WHERE endpoint = ?'),
+  pushAll: db.prepare('SELECT endpoint, sub FROM portal_push'),
+  pushFor: db.prepare('SELECT endpoint, sub FROM portal_push WHERE employee_id = @id'),
+  pushCountFor: db.prepare('SELECT COUNT(*) n FROM portal_push WHERE employee_id = @id'),
 };
 
 /**
@@ -247,6 +269,60 @@ function notify(kind, title, { body = null, employeeId = null, href = null } = {
   try {
     q.addEvent.run({ kind, title, body, employee_id: employeeId ?? null, href });
   } catch { /* best effort — the board/note/pay change still stands */ }
+  // Then push it to any device that opted in — fire and forget, so a failed or
+  // unconfigured push never fails the action that raised it.
+  try { sendPush(employeeId ?? null, { title, body: body || '', url: href || '/portal' }); }
+  catch { /* push is best effort; the event is already recorded */ }
+}
+
+// --- Web Push ----------------------------------------------------------------
+// The public key is not secret and ships to the client; the private key is the
+// one env var the deploy has to set (VAPID_PRIVATE_KEY). With no private key,
+// push is simply off and the in-app "What's new" feed carries on alone.
+const webpush = require('web-push');
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY
+  || 'BDBikVKwVdR0sS6xLWv6wODL4D7Vj1jFxz_bOgFVwnNzhWLilYGKmfb2XpYvB6R7WmeaYhV0uPyt7dl1EDSTihE';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || '';
+const pushOn = !!VAPID_PRIVATE;
+if (pushOn) {
+  try {
+    webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:notifications@zwin.app', VAPID_PUBLIC, VAPID_PRIVATE);
+  } catch (e) { /* a malformed key pair leaves push off rather than crashing boot */ }
+}
+
+/** Store (or refresh) a device's push subscription for a staff member. */
+function savePush(employeeId, subscription) {
+  try {
+    const endpoint = subscription && subscription.endpoint;
+    if (!endpoint || !employeeId) return false;
+    q.savePush.run({ employee_id: employeeId, endpoint, sub: JSON.stringify(subscription) });
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Push a payload to a person's devices (employeeId), or to everyone who opted
+ * in (null). Best effort: a device that has gone away (404/410) is dropped so
+ * the list never fills with dead endpoints.
+ */
+function sendPush(employeeId, payload) {
+  if (!pushOn) return;
+  let subs;
+  try { subs = employeeId == null ? q.pushAll.all() : q.pushFor.all({ id: employeeId }); }
+  catch { return; }
+  if (!subs.length) return;
+  const data = JSON.stringify(payload);
+  for (const row of subs) {
+    let sub;
+    try { sub = JSON.parse(row.sub); } catch { continue; }
+    try {
+      webpush.sendNotification(sub, data).catch((err) => {
+        if (err && (err.statusCode === 404 || err.statusCode === 410)) {
+          try { q.delPush.run(row.endpoint); } catch { /* cleaned next time */ }
+        }
+      });
+    } catch { /* a malformed subscription — skip it, never throw into the caller */ }
+  }
 }
 
 /** The three tones a note can carry, worst first — the order they render in. */
@@ -284,4 +360,7 @@ function shapeFor(position) {
   };
 }
 
-module.exports = { q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify };
+module.exports = {
+  q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify,
+  savePush, sendPush, VAPID_PUBLIC, pushEnabled: pushOn,
+};

@@ -614,3 +614,27 @@ test('an earnings notification reaches only the person it is for', async () => {
   assert.match(html, /Qqx Your pay is ready/, 'their own earnings event shows');
   assert.ok(!/Qqx Someone elses pay/.test(html), "but not another person's");
 });
+
+test('a device can turn on push, and it is stored against the person', async () => {
+  const cookie = await signIn('1111');
+  const hub = await (await asStaff('/portal', cookie)).text();
+  assert.match(hub, /id="ptpush"/, 'the turn-on control is on the hub');
+  assert.match(hub, /data-vapid="/, 'with a public key to subscribe against');
+
+  const sub = { endpoint: 'https://example.com/push/qqx-1', keys: { p256dh: 'x', auth: 'y' } };
+  const r = await fetch(BASE + '/portal/push/subscribe', {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify(sub),
+  });
+  const j = await r.json();
+  assert.ok(j.ok, 'the subscribe endpoint accepts it');
+  const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get('1111');
+  const row = db.prepare('SELECT * FROM portal_push WHERE endpoint = ?').get(sub.endpoint);
+  assert.ok(row, 'the subscription is stored');
+  assert.strictEqual(row.employee_id, me.id, 'against the signed-in person');
+
+  // And turning it off removes that device.
+  await fetch(BASE + '/portal/push/unsubscribe', {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ endpoint: sub.endpoint }),
+  });
+  assert.ok(!db.prepare('SELECT 1 FROM portal_push WHERE endpoint = ?').get(sub.endpoint), 'unsubscribe removes it');
+});

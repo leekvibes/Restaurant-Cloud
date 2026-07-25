@@ -3003,6 +3003,46 @@ app.get('/portal', (req, res) => {
       </a>`).join('')}
     </div>` : '';
 
+  // Turn-on-notifications control. Hidden until the client confirms the browser
+  // can do push; the button asks for permission, subscribes this device, and
+  // saves it against this person. No backticks or ${} in the client script — it
+  // lives inside this template literal.
+  const pushBlock = `
+    <div class="pt-push" id="ptpush" hidden data-vapid="${PORTAL.VAPID_PUBLIC}">
+      <span class="pt-push-l"><b id="ptpush-t">Notifications</b>
+        <span id="ptpush-s">Get a heads-up on your phone for specials, notes and your pay.</span></span>
+      <button type="button" class="pt-push-b" id="ptpush-b">Turn on</button>
+    </div>
+    <script>
+    (function(){
+      var box=document.getElementById('ptpush'); if(!box) return;
+      if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+      var btn=document.getElementById('ptpush-b'), t=document.getElementById('ptpush-t'), s=document.getElementById('ptpush-s');
+      var vapid=box.getAttribute('data-vapid'); box.hidden=false;
+      function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
+      function state(on){ if(on){t.textContent='Notifications on';s.textContent='You will get specials, notes and your pay on this phone.';btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Notifications';s.textContent='Get a heads-up on your phone for specials, notes and your pay.';btn.textContent='Turn on';btn.dataset.on='';} }
+      navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
+      btn.addEventListener('click', function(){
+        btn.disabled=true;
+        navigator.serviceWorker.ready.then(function(reg){
+          if(btn.dataset.on){
+            return reg.pushManager.getSubscription().then(function(sub){
+              if(!sub){ state(false); return; }
+              var ep=sub.endpoint;
+              return sub.unsubscribe().then(function(){ return fetch('/portal/push/unsubscribe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({endpoint:ep})}); }).then(function(){ state(false); });
+            });
+          }
+          return Notification.requestPermission().then(function(perm){
+            if(perm!=='granted'){ s.textContent = perm==='denied' ? 'Blocked in your phone settings — allow notifications for this app.' : 'Not turned on.'; return; }
+            return reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:u8(vapid)}).then(function(sub){
+              return fetch('/portal/push/subscribe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sub)});
+            }).then(function(r){ state(r && r.ok); });
+          });
+        }).catch(function(){ s.textContent='Could not change that just now — try again.'; }).then(function(){ btn.disabled=false; });
+      });
+    })();
+    </script>`;
+
   const noteBlock = notes.length ? `
     <div class="pt-kick"><span>Before your shift</span><span>For today</span></div>
     <div class="pt-notes">
@@ -3066,6 +3106,8 @@ app.get('/portal', (req, res) => {
           board.length ? `${running} running · ${off} on the 86 board` : 'Nothing on the board')}
         ${row('/portal/stock', '⊞', 'Report out of stock', 'Out of something, or running low')}
       </div>
+
+      ${pushBlock}
     </div>
     <div class="pt-foot">
       <p>Anything you submit stays editable until your manager sends the shift.</p>
@@ -3088,6 +3130,20 @@ const openTips = (req, res) => {
 };
 app.get('/portal/tips', openTips);
 app.post('/portal/tips', openTips);
+
+// Push notifications: a device turns them on (subscribe) or off (unsubscribe).
+// Both carry a PushSubscription as JSON and are tied to the signed-in person.
+app.post('/portal/push/subscribe', express.json(), (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  res.json({ ok: PORTAL.savePush(who.emp.id, req.body) });
+});
+app.post('/portal/push/unsubscribe', express.json(), (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  try { if (req.body && req.body.endpoint) PORTAL.q.delPush.run(req.body.endpoint); } catch { /* already gone */ }
+  res.json({ ok: true });
+});
 
 app.get('/portal/out', (req, res) => {
   res.setHeader('Set-Cookie', `${PORTAL_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
