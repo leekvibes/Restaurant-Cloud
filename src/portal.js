@@ -186,6 +186,16 @@ CREATE TABLE IF NOT EXISTS admin_push (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_admin_push_uid ON admin_push (uid);
+
+-- Some admin alerts come from a daily sweep, not a one-off action, so the same
+-- situation ("this invoice is overdue", "this document expires in 14 days")
+-- would fire again every morning. This records a stable key the first time an
+-- alert is raised and stays silent after — the sweep can run as often as it
+-- likes and each distinct situation is announced exactly once.
+CREATE TABLE IF NOT EXISTS admin_notified (
+  key        TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 // Which positions hand in tips at the end of a shift.
@@ -327,6 +337,8 @@ const q = {
   adminPushAll: db.prepare('SELECT endpoint, sub FROM admin_push'),
   adminPushFor: db.prepare('SELECT endpoint, sub FROM admin_push WHERE uid = @uid'),
   adminPushCountFor: db.prepare('SELECT COUNT(*) n FROM admin_push WHERE uid = @uid'),
+  adminFiredHas: db.prepare('SELECT 1 FROM admin_notified WHERE key = ?'),
+  adminFiredAdd: db.prepare('INSERT OR IGNORE INTO admin_notified (key) VALUES (?)'),
 };
 
 /**
@@ -468,6 +480,20 @@ function adminNotify(kind, title, { body = null, href = null } = {}) {
   catch { /* push is best effort; the event is already recorded */ }
 }
 
+/**
+ * Fire an admin notification at most once for a given situation. The key is a
+ * stable string the caller controls (e.g. `inv:42:overdue`); the first call
+ * with that key sends, every later call is a no-op. This is what lets the daily
+ * sweep re-check the same state every morning without re-announcing it. Never
+ * throws.
+ */
+function adminNotifyOnce(key, kind, title, opts = {}) {
+  try { if (q.adminFiredHas.get(key)) return false; } catch { /* fall through and still try to notify */ }
+  try { q.adminFiredAdd.run(key); } catch { /* best effort — worst case it repeats */ }
+  adminNotify(kind, title, opts);
+  return true;
+}
+
 /** Store (or refresh) a device's push subscription for an admin account. */
 function saveAdminPush(uid, subscription) {
   try {
@@ -571,5 +597,5 @@ function shapeFor(position) {
 module.exports = {
   q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify,
   savePush, sendPush, sendTest, VAPID_PUBLIC, pushEnabled: pushOn,
-  adminNotify, saveAdminPush, sendAdminPush, sendAdminTest,
+  adminNotify, adminNotifyOnce, saveAdminPush, sendAdminPush, sendAdminTest,
 };

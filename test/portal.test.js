@@ -694,3 +694,94 @@ test('admin push is its own list — turning it on never touches staff push', as
   });
   assert.ok(!db.prepare('SELECT 1 FROM admin_push WHERE endpoint = ?').get(sub.endpoint), 'unsubscribe removes it');
 });
+
+// --- more admin notifications: events + the daily sweep --------------------
+
+test('an expense someone fronted themselves notifies the office (a card buy does not)', async () => {
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n;
+  await form('/c/expenses', { spent_on: today(), name: 'ice bags', amount_cents: '18.00',
+    paid_by: 'Rosa', paid_with: 'Their own money' });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n;
+  assert.strictEqual(after, before + 1, 'their-own-money raises one event');
+  const ev = db.prepare("SELECT * FROM admin_events WHERE kind='expense' ORDER BY id DESC LIMIT 1").get();
+  assert.match(ev.title, /Rosa is owed/, 'it names who is owed');
+  assert.match(ev.href, /^\/c\/expenses\/\d+$/, 'and links to the expense');
+
+  // A company-card buy is already paid — no one is owed, so nothing fires.
+  await form('/c/expenses', { spent_on: today(), name: 'napkins', amount_cents: '12.00',
+    paid_by: 'Rosa', paid_with: 'Company card' });
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n, after,
+    'a company-card expense raises nothing');
+});
+
+test('creating a back-office user notifies the office', async () => {
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='user'").get().n;
+  const email = 'sam-manager@test.local';
+  await form('/users', { name: 'Sam Manager', email, password: 'longenough1', role: 'editor' });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='user'").get().n;
+  assert.strictEqual(after, before + 1, 'one new user, one event');
+  const ev = db.prepare("SELECT * FROM admin_events WHERE kind='user' ORDER BY id DESC LIMIT 1").get();
+  assert.match(ev.title, /New user: Sam Manager/, 'it names the account');
+});
+
+test('the daily sweep raises overdue invoices, stale floor reports and document deadlines — once', async () => {
+  // Seed the three conditions the sweep looks for.
+  db.prepare(`INSERT INTO m_invoices (invoice_date, due_date, invoice_number, amount_cents, status, category)
+    VALUES (date('now','-10 days'), date('now','-3 days'), 'SW-OVERDUE-1', 42000, 'Unpaid', 'Other')`).run();
+  db.prepare(`INSERT INTO portal_stock (item, status, reported_by, reported_at)
+    VALUES ('sweep test milk', 'out', 'Rosa', datetime('now','-2 days'))`).run();
+  db.prepare(`INSERT INTO m_documents (title, category, expires_on, file)
+    VALUES ('Sweep Test Permit', 'Permit', date('now','+10 days'), 'x.pdf')`).run();
+
+  const serverPath = path.join(__dirname, '..', 'src', 'server.js');
+  const sweepOnce = async (port) => {
+    const s = spawn(process.execPath, [serverPath], {
+      env: { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
+        ZWIN_SKIP_BACKFILL: '1', ZWIN_SWEEP_NOW: '1', PORT: String(port) }, stdio: 'ignore' });
+    for (let i = 0; i < 90; i++) {
+      try { await fetch(`http://127.0.0.1:${port}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    await new Promise((r) => setTimeout(r, 400)); // let the synchronous boot sweep land
+    s.kill();
+    await new Promise((r) => setTimeout(r, 200));
+  };
+
+  await sweepOnce(PORT + 61);
+  assert.ok(db.prepare("SELECT 1 FROM admin_events WHERE kind='invoice' AND title LIKE '%overdue%'").get(), 'overdue invoice raised');
+  assert.ok(db.prepare("SELECT 1 FROM admin_events WHERE kind='floor' AND title LIKE '%sweep test milk%'").get(), 'stale floor report raised');
+  assert.ok(db.prepare("SELECT 1 FROM admin_events WHERE kind='document' AND title LIKE '%Sweep Test Permit%'").get(), 'document deadline raised');
+
+  // Run it again: the same situations must not be announced twice.
+  const invBefore = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='invoice'").get().n;
+  await sweepOnce(PORT + 62);
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='invoice'").get().n, invBefore,
+    'a second sweep re-announces nothing');
+});
+
+test('when the last person submits, the office hears the shift is ready to close', async () => {
+  const bella = db.prepare("SELECT id FROM employees WHERE pin = '1111'").get().id;
+  const date = '2025-11-11';  // a date no other test touches, so Bella is the only one on it
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'shift_ready'").get().n;
+  await form('/tips', { employee_id: String(bella), pin: '1111', date, daypart: 'cafe',
+    position: 'server', cash_tips: '40', food: '', coffee: '', alcohol: '' });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'shift_ready'").get().n;
+  assert.strictEqual(after, before + 1, 'the one-and-only submission completes the shift and raises it');
+  const ev = db.prepare("SELECT * FROM admin_events WHERE kind = 'shift_ready' ORDER BY id DESC LIMIT 1").get();
+  assert.match(ev.href, /^\/shifts\/\d+$/, 'and links to the shift to review and send');
+
+  // A correction (a second submission by the same person) must not raise it again.
+  await form('/tips', { employee_id: String(bella), pin: '1111', date, daypart: 'cafe',
+    position: 'server', cash_tips: '45', food: '', coffee: '', alcohol: '' });
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'shift_ready'").get().n, after,
+    'a resubmission does not re-announce it');
+});
+
+test('overriding a duplicate-invoice warning notifies the office', async () => {
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'invoice_dup'").get().n;
+  await form('/c/invoices', { dup_ok: '1', amount: '99.00', invoice_number: 'DUP-TEST-1',
+    invoice_date: today(), status: 'Unpaid', category: 'Other' });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'invoice_dup'").get().n;
+  assert.strictEqual(after, before + 1, 'saving over the warning raises one event');
+  const ev = db.prepare("SELECT * FROM admin_events WHERE kind = 'invoice_dup' ORDER BY id DESC LIMIT 1").get();
+  assert.match(ev.href, /^\/c\/invoices#inv-\d+$/, 'and links to the invoice that was filed');
+});

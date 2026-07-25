@@ -439,6 +439,7 @@ function ago(iso, now) {
 const dashQ = {
   onDate: db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS} FROM shifts sh WHERE sh.date = ? ORDER BY sh.daypart`),
   recent: db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS} FROM shifts sh ORDER BY sh.date DESC, sh.daypart DESC LIMIT ?`),
+  oneRollup: db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS} FROM shifts sh WHERE sh.id = ?`),
   staffToday: db.prepare(`SELECT COUNT(DISTINCT w.employee_id) n FROM work w
     JOIN shifts sh ON sh.id = w.shift_id WHERE sh.date = ?`),
   // Only an unpaid invoice can be overdue, and the unpaid pile stays small
@@ -3219,7 +3220,8 @@ app.get('/notifications', (req, res) => {
   const freshIds = new Set(unseen.map((e) => e.id));
   if (unseen.length) { try { PORTAL.q.adminMarkSeen.run({ uid }); } catch { /* the list still shows */ } }
 
-  const GLYPH = { sales_day: '◇', shift: '✎', payroll: '❖', cash: '$', floor: '⊘', incident: '‼' };
+  const GLYPH = { sales_day: '◇', shift: '✎', shift_ready: '✓', payroll: '❖', cash: '$',
+    floor: '⊘', incident: '‼', invoice: '¶', invoice_dup: '⧉', expense: '↩', document: '▦', user: '⊕' };
 
   // Turn-on-push control — the same proven flow the portal uses, pointed at the
   // admin routes. Hidden until the client confirms push is possible. No backticks
@@ -3748,6 +3750,17 @@ app.post('/tips', (req, res) => {
   PORTAL.adminNotify('shift', `${emp.name.split(' ')[0]} submitted for ${dp(daypart)}`,
     { body: `${dp(daypart)} · ${date}${salesNote !== '' ? ` · $${Number(salesNote).toFixed(2)} sales` : ''}`,
       href: `/shifts/${sh.id}` });
+
+  // If that was the last person outstanding, the shift is fully in and ready to
+  // close — tell the office once (not again on every later correction).
+  try {
+    const roll = dashQ.oneRollup.get(sh.id);
+    if (roll && roll.status !== 'emailed' && roll.people > 0 && roll.submitters >= roll.people) {
+      PORTAL.adminNotifyOnce(`shift_ready:${sh.id}`, 'shift_ready',
+        `${whenOf(sh.date, sh.daypart)} — everyone's in`,
+        { body: `All ${roll.people} submitted. Ready to review and send.`, href: `/shifts/${sh.id}` });
+    }
+  } catch { /* the submission still stands */ }
 
   const p = new URLSearchParams({
     done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
@@ -6517,11 +6530,17 @@ app.post('/users', (req, res) => {
   if (!name || !email) return back('Name and email are both needed.');
   if (password.length < 8) return back('Give them a starting password of at least 8 characters.');
   if (users.byEmail.get(email)) return back(`${email} already has an account.`);
+  const role = req.body.role === 'editor' ? 'editor' : 'viewer';
   users.add.run({
     name, email, pass_hash: hashPassword(password),
-    role: req.body.role === 'editor' ? 'editor' : 'viewer',
+    role,
     features: featureList(req.body),
   });
+  // A new login that can see payroll and staff data just appeared — the office
+  // should know an account with that reach now exists, and who made it.
+  PORTAL.adminNotify('user', `New user: ${name}`,
+    { body: `${email} · ${role === 'editor' ? 'Editor' : 'View only'}${req.user && req.user.name ? ` · added by ${req.user.name}` : ''}`,
+      href: '/users' });
   res.redirect('/users?msg=' + encodeURIComponent(`${name} can now sign in with ${email}.`));
 });
 
@@ -9596,6 +9615,15 @@ app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
     ai_lines: lineJson,
   });
   const saved = db.prepare('SELECT id FROM m_invoices ORDER BY id DESC LIMIT 1').get();
+  // Filed over a duplicate warning — a manager pressed "Save it anyway". That's
+  // the classic path to paying a vendor twice, so the office hears about the
+  // override (the reason it was flagged is already shown on that screen).
+  if (req.body.dup_ok === '1' && saved) {
+    const vn = vendorId ? (invQ.vendors.all().find((v) => Number(v.id) === Number(vendorId)) || {}).name : null;
+    PORTAL.adminNotify('invoice_dup', 'Duplicate invoice saved anyway',
+      { body: `${vn ? vn + ' · ' : ''}${req.body.invoice_number ? '#' + String(req.body.invoice_number).trim() + ' · ' : ''}${money(total)} — a duplicate warning was overridden`,
+        href: `/c/invoices#inv-${saved.id}` });
+  }
   if (!lineCount || !saved) return res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
 
   // Anything the matcher is sure of goes straight in. Hundreds of historical
@@ -11998,11 +12026,107 @@ if (process.env.ZWIN_SKIP_BACKFILL !== '1') {
   }
 }
 
+// ---------------------------------------------------------------------------
+// DAILY BACK-OFFICE SWEEP
+// ---------------------------------------------------------------------------
+// Four of the admin notifications have no moment to hang off — nothing happens
+// the day an invoice tips into overdue, or a pay period closes unsent, or a
+// document's renewal creeps within two weeks. So a light pass runs once a day
+// and raises them. Every alert goes through PORTAL.adminNotifyOnce with a stable
+// key, so a situation is announced once and never re-nagged the next morning.
+const daysUntil = (d) => (d ? Math.round((new Date(d + 'T00:00:00') - startOfToday()) / 86400000) : null);
+
+function runAdminSweep() {
+  const docsDated = db.prepare(
+    'SELECT id, title, category, expires_on, action_by FROM m_documents WHERE expires_on IS NOT NULL OR action_by IS NOT NULL');
+
+  // #8 — a pay period ended and nothing (send or skip) has gone out.
+  try {
+    const justEnded = recentPeriods(2)[1];
+    if (justEnded && justEnded.end < isoDate(startOfToday())
+        && !sendRecord(justEnded.start) && !skipRecord(justEnded.start)) {
+      PORTAL.adminNotifyOnce(`period_unsent:${justEnded.start}`, 'payroll',
+        `Payroll not sent — ${labelFor(justEnded)}`,
+        { body: 'The pay period has ended and nothing has gone out yet.', href: '/payroll' });
+    }
+  } catch (e) { console.error('[sweep] payroll', e && e.message); }
+
+  // #15 — an open invoice due today or past due.
+  try {
+    for (const inv of dashQ.openInvoices.all()) {
+      const st = invStatus(inv);
+      const overdue = st.key === 'overdue';
+      if (!overdue && st.label !== 'Due today') continue;
+      const vn = inv.vendor_id ? (invQ.vendors.all().find((v) => Number(v.id) === Number(inv.vendor_id)) || {}).name : null;
+      PORTAL.adminNotifyOnce(`inv:${inv.id}:${overdue ? 'overdue' : 'due'}`, 'invoice',
+        overdue ? `Invoice overdue — ${vn || 'a vendor'}` : `Invoice due today — ${vn || 'a vendor'}`,
+        { body: `${inv.invoice_number ? '#' + inv.invoice_number + ' · ' : ''}${money(inv.amount_cents || 0)} · ${st.label}`,
+          href: `/c/invoices#inv-${inv.id}` });
+    }
+  } catch (e) { console.error('[sweep] invoices', e && e.message); }
+
+  // #25 — a floor / out-of-stock report left open more than a day.
+  try {
+    for (const r of PORTAL.q.stockOpen.all()) {
+      const ageMs = Date.now() - new Date(String(r.reported_at).replace(' ', 'T') + 'Z').getTime();
+      if (!(ageMs >= 24 * 3600000)) continue;
+      PORTAL.adminNotifyOnce(`floor_stale:${r.id}`, 'floor', `Still out: ${r.item}`,
+        { body: `${r.reported_by || 'Someone'} reported it ${atTime(r.reported_at)} — not cleared yet`,
+          href: '/staff-portal' });
+    }
+  } catch (e) { console.error('[sweep] floor', e && e.message); }
+
+  // #29 — a document's renewal or action deadline within 30 / 14 / 0 days.
+  try {
+    for (const d of docsDated.all()) {
+      for (const [field, verb] of [['expires_on', 'expires'], ['action_by', 'due']]) {
+        const on = d[field];
+        if (!on) continue;
+        const days = daysUntil(on);
+        if (days == null) continue;
+        const step = days <= 0 ? 0 : days <= 14 ? 14 : days <= 30 ? 30 : null;
+        if (step == null) continue;
+        const when = days < 0 ? `${verb === 'expires' ? 'expired' : 'was due'} ${-days} day${days === -1 ? '' : 's'} ago`
+          : days === 0 ? `${verb} today` : `${verb} in ${days} day${days === 1 ? '' : 's'}`;
+        PORTAL.adminNotifyOnce(`doc:${d.id}:${field}:${step}`, 'document',
+          `${d.title || d.category || 'A document'} ${when}`,
+          { body: `${d.category ? d.category + ' · ' : ''}${niceDate(on)}`, href: `/c/documents/${d.id}` });
+      }
+    }
+  } catch (e) { console.error('[sweep] documents', e && e.message); }
+}
+
+// Run it at most once per calendar day. Kept in memory, not a table: on a
+// restart it simply runs again at boot, and adminNotifyOnce makes that a no-op
+// for anything already announced.
+let lastSweepDay = null;
+function maybeRunDailySweep() {
+  try {
+    const day = isoDate(startOfToday());
+    if (day === lastSweepDay) return;
+    lastSweepDay = day;
+    runAdminSweep();
+  } catch (e) { console.error('[sweep]', e && e.message); }
+}
+
 app.listen(PORT, () => {
   console.log(`\n  ${RESTAURANT} ops running →  http://localhost:${PORT}\n`);
   if (!process.env.GMAIL_USER && !process.env.SMTP_HOST) {
     console.log('  Email: PREVIEW MODE (no mail configured). "Send" writes files to /previews.\n');
   }
+  // The daily sweep. Skipped under test (same flag as the backfill) so a spawned
+  // server never fires operational alerts into a throwaway database or leaves an
+  // interval keeping the process alive. Shortly after boot, then hourly — the
+  // hourly tick is only there to catch the date rolling over on a long-running
+  // process; the once-a-day guard makes every extra tick a cheap no-op.
+  if (process.env.ZWIN_SKIP_BACKFILL !== '1') {
+    setTimeout(maybeRunDailySweep, 8000);
+    setInterval(maybeRunDailySweep, 60 * 60 * 1000);
+  }
+  // A test hook: run the sweep once, synchronously, at boot. Lets a test seed
+  // the conditions and assert the alerts without waiting on the timer (which is
+  // off under the backfill-skip flag tests use anyway).
+  if (process.env.ZWIN_SWEEP_NOW === '1') { try { runAdminSweep(); } catch (e) { console.error('[sweep] boot', e && e.message); } }
 });
 
 module.exports = app;
