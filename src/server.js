@@ -10,7 +10,7 @@ const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftI
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
-const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, canWrite, navAllowed } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed } = require('./views');
 const { mountModules, MODULES, pagesOf } = require('./modules');
 const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
@@ -226,10 +226,23 @@ function currentUser(req) {
 }
 const canSee = (user, key) => !user ? false : (user.master || !user.features.length || !key || user.features.includes(key));
 
+// A stable id for the signed-in back-office account, used to key admin
+// notification "seen" state and push subscriptions: 'm' for the owner, the
+// user row's id otherwise. In open mode (no password set) there is one implicit
+// owner, so 'm' is the right default there too.
+const adminUid = (req) => (req.user ? (req.user.master ? 'm' : String(req.user.id)) : 'm');
+
 // Nav and page rendering need the current user without threading it through
 // every layout() call. AsyncLocalStorage keeps it correct across awaits.
 const reqCtx = new AsyncLocalStorage();
 setViewContext(reqCtx);
+// The masthead bell asks how many back-office notifications this account hasn't
+// seen. Computed on demand, only when a page actually renders — one indexed
+// COUNT — so it costs nothing on POSTs, API calls or static assets.
+setAdminUnseenGetter((user) => {
+  const uid = user ? (user.master ? 'm' : String(user.id)) : 'm';
+  try { return PORTAL.q.adminUnseenCount.get({ uid }).n || 0; } catch { return 0; }
+});
 
 // Paths the owner's password does not guard.
 //
@@ -2264,6 +2277,11 @@ app.post('/shifts/:id/send', async (req, res) => {
       { employeeId: p.employeeId, href: `/portal/earnings/${sh.id}` });
   }
 
+  // And tell the back office the shift is out the door — the day's sales and
+  // tips are final. One event for the office, distinct from each person's own.
+  PORTAL.adminNotify('sales_day', `${shiftLabel} sent`,
+    { body: 'Sales and tips are final and pay has gone out.', href: `/shifts/${sh.id}` });
+
   // Your own copy: confirmation of who received what, and the totals. Sent
   // after the staff emails so it reports what actually happened, and kept
   // separate so a failure here can't stop staff getting theirs.
@@ -3174,6 +3192,113 @@ app.get('/portal/out', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// BACK-OFFICE NOTIFICATIONS
+// ---------------------------------------------------------------------------
+// The admin twin of the portal's push + "What's new". It shares the one push
+// engine and VAPID pair, but reads and writes its own admin_* tables through
+// its own routes — so nothing here can disturb the staff portal's
+// notifications, which the whole team just re-installed and confirmed working.
+app.post('/notifications/push/subscribe', express.json(), (req, res) => {
+  res.json({ ok: PORTAL.saveAdminPush(adminUid(req), req.body) });
+});
+app.post('/notifications/push/unsubscribe', express.json(), (req, res) => {
+  try { if (req.body && req.body.endpoint) PORTAL.q.adminDelPush.run(req.body.endpoint); } catch { /* already gone */ }
+  res.json({ ok: true });
+});
+app.post('/notifications/push/test', async (req, res) => {
+  try { res.json(await PORTAL.sendAdminTest(adminUid(req))); }
+  catch (e) { res.json({ enabled: PORTAL.pushEnabled === true, devices: 0, sent: 0, failed: 1, errors: [String(e && e.message || e).slice(0, 120)] }); }
+});
+
+// The feed: recent operational alerts, each linking to where it happened.
+// Opening the page marks everything seen, which is what clears the masthead dot.
+app.get('/notifications', (req, res) => {
+  const uid = adminUid(req);
+  const events = PORTAL.q.adminEvents.all();
+  const unseen = PORTAL.q.adminUnseenFor.all({ uid });
+  const freshIds = new Set(unseen.map((e) => e.id));
+  if (unseen.length) { try { PORTAL.q.adminMarkSeen.run({ uid }); } catch { /* the list still shows */ } }
+
+  const GLYPH = { sales_day: '◇', shift: '✎', payroll: '❖', cash: '$', floor: '⊘', incident: '‼' };
+
+  // Turn-on-push control — the same proven flow the portal uses, pointed at the
+  // admin routes. Hidden until the client confirms push is possible. No backticks
+  // or ${} in the client script except the VAPID key, which rides on data-vapid.
+  const pushBlock = `
+    <div class="an-push" id="anpush" hidden data-vapid="${PORTAL.VAPID_PUBLIC}">
+      <span class="an-push-l"><b id="anpush-t">Push notifications</b>
+        <span id="anpush-s">Get these alerts on your phone — a shift sent, the register closed, payroll out, a floor report or an incident.</span></span>
+      <span class="an-push-acts">
+        <button type="button" class="bs-btn-quiet an-push-test" id="anpush-test" hidden>Send test</button>
+        <button type="button" class="bs-btn an-push-b" id="anpush-b">Turn on</button>
+      </span>
+    </div>
+    <script>
+    (function(){
+      var box=document.getElementById('anpush'); if(!box) return;
+      if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+      var btn=document.getElementById('anpush-b'), t=document.getElementById('anpush-t'), s=document.getElementById('anpush-s'), test=document.getElementById('anpush-test');
+      var vapid=box.getAttribute('data-vapid'); box.hidden=false;
+      var ON='You will get back-office alerts on this device.', OFF='Get these alerts on your phone — a shift sent, the register closed, payroll out, a floor report or an incident.';
+      function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
+      function state(on){ test.hidden=!on; if(on){t.textContent='Notifications on';s.textContent=ON;btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Push notifications';s.textContent=OFF;btn.textContent='Turn on';btn.dataset.on='';} }
+      navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
+      test.addEventListener('click', function(){
+        test.disabled=true; s.textContent='Sending a test…';
+        fetch('/notifications/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){return r.json();}).then(function(d){
+          if(!d || !d.enabled) s.textContent='Push is off on the server — VAPID keys still need to be set.';
+          else if(!d.devices) s.textContent='This device is not subscribed. Turn it off, then on again.';
+          else if(d.sent) s.textContent='Sent to '+d.sent+' device'+(d.sent===1?'':'s')+' — check your lock screen.';
+          else s.textContent='Could not deliver: '+((d.errors&&d.errors[0])||'unknown');
+        }).catch(function(){ s.textContent='The test did not send — try again.'; }).then(function(){ test.disabled=false; });
+      });
+      btn.addEventListener('click', function(){
+        btn.disabled=true;
+        navigator.serviceWorker.ready.then(function(reg){
+          if(btn.dataset.on){
+            return reg.pushManager.getSubscription().then(function(sub){
+              if(!sub){ state(false); return; }
+              var ep=sub.endpoint;
+              return sub.unsubscribe().then(function(){ return fetch('/notifications/push/unsubscribe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({endpoint:ep})}); }).then(function(){ state(false); });
+            });
+          }
+          return Notification.requestPermission().then(function(perm){
+            if(perm!=='granted'){ s.textContent = perm==='denied' ? 'Blocked in your settings — allow notifications for this app.' : 'Not turned on.'; return; }
+            return reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:u8(vapid)}).then(function(sub){
+              return fetch('/notifications/push/subscribe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sub)});
+            }).then(function(r){ state(r && r.ok); });
+          });
+        }).catch(function(){ s.textContent='Could not change that just now — try again.'; }).then(function(){ btn.disabled=false; });
+      });
+    })();
+    </script>`;
+
+  const feed = events.length ? `
+    <div class="bs-sec-h"><span class="bs-kicker">Recent</span></div>
+    <div class="an-feed">
+      ${events.map((e) => `<a class="an-row${freshIds.has(e.id) ? ' an-new' : ''}" href="${esc(e.href || '/notifications')}">
+        <span class="an-g" aria-hidden="true">${GLYPH[e.kind] || '•'}</span>
+        <span class="an-t"><b>${esc(e.title)}</b>${e.body ? `<span>${esc(e.body)}</span>` : ''}</span>
+        <span class="an-w">${esc(atTime(e.created_at))}</span>
+      </a>`).join('')}
+    </div>`
+    : `<div class="empty2"><div class="empty2-t">Nothing yet</div>
+        <div class="empty2-s">Operational alerts show up here as they happen — and on your phone once push is on.</div></div>`;
+
+  res.send(layout('Notifications', `
+    <div class="bs-page an-page">
+      <div class="bs-head">
+        <div>
+          <h1 class="bs-headline">Notifications</h1>
+          <p class="bs-subline">Back-office alerts — a shift sent, the register closed, payroll out, a floor report or an incident.</p>
+        </div>
+      </div>
+      ${pushBlock}
+      ${feed}
+    </div>`));
+});
+
+// ---------------------------------------------------------------------------
 // WHAT YOU'VE EARNED
 // ---------------------------------------------------------------------------
 // The full breakdown of one shift — the same lines whether it is shown as the
@@ -3419,6 +3544,7 @@ app.post('/portal/stock', (req, res) => {
   try { items = JSON.parse(req.body.items || '[]'); } catch { items = []; }
   const batch = `${emp.id}-${Date.now()}`;
   let n = 0;
+  const names = [];
 
   db.transaction(() => {
     for (const raw of Array.isArray(items) ? items.slice(0, 40) : []) {
@@ -3436,9 +3562,18 @@ app.post('/portal/stock', (req, res) => {
         reported_by: emp.name,
         batch,
       });
+      names.push(item);
       n++;
     }
   })();
+
+  // Always tell the back office when the floor reports a shortage — the one
+  // staff → manager event the owner wants pushed every time. One notification
+  // per batch, naming what was sent, linked to the board where reports clear.
+  if (n > 0) {
+    PORTAL.adminNotify('floor', `${emp.name.split(' ')[0]} reported ${n === 1 ? 'an item' : n + ' items'} out`,
+      { body: n === 1 ? names[0] : `${names[0]} +${n - 1} more`, href: '/staff-portal' });
+  }
 
   res.redirect('/portal?sent=' + n);
 });
@@ -3606,6 +3741,13 @@ app.post('/tips', (req, res) => {
     note: String(req.body.note || '').trim() || null,
     source: 'staff',
   });
+
+  // Tell the back office someone handed in their shift — who, and for which
+  // service — so a manager knows submissions are coming in. Links to the shift
+  // so they can review it. Best effort; a notification must not fail the report.
+  PORTAL.adminNotify('shift', `${emp.name.split(' ')[0]} submitted for ${dp(daypart)}`,
+    { body: `${dp(daypart)} · ${date}${salesNote !== '' ? ` · $${Number(salesNote).toFixed(2)} sales` : ''}`,
+      href: `/shifts/${sh.id}` });
 
   const p = new URLSearchParams({
     done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
@@ -4050,6 +4192,12 @@ app.post('/payroll/send', async (req, res) => {
 
   const out = await sendEmails(emails);
   markSent(from, to, out.sent || out.previewed);
+  // Tell the back office payroll went out — the period, and how many people got
+  // their summary. Only when mail actually sent, not on a previews-only run.
+  if (out.sent) {
+    PORTAL.adminNotify('payroll', `Payroll sent — ${labelFor({ start: from, end: to })}`,
+      { body: `Summaries went to ${out.sent} ${out.sent === 1 ? 'person' : 'people'}.`, href: '/payroll' });
+  }
   const problems = out.errors.length ? ` ${out.errors.length} problem${out.errors.length === 1 ? '' : 's'}: ${out.errors.join('; ')}` : '';
   return back(out.sent
     ? `Sent the ${labelFor({ start: from, end: to })} summary to ${out.sent} people.${problems}`
@@ -5183,6 +5331,19 @@ function cashSave(req, res, existingId) {
   }
   const who = (req.user && req.user.name) || 'Owner';
   const id = saveCash(existingId, row, movements, denoms, who);
+  // A finalised count is the register being closed for that service — tell the
+  // back office, with who counted it and whether it balanced. Drafts are working
+  // notes and stay quiet. Best effort; never let it fail the save.
+  if (row.status !== 'draft') {
+    try {
+      const saved = CASH.q.one.get(id);
+      const c = saved ? CASH.compute(saved) : null;
+      const v = c ? c.variance : null;
+      const vtxt = v == null ? '' : (v === 0 ? 'balanced' : `${CASH.money(Math.abs(v))} ${v > 0 ? 'over' : 'short'}`);
+      PORTAL.adminNotify('cash', `Drawer closed — ${dp(row.daypart || 'cafe')}`,
+        { body: `Counted by ${who}${vtxt ? ` · ${vtxt}` : ''}`, href: `/cash/${id}` });
+    } catch { /* the reconciliation is saved regardless */ }
+  }
   res.redirect(`/cash/${id}?msg=` + encodeURIComponent(row.status === 'draft' ? 'Saved as a draft.' : 'Reconciliation saved.'));
 }
 

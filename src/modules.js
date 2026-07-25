@@ -202,6 +202,16 @@ const MODULES = [
       { name: 'description', label: 'What happened', type: 'textarea', required: true },
       { name: 'logged_by', label: 'Logged by', type: 'text', list: true },
     ],
+    // When an incident is filed, tell the back office — the owner wants to hear
+    // about it the moment it is written down. Required lazily so this low-level
+    // registry never has to know the notification module at load time.
+    onCreate(row) {
+      const type = row.type || 'Incident';
+      const who = row.logged_by ? ` by ${row.logged_by}` : '';
+      const detail = String(row.description || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+      require('./portal').adminNotify('incident', `Incident logged: ${type}${who}`,
+        { body: detail || null, href: `/c/incidents/${row.id}` });
+    },
   },
   {
     slug: 'notes', table: 'm_notes', title: 'Decisions log', icon: '📝',
@@ -745,7 +755,13 @@ function mountModules(app) {
       }
     }
     const cols = m.fields.map((f) => f.name);
-    db.prepare(`INSERT INTO ${m.table} (${cols.join(',')}) VALUES (${cols.map((c) => '@' + c).join(',')})`).run(data);
+    const info = db.prepare(`INSERT INTO ${m.table} (${cols.join(',')}) VALUES (${cols.map((c) => '@' + c).join(',')})`).run(data);
+    // A module can ask to be told the moment one of its rows is created — the
+    // incident log uses it to notify the back office. Best effort: a hook that
+    // throws must never fail the save that has already happened.
+    if (typeof m.onCreate === 'function') {
+      try { m.onCreate({ id: info.lastInsertRowid, ...data }); } catch { /* the row is saved regardless */ }
+    }
     res.redirect(`/c/${m.slug}?msg=` + encodeURIComponent('Saved.'));
   });
 

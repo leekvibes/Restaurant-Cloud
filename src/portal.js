@@ -145,6 +145,49 @@ CREATE TABLE IF NOT EXISTS portal_push (
 CREATE INDEX IF NOT EXISTS idx_push_emp ON portal_push (employee_id);
 `);
 
+// --- admin notifications ----------------------------------------------------
+// A second event feed, for the back office rather than the floor. Where
+// portal_events tells staff what changed on their board, these tell the owner
+// and managers when the day's operational milestones happen — a shift sent, a
+// register closed, payroll out, an incident filed — and, always, when the floor
+// reports something out of stock. Kept in its own tables, entirely separate
+// from the staff ones above, so the two systems can never interfere: the staff
+// portal's push, which the whole team just re-installed and confirmed working,
+// is not touched by anything here.
+db.exec(`
+CREATE TABLE IF NOT EXISTS admin_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,     -- sales_day | shift | payroll | cash | floor | incident
+  title      TEXT NOT NULL,
+  body       TEXT,
+  href       TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_admin_events ON admin_events (created_at DESC);
+
+-- The highest event id each account has already seen. uid is 'm' for the owner
+-- or the user row's id as text, so "new" is per person and immune to
+-- same-second collisions, exactly as portal_seen is for staff.
+CREATE TABLE IF NOT EXISTS admin_seen (
+  uid     TEXT PRIMARY KEY,
+  seen_id INTEGER NOT NULL DEFAULT 0
+);
+
+-- Web Push subscriptions for the back office: one per device an admin turned
+-- notifications on from. Its own table, keyed by endpoint like portal_push, so
+-- the staff and admin subscription lists never mix. uid records who turned it
+-- on; every admin event pushes to every admin device, because these events are
+-- addressed to "the office", not to one person.
+CREATE TABLE IF NOT EXISTS admin_push (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid        TEXT NOT NULL,
+  endpoint   TEXT NOT NULL UNIQUE,
+  sub        TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_admin_push_uid ON admin_push (uid);
+`);
+
 // Which positions hand in tips at the end of a shift.
 //
 // The portal has to know, because a kitchen cook opening it should not be
@@ -258,6 +301,32 @@ const q = {
   pushAll: db.prepare('SELECT endpoint, sub FROM portal_push'),
   pushFor: db.prepare('SELECT endpoint, sub FROM portal_push WHERE employee_id = @id'),
   pushCountFor: db.prepare('SELECT COUNT(*) n FROM portal_push WHERE employee_id = @id'),
+
+  // --- admin notifications (back office) -----------------------------------
+  adminAdd: db.prepare(`INSERT INTO admin_events (kind, title, body, href)
+    VALUES (@kind, @title, @body, @href)`),
+  adminEvents: db.prepare(`SELECT * FROM admin_events
+    ORDER BY created_at DESC, id DESC LIMIT 40`),
+  // New since this account last looked, by id — same first-time guard as staff.
+  adminUnseenFor: db.prepare(`SELECT * FROM admin_events
+    WHERE id > COALESCE(
+      (SELECT seen_id FROM admin_seen WHERE uid = @uid),
+      (SELECT COALESCE(MAX(id), 0) FROM admin_events WHERE created_at <= datetime('now','-2 days')))
+    ORDER BY id DESC LIMIT 40`),
+  adminUnseenCount: db.prepare(`SELECT COUNT(*) n FROM admin_events
+    WHERE id > COALESCE(
+      (SELECT seen_id FROM admin_seen WHERE uid = @uid),
+      (SELECT COALESCE(MAX(id), 0) FROM admin_events WHERE created_at <= datetime('now','-2 days')))`),
+  adminMarkSeen: db.prepare(`INSERT INTO admin_seen (uid, seen_id)
+      VALUES (@uid, (SELECT COALESCE(MAX(id), 0) FROM admin_events))
+    ON CONFLICT(uid) DO UPDATE SET seen_id = excluded.seen_id`),
+  adminSavePush: db.prepare(`INSERT INTO admin_push (uid, endpoint, sub)
+      VALUES (@uid, @endpoint, @sub)
+    ON CONFLICT(endpoint) DO UPDATE SET uid = excluded.uid, sub = excluded.sub`),
+  adminDelPush: db.prepare('DELETE FROM admin_push WHERE endpoint = ?'),
+  adminPushAll: db.prepare('SELECT endpoint, sub FROM admin_push'),
+  adminPushFor: db.prepare('SELECT endpoint, sub FROM admin_push WHERE uid = @uid'),
+  adminPushCountFor: db.prepare('SELECT COUNT(*) n FROM admin_push WHERE uid = @uid'),
 };
 
 /**
@@ -380,6 +449,90 @@ async function sendTest(employeeId) {
   return { enabled: true, devices: subs.length, sent, failed, errors };
 }
 
+// --- admin push --------------------------------------------------------------
+// The back-office half of the same push engine above. It reuses the one VAPID
+// setup and webpush client — there is only ever one key pair — but reads and
+// writes admin_push, never portal_push, so turning admin notifications on or off
+// can never disturb a staff member's subscription.
+
+/**
+ * Record a back-office event and push it to every admin device. Mirrors
+ * notify() for staff, but an admin event goes to the whole office — there is no
+ * per-person addressing here — and it touches only the admin tables. Never
+ * throws: a notification failing must not fail the action that raised it.
+ */
+function adminNotify(kind, title, { body = null, href = null } = {}) {
+  try { q.adminAdd.run({ kind, title, body, href }); }
+  catch { /* best effort — the action that raised it still stands */ }
+  try { sendAdminPush({ title, body: body || '', url: href || '/notifications' }); }
+  catch { /* push is best effort; the event is already recorded */ }
+}
+
+/** Store (or refresh) a device's push subscription for an admin account. */
+function saveAdminPush(uid, subscription) {
+  try {
+    const endpoint = subscription && subscription.endpoint;
+    if (!endpoint || uid == null) return false;
+    q.adminSavePush.run({ uid: String(uid), endpoint, sub: JSON.stringify(subscription) });
+    return true;
+  } catch { return false; }
+}
+
+/** Push a payload to every admin device that opted in. Best effort: a device
+ *  that has gone away (404/410) is dropped so the list never fills with dead
+ *  endpoints. */
+function sendAdminPush(payload) {
+  if (!pushOn) return;
+  let subs;
+  try { subs = q.adminPushAll.all(); } catch { return; }
+  if (!subs.length) return;
+  const data = JSON.stringify(payload);
+  for (const row of subs) {
+    let sub;
+    try { sub = JSON.parse(row.sub); } catch { continue; }
+    try {
+      webpush.sendNotification(sub, data).catch((err) => {
+        const code = err && err.statusCode;
+        if (code === 404 || code === 410) {
+          try { q.adminDelPush.run(row.endpoint); } catch { /* cleaned next time */ }
+        } else {
+          console.error('[push] admin send failed', code || '', err && err.body ? String(err.body).slice(0, 200) : (err && err.message) || '');
+        }
+      });
+    } catch { /* a malformed subscription — skip it, never throw into the caller */ }
+  }
+}
+
+/** Send a test push to one admin's own devices and report the result — the
+ *  admin twin of sendTest(). */
+async function sendAdminTest(uid) {
+  if (!pushOn) return { enabled: false, devices: 0, sent: 0, failed: 0, errors: [] };
+  let subs = [];
+  try { subs = q.adminPushFor.all({ uid: String(uid) }); } catch { /* */ }
+  const data = JSON.stringify({
+    title: 'Test notification',
+    body: 'If you can see this, admin notifications are working.',
+    url: '/notifications', tag: 'zwin-admin-test',
+  });
+  let sent = 0, failed = 0;
+  const errors = [];
+  for (const row of subs) {
+    let sub;
+    try { sub = JSON.parse(row.sub); } catch { failed++; errors.push('bad subscription'); continue; }
+    try {
+      await webpush.sendNotification(sub, data);
+      sent++;
+    } catch (err) {
+      failed++;
+      const code = err && err.statusCode;
+      errors.push(code ? `HTTP ${code}${err.body ? ': ' + String(err.body).slice(0, 120) : ''}`
+        : (err && err.message ? String(err.message).slice(0, 120) : 'send failed'));
+      if (code === 404 || code === 410) { try { q.adminDelPush.run(row.endpoint); } catch { /* */ } }
+    }
+  }
+  return { enabled: true, devices: subs.length, sent, failed, errors };
+}
+
 /** The three tones a note can carry, worst first — the order they render in. */
 const TONES = ['urgent', 'caution', 'fyi'];
 /** How a reporter can describe a shortage, most urgent first. */
@@ -418,4 +571,5 @@ function shapeFor(position) {
 module.exports = {
   q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify,
   savePush, sendPush, sendTest, VAPID_PUBLIC, pushEnabled: pushOn,
+  adminNotify, saveAdminPush, sendAdminPush, sendAdminTest,
 };

@@ -258,6 +258,24 @@ body {
 .bs-theme { font-size: 14px; }
 .bs-theme:hover, .bs-avatar:hover { background: var(--row-hover); color: var(--ink); }
 
+/* The masthead notification bell — sized to match the theme toggle, with a
+   small red dot when the back office has something unseen. */
+.bs-bell {
+  position: relative; width: 28px; height: 28px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--ink); background: var(--surface);
+  color: var(--ink); cursor: pointer; text-decoration: none;
+}
+.bs-bell:hover { background: var(--row-hover); }
+.bs-bell svg { width: 15px; height: 15px; display: block; fill: none;
+  stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.bs-bell-d {
+  position: absolute; top: -6px; right: -6px; min-width: 15px; height: 15px;
+  padding: 0 3px; border-radius: 8px; background: var(--danger); color: #fff;
+  font-family: var(--sans); font-size: 10px; font-weight: 700; line-height: 15px;
+  text-align: center; box-sizing: border-box;
+}
+
 /* Account popover */
 .bs-acct { position: relative; }
 .bs-acct > summary { list-style: none; cursor: pointer; }
@@ -741,9 +759,10 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-soon-r b { font-size: 12px; color: var(--warning); white-space: nowrap; }
 
 /* The specials board reuses the soon-row, but its figure is a price, not a
-   deadline — quiet mono ink — and an 86'd line is struck through and greyed. */
+   deadline — quiet mono ink — and an 86'd line is called out in red so it's
+   easy to read which item is out (rather than struck through). */
 .bs-board .bs-soon-r b { color: var(--secondary); font-family: var(--mono); }
-.bs-board .bs-soon-r.off span { color: var(--faint); text-decoration: line-through; }
+.bs-board .bs-soon-r.off span { color: var(--danger); }
 .bs-board .bs-soon-r.off b { color: var(--danger); }
 
 /* --- last service, and the record ----------------------------------------- */
@@ -1470,6 +1489,8 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-index-tools .bs-search .bs-kbd { display: none; }
 .bs-index-tools .bs-search-ico { width: 30px; height: 44px; display: flex; align-items: center; justify-content: center; }
 .bs-index-tools .bs-theme { width: 44px; height: 44px; flex-shrink: 0; font-size: 16px; }
+.bs-index-tools .bs-bell { width: 44px; height: 44px; flex-shrink: 0; }
+.bs-index-tools .bs-bell svg { width: 18px; height: 18px; }
 .bs-index-x {
   width: 38px; height: 38px; flex-shrink: 0;
   border: 1.5px solid var(--ink); background: var(--surface);
@@ -3144,7 +3165,7 @@ body.cap-open.qx-open [data-cap] { display: none; }
 .pa-dn span { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .pa-dp { font-family: var(--mono); font-size: 14px; color: var(--headline); min-width: 74px; text-align: right; }
 .pa-dl { font-size: 12.5px; color: var(--warning); min-width: 74px; }
-.pa-dish.off .pa-dn b { text-decoration: line-through; color: var(--muted); }
+.pa-dish.off .pa-dn b { color: var(--danger); }
 .pa-86 { display: flex; gap: 8px; align-items: center; }
 .pa-mini { width: 108px; padding: 7px 9px; border: 1px solid var(--rule); background: var(--paper);
   font: inherit; font-size: 12.5px; color: var(--headline); }
@@ -3434,4 +3455,45 @@ body.cap-open.qx-open [data-cap] { display: none; }
   /* Metric tiles: two up is fine, but let a lone card on a narrow phone fill the
      width rather than sit half-empty beside a gap. */
   .bs .mcard-value { font-size: 23px; }
+}
+
+/* --- Notifications (back office) ------------------------------------------- */
+/* The admin feed at /notifications: a turn-on-push control and a list of recent
+   operational alerts, each linking to where it happened. */
+.an-page { max-width: 720px; }
+.an-push {
+  display: flex; align-items: center; gap: 16px; justify-content: space-between;
+  padding: 15px 18px; margin: 6px 0 10px; border: 1px solid var(--rule);
+  background: var(--surface); flex-wrap: wrap;
+}
+.an-push-l { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.an-push-l b { font-size: 15px; color: var(--headline); }
+.an-push-l span { font-size: 13px; color: var(--muted); line-height: 1.45; }
+.an-push-acts { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+.an-feed { padding-top: 2px; }
+.an-row {
+  display: flex; align-items: flex-start; gap: 14px; text-decoration: none;
+  padding: 14px 2px; border-bottom: 1px dotted var(--rule-dotted); color: inherit;
+}
+.an-row:last-child { border-bottom: 0; }
+.an-row:hover { background: var(--row-hover); }
+.an-g {
+  flex-shrink: 0; width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 14px; color: var(--muted);
+  border: 1px solid var(--rule); background: var(--paper);
+}
+.an-row.an-new .an-g { color: var(--danger); border-color: var(--danger); }
+.an-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.an-t b { font-size: 14.5px; font-weight: 500; color: var(--headline); line-height: 1.35; }
+.an-t span { font-size: 13px; color: var(--muted); line-height: 1.4; }
+.an-w {
+  flex-shrink: 0; font-family: var(--mono); font-size: 12px; color: var(--faint);
+  white-space: nowrap; padding-top: 2px;
+}
+
+@media (max-width: 640px) {
+  .an-push { flex-direction: column; align-items: stretch; gap: 12px; }
+  .an-push-acts { justify-content: flex-end; }
 }

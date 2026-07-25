@@ -66,6 +66,15 @@ const initialsOf = (u) => String((u && u.name) || 'Owner')
   .split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || 'M';
 const currentPath = () => (viewCtx && viewCtx.getStore() ? viewCtx.getStore().path : '') || '/';
 
+// How many back-office notifications the current account hasn't seen — for the
+// masthead bell. server.js registers the getter (it owns the notification
+// store); until it does, or if it throws, the bell simply shows no count.
+let adminUnseenFn = null;
+const setAdminUnseenGetter = (fn) => { adminUnseenFn = fn; };
+const currentAdminUnseen = () => {
+  try { return adminUnseenFn ? (adminUnseenFn(currentViewUser()) || 0) : 0; } catch { return 0; }
+};
+
 /**
  * Whether the signed-in account may change anything. A null user means auth is
  * switched off entirely, which is the local default.
@@ -342,6 +351,17 @@ function navOn(href, path) {
   return path === href || path.startsWith(href + '/');
 }
 
+/** The masthead notification bell, with an unseen dot. Links to the feed. */
+function bell() {
+  const n = currentAdminUnseen();
+  return `<a class="bs-bell${n ? ' has' : ''}" id="bs-bell" href="/notifications"
+      aria-label="Notifications${n ? ` (${n} new)` : ''}" title="Notifications">
+      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path d="M8 1.5a3.2 3.2 0 0 0-3.2 3.2c0 3-1.2 4-1.2 4h8.8s-1.2-1-1.2-4A3.2 3.2 0 0 0 8 1.5Z"/>
+        <path d="M6.6 12.4a1.5 1.5 0 0 0 2.8 0"/>
+      </svg>${n ? `<span class="bs-bell-d">${n > 9 ? '9+' : n}</span>` : ''}</a>`;
+}
+
 function masthead(path) {
   const u = currentViewUser();
   const initials = (n) => String(n || '').split(/\s+/).map((w) => w[0]).filter(Boolean).join('').slice(0, 2).toUpperCase() || 'M';
@@ -373,6 +393,7 @@ function masthead(path) {
       </div>
       <span class="bs-date" id="bs-date">${esc(stamp)} — <span id="bs-part">${part}</span></span>
       <button type="button" class="bs-theme" id="bs-theme" aria-label="Switch theme" title="Switch day / night">☾</button>
+      ${bell()}
       <details class="bs-acct">
         <summary class="bs-chip" title="${esc(name)}">
           <span class="bs-chip-av">${esc(initials(name))}</span>
@@ -995,6 +1016,8 @@ function layout(title, body, opts = {}) {
           if (!slot) return;
           var search = document.getElementById('rc-search');
           var theme = document.getElementById('bs-theme');
+          var bell = document.getElementById('bs-bell') || document.querySelector('.bs-bell');
+          if (bell) slot.appendChild(bell);
           if (theme) slot.appendChild(theme);
           if (search) slot.appendChild(search);
         })();
@@ -1054,4 +1077,4 @@ function flash(req) {
 // navAllowed is the one gate the sidebar and the routes both read, so it is
 // exported rather than reimplemented per page — a second copy is how a link
 // ends up visible to somebody who gets a 403 when they follow it.
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, canWrite, navAllowed };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed };

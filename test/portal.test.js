@@ -638,3 +638,59 @@ test('a device can turn on push, and it is stored against the person', async () 
   });
   assert.ok(!db.prepare('SELECT 1 FROM portal_push WHERE endpoint = ?').get(sub.endpoint), 'unsubscribe removes it');
 });
+
+// --- admin (back-office) notifications -------------------------------------
+// A parallel feed for the owner and managers, in its own admin_* tables. Two
+// things matter: the office is told when operational milestones happen, and
+// none of it can disturb the staff portal's own notifications. (These run in
+// open mode — APP_PASSWORD is blank — so the admin routes need no cookie.)
+
+test('a floor report always notifies the back office', async () => {
+  const cookie = await signIn('1111'); // Bella, a server
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='floor'").get().n;
+  await fetch(BASE + '/portal/stock', {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie },
+    body: new URLSearchParams({ items: JSON.stringify([{ item: 'oat milk', status: 'out' }]) }).toString(),
+  });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='floor'").get().n;
+  assert.strictEqual(after, before + 1, 'the report writes exactly one admin event');
+  const ev = db.prepare("SELECT * FROM admin_events WHERE kind='floor' ORDER BY id DESC LIMIT 1").get();
+  assert.match(ev.title, /reported/, 'it names who reported');
+  assert.strictEqual(ev.href, '/staff-portal', 'and clicks through to the board where reports clear');
+});
+
+test('filing an incident notifies the office, and links to the incident', async () => {
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='incident'").get().n;
+  await form('/c/incidents', { type: 'Guest complaint', description: 'A guest slipped near the bar.', logged_by: 'Owner' });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='incident'").get().n;
+  assert.strictEqual(after, before + 1, 'one incident logged, one admin event');
+  const ev = db.prepare("SELECT * FROM admin_events WHERE kind='incident' ORDER BY id DESC LIMIT 1").get();
+  assert.match(ev.href, /^\/c\/incidents\/\d+$/, 'the click opens that incident');
+});
+
+test('the notifications page shows what is new, then marks it seen', async () => {
+  db.prepare("INSERT INTO admin_events (kind, title, href) VALUES ('payroll','Payroll sent — unit test','/payroll')").run();
+  const maxId = db.prepare('SELECT MAX(id) m FROM admin_events').get().m;
+  const html = await (await fetch(BASE + '/notifications')).text();
+  assert.match(html, /Payroll sent — unit test/, 'the event is on the page');
+  assert.match(html, /Turn on/, 'and the turn-on-push control is offered');
+  const seen = db.prepare("SELECT seen_id FROM admin_seen WHERE uid='m'").get();
+  assert.ok(seen && seen.seen_id >= maxId, 'opening the page marks everything up to now as seen');
+});
+
+test('admin push is its own list — turning it on never touches staff push', async () => {
+  const staffBefore = db.prepare('SELECT COUNT(*) n FROM portal_push').get().n;
+  const sub = { endpoint: 'https://example.com/admin-endpoint-1', keys: { p256dh: 'k', auth: 'a' } };
+  const r = await fetch(BASE + '/notifications/push/subscribe', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sub),
+  });
+  assert.ok((await r.json()).ok, 'the admin subscribe endpoint accepts it');
+  assert.ok(db.prepare('SELECT 1 FROM admin_push WHERE endpoint = ?').get(sub.endpoint), 'stored in admin_push');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM portal_push').get().n, staffBefore, 'and the staff push list is untouched');
+
+  await fetch(BASE + '/notifications/push/unsubscribe', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }),
+  });
+  assert.ok(!db.prepare('SELECT 1 FROM admin_push WHERE endpoint = ?').get(sub.endpoint), 'unsubscribe removes it');
+});

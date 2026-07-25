@@ -665,7 +665,7 @@ body.bare {
 }
 .pt-dish p { font-size: 14.5px; color: var(--pt-second); margin: 5px 0 0; line-height: 1.45; }
 .pt-low { color: var(--pt-amber); font-weight: 600; }
-.pt-dish.off .pt-dish-h b { text-decoration: line-through; color: var(--pt-muted); }
+.pt-dish.off .pt-dish-h b { color: var(--pt-red); }
 
 /* --- out of stock --------------------------------------------------------- */
 .pt-list { margin-top: 2px; }
