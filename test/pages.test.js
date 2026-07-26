@@ -1029,7 +1029,9 @@ test('no month group is expanded on arrival, on any ledger', async () => {
   // Named per page, because "no group was open" is also true of a page that
   // drew no groups — a sweep that cannot tell those apart reports a pass for a
   // ledger it never looked at.
-  const ledgers = ['/shifts', '/sales', '/c/invoices', '/c/expenses'];
+  // Shifts moved to a month browser (a list + one panel, not an accordion), so
+  // it is exercised in shifts.test.js instead; the accordion ledgers stay here.
+  const ledgers = ['/sales', '/c/invoices', '/c/expenses'];
   const covered = {};
   for (const p of ledgers) {
     const html = await (await fetch(BASE + p)).text();

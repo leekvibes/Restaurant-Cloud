@@ -36,6 +36,7 @@
   --btn-bg:       #1f1d1a;
   --btn-ink:      #f7eee0;
   --row-hover:    #f6f4ee;
+  --mb-sel:       #efe4d1;   /* the selected month in the shifts browser */
   --stripe:       #ebdfc6;   /* every other ledger line — a browner cream, sitting
                                 between --tp-panel and --rule-light so it reads as
                                 a shade of the paper and never as a hairline */
@@ -90,6 +91,7 @@
   --btn-bg:       #eae6d9;
   --btn-ink:      #191815;
   --row-hover:    #22201c;
+  --mb-sel:       #2a271e;   /* the selected month in the shifts browser */
   --stripe:       #26231c;   /* the same step, warm side, going lighter */
   /* Night needs no reinterpretation — our page, surface and rule already are
      the values the handoff asks for. */
@@ -912,6 +914,76 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-lr-miss { display: block; font-style: normal; font-size: 11px; color: var(--danger); }
 .bs-lr-go { color: var(--faint); text-align: right; }
 .bs-lr:hover .bs-lr-go { color: var(--accent); }
+
+/* --- Shifts month browser -------------------------------------------------
+   A fixed month list on the left, the selected month's shifts on the right.
+   Clicking a month swaps the right panel; the list never moves. Structure from
+   hairlines — border-radius 0, no shadows except the year dropdown. */
+.bs-mb { display: grid; grid-template-columns: 216px minmax(0, 1fr); margin-top: 10px; border: 1px solid var(--rule); }
+.bs-mb-side { border-right: 1px solid var(--rule); background: var(--panel); }
+.bs-mb-sh { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 12px 10px; border-bottom: 1px solid var(--rule); }
+.bs-yr-only { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.bs-mb-list { padding: 2px 0; }
+.bs-mb-m { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  text-align: left; padding: 10px 12px; background: none; border: 0; border-left: 3px solid transparent;
+  border-bottom: 1px dotted var(--rule-dotted); cursor: pointer; font: inherit; }
+.bs-mb-list .bs-mb-m:last-child { border-bottom: 0; }
+.bs-mb-mtext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bs-mb-mn { font-size: 15px; color: var(--body); }
+.bs-mb-mf { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.bs-mb-mc { font-family: var(--mono); font-size: 12px; color: var(--muted); flex-shrink: 0; }
+.bs-mb-m:hover { border-left-color: var(--accent); background: var(--row-hover); }
+.bs-mb-m:hover .bs-mb-mn { color: var(--headline); }
+.bs-mb-m.on { background: var(--mb-sel); border-left-color: var(--ink); }
+.bs-mb-m.on .bs-mb-mn { color: var(--headline); font-weight: 500; }
+.bs-mb-m.empty { opacity: .5; cursor: default; }
+.bs-mb-m.empty:hover { border-left-color: transparent; background: none; }
+.bs-mb.filtering .bs-mb-m.on { background: none; border-left-color: transparent; }
+.bs-mb.filtering .bs-mb-m.on .bs-mb-mn { color: var(--body); font-weight: 400; }
+/* year chip + its dropdown */
+.bs-yr { position: relative; }
+.bs-yr-chip { font-family: var(--mono); font-size: 11.5px; color: var(--body); background: var(--surface);
+  border: 1px solid var(--rule); padding: 4px 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.bs-yr-cx { color: var(--accent); }
+.bs-yr-pop { position: absolute; top: calc(100% + 4px); right: 0; min-width: 132px; z-index: 30;
+  background: var(--surface); border: 1px solid var(--rule); box-shadow: 0 10px 24px rgba(0, 0, 0, .28); display: none; }
+.bs-yr.open .bs-yr-pop { display: block; }
+.bs-yr-h { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); padding: 8px 10px 6px; border-bottom: 1px solid var(--rule); }
+.bs-yr-o { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 10px;
+  font-family: var(--mono); font-size: 12.5px; color: var(--body); text-decoration: none; }
+.bs-yr-o span { color: var(--faint); }
+.bs-yr-o:hover { background: var(--row-hover); }
+.bs-yr-o.on { background: var(--mb-sel); color: var(--headline); }
+/* right column — the selected month's shifts */
+.bs-mb-main { min-width: 0; }
+.bs-mb-phead { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 13px 16px; border-bottom: 1px solid var(--rule); }
+.bs-mb-pt { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--headline); }
+.bs-mb-pmeta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.bs-mb-pmeta .warn { color: var(--warning); }
+.bs-mb-pmeta .ok { color: var(--positive); }
+.bs-mb-ptot { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--headline); }
+.bs-mb-ptot i { color: var(--muted); font-style: normal; }
+.bs-mb-panel > .bs-lhead, .bs-mb-panel > .bs-lrows { padding-left: 16px; padding-right: 16px; }
+.bs-mb-picker { display: none; }
+
+/* On a phone the fixed column can't fit, so months and the year become a
+   compact pair of native pickers above the shifts. Same swap, phone-shaped. */
+@media (max-width: 900px) {
+  .bs-mb { grid-template-columns: 1fr; border: 0; margin-top: 2px; }
+  .bs-mb-side { display: none; }
+  .bs-mb-picker { display: flex; gap: 12px; margin: 2px 0 14px; }
+  .bs-mb-pk { flex: 1 1 auto; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .bs-mb-pk:last-child { flex: 0 0 34%; }
+  .bs-mb-pkl { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .bs-mb-pk select { width: 100%; padding: 11px 12px; font: inherit; font-size: 15px; border-radius: 0;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
+  .bs-mb-main { border: 1px solid var(--rule); }
+  .bs-mb-phead { padding: 12px; }
+  .bs-mb-panel > .bs-lhead, .bs-mb-panel > .bs-lrows { padding-left: 12px; padding-right: 12px; }
+}
 
 @media (max-width: 1100px) {
   .bs-strip { flex-wrap: wrap; gap: 18px 0; }

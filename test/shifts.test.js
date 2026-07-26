@@ -122,11 +122,14 @@ test('the stat strip excludes open shifts', async () => {
   assert.ok(completed < all, `${completed} counted out of ${all} — the empty ones are excluded`);
 });
 
-test('months are grouped, newest expanded, the rest one line', async () => {
+test('months are a browsable list, the newest one selected', async () => {
   const h = await html('/shifts');
-  assert.match(h, /class="bs-month"/, 'the newest month is a ledger');
-  const heads = [...h.matchAll(/bs-kicker">([A-Z][a-z]+ \d{4})</g)].map((m) => m[1]);
-  assert.ok(heads.length >= 1, `grouped by month, got ${heads.join(', ')}`);
+  assert.match(h, /class="bs-mb"/, 'the month browser is present');
+  const names = [...h.matchAll(/bs-mb-mn">([A-Z][a-z]+)</g)].map((m) => m[1]);
+  assert.ok(names.length >= 1, `months are listed, got ${names.join(', ')}`);
+  assert.match(h, /data-monthpick="[^"]+" aria-pressed="true"/, 'the newest month is selected');
+  // Its shifts are the ones shown — the selected panel is the one not hidden.
+  assert.match(h, /<section class="bs-mb-panel" data-monthpanel="[^"]+">/, 'and its shifts show beside the list');
 });
 
 test('every shift in range is reachable from the ledger', async () => {
@@ -311,14 +314,12 @@ test('the ledger groups days into weeks and totals each one', async () => {
   w.close();
   try {
     const h = await html('/shifts');
-    // Counted WITHIN the newest month. Across the page, one block per month
-    // already reaches three, so a version that never split a month passed.
-    // From the first month to the second. This used to slice to
-    // 'bs-month bs-month-old', a class that no longer exists — indexOf returned
-    // -1, the slice ran to the end of the document, and it counted the week
-    // blocks of every month on the page.
-    const a = h.indexOf('class="bs-month"');
-    const b = h.indexOf('class="bs-month"', a + 1);
+    // Counted WITHIN the newest month's panel. Across the page, one block per
+    // month already reaches three, so a version that never split a month
+    // passed. Slice from the first month panel to the second so only the
+    // newest month's week blocks are counted.
+    const a = h.indexOf('data-monthpanel=');
+    const b = h.indexOf('data-monthpanel=', a + 1);
     const first = h.slice(a, b === -1 ? undefined : b);
     const blocks = (first.match(/class="bs-week"/g) || []).length;
 
@@ -347,23 +348,22 @@ test('the ledger groups days into weeks and totals each one', async () => {
   }
 });
 
-test('every month starts closed, and opening one shows all of its days', async () => {
+test('one month shows at a time, the rest a click away', async () => {
   const h = await html('/shifts');
 
-  // You arrive looking for a stretch of days, so the page opens as a list of
-  // months you can take in at once and you go into the one you want.
-  const months = h.match(/<details class="bs-month" data-month[^>]*>/g) || [];
-  assert.ok(months.length >= 1, 'months are rendered');
-  assert.ok(months.every((m) => !/\bopen\b/.test(m)), `none opens by default: ${months.join(' ')}`);
+  // The browser renders a panel per month with shifts, and exactly one — the
+  // newest — is shown on arrival; the rest are hidden until you pick them, so
+  // the list never moves as you jump between months.
+  const panels = h.match(/<section class="bs-mb-panel" data-monthpanel="[^"]+"[^>]*>/g) || [];
+  assert.ok(panels.length >= 1, 'a panel per month with shifts');
+  const openPanels = panels.filter((p) => !/\bhidden\b/.test(p));
+  assert.strictEqual(openPanels.length, 1, 'exactly one month is shown on arrival');
 
-  // And every one is the same control — the newest used to be a plain section
-  // with no way to shut it while the rest were disclosures with "open ▸".
-  assert.strictEqual((h.match(/bs-month-go/g) || []).length, months.length,
-    'each carries the same affordance');
-  assert.ok(!h.includes('bs-month-old'), 'there is one code path, not two');
+  // Every month is its own control in the list.
+  assert.ok((h.match(/data-monthpick="/g) || []).length >= 1, 'each month is its own control');
 
-  // An open month shows everything in it. The inner "N earlier days" fold was
-  // a second click to reach what the first one asked for.
+  // A month shows everything in it. The inner "N earlier days" fold was a
+  // second click to reach what the first one asked for.
   assert.ok(!/earlier day/.test(h), 'no fold inside a month');
 });
 

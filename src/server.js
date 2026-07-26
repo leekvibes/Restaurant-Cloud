@@ -1141,83 +1141,128 @@ app.get('/shifts', (req, res) => {
       </div>
     </section>` : '';
 
-  const monthBlocks = months.map((m) => {
-    const list = byMonth.get(m);
-    const sales = sum(list, ({ x }) => shiftSales(x));
-    const tips = sum(list, ({ x }) => x.tips);
-    const hrs = sum(list, ({ x }) => x.hours);
-    const open = list.filter(({ s }) => s.key !== 'sent').length;
-    const label = `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
-
-    // Weeks, so twenty-one identical rows become three groups your eye can
-    // hold — and a week subtotal is a question the page could not answer
-    // before. Monday starts the week, matching the payroll period.
-    const weekOf = (d) => {
-      const dt = new Date(d + 'T00:00:00');
-      return addDays(d, -((dt.getDay() + 6) % 7));
-    };
-    const inWeeks = (items) => {
-      const out = [];
-      for (const it of items) {
-        const wk = weekOf(it.x.date);
-        if (!out.length || out[out.length - 1].wk !== wk) out.push({ wk, list: [] });
-        out[out.length - 1].list.push(it);
-      }
-      return out;
-    };
-    const weekBlock = (items) => inWeeks(items).map(({ wk, list: wl }) => {
+  // --- the month browser ----------------------------------------------------
+  // A two-column split: months live in a fixed left column, and the selected
+  // month's shifts fill the space beside them. Clicking a month swaps the table
+  // on the right without moving the list, so you can jump between months without
+  // re-finding your place. The shift rows, the week grouping and every figure
+  // are exactly as they were — only how you get to a month changed.
+  //
+  // Weeks, so twenty-one identical rows become three groups your eye can hold —
+  // and a week subtotal is a question the page could not answer before. Monday
+  // starts the week, matching the payroll period.
+  const weekOf = (d) => {
+    const dt = new Date(d + 'T00:00:00');
+    return addDays(d, -((dt.getDay() + 6) % 7));
+  };
+  const row = ({ x, s }) => {
+    const mlabel = `${MONTHS[Number(x.date.slice(5, 7)) - 1]} ${x.date.slice(0, 4)}`;
+    const search = [x.date, dp(x.daypart), s.label, mlabel].join(' ').toLowerCase();
+    const none = shiftSales(x) === 0;
+    const dow = new Date(x.date + 'T00:00:00').getDay();
+    const weekend = dow === 0 || dow === 5 || dow === 6;
+    return `<a class="bs-lr bs-shiftrow${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
+       data-service="${esc(x.daypart)}" data-search="${esc(search)}">
+      <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8, 10))}</span>
+      <span class="bs-lr-s">${esc(dp(x.daypart))}</span>
+      <span class="bs-lr-st ${s.key}">${esc(s.label.toUpperCase())}</span>
+      <span class="bs-lr-n">${none ? '—' : money(shiftSales(x))}</span>
+      <span class="bs-lr-n muted">${x.tips ? money(x.tips) : '—'}</span>
+      <span class="bs-lr-n muted">${x.hours ? (Math.round(x.hours * 10) / 10).toFixed(1) : '—'}${x.no_hours ? `<i class="bs-lr-miss">${x.no_hours} missing</i>` : ''}</span>
+      <span class="bs-lr-n muted">${x.people || 0}</span>
+      <span class="bs-lr-go">→</span>
+    </a>`;
+  };
+  const weekBlock = (items) => {
+    const wk = [];
+    for (const it of items) {
+      const w = weekOf(it.x.date);
+      if (!wk.length || wk[wk.length - 1].wk !== w) wk.push({ wk: w, list: [] });
+      wk[wk.length - 1].list.push(it);
+    }
+    return wk.map(({ wk: w, list: wl }) => {
       const wSales = sum(wl, ({ x }) => shiftSales(x));
       const wTips = sum(wl, ({ x }) => x.tips);
       return `<div class="bs-week">
         ${wl.map(row).join('')}
-        <div class="bs-week-f"><span>week of ${esc(whenOf(wk))}</span>
+        <div class="bs-week-f"><span>week of ${esc(whenOf(w))}</span>
           <b class="bs-fig">${money(wSales)}</b>
           <i class="bs-fig">${wTips ? money(wTips) + ' tips' : ''}</i></div>
       </div>`;
     }).join('');
+  };
 
-    const row = ({ x, s }) => {
-      const search = [x.date, dp(x.daypart), s.label, label].join(' ').toLowerCase();
-      const none = shiftSales(x) === 0;
-      const dow = new Date(x.date + 'T00:00:00').getDay();
-      const weekend = dow === 0 || dow === 5 || dow === 6;
-      return `<a class="bs-lr bs-shiftrow${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
-         data-service="${esc(x.daypart)}" data-search="${esc(search)}">
-        <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8, 10))}</span>
-        <span class="bs-lr-s">${esc(dp(x.daypart))}</span>
-        <span class="bs-lr-st ${s.key}">${esc(s.label.toUpperCase())}</span>
-        <span class="bs-lr-n">${none ? '—' : money(shiftSales(x))}</span>
-        <span class="bs-lr-n muted">${x.tips ? money(x.tips) : '—'}</span>
-        <span class="bs-lr-n muted">${x.hours ? (Math.round(x.hours * 10) / 10).toFixed(1) : '—'}${x.no_hours ? `<i class="bs-lr-miss">${x.no_hours} missing</i>` : ''}</span>
-        <span class="bs-lr-n muted">${x.people || 0}</span>
-        <span class="bs-lr-go">→</span>
-      </a>`;
-    };
+  const selKey = months[0];                        // newest month with data — opens selected
+  const briefUSD = (cents) => '$' + Math.round((cents || 0) / 100).toLocaleString('en-US');
 
-    // Every month starts closed and every month behaves the same. You arrive
-    // looking for a particular stretch of days, so the page opens as a list of
-    // months you can take in at once — total, hours, how many are unsent — and
-    // you go into the one you want.
-    //
-    // An open month shows all of its days. Folding the first six and hiding
-    // the rest behind "N earlier days" made sense when the newest month opened
-    // by default; now it is a second click to reach what the first one asked
-    // for. The week rules are what keep a thirty-day month scannable.
-    return `<details class="bs-month" data-month>
-      <summary class="bs-month-h">
-        <span class="bs-kicker">${esc(label)}</span>
-        <span class="bs-month-meta">${list.length} shift${list.length === 1 ? '' : 's'} · ${Math.round(hrs).toLocaleString('en-US')} hrs ·
-          ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
-        <span class="bs-month-tot"><b>${money(sales)}</b>${tips ? ` + ${money(tips)} tips` : ''}</span>
-        <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
-      </summary>
+  // Which months to list: every elapsed month of the year (so the gaps show),
+  // plus any month that actually holds a shift. Future months of the current
+  // year are not listed — you cannot have worked them yet.
+  const curY = Number(today.slice(0, 4));
+  const curM = Number(today.slice(5, 7));
+  let lastM = Number(year) < curY ? 12 : Number(year) > curY ? 1 : curM;
+  for (const key of byMonth.keys()) { const mm = Number(key.slice(5, 7)); if (mm > lastM) lastM = mm; }
+  const monthNums = [];
+  for (let mm = lastM; mm >= 1; mm--) monthNums.push(mm);
+
+  const monthList = monthNums.map((mm) => {
+    const key = `${year}-${String(mm).padStart(2, '0')}`;
+    const list = byMonth.get(key);
+    const name = MONTHS[mm - 1];
+    if (!list) return `<div class="bs-mb-m empty" aria-disabled="true">
+      <span class="bs-mb-mtext"><span class="bs-mb-mn">${name}</span><span class="bs-mb-mf">no shifts</span></span></div>`;
+    const on = key === selKey;
+    return `<button type="button" class="bs-mb-m${on ? ' on' : ''}" data-monthpick="${key}" aria-pressed="${on ? 'true' : 'false'}">
+      <span class="bs-mb-mtext"><span class="bs-mb-mn">${name}</span><span class="bs-mb-mf">${briefUSD(sum(list, ({ x }) => shiftSales(x)))}</span></span>
+      <span class="bs-mb-mc">${list.length}</span></button>`;
+  }).join('');
+
+  const panelFor = (key) => {
+    const list = byMonth.get(key);
+    const sales = sum(list, ({ x }) => shiftSales(x));
+    const tips = sum(list, ({ x }) => x.tips);
+    const hrs = sum(list, ({ x }) => x.hours);
+    const open = list.filter(({ s }) => s.key !== 'sent').length;
+    const M = key.slice(5, 7);
+    const label = `${MONTHS[Number(M) - 1]} ${key.slice(0, 4)}`;
+    return `<section class="bs-mb-panel" data-monthpanel="${key}"${key === selKey ? '' : ' hidden'}>
+      <div class="bs-mb-phead">
+        <span class="bs-mb-pt">${esc(label)}</span>
+        <span class="bs-mb-pmeta">${Math.round(hrs).toLocaleString('en-US')} hrs · ${open ? `<b class="warn">${open} not sent</b>` : '<b class="ok">all sent</b>'}</span>
+        <span class="bs-mb-ptot"><b>${money(sales)}</b>${tips ? ` <i>+ ${money(tips)} tips</i>` : ''}</span>
+      </div>
       <div class="bs-lhead bs-shifthead">
         <span>Date</span><span>Service</span><span>Status</span>
         <span class="r">Sales</span><span class="r">Tips</span><span class="r">Hrs</span><span class="r">Staff</span><span></span>
       </div>
       <div class="bs-lrows">${weekBlock(list)}</div>
-    </details>`;
-  }).join('');
+    </section>`;
+  };
+  const monthPanels = months.map(panelFor).join('');
+
+  const yearCount = (y) => st.filter(({ x }) => x.date.slice(0, 4) === y).length;
+  const yearPop = `<div class="bs-yr" id="mb-yr">
+    <button type="button" class="bs-yr-chip" aria-haspopup="true" aria-expanded="false">${esc(year)} <span class="bs-yr-cx" aria-hidden="true">▾</span></button>
+    <div class="bs-yr-pop" role="menu">
+      <div class="bs-yr-h">Years with data</div>
+      ${years.map((y) => `<a class="bs-yr-o${y === year ? ' on' : ''}" role="menuitem" href="/shifts?y=${y}">${esc(y)}<span>${yearCount(y)}</span></a>`).join('')}
+    </div></div>`;
+
+  const monthBrowser = `<div class="bs-mb">
+    <aside class="bs-mb-side">
+      <div class="bs-mb-sh"><span class="bs-kicker">Months</span>${years.length > 1 ? yearPop : `<span class="bs-yr-only">${esc(year)}</span>`}</div>
+      <div class="bs-mb-list">${monthList}</div>
+    </aside>
+    <div class="bs-mb-picker">
+      <label class="bs-mb-pk"><span class="bs-mb-pkl">Month</span>
+        <select id="mb-month">${months.map((key) => `<option value="${key}"${key === selKey ? ' selected' : ''}>${MONTHS[Number(key.slice(5, 7)) - 1]} — ${byMonth.get(key).length} shift${byMonth.get(key).length === 1 ? '' : 's'}</option>`).join('')}</select></label>
+      ${years.length > 1 ? `<label class="bs-mb-pk"><span class="bs-mb-pkl">Year</span>
+        <select id="mb-yr-m" onchange="location.href='/shifts?y='+this.value">${years.map((y) => `<option value="${esc(y)}"${y === year ? ' selected' : ''}>${esc(y)}</option>`).join('')}</select></label>` : ''}
+    </div>
+    <div class="bs-mb-main">${monthPanels}
+      <div class="bs-clear" id="snone" style="display:none">Nothing matches. Try a different search or filter.</div>
+    </div>
+  </div>`;
 
   const notSent = st.filter(({ s }) => s.key !== 'sent' && s.key !== 'open').length;
   const headline = all.length
@@ -1242,11 +1287,9 @@ app.get('/shifts', (req, res) => {
       <button class="bs-fchip" data-f="status" data-v="ready">Ready</button>
       <button class="bs-fchip" data-f="status" data-v="sent">Sent</button>
       <span class="bs-filter-sp"></span>
-      ${years.length > 1 ? years.map((y) => `<a class="bs-ytab${y === year ? ' on' : ''}" href="/shifts?y=${y}">${y}</a>`).join('') : ''}
       <input id="ssearch" class="bs-search-inline" type="search" placeholder="Search a date, month or service…" autocomplete="off">
     </div>
-    ${monthBlocks}
-    <div class="bs-clear" id="snone" style="display:none">Nothing matches. Try a different search or filter.</div>`
+    ${monthBrowser}`
     : `<p class="bs-clear">Nothing yet. ${canWrite() ? '<a href="/shifts/new">Log a shift →</a>' : ''}</p>`;
 
   res.send(layout('Shifts', `
@@ -1264,11 +1307,41 @@ app.get('/shifts', (req, res) => {
     <script>
       (function () {
         var q = '', mode = 'all', val = '';
+        var panels = [].slice.call(document.querySelectorAll('[data-monthpanel]'));
+        var picks = [].slice.call(document.querySelectorAll('[data-monthpick]'));
+        var msel = document.getElementById('mb-month');
+        var first = document.querySelector('[data-monthpick].on');
+        var sel = first ? first.getAttribute('data-monthpick')
+          : (panels[0] ? panels[0].getAttribute('data-monthpanel') : null);
+
+        function filtering() { return q !== '' || mode !== 'all'; }
+
+        // Pick a month: swap the table on the right, the list stays put.
+        function selectMonth(key) {
+          sel = key;
+          picks.forEach(function (b) {
+            var on = b.getAttribute('data-monthpick') === key;
+            b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+          });
+          if (msel && msel.value !== key) msel.value = key;
+          if (!filtering()) showSelected();
+        }
+        function showSelected() {
+          panels.forEach(function (p) {
+            p.hidden = p.getAttribute('data-monthpanel') !== sel;
+            p.querySelectorAll('[data-shift]').forEach(function (el) { el.style.display = ''; });
+          });
+          var none = document.getElementById('snone'); if (none) none.style.display = 'none';
+          var mb = document.querySelector('.bs-mb'); if (mb) mb.classList.remove('filtering');
+        }
+        // Search / filter spans the whole year: every month with a match opens,
+        // the rest fold away — the same reach the accordion had.
         function apply() {
+          if (!filtering()) { showSelected(); return; }
           var shown = 0;
-          document.querySelectorAll('[data-month]').forEach(function (g) {
+          panels.forEach(function (p) {
             var n = 0;
-            g.querySelectorAll('[data-shift]').forEach(function (el) {
+            p.querySelectorAll('[data-shift]').forEach(function (el) {
               var ok = mode === 'all' ? true
                 : mode === 'service' ? el.getAttribute('data-service') === val
                 : el.getAttribute('data-status') === val;
@@ -1276,16 +1349,17 @@ app.get('/shifts', (req, res) => {
               el.style.display = ok ? '' : 'none';
               if (ok) { n++; shown++; }
             });
-            g.style.display = n ? '' : 'none';
-            if (n && (q || mode !== 'all')) g.open = true;
+            p.hidden = n === 0;
           });
-          var none = document.getElementById('snone');
-          if (none) none.style.display = shown ? 'none' : '';
+          var none = document.getElementById('snone'); if (none) none.style.display = shown ? 'none' : '';
+          var mb = document.querySelector('.bs-mb'); if (mb) mb.classList.add('filtering');
         }
+
+        picks.forEach(function (b) { b.addEventListener('click', function () { selectMonth(b.getAttribute('data-monthpick')); }); });
+        if (msel) msel.addEventListener('change', function () { selectMonth(this.value); });
+
         var si = document.getElementById('ssearch');
         if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
-        // The chips carry the class bs-fchip; this listener used to look for
-        // .fchip and bound nothing, so every status/service filter was dead.
         document.querySelectorAll('.bs-fchip').forEach(function (b) {
           b.addEventListener('click', function () {
             document.querySelectorAll('.bs-fchip').forEach(function (x) { x.classList.remove('on'); });
@@ -1293,6 +1367,19 @@ app.get('/shifts', (req, res) => {
             mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
           });
         });
+
+        // The year chip's dropdown (its items are plain links that reload).
+        var yr = document.getElementById('mb-yr');
+        if (yr) {
+          var chip = yr.querySelector('.bs-yr-chip');
+          chip.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var open = yr.classList.toggle('open');
+            chip.setAttribute('aria-expanded', open ? 'true' : 'false');
+          });
+          document.addEventListener('click', function () { yr.classList.remove('open'); chip.setAttribute('aria-expanded', 'false'); });
+          document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { yr.classList.remove('open'); chip.setAttribute('aria-expanded', 'false'); } });
+        }
       })();
     </script>`));
 });
