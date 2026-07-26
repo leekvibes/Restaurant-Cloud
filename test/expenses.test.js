@@ -392,3 +392,19 @@ test('a legacy expense with no date is still shown, under "No date"', async () =
   assert.match(html, /Ghost expense/, 'the undated row shows');
   assert.match(html, /No date/, 'grouped under No date');
 });
+
+test('an expense filed under an off-year date is still reachable, not lost', async () => {
+  // The bug this guards: a receipt read (or typed) with the wrong year used to
+  // vanish, because the list opened on the latest year and this row was not in
+  // it. Now the default view opens on the most recently ADDED expense's year,
+  // so whatever was just saved is on screen — and "All years" always holds it.
+  await logExpense({ name: 'Offyear widget', amount_cents: '15.00', spent_on: '2019-03-03',
+    paid_by: 'Rosa', paid_with: 'Company card', category: 'Supplies' });
+
+  const deflt = await (await fetch(`${BASE}/c/expenses`)).text();
+  assert.match(deflt, /Offyear widget/, 'the just-saved expense shows without hunting for a year');
+
+  const all = await (await fetch(`${BASE}/c/expenses?y=all`)).text();
+  assert.match(all, /Offyear widget/, 'All years shows it too');
+  assert.match(all, /All years/, 'and the All years option is offered once there is more than one year');
+});

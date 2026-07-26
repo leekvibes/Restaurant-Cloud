@@ -3031,8 +3031,18 @@ body.cap-open { overflow: hidden; }
   .cap-grid { grid-template-columns: 1fr; }
   .cap-f { border-right: 0; }
   .cap-title { font-size: 20px; }
-  .cap-drop { padding: 34px 16px; }
+  .cap-drop { padding: 30px 16px; }
   .cap-drop-t { font-size: 21px; }
+  /* On a phone you photograph the receipt in your hand — so that is the big
+     primary action, then the file picker, then typing it in. Full-width and
+     stacked, each a proper thumb target rather than three chips in a row. */
+  .cap-drop-b { flex-direction: column; align-items: stretch; gap: 10px; }
+  .cap-drop-b button { width: 100%; padding: 14px; font-size: 15px; }
+  .cap-drop-b #cap-photo { order: -1; background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .cap-drop-b #cap-choose { background: var(--panel); color: var(--secondary); }
+  /* The receipt tile in the quick modal, big enough to actually hit. */
+  .cap-quick .cap-photo { gap: 14px; }
+  .cap-quick .cap-shot { width: 84px; height: 84px; }
 }
 
 /* Two overlays can be on one page — the scan flow and the quick modal. Only

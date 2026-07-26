@@ -7682,6 +7682,26 @@ function quickExpenseScript() {
       if (low) { var box = f.closest('.cap-f'); if (box) box.classList.add('warn'); }
     }
 
+    // A receipt you are logging now is recent. If the read date is missing, in
+    // the future, or wildly old, that is a misread — and letting it through files
+    // the expense under some other year where you will never find it. So keep
+    // today's date and flag it, rather than scattering the row into 2019.
+    function recentDate(s) {
+      if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(s || '')) return null;
+      var d = new Date(s + 'T00:00:00');
+      if (isNaN(d.getTime())) return null;
+      var days = (Date.now() - d.getTime()) / 86400000;
+      return (days >= -1 && days <= 400) ? s : null;
+    }
+    function fillDate(raw) {
+      var ok = recentDate(raw);
+      if (ok) { set('spent_on', ok, true); return; }
+      // Left as today. Say so, so a wrong read never silently sits on the row.
+      var mark = form.querySelector('.cap-mark[data-for="spent_on"]');
+      if (mark && !touched['spent_on']) mark.innerHTML = ' <span class="chk">· set the date</span>';
+      var box = document.getElementById('qx_date'); if (box && !touched['spent_on']) box.closest('.cap-f').classList.add('warn');
+    }
+
     // A photo attached here is a receipt, and a receipt has the answers on it.
     // Reading it is the whole reason to photograph it rather than type it.
     function read() {
@@ -7704,7 +7724,7 @@ function quickExpenseScript() {
           set('name', d.name, low);
           set('where_bought', d.where_bought, low);
           set('amount_cents', d.total, low);
-          set('spent_on', d.spent_on, low);
+          fillDate(d.spent_on);
           set('category', d.category, low);
           // Only when the receipt actually says so. Whose card it was is not
           // printed on it, and guessing wrong invents a debt to somebody.
@@ -7776,6 +7796,7 @@ function captureScript(kinds) {
     var READ_URL = { invoice: '/c/invoices/read', expense: '/c/expenses/read', document: '/c/documents/read' };
     var READING = { invoice: 'Reading the invoice…', expense: 'Reading the receipt…', document: 'Reading the document…' };
     var TITLE = { invoice: 'Reviewing a new invoice', expense: 'Reviewing a receipt', document: 'Reviewing a document' };
+    var ADD = { invoice: 'Add an invoice', expense: 'Scan a receipt', document: 'Add a document' };
     var SAVE = { invoice: 'Save invoice', expense: 'Save expense', document: 'File it' };
     var HINT = {
       invoice: 'ZWIN reads the vendor, invoice number, date and line items so you just confirm. Or start blank and type it in.',
@@ -7789,7 +7810,11 @@ function captureScript(kinds) {
     // --- opening and closing ------------------------------------------------
     function open(k) {
       lastFocus = document.activeElement;
-      if (k) setKind(k);
+      // Always sync to the kind being opened — without this, opening from a
+      // single-kind page left the invoice-flavoured defaults in place, so the
+      // expense scanner announced "reads the vendor, invoice number and line
+      // items". k falls back to the page's own kind (KINDS[0]) when omitted.
+      setKind(k || kind);
       document.body.classList.remove('qx-open');
       document.body.classList.add('cap-open');
       var b = el('cap-choose'); if (b) setTimeout(function () { b.focus(); }, 60);
@@ -7840,6 +7865,10 @@ function captureScript(kinds) {
       });
       var s = el('cap-drop-s'); if (s) s.textContent = HINT[k];
       var sv = el('cap-save'); if (sv) { sv.textContent = SAVE[k]; sv.setAttribute('form', panel(k).id); }
+      // Name the step for the kind while still on the dropzone (before a file is
+      // chosen). Once one is picked, toWork() renames it to "Reviewing…".
+      var t = el('cap-title'), w = el('cap-step-work');
+      if (t && w && w.hidden) t.textContent = ADD[k];
     }
     wrap.querySelectorAll('[data-kind]').forEach(function (b) {
       b.addEventListener('click', function () { setKind(b.dataset.kind); });
@@ -7953,6 +7982,25 @@ function captureScript(kinds) {
       if (low) { var box = f.closest('.cap-f'); if (box) box.classList.add('warn'); }
     }
 
+    // A receipt read now is recent; a missing, future, or wildly old date is a
+    // misread. Rather than file the expense under a year you will never look in,
+    // keep today's date and flag it to set.
+    function recentDate(s) {
+      if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(s || '')) return null;
+      var d = new Date(s + 'T00:00:00');
+      if (isNaN(d.getTime())) return null;
+      var days = (Date.now() - d.getTime()) / 86400000;
+      return (days >= -1 && days <= 400) ? s : null;
+    }
+    function fillSpent(raw) {
+      var ok = recentDate(raw);
+      if (ok) { set('spent_on', ok, true); return; }
+      if (touched['spent_on']) return;
+      var mark = panel().querySelector('.cap-mark[data-for="spent_on"]');
+      if (mark) mark.innerHTML = ' <span class="chk">· set the date</span>';
+      var f = panel().querySelector('[name="spent_on"]'); if (f) { var bx = f.closest('.cap-f'); if (bx) bx.classList.add('warn'); }
+    }
+
     function fill(d) {
       var low = d.confidence === 'low' || d.confidence === 'medium';
       panel().querySelector('.cap-ai').value = 'ai';
@@ -7991,7 +8039,7 @@ function captureScript(kinds) {
         set('name', d.name, low);
         set('where_bought', d.where_bought, low);
         set('amount_cents', d.total, low);
-        set('spent_on', d.spent_on, low);
+        fillSpent(d.spent_on);
         set('category', d.category, low);
         set('paid_with', d.paid_with, low);
       } else {
@@ -8687,7 +8735,7 @@ app.get('/c/documents', (req, res) => {
         <p class="bs-hero-s">${canWrite()
           ? 'Upload a PDF or a photo and it reads the title, who sent it and the dates that matter — including the one it runs out on. You confirm before anything is filed.'
           : 'Once the owner files documents, they show up here.'}</p>
-        ${canWrite() ? '<button class="bs-btn" type="button" onclick="capOpen()">File the first one</button>' : ''}
+        ${canWrite() ? '<button class="bs-btn" type="button" onclick="capOpen(\'document\')">File the first one</button>' : ''}
       </div>`;
 
   const headline = all.length
@@ -8705,7 +8753,7 @@ app.get('/c/documents', (req, res) => {
           <h1 class="bs-headline">${headline}</h1>
           <p class="bs-subline">Leases, tax filings, licences and letters. The file is kept as you uploaded it.</p>
         </div>
-        ${canWrite() ? '<button class="bs-btn" type="button" onclick="capOpen()">File a document</button>' : ''}
+        ${canWrite() ? '<button class="bs-btn" type="button" onclick="capOpen(\'document\')">File a document</button>' : ''}
       </div>
       ${all.length ? strip : ''}
       ${all.length ? toolbar : ''}
@@ -8762,12 +8810,22 @@ app.get('/c/expenses', (req, res) => {
   const thisMonth = today.slice(0, 7);
 
   const years = [...new Set(all.map((r) => (r.spent_on || '').slice(0, 4)).filter(Boolean))].sort().reverse();
-  const year = years.includes(req.query.y) ? req.query.y : (years[0] || today.slice(0, 4));
+  // Open on the year holding the most recently ADDED expense — not just the
+  // latest date — so whatever was just uploaded is on screen even if its read
+  // date lands it in another year. 'all' shows every year at once: the backstop
+  // for anything filed under a date nobody would think to click.
+  const newestAdded = all.length ? all.reduce((a, b) => (b.id > a.id ? b : a)) : null;
+  const newestYear = newestAdded ? (newestAdded.spent_on || '').slice(0, 4) : '';
+  const showAll = req.query.y === 'all';
+  const year = showAll ? 'all'
+    : years.includes(req.query.y) ? req.query.y
+    : (years.includes(newestYear) ? newestYear : (years[0] || today.slice(0, 4)));
   // Undated rows (saved before dates defaulted to today) still belong in
   // history: show them alongside whichever year is open, under the "No date"
   // group, rather than dropping them off the page. Nothing an owner uploaded
   // should ever be invisible.
-  const rows = all.filter((r) => { const y = (r.spent_on || '').slice(0, 4); return y === year || !y; });
+  const rows = showAll ? all.slice()
+    : all.filter((r) => { const y = (r.spent_on || '').slice(0, 4); return y === year || !y; });
 
   const brief = (cents) => (Math.abs(cents) >= 100000
     ? '$' + Math.round(cents / 100).toLocaleString('en-US') : money(cents));
@@ -8792,7 +8850,7 @@ app.get('/c/expenses', (req, res) => {
       owedTotal ? 'warn' : 'ok')}
     ${statCell('No receipt', String(noReceipt), noReceipt ? 'photograph them before they fade' : 'every one has a photo',
       noReceipt ? 'warn' : 'ok')}
-    ${statCell(`Spent in ${esc(year)}`, brief(yearSpend), `${rows.length} expense${rows.length === 1 ? '' : 's'}`)}
+    ${statCell(`Spent ${year === 'all' ? 'all years' : 'in ' + esc(year)}`, brief(yearSpend), `${rows.length} expense${rows.length === 1 ? '' : 's'}`)}
   </section>`;
 
   const byMonth = new Map();
@@ -8903,7 +8961,8 @@ app.get('/c/expenses', (req, res) => {
             <div class="fs-h">Year</div>
             <div class="fs-opts">
               ${years.length ? years.map((y) => `<a class="fs-o${y === year ? ' on' : ''}" href="/c/expenses?y=${y}">${y}</a>`).join('')
-                : `<span class="fs-o on">${esc(year)}</span>`}
+                : `<span class="fs-o on">${esc(year === 'all' ? today.slice(0, 4) : year)}</span>`}
+              ${years.length > 1 ? `<a class="fs-o${showAll ? ' on' : ''}" href="/c/expenses?y=all">All years</a>` : ''}
             </div>
             <div class="fs-h">Sort</div>
             <select id="xsort" class="bs-sel">
@@ -8923,7 +8982,7 @@ app.get('/c/expenses', (req, res) => {
     </div>`;
 
   const body = rows.length ? monthBlocks : (all.length
-    ? `<div class="bs-blank"><b>Nothing in ${esc(year)}</b><span>Pick another year in Sort &amp; filter.</span></div>`
+    ? `<div class="bs-blank"><b>Nothing in ${esc(year === 'all' ? 'the books' : year)}</b><span>Try <a href="/c/expenses?y=all">All years</a>, or pick another in Sort &amp; filter.</span></div>`
     : `<div class="bs-hero">
         <div class="bs-hero-k">Nothing logged yet</div>
         <h2 class="bs-hero-t">The Costco run, a bag of ice, a part from the hardware shop.</h2>
@@ -8931,7 +8990,7 @@ app.get('/c/expenses', (req, res) => {
           ? 'Everything bought without an invoice behind it. Log it with a photo of the receipt and who paid, and the money somebody is owed stops being something they have to remember to ask for.'
           : 'Once the owner logs expenses, they show up here.'}</p>
         ${canWrite() ? `<button class="bs-btn" type="button" onclick="capQuick()">Log the first expense</button>
-          <button class="bs-btn-sm" type="button" onclick="capOpen()">Scan a receipt</button>` : ''}
+          <button class="bs-btn-sm" type="button" onclick="capOpen('expense')">Scan a receipt</button>` : ''}
       </div>`);
 
   const headline = all.length
@@ -8948,7 +9007,7 @@ app.get('/c/expenses', (req, res) => {
           <p class="bs-subline">Anything bought outside an invoice. Bills from a vendor belong on
             <a class="bs-act" href="/c/invoices">Invoices</a>.</p>
         </div>
-        ${canWrite() ? `<button class="bs-btn-sm" type="button" onclick="capOpen()">Scan a receipt</button>
+        ${canWrite() ? `<button class="bs-btn-sm" type="button" onclick="capOpen('expense')">Scan a receipt</button>
           <button class="bs-btn" type="button" onclick="capQuick()">Log an expense</button>` : ''}
       </div>
       ${all.length ? strip : ''}
