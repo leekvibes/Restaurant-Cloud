@@ -224,9 +224,11 @@ test('the shared pool shows what it holds and who it splits to', async () => {
   assert.match(h, /Shared tip pool/);
   assert.match(h, /Cash pool[\s\S]{0,120}\$40\.00/);
   assert.match(h, /To-go card[\s\S]{0,160}\$60\.00/);
-  assert.match(h, /Split by hours/i, 'and how it divides');
-  // The rule that makes the pool make sense.
-  assert.match(h, /not kept by whoever reported them/);
+  // Each support person's take-home, split the way they are paid: card to the
+  // paycheck, cash out of the jar.
+  assert.match(h, /Support take-home/, 'the take-home table is there');
+  assert.match(h, /bs-take-head[\s\S]{0,140}Card[\s\S]{0,60}Cash[\s\S]{0,60}Total/, 'with card / cash / total columns');
+  assert.match(h, /Split by hours/i, 'and it still says how it divides');
 });
 
 test('a person with no hours is flagged on their own row', async () => {
@@ -446,4 +448,21 @@ test('the on-shift roster shows card and cash as separate columns', async () => 
   // food, coffee, card, cash, hrs, wage — six figure cells, card ≠ cash.
   const card = figures[2], cash = figures[3];
   assert.notStrictEqual(card, cash, `card (${card}) and cash (${cash}) are shown independently`);
+});
+
+test('the payroll support-tips report totals a support person over a date range', async () => {
+  // A pure read of the tip engine: enter the cash jar (and to-go card) on a
+  // shift, and the report adds up what each support person took — card to the
+  // paycheck, cash from the jar — for whatever range you pick.
+  const { ready } = module.exports;
+  const w = new Database(DB);
+  w.prepare('UPDATE shifts SET pool_jar_cents = 5000, pool_togo_card_cents = 3000 WHERE id = ?').run(ready);
+  w.close();
+
+  const from = back(30), to = back(0);            // a range that includes the ready shift (3 days ago)
+  const h = await html(`/payroll/support-tips?from=${from}&to=${to}`);
+  assert.match(h, /Support tip take-home/, 'the report renders');
+  assert.match(h, new RegExp(`value="${from}"`), 'the chosen range is on the form');
+  assert.match(h, /bs-take-head[\s\S]*?Card[\s\S]*?Cash[\s\S]*?Total/, 'card / cash / total columns');
+  assert.match(h, /bs-take-tot/, 'and a totals row, because a support person was paid from the pool');
 });

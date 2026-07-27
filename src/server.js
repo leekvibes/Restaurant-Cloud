@@ -1775,9 +1775,25 @@ app.get('/shifts/:id', (req, res) => {
     </details>`;
   };
 
-  const splitRows = eligible.length ? eligible.map((p) => `
-    <div class="bs-lrow"><span>${esc(p.name)} <i class="bs-em">${(Math.round(p.hours * 100) / 100).toFixed(2)}h</i></span>
-      <b class="bs-fig">${money(p.poolShare || 0)}</b></div>`).join('') : '';
+  // What each support person takes home tonight, split the way they get paid:
+  // card money (their to-go card share plus any server tip-out) rides the
+  // paycheck; cash is their cut of the jar, handed over in person. cardTotal and
+  // cashTotal come straight from the engine — this only displays them.
+  const takeCard = eligible.reduce((a, p) => a + p.cardTotal, 0);
+  const takeCash = eligible.reduce((a, p) => a + p.cashTotal, 0);
+  const splitRows = eligible.length ? `
+    <div class="bs-take bs-take-head"><span class="bs-take-w"></span>
+      <span class="bs-take-n">Card</span><span class="bs-take-n">Cash</span><span class="bs-take-n">Total</span></div>
+    ${eligible.map((p) => `<div class="bs-take">
+      <span class="bs-take-w">${esc(p.name)} <i class="bs-em">${esc(p.role)} · ${(Math.round(p.hours * 100) / 100).toFixed(2)}h</i></span>
+      <span class="bs-take-n">${money(p.cardTotal)}</span>
+      <span class="bs-take-n">${money(p.cashTotal)}</span>
+      <span class="bs-take-n"><b>${money(p.cardTotal + p.cashTotal)}</b></span></div>`).join('')}
+    ${eligible.length > 1 ? `<div class="bs-take bs-take-tot">
+      <span class="bs-take-w">Everyone</span>
+      <span class="bs-take-n">${money(takeCard)}</span>
+      <span class="bs-take-n">${money(takeCash)}</span>
+      <span class="bs-take-n"><b>${money(takeCard + takeCash)}</b></span></div>` : ''}` : '';
 
   const toolScript = `
     <script>
@@ -1913,12 +1929,12 @@ app.get('/shifts/:id', (req, res) => {
             <div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>
           </div>
           ${eligible.length ? `
-            <div class="bs-sec-h bs-split-h"><span class="bs-kicker">Split by hours · ${eligible.length}</span></div>
-            <div class="bs-lrows">${splitRows}</div>`
+            <div class="bs-sec-h bs-split-h"><span class="bs-kicker">Support take-home · ${eligible.length}</span></div>
+            <div class="bs-take-tbl">${splitRows}</div>`
             : `<p class="bs-clear">Nobody eligible yet — add support staff and the pool will split across them.</p>`}
           ${(poolCash + poolCard) > 0 && !eligible.length
             ? `<p class="bs-clear warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</p>` : ''}
-          <p class="bs-sheet-note">Tips staff logged go to the shared pool and split by hours — not kept by whoever reported them.</p>
+          <p class="bs-sheet-note">Card rides the paycheck (to-go card + any tip-out); cash is their cut of the jar, handed over. Split by hours across the support on shift.</p>
           ${canWrite() ? `<details class="bs-x">
             <summary>Edit what you counted</summary>
             <form method="post" action="/shifts/${sh.id}/pool" class="bs-form">
@@ -4412,6 +4428,72 @@ app.get('/payroll/:employeeId(\\d+)', (req, res) => {
     </div>`));
 });
 
+// Support tip take-home over a date range: for each service in the range, run
+// the tip engine and add up what each support person took — card to the
+// paycheck, cash out of the jar. A pure read of the same figures the shift sheet
+// and payroll already show; it changes no data and enters nothing.
+app.get('/payroll/support-tips', (req, res) => {
+  const iso = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null);
+  const justEnded = recentPeriods(2)[1];
+  const fallbackFrom = justEnded ? justEnded.start : isoDate(startOfToday());
+  const fallbackTo = justEnded ? justEnded.end : isoDate(startOfToday());
+  let from = iso(req.query.from) || fallbackFrom;
+  let to = iso(req.query.to) || fallbackTo;
+  if (from > to) { const t = from; from = to; to = t; }   // a backwards range still reads forwards
+
+  const shifts = s.shiftsInRange.all(from, to);
+  const acc = new Map();   // employeeId -> { name, role, card, cash, hours, shifts }
+  for (const sh of shifts) {
+    const r = runShift(shiftInputs(sh.id), policyForShift(sh));
+    for (const p of r.support) {
+      const a = acc.get(p.employeeId) || { name: p.name, role: p.role, card: 0, cash: 0, hours: 0, shifts: 0 };
+      a.card += p.cardTotal; a.cash += p.cashTotal; a.hours += p.hours;
+      if (p.cardTotal || p.cashTotal) a.shifts += 1;
+      acc.set(p.employeeId, a);
+    }
+  }
+  const rows = [...acc.values()].filter((a) => a.card || a.cash)
+    .sort((a, b) => (b.card + b.cash) - (a.card + a.cash) || a.name.localeCompare(b.name));
+  const tCard = rows.reduce((a, r) => a + r.card, 0);
+  const tCash = rows.reduce((a, r) => a + r.cash, 0);
+  const hrs = (n) => (Math.round(n * 10) / 10).toFixed(1);
+
+  const table = rows.length ? `
+    <div class="bs-take-tbl bs-take-report">
+      <div class="bs-take bs-take-head">
+        <span class="bs-take-w">${rows.length} support · ${shifts.length} service${shifts.length === 1 ? '' : 's'}</span>
+        <span class="bs-take-n">Card</span><span class="bs-take-n">Cash</span><span class="bs-take-n">Total</span></div>
+      ${rows.map((r) => `<div class="bs-take">
+        <span class="bs-take-w">${esc(r.name)} <i>${esc(r.role)} · ${hrs(r.hours)}h · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
+        <span class="bs-take-n">${money(r.card)}</span>
+        <span class="bs-take-n">${money(r.cash)}</span>
+        <span class="bs-take-n"><b>${money(r.card + r.cash)}</b></span></div>`).join('')}
+      <div class="bs-take bs-take-tot"><span class="bs-take-w">Everyone</span>
+        <span class="bs-take-n">${money(tCard)}</span>
+        <span class="bs-take-n">${money(tCash)}</span>
+        <span class="bs-take-n"><b>${money(tCard + tCash)}</b></span></div>
+    </div>
+    <p class="bs-sheet-note">Card rides the paycheck (to-go card + any tip-out); cash is handed over out of the jar. Enter each day's cash on its shift under Shared tip pool.</p>`
+    : `<p class="bs-clear">No support tips in this range yet. Enter each day's cash jar on its shift (Shared tip pool → “Cash you counted”), then come back.</p>`;
+
+  res.send(layout('Support tip take-home', `
+    <div class="bs-page">
+      <div class="bs-head">
+        <div>
+          <h1 class="bs-headline">Support tip take-home</h1>
+          <p class="bs-subline">What each support person took from the pool over a date range.</p>
+        </div>
+        <a class="bs-btn-quiet" href="/payroll">← Payroll</a>
+      </div>
+      <form class="bs-daterange" method="get" action="/payroll/support-tips">
+        <label>From <input type="date" name="from" value="${esc(from)}"></label>
+        <label>To <input type="date" name="to" value="${esc(to)}"></label>
+        <button class="bs-btn" type="submit">Show</button>
+      </form>
+      ${table}
+    </div>`));
+});
+
 app.get('/payroll', (req, res) => {
   // Open on the newest period — the one running now. It used to open on the
   // period that just ended, on the reasoning that it is the one you are about
@@ -4496,6 +4578,7 @@ app.get('/payroll', (req, res) => {
             ${shiftCount} shift${shiftCount === 1 ? '' : 's'}. Hours and card tip payout are what Gusto asks for.</p>
         </div>
         <div class="bs-head-acts">
+          <a class="bs-btn-sm" href="/payroll/support-tips?from=${from}&to=${to}">Support tips</a>
           <a class="bs-btn-sm" href="/payroll/summary?from=${from}&to=${to}">View summary</a>
           <a class="bs-btn-sm" href="/payroll/export?from=${from}&to=${to}">Export to Excel</a>
         </div>

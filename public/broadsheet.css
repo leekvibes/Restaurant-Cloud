@@ -1090,6 +1090,40 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-split-h { margin-top: 26px; }
 .bs-sheet-note { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
 
+/* Support take-home on a shift, and the same shape in the payroll report:
+   a name, then card / cash / total in mono columns. */
+.bs-take-tbl { margin-top: 4px; }
+.bs-take {
+  display: grid; grid-template-columns: minmax(0, 1fr) 72px 72px 78px;
+  align-items: baseline; gap: 6px; padding: 9px 0;
+  border-bottom: 1px dotted var(--rule-dotted);
+}
+.bs-take:last-child { border-bottom: 0; }
+.bs-take-head { padding: 5px 0; border-bottom: 1px solid var(--rule); }
+.bs-take-head .bs-take-n { font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); }
+.bs-take-w { font-size: 14px; color: var(--headline); min-width: 0; }
+.bs-take-w i { display: block; font-style: normal; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.bs-take-n { font-family: var(--mono); font-size: 13px; color: var(--body); text-align: right; white-space: nowrap; }
+.bs-take-n b { color: var(--headline); }
+.bs-take-tot { border-top: 1px solid var(--rule); border-bottom: 0; margin-top: 2px; }
+.bs-take-tot .bs-take-w { font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted); }
+.bs-take-report { max-width: 580px; }
+.bs-take-report .bs-take-w i { display: block; font-style: normal; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+/* The date-range picker on the support-tips report. */
+.bs-daterange { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin: 8px 0 22px; }
+.bs-daterange label { display: flex; flex-direction: column; gap: 5px; font-family: var(--mono);
+  font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.bs-daterange input { font: inherit; font-size: 15px; padding: 9px 11px; border-radius: 0;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
+@media (max-width: 560px) {
+  .bs-daterange label { flex: 1 1 42%; }
+  .bs-daterange input { width: 100%; }
+  .bs-daterange button { flex: 1 1 100%; }
+}
+
 /* --- who was on ----------------------------------------------------------- */
 /* .bs-shead / .bs-sr are the shared shape of a ruled ledger — grid, baseline,
    gap — and nothing more. The column tracks belong to whichever ledger it is,
