@@ -1033,9 +1033,10 @@ test('no month group is expanded on arrival, on any ledger', async () => {
   // Named per page, because "no group was open" is also true of a page that
   // drew no groups — a sweep that cannot tell those apart reports a pass for a
   // ledger it never looked at.
-  // Shifts moved to a month browser (a list + one panel, not an accordion), so
-  // it is exercised in shifts.test.js instead; the accordion ledgers stay here.
-  const ledgers = ['/sales', '/c/invoices', '/c/expenses'];
+  // Shifts and Invoices moved to a month browser (a list + one panel, not an
+  // accordion); each is exercised in its own file (shifts.test.js,
+  // invoice-flow.test.js). The accordion ledgers stay here.
+  const ledgers = ['/sales', '/c/expenses'];
   const covered = {};
   for (const p of ledgers) {
     const html = await (await fetch(BASE + p)).text();
@@ -1054,10 +1055,12 @@ test('no month group is expanded on arrival, on any ledger', async () => {
 
 test('a closed ledger still shows what each month came to', async () => {
   // Closing them only works because the header carries the figures. If the
-  // total moved inside the group, shutting it would hide the answer.
-  const html = await (await fetch(`${BASE}/c/invoices`)).text();
+  // total moved inside the group, shutting it would hide the answer. Invoices
+  // is a month browser now — its panel headers carry the totals, covered in
+  // invoice-flow.test.js; Expenses is the accordion this still guards.
+  const html = await (await fetch(`${BASE}/c/expenses`)).text();
   const heads = html.match(/<summary class="bs-month-h">[\s\S]*?<\/summary>/g) || [];
-  assert.ok(heads.length, 'the invoice ledger has month headers');
+  assert.ok(heads.length, 'the expense ledger has month headers');
   for (const h of heads) {
     assert.match(h, /bs-month-tot/, 'each closed month still states its total');
     assert.match(h, /bs-month-meta/, 'and how many rows are inside it');

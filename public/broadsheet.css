@@ -969,7 +969,8 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-mb-pmeta .ok { color: var(--positive); }
 .bs-mb-ptot { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--headline); }
 .bs-mb-ptot i { color: var(--muted); font-style: normal; }
-.bs-mb-panel > .bs-lhead, .bs-mb-panel > .bs-lrows { padding-left: 16px; padding-right: 16px; }
+.bs-mb-panel > .bs-lhead, .bs-mb-panel > .bs-lrows,
+.bs-mb-panel > .bs-shead, .bs-mb-panel > .bs-srows { padding-left: 16px; padding-right: 16px; }
 .bs-mb-picker { display: none; }
 
 /* On a phone the fixed column can't fit, so months and the year become a
@@ -985,7 +986,8 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
     background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
   .bs-mb-main { border: 1px solid var(--rule); }
   .bs-mb-phead { padding: 12px; }
-  .bs-mb-panel > .bs-lhead, .bs-mb-panel > .bs-lrows { padding-left: 12px; padding-right: 12px; }
+  .bs-mb-panel > .bs-lhead, .bs-mb-panel > .bs-lrows,
+  .bs-mb-panel > .bs-shead, .bs-mb-panel > .bs-srows { padding-left: 12px; padding-right: 12px; }
 }
 
 @media (max-width: 1100px) {
@@ -2595,10 +2597,10 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 /* The original on the left because that is the thing being checked against;
    the figures read down the right. Fetched on open, so it arrives into an
    already-tinted row. */
-.bs-ivx { display: flex; gap: 22px; padding: 4px 0 20px; align-items: flex-start; }
-.bs-ivl { display: grid; gap: 8px; justify-items: center; flex: none; width: 132px; }
+.bs-ivx { display: flex; gap: 20px; padding: 4px 0 20px; align-items: flex-start; }
+.bs-ivl { display: grid; gap: 8px; justify-items: center; flex: none; width: 96px; }
 .bs-ivthumb {
-  display: grid; place-items: center; width: 132px; height: 168px; overflow: hidden;
+  display: grid; place-items: center; width: 96px; height: 118px; overflow: hidden;
   border: 1px solid var(--rule); background: var(--surface); color: var(--faint);
 }
 .bs-ivthumb img { width: 100%; height: 100%; object-fit: cover; }
@@ -2624,8 +2626,16 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-ivx { flex-direction: column; gap: 14px; }
   .bs-ivl { width: 100%; grid-auto-flow: column; justify-items: start;
     align-items: center; justify-content: start; gap: 12px; }
-  .bs-ivthumb { width: 76px; height: 96px; }
+  .bs-ivthumb { width: 56px; height: 72px; }
+  .bs-ivthumb svg { width: 22px; height: 22px; }
 }
+
+/* The invoices page never scrolls sideways on a phone — only up and down. A
+   guard at the page level, plus the vendor cell keeping a long invoice/customer
+   number on its own line with an ellipsis so it can never push the row wide. */
+.bs-invpage { overflow-x: clip; max-width: 100%; }
+.bs-invpage .bs-ir-v { min-width: 0; overflow: hidden; }
+.bs-invpage .bs-ir-v > u { min-width: 0; flex: 0 1 auto; }
 
 /* ===========================================================================
    DRAWERS, in the broadsheet

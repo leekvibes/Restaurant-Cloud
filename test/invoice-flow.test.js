@@ -1194,3 +1194,48 @@ test('an invoice of nothing but charges is not advertised anywhere', async () =>
   assert.ok(n < loose,
     `the dashboard counts real work (${n}), not every unstamped invoice (${loose})`);
 });
+
+// ---------------------------------------------------------------------------
+// The list is a month browser now, not an accordion — the same rail-and-panel
+// shape Shifts uses. These guard the two things the redesign had to keep: one
+// month open on arrival with its total on the panel header (the invariant that
+// used to live on pages.test.js's closed-accordion sweep), and undated
+// invoices still surfacing under "No date" rather than being filtered away.
+// ---------------------------------------------------------------------------
+
+test('the invoice list is a month browser: one panel open, header carries the total', async () => {
+  const list = await (await fetch(`${BASE}/c/invoices?y=2026`)).text();
+  assert.match(list, /class="bs-mb"/, 'it renders the month browser');
+  assert.ok(!/class="bs-month" data-month/.test(list), 'and no accordion month groups remain');
+
+  const panels = list.match(/<section class="bs-mb-panel" data-monthpanel="[^"]+"[^>]*>/g) || [];
+  assert.ok(panels.length, 'it drew month panels');
+  const open = panels.filter((p) => !/\bhidden\b/.test(p));
+  assert.strictEqual(open.length, 1, 'exactly one month is open on arrival');
+
+  // The open panel states the total for its month, so the closed months on the
+  // rail are not hiding the only copy of the figure.
+  const openKey = open[0].match(/data-monthpanel="([^"]+)"/)[1];
+  const panelBlock = list.slice(list.indexOf(open[0]), list.indexOf('</section>', list.indexOf(open[0])));
+  assert.match(panelBlock, /bs-mb-ptot/, 'the open panel header carries the month total');
+
+  // A rail pick for every panel, and the mobile picker opens on the same month.
+  const picks = list.match(/data-monthpick="[^"]+"/g) || [];
+  assert.strictEqual(picks.length, panels.length, 'a rail pick for every panel');
+  assert.match(list, new RegExp(`<option value="${openKey}"[^>]*selected`),
+    'the mobile picker opens on the same month');
+});
+
+test('an undated invoice still shows, under "No date"', async () => {
+  // The list filters rows by year; before the fix a null-dated upload fell
+  // through that filter and vanished, even though its products had imported.
+  const db = new Database(DB);
+  const id = db.prepare(`INSERT INTO m_invoices (invoice_date, amount_cents, status, invoice_number)
+    VALUES (NULL, 5000, 'Unpaid', 'BLD-NODATE-1')`).run().lastInsertRowid;
+  db.close();
+
+  const list = await (await fetch(`${BASE}/c/invoices?y=2026`)).text();
+  assert.match(list, /data-monthpanel="undated"/, 'a No-date panel exists');
+  assert.match(list, /data-monthpick="undated"/, 'and a rail pick for it');
+  assert.match(invRow(list, id), /data-inv/, 'and the undated invoice is really on the page');
+});

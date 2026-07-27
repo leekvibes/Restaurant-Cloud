@@ -9330,8 +9330,18 @@ app.get('/c/invoices', (req, res) => {
   // a restaurant with several years of history would otherwise ship every
   // invoice it has ever had into one page of HTML.
   const years = [...new Set(all.map((r) => (r.invoice_date || '').slice(0, 4)).filter(Boolean))].sort().reverse();
-  const year = years.includes(req.query.y) ? req.query.y : (years[0] || today.slice(0, 4));
-  const rows = all.filter((r) => (r.invoice_date || '').slice(0, 4) === year);
+  // Open on the year holding the most recently ADDED invoice, and always keep
+  // undated ones in view (they group under "No date") — so an upload whose date
+  // the reader missed still shows, instead of saving into thin air. 'all' is the
+  // backstop: every invoice, whatever its date.
+  const newestAdded = all.length ? all.reduce((a, b) => (b.id > a.id ? b : a)) : null;
+  const newestYear = newestAdded ? (newestAdded.invoice_date || '').slice(0, 4) : '';
+  const showAll = req.query.y === 'all';
+  const year = showAll ? 'all'
+    : years.includes(req.query.y) ? req.query.y
+    : (years.includes(newestYear) ? newestYear : (years[0] || today.slice(0, 4)));
+  const rows = showAll ? all.slice()
+    : all.filter((r) => { const y = (r.invoice_date || '').slice(0, 4); return y === year || !y; });
 
   // KPIs stay whole-history where that's the useful reading, and year-scoped
   // where it isn't — "spend this month" means nothing scoped to 2024.
@@ -9356,7 +9366,7 @@ app.get('/c/invoices', (req, res) => {
     ${statCell('Spend this month', brief(spendMonth), MONTH_NAMES[Number(thisMonth.slice(5, 7)) - 1] + ' ' + thisMonth.slice(0, 4))}
     ${statCell('Outstanding', brief(outstanding), unpaid.length ? `${unpaid.length} unpaid` : 'All settled', outstanding ? 'warn' : 'ok')}
     ${statCell('Overdue', String(overdue.length), overdue.length ? esc(vName.get(Number(overdue[0].r.vendor_id)) || 'Unknown vendor') : 'Nothing past due', overdue.length ? 'bad' : 'ok')}
-    ${statCell(`Spend in ${esc(year)}`, brief(yearSpend), `${rows.length} invoice${rows.length === 1 ? '' : 's'}`)}
+    ${statCell(`Spend ${year === 'all' ? 'all years' : 'in ' + esc(year)}`, brief(yearSpend), `${rows.length} invoice${rows.length === 1 ? '' : 's'}`)}
   </section>`;
 
   // Two invoices that would have stopped each other at the door. Grouped
@@ -9384,25 +9394,22 @@ app.get('/c/invoices', (req, res) => {
   }
   const months = [...byMonth.keys()].sort().reverse();
 
-  const monthBlocks = months.map((m, idx) => {
-    const list = byMonth.get(m).slice().sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || '') || b.id - a.id);
-    const sts = list.map((r) => invStatus(r));
-    const paid = sts.filter((s) => s.key === 'paid').length;
-    const over = sts.filter((s) => s.key === 'overdue').length;
-    const out = list.length - paid;
-    const total = list.reduce((a, r) => a + (r.amount_cents || 0), 0);
-    const label = m === 'undated' ? 'No date' : `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
-
-    const items = list.map((r) => {
-      const s = invStatus(r);
-      const c = invCat(r.category || 'Other');
-      const ai = aiBadge(r);
-      const vn = vName.get(Number(r.vendor_id)) || 'Unknown vendor';
-      const isImg = r.file && /\.(jpe?g|png|webp|gif|heic)$/i.test(r.file);
-      const search = [vn, r.invoice_number, r.category, r.notes, ((r.amount_cents || 0) / 100).toFixed(2)]
-        .filter(Boolean).join(' ').toLowerCase();
-      const rev = needsProductReview(r);
-      return `
+  // --- month browser --------------------------------------------------------
+  // Two columns, the same shape Shifts uses: months in a fixed left rail, the
+  // chosen month's ledger filling the space beside them. Clicking a month swaps
+  // the panel on the right without moving the list, so you can jump between
+  // months without re-finding your place. Every row, figure and the lazy-loaded
+  // detail are exactly as they were — only how you reach a month changed. On a
+  // phone the rail folds into a compact month picker (no sideways rail to swipe
+  // past), which is also why nothing on this page scrolls left or right.
+  const invItemRow = (r) => {
+    const s = invStatus(r);
+    const c = invCat(r.category || 'Other');
+    const vn = vName.get(Number(r.vendor_id)) || 'Unknown vendor';
+    const search = [vn, r.invoice_number, r.category, r.notes, ((r.amount_cents || 0) / 100).toFixed(2)]
+      .filter(Boolean).join(' ').toLowerCase();
+    const rev = needsProductReview(r);
+    return `
       <details class="bs-srow bs-invrow" data-inv data-id="${r.id}" data-status="${s.key}" data-cat="${esc(r.category || 'Other')}"
         data-vendor="${esc(String(r.vendor_id || ''))}" data-amt="${(r.amount_cents || 0) / 100}"
         data-date="${esc(r.invoice_date || '')}" data-due="${esc(r.due_date || '')}"
@@ -9413,10 +9420,9 @@ app.get('/c/invoices', (req, res) => {
           <span class="bs-ir-v"><i class="bs-catdot"></i>${esc(vn)}${r.invoice_number ? `<u>${esc(r.invoice_number)}</u>` : ''}</span>
           <span class="bs-ir-c">${esc(r.category || 'Other')}</span>
           ${/* invStatus carries both a key and a class; the key is the one with
-                 the four values worth colouring. Two tags fit here and the row
-                 then stands two lines tall, which breaks the rhythm the ledger
-                 is for — so only the actionable one rides along, and the AI's
-                 own confidence stays in the panel where it can be read. */''}
+                 the four values worth colouring. Only the actionable tag rides
+                 along, so the row stays one line tall and the ledger keeps its
+                 rhythm; the AI's own confidence stays in the panel. */''}
           <span class="bs-ir-t ${s.key}"><i class="bs-pip ${s.key}"></i>${esc(s.label)}${
             rev ? '<i class="bs-tag rev">review</i>' : ''}</span>
           <span class="bs-ir-d">${esc(niceDate(r.invoice_date))}</span>
@@ -9425,30 +9431,79 @@ app.get('/c/invoices', (req, res) => {
         </summary>
         <div class="inv-lazy"><div class="bs-loading">Loading…</div></div>
       </details>`;
-    }).join('');
+  };
 
-    // Every month starts closed, including the newest. A ledger that opens
-    // itself decides for you which month you came for, and on a busy year that
-    // is sixty rows to scroll past before you reach the month you wanted. The
-    // month totals are on the header line, so a closed ledger still answers
-    // "what did we spend" at a glance. Shifts and Sales already worked this
-    // way; this is the rest of them agreeing.
-    return `
-      <details class="bs-month" data-month>
-        <summary class="bs-month-h">
-          <span class="bs-kicker">${esc(label)}</span>
-          <span class="bs-month-meta">${list.length} invoice${list.length === 1 ? '' : 's'}
-            ${over ? `· <b class="warn">${over} overdue</b>` : out ? `· <b>${out} outstanding</b>` : '· <b class="ok">all paid</b>'}</span>
-          <span class="bs-month-tot"><b>${money(total)}</b></span>
-          <span class="bs-act bs-month-go">open <span aria-hidden="true">▸</span></span>
-        </summary>
-        <div class="bs-shead bs-invhead">
-          <span>Vendor</span><span>Category</span><span>Status</span><span>Date</span>
-          <span class="r">Amount</span><span></span>
-        </div>
-        <div class="bs-srows invs">${items}</div>
-      </details>`;
+  // `months` is newest-first and may end with an 'undated' bucket. Real months
+  // lead the rail; undated invoices sit at the bottom under "No date" so an
+  // upload whose date was missed is still one click away rather than lost.
+  const realMonths = months.filter((m) => m !== 'undated');
+  const orderedMonths = [...realMonths, ...(byMonth.has('undated') ? ['undated'] : [])];
+  const selKey = realMonths[0] || 'undated';           // opens on the newest dated month
+  const briefUSD = (cents) => '$' + Math.round((cents || 0) / 100).toLocaleString('en-US');
+  // Under "All years" a bare "Jul" would be ambiguous, so the year rides along.
+  const monthName = (m) => m === 'undated' ? 'No date'
+    : showAll ? `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}` : MONTHS[Number(m.slice(5, 7)) - 1];
+  const monthMeta = (m) => {
+    const list = byMonth.get(m);
+    const sts = list.map((r) => invStatus(r));
+    const over = sts.filter((x) => x.key === 'overdue').length;
+    const out = list.length - sts.filter((x) => x.key === 'paid').length;
+    const total = list.reduce((a, r) => a + (r.amount_cents || 0), 0);
+    const label = m === 'undated' ? 'No date' : `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+    return { list, over, out, total, label };
+  };
+
+  const monthList = orderedMonths.map((m) => {
+    const { list, over, out, total } = monthMeta(m);
+    const on = m === selKey;
+    return `<button type="button" class="bs-mb-m${on ? ' on' : ''}" data-monthpick="${m}" aria-pressed="${on ? 'true' : 'false'}">
+      <span class="bs-mb-mtext"><span class="bs-mb-mn">${esc(monthName(m))}</span><span class="bs-mb-mf">${briefUSD(total)}${over ? ` · ${over} overdue` : out ? ` · ${out} due` : ''}</span></span>
+      <span class="bs-mb-mc">${list.length}</span></button>`;
   }).join('');
+
+  const panelFor = (m) => {
+    const { list, over, out, total, label } = monthMeta(m);
+    const sorted = list.slice().sort((a, b) => (b.invoice_date || '').localeCompare(a.invoice_date || '') || b.id - a.id);
+    return `<section class="bs-mb-panel" data-monthpanel="${m}"${m === selKey ? '' : ' hidden'}>
+      <div class="bs-mb-phead">
+        <span class="bs-mb-pt">${esc(label)}</span>
+        <span class="bs-mb-pmeta">${list.length} invoice${list.length === 1 ? '' : 's'} · ${over ? `<b class="warn">${over} overdue</b>` : out ? `<b>${out} outstanding</b>` : '<b class="ok">all paid</b>'}</span>
+        <span class="bs-mb-ptot"><b>${money(total)}</b></span>
+      </div>
+      <div class="bs-shead bs-invhead">
+        <span>Vendor</span><span>Category</span><span>Status</span><span>Date</span>
+        <span class="r">Amount</span><span></span>
+      </div>
+      <div class="bs-srows invs">${sorted.map(invItemRow).join('')}</div>
+    </section>`;
+  };
+  const monthPanels = orderedMonths.map(panelFor).join('');
+
+  const yearCount = (y) => all.filter((r) => (r.invoice_date || '').slice(0, 4) === y).length;
+  const yearPop = years.length > 1 ? `<div class="bs-yr" id="mb-yr">
+      <button type="button" class="bs-yr-chip" aria-haspopup="true" aria-expanded="false">${esc(year === 'all' ? 'All years' : year)} <span class="bs-yr-cx" aria-hidden="true">▾</span></button>
+      <div class="bs-yr-pop" role="menu">
+        <div class="bs-yr-h">Years with data</div>
+        ${years.map((y) => `<a class="bs-yr-o${y === year ? ' on' : ''}" role="menuitem" href="/c/invoices?y=${y}">${esc(y)}<span>${yearCount(y)}</span></a>`).join('')}
+        <a class="bs-yr-o${showAll ? ' on' : ''}" role="menuitem" href="/c/invoices?y=all">All years<span>${all.length}</span></a>
+      </div></div>`
+    : `<span class="bs-yr-only">${esc(year === 'all' ? today.slice(0, 4) : year)}</span>`;
+
+  const monthBrowser = `<div class="bs-mb">
+    <aside class="bs-mb-side">
+      <div class="bs-mb-sh"><span class="bs-kicker">Months</span>${yearPop}</div>
+      <div class="bs-mb-list">${monthList}</div>
+    </aside>
+    <div class="bs-mb-picker">
+      <label class="bs-mb-pk"><span class="bs-mb-pkl">Month</span>
+        <select id="mb-month">${orderedMonths.map((m) => `<option value="${m}"${m === selKey ? ' selected' : ''}>${esc(monthName(m))} — ${byMonth.get(m).length}</option>`).join('')}</select></label>
+      ${years.length > 1 ? `<label class="bs-mb-pk"><span class="bs-mb-pkl">Year</span>
+        <select id="mb-yr-m" onchange="location.href='/c/invoices?y='+this.value">${years.map((y) => `<option value="${esc(y)}"${y === year ? ' selected' : ''}>${esc(y)}</option>`).join('')}<option value="all"${showAll ? ' selected' : ''}>All years</option></select></label>` : ''}
+    </div>
+    <div class="bs-mb-main">${monthPanels}
+      <div class="bs-blank" id="inone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
+    </div>
+  </div>`;
 
   // Read but not yet imported — the queue an operator actually works through.
   const needsReview = rows.filter(needsProductReview).length;
@@ -9481,7 +9536,8 @@ app.get('/c/invoices', (req, res) => {
             <div class="fs-h">Year</div>
             <div class="fs-opts">
               ${years.length ? years.map((y) => `<a class="fs-o${y === year ? ' on' : ''}" href="/c/invoices?y=${y}">${y}</a>`).join('')
-                : `<span class="fs-o on">${esc(year)}</span>`}
+                : `<span class="fs-o on">${esc(year === 'all' ? today.slice(0, 4) : year)}</span>`}
+              ${years.length > 1 ? `<a class="fs-o${showAll ? ' on' : ''}" href="/c/invoices?y=all">All years</a>` : ''}
             </div>
             <div class="fs-h">Sort</div>
             <select id="isort" class="bs-sel">
@@ -9515,7 +9571,7 @@ app.get('/c/invoices', (req, res) => {
       </details>
     </div>`;
 
-  const body = rows.length ? monthBlocks : (all.length
+  const body = rows.length ? monthBrowser : (all.length
     ? `<div class="bs-blank"><b>No invoices in ${esc(year)}</b><span>Pick another year in Sort &amp; filter.</span></div>`
     : `<div class="bs-hero">
         <div class="bs-hero-k">Nothing on file yet</div>
@@ -9537,7 +9593,7 @@ app.get('/c/invoices', (req, res) => {
 
   res.send(layout('Invoices', `
     ${flash(req)}
-    <div class="bs-page">
+    <div class="bs-page bs-invpage">
       <div class="bs-head">
         <div class="bs-headwrap">
           <h1 class="bs-headline">${headline}</h1>
@@ -9550,14 +9606,23 @@ app.get('/c/invoices', (req, res) => {
       ${all.length ? strip : ''}
       ${all.length ? toolbar : ''}
       ${body}
-      <div class="bs-blank" id="inone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
     </div>
     ${canWrite() ? captureOverlay(['invoice', 'expense'], { today }) : ''}
     <script>
-      // Filters combine, and sorting reorders within each month rather than
-      // flattening the grouping — the month totals are the point of the page.
+      // Pick a month and the panel on the right swaps; the rail stays put.
+      // Search and the filters reach across every month at once — the same
+      // span the accordion had — and sorting reorders within each panel, since
+      // the month totals are the point of the page.
       (function () {
         var q = '', mode = 'all', val = '', vendor = '', amt = '';
+        var panels = [].slice.call(document.querySelectorAll('[data-monthpanel]'));
+        var picks = [].slice.call(document.querySelectorAll('[data-monthpick]'));
+        var msel = document.getElementById('mb-month');
+        var first = document.querySelector('[data-monthpick].on');
+        var sel = first ? first.getAttribute('data-monthpick')
+          : (panels[0] ? panels[0].getAttribute('data-monthpanel') : null);
+
+        function filtering() { return q !== '' || mode !== 'all' || vendor || amt; }
         function pass(el) {
           if (mode === 'status' && el.getAttribute('data-status') !== val) return false;
           if (mode === 'cat' && el.getAttribute('data-cat') !== val) return false;
@@ -9571,22 +9636,41 @@ app.get('/c/invoices', (req, res) => {
           if (q && el.getAttribute('data-search').indexOf(q) === -1) return false;
           return true;
         }
+        // Pick a month: show only its panel, the rail stays where it is.
+        function selectMonth(key) {
+          sel = key;
+          picks.forEach(function (b) {
+            var on = b.getAttribute('data-monthpick') === key;
+            b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+          });
+          if (msel && msel.value !== key) msel.value = key;
+          if (!filtering()) showSelected();
+        }
+        function showSelected() {
+          panels.forEach(function (p) {
+            p.hidden = p.getAttribute('data-monthpanel') !== sel;
+            p.querySelectorAll('[data-inv]').forEach(function (el) { el.style.display = ''; });
+          });
+          var none = document.getElementById('inone'); if (none) none.style.display = 'none';
+          var mb = document.querySelector('.bs-mb'); if (mb) mb.classList.remove('filtering');
+        }
+        // Filtering spans the year: every month with a match shows, the rest
+        // fold away — the reach the old accordion had, on the new layout.
         function apply() {
+          if (!filtering()) { showSelected(); return; }
           var shown = 0;
-          document.querySelectorAll('[data-month]').forEach(function (g) {
+          panels.forEach(function (p) {
             var n = 0;
-            g.querySelectorAll('[data-inv]').forEach(function (el) {
+            p.querySelectorAll('[data-inv]').forEach(function (el) {
               var ok = pass(el); el.style.display = ok ? '' : 'none'; if (ok) { n++; shown++; }
             });
-            g.style.display = n ? '' : 'none';
-            // Anything narrowed down is worth showing straight away.
-            if (n && (q || mode !== 'all' || vendor || amt)) g.open = true;
+            p.hidden = n === 0;
           });
-          var none = document.getElementById('inone');
-          if (none) none.style.display = shown ? 'none' : '';
+          var none = document.getElementById('inone'); if (none) none.style.display = shown ? 'none' : '';
+          var mb = document.querySelector('.bs-mb'); if (mb) mb.classList.add('filtering');
         }
         function sortNow(how) {
-          document.querySelectorAll('[data-month] .invs').forEach(function (box) {
+          document.querySelectorAll('[data-monthpanel] .invs').forEach(function (box) {
             var items = [].slice.call(box.querySelectorAll('[data-inv]'));
             items.sort(function (a, b) {
               var A = function (k) { return a.getAttribute(k) || ''; }, B = function (k) { return b.getAttribute(k) || ''; };
@@ -9603,6 +9687,10 @@ app.get('/c/invoices', (req, res) => {
             items.forEach(function (el) { box.appendChild(el); });
           });
         }
+
+        picks.forEach(function (b) { b.addEventListener('click', function () { selectMonth(b.getAttribute('data-monthpick')); }); });
+        if (msel) msel.addEventListener('change', function () { selectMonth(this.value); });
+
         var si = document.getElementById('isearch');
         if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
         var sv = document.getElementById('ivendor');
@@ -9618,6 +9706,19 @@ app.get('/c/invoices', (req, res) => {
             mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
           });
         });
+
+        // The year chip's dropdown (its items are plain links that reload).
+        var yr = document.getElementById('mb-yr');
+        if (yr) {
+          var chip = yr.querySelector('.bs-yr-chip');
+          chip.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var open = yr.classList.toggle('open');
+            chip.setAttribute('aria-expanded', open ? 'true' : 'false');
+          });
+          document.addEventListener('click', function () { yr.classList.remove('open'); chip.setAttribute('aria-expanded', 'false'); });
+          document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { yr.classList.remove('open'); chip.setAttribute('aria-expanded', 'false'); } });
+        }
       })();
       // Detail is fetched the first time a row opens, then kept.
       document.addEventListener('toggle', function (e) {
@@ -9892,7 +9993,11 @@ app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
   } catch { /* not readable as lines — the invoice still saves */ }
 
   invQ.add.run({
-    invoice_date: String(req.body.invoice_date || '').slice(0, 10) || null,
+    // An invoice must always land with a date, or it drops out of the
+    // date-grouped list and looks like it never saved — even though its lines
+    // imported and the vendor shows it. When the reader could not read one (or
+    // the field came in blank), fall back to today, the day it was filed.
+    invoice_date: String(req.body.invoice_date || '').slice(0, 10) || isoDate(startOfToday()),
     due_date: String(req.body.due_date || '').slice(0, 10) || null,
     vendor_id: vendorId ? String(vendorId) : null,
     invoice_number: String(req.body.invoice_number || '').trim() || null,
