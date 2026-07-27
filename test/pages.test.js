@@ -734,25 +734,29 @@ test('the shift button is gone from the bar, not just hidden', async () => {
   assert.match(html, /Log a shift/, 'still on the page it belongs to');
 });
 
-test('the mobile dashboard leads with the last service', () => {
-  // Order on a phone: last service, the week, attention, today's specials. The
-  // columns become display:contents so the blocks themselves are the grid
-  // items — without that, `order` has nothing to act on.
+test('the mobile dashboard leads with attention and drops the sales figures', () => {
+  // Order on a phone: last service, needs attention (which carries the floor's
+  // out-of-stock reports), today's specials, then what's coming up. The week's
+  // sales figures are hidden — they live on Sales and Performance. The columns
+  // become display:contents so the blocks themselves are the grid items.
   const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
   const stacked = [...css.matchAll(/@media \(max-width: 1180px\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join('');
   assert.match(stacked, /\.bs-cols3 > \.bs-col \{[^}]*display:\s*contents/,
     'the columns stop being boxes so their blocks can be reordered');
 
-  const orderOf = (cls) => {
+  const ruleOf = (cls) => {
     const m = new RegExp(`\\.bs-dblk-${cls}\\s*\\{([^}]*)\\}`).exec(stacked);
-    assert.ok(m, `.bs-dblk-${cls} is ordered`);
-    return Number(/order:\s*(\d+)/.exec(m[1])[1]);
+    assert.ok(m, `.bs-dblk-${cls} is present in the stack`);
+    return m[1];
   };
+  const num = (rule) => Number(/order:\s*(\d+)/.exec(rule)[1]);
   assert.deepStrictEqual(
-    [orderOf('last'), orderOf('week'), orderOf('attn'), orderOf('specials')],
+    [num(ruleOf('last')), num(ruleOf('attn')), num(ruleOf('specials')), num(ruleOf('coming'))],
     [1, 2, 3, 4],
-    'last service · the week · attention · today\'s specials',
+    'last service · attention · today\'s specials · coming up',
   );
+  // The week's sales figures are dropped on the phone, not merely reordered.
+  assert.match(ruleOf('week'), /display:\s*none/, 'the week in numbers is hidden on mobile');
 });
 
 test('the staff portal starts below the phone status bar', async () => {

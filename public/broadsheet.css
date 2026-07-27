@@ -794,12 +794,15 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
   .bs-cols3 > .bs-col { display: contents; }
   .bs-dblk { margin-top: 30px; }
 
-  /* Last service first: on a phone the answer to "how did we just do" beats
-     the to-do list, and attention moves under the week's numbers. */
+  /* Home answers "what needs me now" on a phone: last service first (how we
+     just did), then needs attention — which carries the floor's out-of-stock
+     reports — then today's specials and what's coming up. The week's sales
+     figures drop off entirely; they live on Sales and Performance. */
   .bs-dblk-last { order: 1; margin-top: 0; }
-  .bs-dblk-week { order: 2; }
-  .bs-dblk-attn { order: 3; }
-  .bs-dblk-specials { order: 4; }
+  .bs-dblk-attn { order: 2; }
+  .bs-dblk-specials { order: 3; }
+  .bs-dblk-coming { order: 4; }
+  .bs-dblk-week { display: none; }
 
   .bs-headline { max-width: none; }
 }
@@ -3266,6 +3269,26 @@ body.cap-open.qx-open [data-cap] { display: none; }
   .pa-stock, .pa-note, .pa-dish, .pa-hand { flex-wrap: wrap; }
   .pa-meta, .pa-do { min-width: 0; text-align: left; justify-content: flex-start; }
   .pa-add { grid-template-columns: 1fr 1fr; }
+}
+
+/* A floor report read as one cramped left-hugging line on a phone — the item,
+   who reported it, the time, the status and the action buttons all fighting for
+   a narrow column, the item name wrapping three lines deep. Rebuilt as a card:
+   a coloured status bar down the left, then the item, who + when, the status,
+   any note, and the actions — each on its own line, in that order. */
+@media (max-width: 640px) {
+  .pa-stock {
+    position: relative; display: flex; flex-direction: column; align-items: stretch;
+    gap: 0; padding: 14px 0 14px 14px;
+  }
+  .pa-stock > .pa-bar { position: absolute; left: 0; top: 12px; bottom: 12px; width: 4px; height: auto; }
+  .pa-stock .pa-what { order: 1; }
+  .pa-stock .pa-what b { font-size: 16px; }
+  .pa-stock .pa-what i { display: block; margin-left: 0; margin-top: 3px; }
+  .pa-stock .pa-meta { order: 2; text-align: left; min-width: 0; margin-top: 7px; }
+  .pa-stock .pa-said { order: 3; min-width: 0; margin-top: 7px; color: var(--body); font-size: 13.5px; }
+  .pa-stock .pa-said:empty { display: none; }
+  .pa-stock .pa-do { order: 4; min-width: 0; margin-top: 12px; justify-content: flex-start; }
 }
 
 /* ===========================================================================

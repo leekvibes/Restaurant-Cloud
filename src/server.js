@@ -691,7 +691,11 @@ app.get('/', (req, res) => {
   // Worst first, so a drawer that came up short is never buried under six
   // expiry reminders.
   const TONE_RANK = { red: 0, amber: 1, blue: 2 };
-  attn.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone]);
+  // Worst first — and within a severity, the floor's out-of-stock reports lead.
+  // They are what a manager most wants surfaced ("what did staff just flag"),
+  // and on a phone Home now opens on attention right after last service.
+  attn.sort((a, b) => (TONE_RANK[a.tone] - TONE_RANK[b.tone])
+    || ((b.ico === 'par') - (a.ico === 'par')));
   const bad = attn.filter((a) => a.tone === 'red').length;
 
   // --- rendering: today ----------------------------------------------------
@@ -949,13 +953,18 @@ app.get('/', (req, res) => {
       <p class="bs-sparklabel">Sales, trailing 8 weeks</p>
       <div class="bs-spark">${CH.lineChart(
         [{ label: 'Sales', values: sparkOf((w) => w.sales).map((v) => ({ x: '', y: v })), area: true }],
-        { height: 96, empty: '' })}</div>` : ''}
-    ${soon.length ? `
-      <div class="bs-sec-h bs-soon-h"><span class="bs-kicker">Coming up</span></div>
-      <div class="bs-soon">
-        ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
-          <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
-      </div>` : ''}` : '';
+        { height: 96, empty: '' })}</div>` : ''}` : '';
+
+  // "Coming up" is its own block now rather than folded under the week's
+  // numbers — so on a phone, where Home drops the sales figures (they belong on
+  // Sales and Performance), the upcoming deadlines still show. Not gated on cost
+  // access either: an expiry or a due task is not a cost figure.
+  const comingBlock = soon.length ? `
+    <div class="bs-sec-h bs-soon-h"><span class="bs-kicker">Coming up</span></div>
+    <div class="bs-soon">
+      ${soon.slice(0, 6).map((u) => `<a class="bs-soon-r" href="${u.href}">
+        <span>${esc(u.title)}</span><b class="bs-fig">${esc(u.sub)}</b></a>`).join('')}
+    </div>` : '';
 
   // --- column 3: last service, and the record ------------------------------
   const row = (label, value) => `<div class="bs-lrow"><span>${label}</span><b class="bs-fig">${value}</b></div>`;
@@ -1003,12 +1012,14 @@ app.get('/', (req, res) => {
       <!-- Each block is wrapped so a phone can reorder them without the desktop
            columns moving. On a wide screen these wrappers style nothing; below
            1180px the columns become display:contents and the wrappers are the
-           grid items, ordered last service · the week · attention · specials.
-           Wrapped only when it has content, so an absent block leaves no stray
-           gap in the stack. -->
+           grid items. On a phone Home answers "what needs me now": last service,
+           then needs attention (which carries the floor's out-of-stock reports),
+           then today's specials and what's coming up — the week's sales figures
+           drop off, they live on Sales and Performance. Wrapped only when it has
+           content, so an absent block leaves no stray gap in the stack. -->
       <div class="bs-cols3">
         <div class="bs-col">${dblk('attn', attnBlock)}</div>
-        <div class="bs-col">${dblk('week', weekBand)}</div>
+        <div class="bs-col">${dblk('week', weekBand)}${dblk('coming', comingBlock)}</div>
         <div class="bs-col">${dblk('last', lastBand)}${dblk('specials', specialsBlock)}</div>
       </div>
     </div>`;
