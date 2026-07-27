@@ -1124,6 +1124,14 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
   .bs-daterange button { flex: 1 1 100%; }
 }
 
+/* The hours-entry format toggle on the shift sheet: decimal (7.5) vs h:mm. */
+.bs-hfmt { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; }
+.bs-hfmt-l { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.bs-hfmt-b { font-family: var(--mono); font-size: 12px; padding: 3px 9px; cursor: pointer;
+  background: var(--surface); color: var(--muted); border: 1px solid var(--rule); }
+.bs-hfmt-b + .bs-hfmt-b { border-left: 0; }
+.bs-hfmt-b.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
 /* --- who was on ----------------------------------------------------------- */
 /* .bs-shead / .bs-sr are the shared shape of a ruled ledger — grid, baseline,
    gap — and nothing more. The column tracks belong to whichever ledger it is,

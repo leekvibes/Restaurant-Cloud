@@ -32,7 +32,7 @@ const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
 // Same reason as products above: cash.js creates cash_recon and adds its
 // columns, and the dashboard alert below reads them.
 const CASH = require('./cash');
-const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting,
+const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting, getSetting,
   skipRecord, markSkipped, unskipPeriod } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -1027,6 +1027,41 @@ app.get('/', (req, res) => {
   res.send(layout('Dashboard', bodyHtml));
 });
 
+// --- how hours are entered and shown --------------------------------------
+// Hours are stored as decimal (7.5), the way the engine and payroll need them.
+// This layer is only about how a person types and reads them: 'decimal' (7.5)
+// or 'hms' (7:30). The setting is owner-wide; the toggle lives on the shift
+// sheet, where hours are entered.
+const hoursFmt = () => (getSetting('hours_format', 'decimal') === 'hms' ? 'hms' : 'decimal');
+
+// Accept BOTH "7:30" and "7.5" → decimal hours, always. Forgiving on purpose:
+// the format setting changes only how hours are shown, never whether an entry
+// parses, so a mis-set toggle (or a habit from the other format) can never
+// corrupt a shift. Minutes clamp to 0–59; the result is minute-granular.
+function parseHours(v) {
+  const str = String(v == null ? '' : v).trim();
+  if (!str) return 0;
+  if (str.includes(':')) {
+    const [h, m] = str.split(':');
+    const hh = Math.max(0, Number(h) || 0);
+    const mm = Math.min(59, Math.max(0, Math.round(Number(m) || 0)));
+    return Math.round((hh + mm / 60) * 1000) / 1000;
+  }
+  return Math.max(0, Number(str) || 0);
+}
+
+// Decimal hours → the current display format. For 'hms', "7:30"; for 'decimal',
+// a trimmed number ("7.5", "8"). Rounds to the nearest minute in h:mm.
+function fmtHours(h, fmt) {
+  const n = Math.max(0, Number(h) || 0);
+  if ((fmt || hoursFmt()) !== 'hms') return String(Math.round(n * 100) / 100);
+  let H = Math.floor(n);
+  let M = Math.round((n - H) * 60);
+  if (M === 60) { H += 1; M = 0; }
+  return `${H}:${String(M).padStart(2, '0')}`;
+}
+const hoursPlaceholder = () => (hoursFmt() === 'hms' ? '0:00' : '0.00');
+
 // ---------------------------------------------------------------------------
 // Shifts — list of all shifts + "log a shift"
 // ---------------------------------------------------------------------------
@@ -1741,7 +1776,7 @@ app.get('/shifts/:id', (req, res) => {
         ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
         <span class="bs-sr-f">${money0(toCents(p.cardTips))}</span>
         <span class="bs-sr-f">${money0(toCents(p.cashTips))}</span>
-        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? (Math.round(p.hours * 100) / 100).toFixed(2) : 'missing'}</span>
+        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? fmtHours(p.hours) : 'missing'}</span>
         <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
         ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
       </summary>
@@ -1760,7 +1795,7 @@ app.get('/shifts/:id', (req, res) => {
              got wrong could be seen and never corrected. -->
         <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
         <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>
-        <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="decimal" value="${e.hours || ''}" placeholder="0.00"></label>
+        <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="text" value="${e.hours ? fmtHours(e.hours) : ''}" placeholder="${hoursPlaceholder()}"></label>
         <label class="bs-pill"><span>Wage/hr</span><input name="wage" type="text" inputmode="decimal" value="${e.wage || ''}" placeholder="default"></label>
         <button class="bs-btn" type="submit">Save</button>
         <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
@@ -1785,7 +1820,7 @@ app.get('/shifts/:id', (req, res) => {
     <div class="bs-take bs-take-head"><span class="bs-take-w"></span>
       <span class="bs-take-n">Card</span><span class="bs-take-n">Cash</span><span class="bs-take-n">Total</span></div>
     ${eligible.map((p) => `<div class="bs-take">
-      <span class="bs-take-w">${esc(p.name)} <i class="bs-em">${esc(p.role)} · ${(Math.round(p.hours * 100) / 100).toFixed(2)}h</i></span>
+      <span class="bs-take-w">${esc(p.name)} <i class="bs-em">${esc(p.role)} · ${fmtHours(p.hours)}h</i></span>
       <span class="bs-take-n">${money(p.cardTotal)}</span>
       <span class="bs-take-n">${money(p.cashTotal)}</span>
       <span class="bs-take-n"><b>${money(p.cardTotal + p.cashTotal)}</b></span></div>`).join('')}
@@ -1869,7 +1904,7 @@ app.get('/shifts/:id', (req, res) => {
                   <label class="fld">Coffee sales<input name="coffee" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
                   <label class="fld">Alcohol sales<input name="alcohol" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
                   <label class="fld">Card tips<input name="card_tips" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00"></label>
-                  <label class="fld">Hours<input name="hours" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>
+                  <label class="fld">Hours<input name="hours" type="text" inputmode="text" placeholder="${hoursPlaceholder()}"></label>
                   <label class="fld">Wage / hr<input name="wage" type="number" step="0.01" min="0" inputmode="decimal" placeholder="staff default"></label>
                 </div>
                 <button class="bs-btn" type="submit">Add to shift</button>
@@ -1881,7 +1916,7 @@ app.get('/shifts/:id', (req, res) => {
                     <select name="employee_id" required id="support-emp">${staffOptions}</select></label>
                   <label class="fld wide">Position
                     <select name="role" id="support-role">${roleOpts('kitchen')}</select></label>
-                  <label class="fld">Hours<input name="hours" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0"></label>
+                  <label class="fld">Hours<input name="hours" type="text" inputmode="text" placeholder="${hoursPlaceholder()}"></label>
                   <label class="fld">Wage / hr<input name="wage" type="number" step="0.01" min="0" inputmode="decimal" placeholder="staff default"></label>
                 </div>
                 <button class="bs-btn" type="submit">Add to shift</button>
@@ -1904,7 +1939,13 @@ app.get('/shifts/:id', (req, res) => {
 
       <div class="bs-cols2">
         <div class="bs-col">
-          <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span></div>
+          <div class="bs-sec-h"><span class="bs-kicker">On shift · ${people.length}</span>
+            ${canWrite() ? `<form class="bs-hfmt" method="post" action="/shifts/hours-format" title="How hours are entered and shown">
+              <input type="hidden" name="back" value="/shifts/${sh.id}">
+              <span class="bs-hfmt-l">Hours</span>
+              <button type="submit" name="fmt" value="decimal" class="bs-hfmt-b${hoursFmt() === 'decimal' ? ' on' : ''}">7.5</button>
+              <button type="submit" name="fmt" value="hms" class="bs-hfmt-b${hoursFmt() === 'hms' ? ' on' : ''}">7:30</button>
+            </form>` : ''}</div>
 
           ${people.length ? `
             <div class="bs-shead bs-staffhead${anyAlcohol ? ' has-alc' : ''}">
@@ -2071,11 +2112,19 @@ function logManagerEdit(shiftId, empId, role, body) {
   });
 }
 
+// The hours-entry format toggle (decimal vs h:mm). Owner-wide setting, set from
+// the shift sheet where hours are entered; redirects back to wherever it was.
+app.post('/shifts/hours-format', (req, res) => {
+  setSetting('hours_format', req.body.fmt === 'hms' ? 'hms' : 'decimal');
+  const back = typeof req.body.back === 'string' && req.body.back.startsWith('/') ? req.body.back : '/shifts';
+  res.redirect(back);
+});
+
 app.post('/shifts/:id/server', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const empId = Number(req.body.employee_id);
-  w.upsertWork.run({ shift_id: sh.id, employee_id: empId, role: 'server', hours: Number(req.body.hours) || 0, hourly_rate_cents: toCents(req.body.wage) });
+  w.upsertWork.run({ shift_id: sh.id, employee_id: empId, role: 'server', hours: parseHours(req.body.hours), hourly_rate_cents: toCents(req.body.wage) });
   w.upsertSales.run({
     shift_id: sh.id, employee_id: empId,
     food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee),
@@ -2092,7 +2141,7 @@ app.post('/shifts/:id/support', (req, res) => {
   const empId = Number(req.body.employee_id);
   w.upsertWork.run({
     shift_id: sh.id, employee_id: empId,
-    role: req.body.role, hours: Number(req.body.hours) || 0, hourly_rate_cents: toCents(req.body.wage),
+    role: req.body.role, hours: parseHours(req.body.hours), hourly_rate_cents: toCents(req.body.wage),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, req.body.role, req.body);
@@ -6913,8 +6962,8 @@ app.post('/webhook/benugin', (req, res) => {
 
     // Register the server on the shift; only set hours if the POS actually sent them.
     w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: 'server' });
-    if (row.hours != null && Number(row.hours) > 0) {
-      w.setHours.run({ shift_id: sh.id, employee_id: emp.id, hours: Number(row.hours) });
+    if (row.hours != null && parseHours(row.hours) > 0) {
+      w.setHours.run({ shift_id: sh.id, employee_id: emp.id, hours: parseHours(row.hours) });
     }
     w.upsertSales.run({
       shift_id: sh.id, employee_id: emp.id,

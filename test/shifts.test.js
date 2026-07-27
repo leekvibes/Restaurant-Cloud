@@ -466,3 +466,34 @@ test('the payroll support-tips report totals a support person over a date range'
   assert.match(h, /bs-take-head[\s\S]*?Card[\s\S]*?Cash[\s\S]*?Total/, 'card / cash / total columns');
   assert.match(h, /bs-take-tot/, 'and a totals row, because a support person was paid from the pool');
 });
+
+test('hours can be entered and shown as h:mm, and always parse either way', async () => {
+  const { ready, people } = module.exports;
+  const post = (url, body) => fetch(BASE + url, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body).toString(),
+  });
+
+  // Switch the whole app to h:mm, from the shift sheet where hours are entered.
+  await post('/shifts/hours-format', { fmt: 'hms', back: `/shifts/${ready}` });
+
+  // Joseph's hours entered as 7:30 → stored as decimal 7.5 (the engine's unit).
+  await post(`/shifts/${ready}/support`, { employee_id: people.joseph, role: 'busser', hours: '7:30', card_tips: '', cash_tips: '', wage: '' });
+  assert.strictEqual(db.prepare('SELECT hours FROM work WHERE shift_id=? AND employee_id=?').get(ready, people.joseph).hours, 7.5,
+    'h:mm parses to decimal hours');
+
+  const h = await html(`/shifts/${ready}`);
+  assert.match(h, /bs-sr-f[^>]*>7:30</, 'the row shows the hours as h:mm');
+  assert.match(h, /bs-hfmt-b on">7:30/, 'and the h:mm toggle is the active one');
+
+  // The format is display-only: a plain decimal still parses in h:mm mode, so a
+  // mis-set toggle can never reject or corrupt an entry.
+  await post(`/shifts/${ready}/support`, { employee_id: people.joseph, role: 'busser', hours: '8.25', card_tips: '', cash_tips: '', wage: '' });
+  assert.strictEqual(db.prepare('SELECT hours FROM work WHERE shift_id=? AND employee_id=?').get(ready, people.joseph).hours, 8.25,
+    'a decimal still parses while in h:mm mode');
+
+  // Back to decimal so the rest of the suite sees the default.
+  await post('/shifts/hours-format', { fmt: 'decimal', back: `/shifts/${ready}` });
+  assert.match(await html(`/shifts/${ready}`), /bs-hfmt-b on">7\.5/, 'toggled back to decimal');
+});
