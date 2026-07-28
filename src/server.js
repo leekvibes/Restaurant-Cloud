@@ -3838,14 +3838,21 @@ function clockPage(req, who, opts = {}) {
   const ok = opts.ok ? `<div class="tc-ok">${esc(opts.ok)}</div>` : '';
 
   // --- the one card that matters ------------------------------------------
+  // The counter is anchored to the SERVER's clock, not the phone's: the page
+  // carries both the punch and what time the server thinks it is, and the
+  // script works out the difference once. A device an hour fast still shows the
+  // true elapsed time.
+  const serverNow = TC.toDate(TC.nowUtc()).getTime();
   let card = '';
   if (active && active.status === 'on_break') {
     const br = TC.q.openBreak.get(active.id);
     card = `
       <div class="tc-state tc-break">
         <div class="tc-kick">On break</div>
-        <div class="tc-live" data-since="${TC.toDate(br.start_at).getTime()}">0m</div>
+        <div class="tc-live" data-since="${TC.toDate(br.start_at).getTime()}" data-now="${serverNow}">0:00</div>
         <div class="tc-meta">Break started ${esc(TC.clockFace(br.start_at))} · ${esc(br.paid ? 'paid' : 'unpaid')}</div>
+        <div class="tc-sub" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}"
+          data-prefix="On the clock ">On the clock</div>
         <form method="post" action="/portal/clock/break/end" class="tc-actions">
           <button class="tc-btn tc-btn-go" type="submit" data-once>End break</button>
         </form>
@@ -3855,9 +3862,10 @@ function clockPage(req, who, opts = {}) {
     card = `
       <div class="tc-state tc-on${stale ? ' tc-stale' : ''}">
         <div class="tc-kick">${stale ? 'Still clocked in' : 'On the clock'}</div>
-        <div class="tc-live" data-since="${TC.toDate(active.clock_in_at).getTime()}">0m</div>
+        <div class="tc-live" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}">0:00</div>
         <div class="tc-meta">In at ${esc(TC.clockFace(active.clock_in_at))}
           · ${esc(posName(active.position))}${active.daypart ? ' · ' + esc(dp(active.daypart)) : ''}</div>
+        ${TC.breakTotals(active.id).unpaid ? `<div class="tc-sub">Less ${TC.hm(TC.breakTotals(active.id).unpaid)} of break so far</div>` : ''}
         ${stale ? `<p class="tc-note">That is over ${STALE_HOURS} hours. If you forgot to clock out,
           clock out now and then ask your manager to fix the time.</p>` : ''}
         <div class="tc-actions">
@@ -3927,15 +3935,43 @@ function clockPage(req, who, opts = {}) {
       <a class="tc-more" href="/portal/clock/history">Your time history ›</a>
     </div>
     <script>
-      // Live counters are display only — the server owns the real elapsed time.
+      // The counter ticks every second so the time visibly moves while somebody
+      // is looking at it. It is display only — the punch the server recorded is
+      // the one that counts — but it is anchored to the SERVER's clock rather
+      // than the device's, so a phone with the wrong time still reads true.
       (function () {
+        var el0 = document.querySelector('[data-now]');
+        var skew = el0 ? Date.now() - Number(el0.getAttribute('data-now')) : 0;
+        function fmt(ms) {
+          var s = Math.max(0, Math.floor(ms / 1000));
+          var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+          var p = function (n) { return n < 10 ? '0' + n : String(n); };
+          return h ? h + ':' + p(m) + ':' + p(ss) : m + ':' + p(ss);
+        }
         function tick() {
-          document.querySelectorAll('.tc-live[data-since]').forEach(function (el) {
-            var m = Math.max(0, Math.round((Date.now() - Number(el.getAttribute('data-since'))) / 60000));
-            el.textContent = m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + 'm';
+          var t = Date.now() - skew;
+          document.querySelectorAll('[data-since]').forEach(function (el) {
+            var txt = fmt(t - Number(el.getAttribute('data-since')));
+            el.textContent = (el.getAttribute('data-prefix') || '') + txt;
           });
         }
-        tick(); setInterval(tick, 15000);
+        tick(); setInterval(tick, 1000);
+
+        // While somebody is on the clock, keep their session alive and re-sync
+        // the counter. A shift outlasts the 45-minute portal token, and being
+        // signed out halfway through service is how a clock-out gets missed.
+        if (document.querySelector('.tc-state.tc-on, .tc-state.tc-break')) {
+          setInterval(function () {
+            fetch('/portal/clock/ping', { method: 'POST' })
+              .then(function (r) {
+                // A timed-out session answers with the PIN page, not JSON.
+                var t = r.headers.get('content-type') || '';
+                return t.indexOf('json') !== -1 ? r.json() : null;
+              })
+              .then(function (j) { if (j && j.now) skew = Date.now() - j.now; })
+              .catch(function () { /* offline — the counter keeps running */ });
+          }, 10 * 60 * 1000);
+        }
         // A punch must not fire twice because a thumb bounced.
         document.querySelectorAll('[data-once]').forEach(function (b) {
           b.addEventListener('click', function () {
@@ -3954,6 +3990,23 @@ app.get('/portal/clock', (req, res) => {
   // On the clock? Keep the session alive so a shift never signs itself out.
   if (TC.q.active.get(who.emp.id)) setPortalCookie(req, res, who.emp.id);
   res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok }));
+});
+
+/**
+ * Keepalive for somebody on the clock: refreshes the portal token and hands
+ * back the server's time so the live counter cannot drift. Only ever extends a
+ * session for a person who is genuinely punched in — it never opens, closes or
+ * changes an entry.
+ */
+app.post('/portal/clock/ping', (req, res) => {
+  // Turned away exactly like every other /portal route — a stranger gets the
+  // PIN screen, not a JSON error. The whole prefix is exempt from the owner's
+  // password, so uniformity here is the thing keeping it safe, and there is a
+  // test that walks these routes and fails if one answers differently.
+  const who = requirePortal(req, res);
+  if (!who) return;
+  if (TC.q.active.get(who.emp.id)) setPortalCookie(req, res, who.emp.id);
+  res.json({ ok: true, now: TC.toDate(TC.nowUtc()).getTime() });
 });
 
 app.post('/portal/clock/in', (req, res) => {

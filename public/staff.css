@@ -764,7 +764,12 @@ body.bare {
   text-transform: uppercase; color: var(--pt-muted); margin-bottom: 10px; }
 .tc-kick-sec { display: flex; justify-content: space-between; align-items: baseline; margin: 24px 0 8px; }
 .tc-kick-sec b { font-family: var(--pt-mono, ui-monospace, monospace); color: var(--pt-body); font-size: 12px; }
-.tc-live { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 46px; line-height: 1; color: var(--pt-ink); letter-spacing: -.02em; }
+.tc-live { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 44px; line-height: 1;
+  color: var(--pt-ink); letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+  /* Tabular figures so a ticking second never nudges the layout. */ }
+.tc-sub { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 12.5px; color: var(--pt-muted); margin-top: 6px;
+  font-variant-numeric: tabular-nums; }
+@media (max-width: 360px) { .tc-live { font-size: 38px; } }
 .tc-big { font-family: var(--pt-serif, Georgia, serif); font-size: 27px; color: var(--pt-ink); margin: 2px 0 16px; }
 .tc-meta { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 12.5px; color: var(--pt-second); margin-top: 8px; }
 .tc-note { font-size: 13px; color: var(--pt-muted); line-height: 1.5; margin: 10px 0 0; }
