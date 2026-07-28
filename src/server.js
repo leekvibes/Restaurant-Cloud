@@ -4793,110 +4793,274 @@ app.get('/payroll/export', async (req, res) => {
 // Anything that belongs to another module links out rather than being
 // reimplemented — the fastest way to two different answers is two owners.
 // ---------------------------------------------------------------------------
+// Targets, now configurable and stored in settings — the old rules of thumb are
+// the defaults. Everything comparing a percentage does it in POINTS.
+function perfTargets() {
+  const n = (k, d) => { const v = Number(getSetting(k, String(d))); return isFinite(v) && v > 0 ? v : d; };
+  return { labor: n('target_labor_pct', 30), food: n('target_food_pct', 32), prime: n('target_prime_pct', 60) };
+}
+app.post('/costs/targets', (req, res) => {
+  if (!canWrite()) return res.status(403).end();
+  const clamp = (v, d) => { const n = Math.round(Number(v)); return isFinite(n) && n > 0 && n < 200 ? n : d; };
+  setSetting('target_labor_pct', String(clamp(req.body.labor, 30)));
+  setSetting('target_food_pct', String(clamp(req.body.food, 32)));
+  setSetting('target_prime_pct', String(clamp(req.body.prime, 60)));
+  const back = String(req.body.back || '').replace(/[^a-z0-9=&_-]/gi, '');
+  res.redirect('/costs' + (back ? '?' + back : ''));
+});
+
+// Every invoice/expense category rolls up to a plain cost bucket, so "biggest
+// cost drivers" reads in the groups an owner thinks in — and the many opex
+// categories collapse to a handful rather than a scatter of tiny slices.
+const COST_GROUP = {
+  Food: 'Food & beverage', Coffee: 'Food & beverage', Beverage: 'Food & beverage', Alcohol: 'Food & beverage', Groceries: 'Food & beverage', Ice: 'Food & beverage',
+  Packaging: 'Packaging & supplies', Supplies: 'Packaging & supplies',
+  Cleaning: 'Cleaning', Repairs: 'Repairs & maintenance', Equipment: 'Equipment',
+  Utilities: 'Utilities', Rent: 'Rent & occupancy', Software: 'Software & subscriptions',
+  Insurance: 'Insurance', Marketing: 'Marketing', Recruiting: 'Recruiting',
+  Professional: 'Professional services', Services: 'Professional services',
+  Kitchen: 'Other', Bar: 'Other', Office: 'Other', Travel: 'Other', Other: 'Other',
+};
+const costGroupOf = (c) => COST_GROUP[c] || 'Other';
+// Tracked costs for a period: wages + everything invoiced or expensed, bucketed.
+// NOT a claim of total cost — rent/utilities appear only once you enter them.
+function trackedCosts(from, to, wages) {
+  const m = new Map();
+  if (wages) m.set('Labor', wages);
+  for (const [cat, cents] of MX.spendByCategory(from, to)) m.set(costGroupOf(cat), (m.get(costGroupOf(cat)) || 0) + cents);
+  for (const e of MX.expenseRows.all(from, to)) m.set(costGroupOf(e.category), (m.get(costGroupOf(e.category)) || 0) + e.cents);
+  return m;
+}
+
 app.get('/costs', (req, res) => {
   const today = isoDate(startOfToday());
   const key = MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '30';
   const r = MX.range(key, today, { from: req.query.from, to: req.query.to });
+  const cmpMode = MX.COMPARE_MODES.some(([k]) => k === req.query.c) ? req.query.c : 'prev';
+  const cmp = MX.compare(r.from, r.to, cmpMode);            // { from, to, label } or null
   const cur = MX.period(r.from, r.to);
-  const prev = MX.previous(r.from, r.to);
-  const series = MX.days(r.from, r.to);
-
-  // Targets. Rules of thumb until they're configurable — stated on the page
-  // rather than hidden in the colour of a tile.
-  const TGT = { labor: 30, food: 32, prime: 60 };
+  const prev = cmp ? MX.period(cmp.from, cmp.to) : null;
+  const cmpLabel = cmp ? cmp.label : null;
+  // Never chart tomorrow: a range ending past today is trimmed, so the tail is
+  // absent rather than a cliff of zeros.
+  const lastDay = r.to > today ? today : r.to;
+  const series = MX.days(r.from, lastDay);
+  const cmpSeries = cmp ? MX.days(cmp.from, cmp.to) : [];
+  const TGT = perfTargets();
   const dm = (d) => d.date.slice(5).replace('-', '/');
+  const qs = `r=${encodeURIComponent(key)}${key === 'custom' ? `&from=${r.from}&to=${r.to}` : ''}&c=${cmpMode}`;
 
-  const kpi = (tone, ico, label, value, sub, spark) => `
-    <div class="mcard mcard-${tone}"><div class="mcard-ico">${icon(ico)}</div>
-      <div class="mcard-body"><div class="mcard-label">${label}</div>
-        <div class="mcard-value">${value}</div><div class="mcard-sub">${sub}</div></div>
-      ${spark ? `<div class="mcard-spark">${spark}</div>` : ''}</div>`;
-
-  const vs = (v, target) => {
-    if (v === null) return 'no data yet';
-    const d = v - target;
-    if (Math.abs(d) < 0.1) return `on the ${target}% target`;
-    return `${Math.abs(d).toFixed(1)} pts ${d > 0 ? 'over' : 'under'} target`;
+  // --- point / percent movement helpers ------------------------------------
+  const ptsLine = (nowV, beforeV) => {
+    if (nowV === null || beforeV === null || beforeV === undefined) return '';
+    const d = Math.round((nowV - beforeV) * 10) / 10;
+    if (Math.abs(d) < 0.1) return `flat vs ${cmpLabel}`;
+    return `${d > 0 ? '↑' : '↓'} ${Math.abs(d).toFixed(1)} pts from ${cmpLabel}`;
   };
-  const band = (v, target) => (v === null ? 'blue' : v <= target ? 'green' : v <= target * 1.1 ? 'amber' : 'red');
+  const pctLine = (nowV, beforeV) => {
+    if (nowV === null || nowV === undefined) return '';   // a null now is unmeasurable, not a 100% fall
+    if (!beforeV) return prev ? `no ${cmpLabel} to compare` : '';
+    const d = ((nowV - beforeV) / Math.abs(beforeV)) * 100;
+    if (Math.abs(d) < 0.5) return `flat vs ${cmpLabel}`;
+    return `${d > 0 ? '↑' : '↓'} ${Math.abs(d).toFixed(1)}% from ${cmpLabel}`;
+  };
+  const vsTarget = (v, target) => {
+    if (v === null) return '';
+    const d = Math.round((v - target) * 10) / 10;
+    if (Math.abs(d) < 0.1) return `on the ${target}% target`;
+    return `${Math.abs(d).toFixed(1)} pts ${d > 0 ? 'above' : 'below'} ${target}% target`;
+  };
+  const band = (v, target) => (v === null ? 'flat' : v <= target ? 'good' : v <= target * 1.1 ? 'warn' : 'bad');
+
+  // --- performance summary --------------------------------------------------
+  // Four figures carry the page — sales, labor, prime, gross profit — with food
+  // cost and average sales at half weight beneath. Each states its value, how it
+  // moved against the comparison, and where it sits versus target.
+  const bigTile = (tone, label, value, moveLine, targetLine, spark) => `
+    <div class="perf-tile perf-tile-lg tone-${tone}">
+      <div class="perf-tile-l">${label}</div>
+      <div class="perf-tile-v">${value}</div>
+      ${targetLine ? `<div class="perf-tile-t">${targetLine}</div>` : ''}
+      ${moveLine ? `<div class="perf-tile-m">${moveLine}</div>` : ''}
+      ${spark ? `<div class="perf-tile-s">${spark}</div>` : ''}
+    </div>`;
+  const smTile = (tone, label, value, sub) => `
+    <div class="perf-tile perf-tile-sm tone-${tone}">
+      <div class="perf-tile-l">${label}</div><div class="perf-tile-v">${value}</div>
+      <div class="perf-tile-t">${sub}</div></div>`;
 
   const salesSpark = CH.spark(series.map((d) => d.sales));
   const laborSpark = CH.spark(series.filter((d) => d.sales > 0).map((d) => (d.wages / d.sales) * 100), { invert: true });
 
-  const cards = `<div class="mcards mcards-3">
-    ${kpi('blue', 'sales', 'Sales', money(cur.sales),
-      `${CH.delta(cur.sales, prev.sales)} vs the period before`, salesSpark)}
-    ${kpi(band(cur.laborPct, TGT.labor), 'payroll', 'Labor %', cur.laborPct === null ? '—' : cur.laborPct + '%',
-      vs(cur.laborPct, TGT.labor), laborSpark)}
-    ${kpi(cur.foodPct === null ? 'blue' : band(cur.foodPct, TGT.food), 'invoices', 'Food cost %',
-      cur.foodPct === null ? '—' : cur.foodPct + '%',
-      cur.foodPct === null ? 'no invoices in this range' : vs(cur.foodPct, TGT.food))}
-    ${kpi(cur.primePct === null ? 'blue' : band(cur.primePct, TGT.prime), 'costs', 'Prime cost',
-      cur.primePct === null ? '—' : cur.primePct + '%',
-      cur.primePct === null ? 'needs invoices' : vs(cur.primePct, TGT.prime))}
-    ${kpi('green', 'cash', 'Gross profit', money(cur.grossProfit),
-      `${CH.delta(cur.grossProfit, prev.grossProfit)} · after wages${cur.cogs ? ' and goods' : ''}`)}
-    ${kpi('violet', 'shifts', 'Average daily sales', cur.avgDaily === null ? '—' : money(cur.avgDaily),
+  const summary = `<section class="perf-summary">
+    ${bigTile('blue', 'Sales', money(cur.sales), prev ? pctLine(cur.sales, prev.sales) : '', '', salesSpark)}
+    ${bigTile(band(cur.laborPct, TGT.labor), 'Labor', cur.laborPct === null ? '—' : cur.laborPct + '%',
+      prev ? ptsLine(cur.laborPct, prev.laborPct) : '', vsTarget(cur.laborPct, TGT.labor), laborSpark)}
+    ${bigTile(cur.primePct === null ? 'flat' : band(cur.primePct, TGT.prime), 'Prime cost', cur.primePct === null ? '—' : cur.primePct + '%',
+      prev ? ptsLine(cur.primePct, prev.primePct) : '', cur.primePct === null ? 'needs invoices' : vsTarget(cur.primePct, TGT.prime), '')}
+    ${bigTile('good', 'Gross profit', money(cur.grossProfit),
+      prev ? pctLine(cur.grossProfit, prev.grossProfit) : '', `after wages${cur.cogs ? ' &amp; goods' : ''}, before overhead`, '')}
+    ${smTile(cur.foodPct === null ? 'flat' : band(cur.foodPct, TGT.food), 'Food cost', cur.foodPct === null ? '—' : cur.foodPct + '%',
+      cur.foodPct === null ? 'no invoices tagged' : vsTarget(cur.foodPct, TGT.food))}
+    ${smTile('flat', 'Avg daily sales', cur.avgDaily === null ? '—' : money(cur.avgDaily),
       cur.dayCount ? `over ${cur.dayCount} day${cur.dayCount === 1 ? '' : 's'} traded` : 'nothing traded yet')}
-  </div>`;
+  </section>`;
 
-  // --- what moved -----------------------------------------------------------
+  // --- what's driving performance ------------------------------------------
+  // Deterministic, prioritized, and never a cause the data can't support — a
+  // bare figure states a fact; "may be related to" flags an inference.
   const drivers = [];
-  if (prev.laborPct !== null && cur.laborPct !== null) {
-    const d = cur.laborPct - prev.laborPct;
-    if (Math.abs(d) >= 0.5) {
-      const hoursMoved = cur.hours - prev.hours;
-      drivers.push({ bad: d > 0, text: `Labor ${d > 0 ? 'rose' : 'fell'} ${Math.abs(d).toFixed(1)} points to ${cur.laborPct}%`,
-        why: hoursMoved ? `${Math.abs(Math.round(hoursMoved * 10) / 10)} ${hoursMoved > 0 ? 'more' : 'fewer'} hours worked` : 'sales moved, hours held' });
+  const push = (o) => drivers.push(o);
+  if (prev) {
+    if (prev.sales > 0) {
+      const d = ((cur.sales - prev.sales) / prev.sales) * 100;
+      if (Math.abs(d) >= 2) push({ bad: d < 0, text: `Sales ${d > 0 ? 'rose' : 'fell'} ${Math.abs(d).toFixed(1)}% versus ${cmpLabel}`, why: `${money(cur.sales)} against ${money(prev.sales)}`, href: '/sales' });
     }
+    if (cur.laborPct !== null && prev.laborPct !== null) {
+      const d = Math.round((cur.laborPct - prev.laborPct) * 10) / 10;
+      if (Math.abs(d) >= 0.5) {
+        const gap = Math.round((cur.laborPct - TGT.labor) * 10) / 10;
+        push({ bad: d > 0, text: `Labor ${d > 0 ? 'rose' : 'fell'} ${Math.abs(d).toFixed(1)} pts to ${cur.laborPct}%`,
+          why: Math.abs(gap) >= 0.5 ? `still ${Math.abs(gap).toFixed(1)} pts ${gap > 0 ? 'above' : 'below'} the ${TGT.labor}% target` : `on the ${TGT.labor}% target`, href: '/payroll' });
+      }
+    }
+    if (cur.salesPerHour !== null && prev.salesPerHour) {
+      const d = cur.salesPerHour - prev.salesPerHour;
+      if (Math.abs(d) >= 100) push({ bad: d < 0, text: `Sales per labor hour ${d > 0 ? 'improved' : 'slipped'} from ${money(prev.salesPerHour)} to ${money(cur.salesPerHour)}`, why: `${Math.round(cur.hours)} hours against ${money(cur.sales)} of sales`, href: '/payroll' });
+    }
+    if (prev.sales > 0 && prev.wages > 0 && cur.wages > prev.wages) {
+      const sg = ((cur.sales - prev.sales) / prev.sales) * 100, wg = ((cur.wages - prev.wages) / prev.wages) * 100;
+      if (wg - sg >= 3) push({ bad: true, text: 'Wages grew faster than sales', why: `wages ${wg > 0 ? '+' : ''}${wg.toFixed(1)}% against sales ${sg > 0 ? '+' : ''}${sg.toFixed(1)}% — may be related to more hours or higher-paid cover`, href: '/payroll' });
+    }
+    if (cur.primePct !== null && prev.primePct !== null) {
+      const d = Math.round((cur.primePct - prev.primePct) * 10) / 10;
+      if (Math.abs(d) >= 0.5) push({ bad: d > 0, text: `Prime cost ${d > 0 ? 'rose' : 'improved'} ${Math.abs(d).toFixed(1)} pts to ${cur.primePct}%`, why: 'labor and goods against sales', href: '/c/invoices' });
+    }
+    const prevV = new Map(MX.spendByVendor(cmp.from, cmp.to).map((v) => [String(v.id || '0'), v.cents]));
+    const rising = MX.spendByVendor(r.from, r.to).map((v) => ({ v, chg: v.cents - (prevV.get(String(v.id || '0')) || 0) })).filter((x) => x.chg > 0).sort((a, b) => b.chg - a.chg)[0];
+    if (rising && rising.chg >= 5000) push({ bad: true, text: `${rising.v.name} spending increased ${money(rising.chg)} versus ${cmpLabel}`, why: `${money(rising.v.cents)} this period`, href: '/c/vendors' });
   }
-  if (prev.foodPct !== null && cur.foodPct !== null) {
-    const d = cur.foodPct - prev.foodPct;
-    if (Math.abs(d) >= 0.5) drivers.push({ bad: d > 0, text: `Food cost ${d > 0 ? 'rose' : 'fell'} ${Math.abs(d).toFixed(1)} points to ${cur.foodPct}%`, why: `${money(cur.cogs)} invoiced against ${money(cur.sales)} of sales`, href: '/c/invoices' });
+  if (cur.foodPct !== null && cur.invoices.length && cur.invoices.length < 5) {
+    push({ bad: false, text: 'Food cost may be understated', why: `only ${cur.invoices.length} invoice${cur.invoices.length === 1 ? '' : 's'} entered — the figure reads low until the rest are in`, href: '/c/invoices' });
   }
-  // Products whose price moved most in this window, from real purchase data.
   let risers = [];
   try {
     risers = PRODUCTS.q.all.all({ from_month: r.from, from_year: r.from })
-      .map((p) => ({ p, t: PRODUCTS.trendOf(p) }))
-      .filter((x) => x.t !== null && x.t >= 5 && x.p.spend_year > 0)
-      .sort((a, b) => b.t - a.t).slice(0, 4);
+      .map((p) => ({ p, t: PRODUCTS.trendOf(p) })).filter((x) => x.t !== null && x.t >= 5 && x.p.spend_year > 0)
+      .sort((a, b) => b.t - a.t).slice(0, 3);
   } catch { risers = []; }
-  if (risers.length) {
-    drivers.push({ bad: true, text: `${risers.length} ingredient${risers.length === 1 ? '' : 's'} costing more than they were`,
-      why: risers.map((x) => `${x.p.name} +${x.t}%`).join(' · '), href: '/c/products' });
-  }
-  if (prev.sales > 0) {
-    const d = ((cur.sales - prev.sales) / prev.sales) * 100;
-    if (Math.abs(d) >= 2) drivers.push({ bad: d < 0, text: `Sales ${d > 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(1)}% on the previous period`, why: `${money(cur.sales)} against ${money(prev.sales)}`, href: '/sales' });
-  }
+  if (risers.length) push({ bad: true, text: `${risers.length} ingredient${risers.length === 1 ? '' : 's'} costing more than before`, why: risers.map((x) => `${x.p.name} +${x.t}%`).join(' · '), href: '/c/products' });
+  // Strongest day of week, by average — only with enough traded days to mean it.
+  const dowFull = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const dowSales = [0, 0, 0, 0, 0, 0, 0], dowN = [0, 0, 0, 0, 0, 0, 0];
+  for (const d of series) if (d.sales > 0) { const i = (new Date(d.date + 'T00:00:00').getDay() + 6) % 7; dowSales[i] += d.sales; dowN[i]++; }
+  const dowAvg = dowSales.map((s, i) => (dowN[i] ? s / dowN[i] : 0));
+  const bestDow = dowAvg.indexOf(Math.max(...dowAvg));
+  if (Math.max(...dowAvg) > 0 && series.filter((d) => d.sales > 0).length >= 5) push({ bad: false, text: `${dowFull[bestDow]} is the strongest day`, why: `${money(Math.round(dowAvg[bestDow]))} average across ${dowN[bestDow]} logged`, href: '/sales' });
+  drivers.length = Math.min(drivers.length, 7);
 
   const driversBlock = `
-    <section class="pcard">
-      <div class="pcard-h"><b>What's driving performance</b><span class="muted">${esc(r.label.toLowerCase())} vs the period before</span></div>
+    <section class="pcard perf-insights">
+      <div class="pcard-h"><b>What's driving performance</b>${cmpLabel ? `<span class="muted">vs ${esc(cmpLabel)}</span>` : ''}</div>
       ${drivers.length ? `<div class="drivers">${drivers.map((d) => `
         ${d.href ? `<a class="driver" href="${d.href}">` : '<div class="driver">'}
           <span class="driver-dot ${d.bad ? 'bad' : 'good'}"></span>
           <span class="driver-b"><b>${esc(d.text)}</b><i>${esc(d.why)}</i></span>
           ${d.href ? '<span class="driver-go">›</span>' : ''}
         ${d.href ? '</a>' : '</div>'}`).join('')}</div>`
-        : `<div class="panel-empty">Nothing moved much this period${prev.sales ? '' : ', and there is no earlier period to compare against yet'}.</div>`}
+        : `<div class="panel-empty">Nothing moved much${cmpLabel ? ` versus ${esc(cmpLabel)}` : ', and no comparison is selected'}.</div>`}
     </section>`;
 
-  // --- charts ---------------------------------------------------------------
-  const salesLine = CH.lineChart([{ label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.sales })), area: true }], { height: 190 });
-  const laborLine = CH.lineChart([
-    { label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.sales })), color: '#2563eb' },
-    { label: 'Wages', values: series.map((d) => ({ x: dm(d), y: d.wages })), color: '#d97706' },
-  ], { height: 180 });
-  const invWeeks = MX.invoiceWeeks(r.from, r.to);
-  const invBar = CH.barChart(invWeeks.map((w) => ({ x: w.week.slice(5).replace('-', '/'), y: w.cents })), { height: 150, color: '#0891b2' });
+  // --- data-quality notice (only when something is actually incomplete) -----
+  const noSalesShifts = cur.rows.filter((x) => x.sales === 0).length;
+  const noHours = cur.rows.reduce((a, x) => a + (x.no_hours || 0), 0);
+  const dq = [];
+  if (cur.sales > 0 && cur.invoices.length === 0) dq.push('No invoices entered for this period, so food and prime cost cannot be shown.');
+  else if (cur.invoices.length > 0 && cur.invoices.length < 5) dq.push(`Only ${cur.invoices.length} invoice${cur.invoices.length === 1 ? '' : 's'} entered — food and prime cost may be understated.`);
+  if (noSalesShifts) dq.push(`${noSalesShifts} shift${noSalesShifts === 1 ? '' : 's'} ${noSalesShifts === 1 ? 'has' : 'have'} no sales entered.`);
+  if (noHours) dq.push(`${noHours} staff shift${noHours === 1 ? '' : 's'} ${noHours === 1 ? 'is' : 'are'} missing hours.`);
+  const dqNotice = dq.length ? `
+    <section class="perf-dq"><div class="perf-dq-h">${icon('incidents')}<span>Data quality</span></div>
+      <ul>${dq.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></section>` : '';
 
-  // --- labour and food ------------------------------------------------------
+  // --- sales comparison: this period against the comparison, by weekday -----
+  // AVERAGE per traded weekday, not the total: a 30-day window holds five
+  // Mondays where its comparison holds four, and comparing the sums would make
+  // Monday look 25% up on the strength of one extra calendar day. Averaging the
+  // days that actually traded makes it like-for-like whatever the window.
+  const dowLbl = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const bySalesDow = (rows) => {
+    const sum = [0, 0, 0, 0, 0, 0, 0], n = [0, 0, 0, 0, 0, 0, 0];
+    for (const d of rows) if (d.sales > 0) { const i = (new Date(d.date + 'T00:00:00').getDay() + 6) % 7; sum[i] += d.sales; n[i]++; }
+    return sum.map((s, i) => (n[i] ? Math.round(s / n[i]) : 0));
+  };
+  const curDow = bySalesDow(series), cmpDow = cmp ? bySalesDow(cmpSeries) : null;
+  const salesCmpGroups = dowLbl.map((lbl, i) => ({ label: lbl, a: curDow[i], b: cmpDow ? cmpDow[i] : 0 }));
+  const salesCmpChart = CH.groupedBar(salesCmpGroups, { height: 180, labelA: 'This period', labelB: 'Comparison', fmt: CH.shortMoney });
+
+  // Best / weakest service (by daypart) + how steady the days are.
+  const svc = {};
+  for (const row of cur.rows) if (row.sales > 0) svc[row.daypart] = (svc[row.daypart] || 0) + row.sales;
+  const svcEntries = Object.entries(svc).sort((a, b) => b[1] - a[1]);
+  const dailySales = series.filter((d) => d.sales > 0).map((d) => d.sales);
+  const salesMean = dailySales.length ? dailySales.reduce((a, b) => a + b, 0) / dailySales.length : 0;
+  const salesSd = dailySales.length > 1 ? Math.sqrt(dailySales.reduce((a, b) => a + (b - salesMean) ** 2, 0) / dailySales.length) : 0;
+  const cv = salesMean ? Math.round((salesSd / salesMean) * 100) : null;
+
+  // --- labor efficiency (swipeable on mobile) -------------------------------
+  const wpsNow = cur.sales ? cur.wages / cur.sales : null;
+  const wpsPrev = prev && prev.sales ? prev.wages / prev.sales : null;
+  const laborMetrics = [
+    { label: 'Labor %', value: cur.laborPct === null ? '—' : cur.laborPct + '%', sub: prev ? ptsLine(cur.laborPct, prev.laborPct) : '', foot: vsTarget(cur.laborPct, TGT.labor), tone: band(cur.laborPct, TGT.labor) },
+    { label: 'Sales per labor hour', value: cur.salesPerHour === null ? '—' : money(cur.salesPerHour), sub: prev && prev.salesPerHour ? pctLine(cur.salesPerHour, prev.salesPerHour) : `${Math.round(cur.hours)} hours worked`, foot: 'higher is better', tone: 'flat' },
+    { label: 'Wage cost / sales $', value: wpsNow === null ? '—' : '$' + wpsNow.toFixed(3), sub: wpsPrev ? pctLine(wpsNow, wpsPrev) : '', foot: 'what each sales dollar costs in wages', tone: 'flat' },
+    { label: 'Avg wage / service', value: cur.completedShifts ? money(Math.round(cur.wages / cur.completedShifts)) : '—', sub: `${cur.completedShifts} service${cur.completedShifts === 1 ? '' : 's'} worked`, foot: 'wages per shift', tone: 'flat' },
+  ];
+
+  // --- biggest cost drivers (tracked costs only — labor + purchases) --------
+  const costNow = trackedCosts(r.from, r.to, cur.wages);
+  const costPrev = prev ? trackedCosts(cmp.from, cmp.to, prev.wages) : null;
+  const costRows = [...costNow.entries()].filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]);
+  const costTotal = costRows.reduce((a, [, c]) => a + c, 0) || 1;
+  const GROUP_COLOR = { Labor: '#2563eb', 'Food & beverage': '#059669', 'Packaging & supplies': '#0d9488', 'Rent & occupancy': '#92400e', Utilities: '#4f46e5', 'Software & subscriptions': '#9333ea', 'Repairs & maintenance': '#ea580c', Equipment: '#475569', Insurance: '#0f766e', Marketing: '#db2777', Recruiting: '#c2410c', 'Professional services': '#1d4ed8', Cleaning: '#0284c7', Other: '#64748b' };
+
+  // --- vendor movement ------------------------------------------------------
+  const vendNow = MX.spendByVendor(r.from, r.to);
+  const vendPrev = prev ? new Map(MX.spendByVendor(cmp.from, cmp.to).map((v) => [String(v.id || '0'), v.cents])) : null;
+  const vendMoves = vendNow.slice(0, 8).map((v) => ({ ...v, chg: vendPrev ? v.cents - (vendPrev.get(String(v.id || '0')) || 0) : null }));
+  const vendTotalNow = vendNow.reduce((a, v) => a + v.cents, 0);
+  const biggestInvoice = vendNow.length ? Math.max(...vendNow.map((v) => v.max)) : 0;
+  const vendConc = vendTotalNow ? Math.round((vendNow[0].cents / vendTotalNow) * 100) : null;
+
+  // --- sales mix ------------------------------------------------------------
+  const mix = cur.mix;
+  const mixRows = [
+    { label: 'Food', value: mix.food, color: '#059669', prev: prev ? prev.mix.food : null },
+    { label: 'Coffee', value: mix.coffee, color: '#b45309', prev: prev ? prev.mix.coffee : null },
+    { label: 'Alcohol', value: mix.alcohol, color: '#7c3aed', prev: prev ? prev.mix.alcohol : null },
+    { label: 'Other', value: mix.other, color: '#0891b2', prev: prev ? prev.mix.other : null },
+  ].filter((x) => x.value > 0);
+  const mixTotal = mixRows.reduce((a, x) => a + x.value, 0) || 1;
+
+  // --- expense-category breakdown (invoices; largest 5 + Other) -------------
+  const catMap = MX.spendByCategory(r.from, r.to);
+  let catRows = [...catMap.entries()].map(([label, value]) => ({ label, value })).filter((x) => x.value > 0).sort((a, b) => b.value - a.value);
+  if (catRows.length > 6) { const top = catRows.slice(0, 5); const rest = catRows.slice(5).reduce((a, x) => a + x.value, 0); catRows = [...top, { label: 'Other', value: rest }]; }
+  const catRowsColored = catRows.map((x, i) => ({ ...x, color: (INV_CATEGORIES[x.label] || {}).color || CH.PALETTE[i % CH.PALETTE.length] }));
+  const catTotal = catRows.reduce((a, x) => a + x.value, 0) || 1;
+
+  // --- detailed sales vs wages, with a per-day readout ----------------------
+  const laborLine = CH.lineChart([
+    { label: 'Sales', values: series.map((d) => ({ x: dm(d), y: d.had ? d.sales : null })), color: '#2563eb' },
+    { label: 'Wages', values: series.map((d) => ({ x: dm(d), y: d.had ? d.wages : null })), color: '#d97706' },
+  ], { height: 200, fmt: CH.money });
+  const readouts = series.map((d) => ({
+    date: niceDate(d.date), had: d.had, sales: d.sales, wages: d.wages,
+    lp: d.sales > 0 ? Math.round((d.wages / d.sales) * 1000) / 10 : null,
+    hours: Math.round(d.hours * 10) / 10, sph: d.hours > 0 ? Math.round(d.sales / d.hours) : null, tgt: TGT.labor,
+  }));
+
   const fact = (k, v) => `<div class="tfact"><span>${k}</span><b>${v}</b></div>`;
-  const topVendors = db.prepare(`SELECT v.name, SUM(i.amount_cents) c FROM m_invoices i
-    LEFT JOIN m_vendors v ON CAST(v.id AS REAL) = CAST(i.vendor_id AS REAL)
-    WHERE i.invoice_date >= ? AND i.invoice_date <= ? GROUP BY i.vendor_id ORDER BY c DESC LIMIT 4`).all(r.from, r.to);
 
   // --- menu margin ----------------------------------------------------------
   let menuAlerts = [];
@@ -4908,63 +5072,180 @@ app.get('/costs', (req, res) => {
 
   res.send(layout('Performance', `
     ${flash(req)}
-    <div class="phead">
-      <div class="phead-t"><h1>Performance</h1>
-        <p class="phead-s">How the restaurant is doing over time, and what moved it.</p></div>
-    </div>
-    <div class="rangebar">
-      ${MX.RANGES.map(([k, label]) => `<a class="rchip${key === k ? ' on' : ''}" href="/costs?r=${k}">${label}</a>`).join('')}
-      <form class="rcustom" method="get" action="/costs">
-        <input type="hidden" name="r" value="custom">
-        <input type="date" name="from" value="${esc(r.from)}"><span>to</span>
-        <input type="date" name="to" value="${esc(r.to)}">
-        <button class="btn btn-sm" type="submit">Go</button>
+    <div class="bs-page perf-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Performance</h1>
+          <p class="bs-subline">What changed, why, and what to look at next. Costs and profit live here; revenue detail is on <a class="bs-act" href="/sales">Sales</a>.</p>
+        </div>
+      </div>
+
+      <form class="perf-controls" method="get" action="/costs" id="perf-controls">
+        <label class="perf-sel"><span class="perf-sel-l">Period</span>
+          <select name="r" id="perf-range">
+            ${MX.RANGES.map(([k, label]) => `<option value="${k}"${key === k ? ' selected' : ''}>${label}</option>`).join('')}
+            <option value="custom"${key === 'custom' ? ' selected' : ''}>Custom range</option>
+          </select></label>
+        <label class="perf-sel"><span class="perf-sel-l">Compared with</span>
+          <select name="c" id="perf-cmp">
+            ${MX.COMPARE_MODES.map(([k, label]) => `<option value="${k}"${cmpMode === k ? ' selected' : ''}>${label}</option>`).join('')}
+          </select></label>
+        <span class="perf-custom"${key === 'custom' ? '' : ' hidden'}>
+          <input type="date" name="from" value="${esc(r.from)}"><span class="perf-to">to</span>
+          <input type="date" name="to" value="${esc(r.to)}">
+          <button class="bs-btn-sm" type="submit">Go</button>
+        </span>
+        <span class="perf-range-note">${esc(r.label)} · ${esc(r.from)} to ${esc(lastDay)} · ${cur.completedShifts} shift${cur.completedShifts === 1 ? '' : 's'} with figures${cmpLabel ? ` · vs ${esc(cmpLabel)}` : ''}</span>
       </form>
-    </div>
-    <p class="rangenote">${esc(r.label)} · ${esc(r.from)} to ${esc(r.to)} · ${cur.completedShifts} shift${cur.completedShifts === 1 ? '' : 's'} with figures</p>
 
-    ${cards}
-    ${driversBlock}
+      ${summary}
+      ${driversBlock}
 
-    <div class="pgrid2">
-      <section class="pcard"><div class="pcard-h"><b>Sales</b><span class="muted">daily</span></div>${salesLine}</section>
-      <section class="pcard"><div class="pcard-h"><b>Sales against wages</b><span class="muted">where labor % comes from</span></div>${laborLine}</section>
-    </div>
+      <div class="pgrid2">
+        <section class="pcard">
+          <div class="pcard-h"><b>Sales comparison</b><span class="muted">avg per weekday${cmpLabel ? ' · vs ' + esc(cmpLabel) : ''}</span></div>
+          ${salesCmpChart}
+          <div class="perf-facts">
+            ${fact('Average per service', cur.avgShift === null ? '—' : money(cur.avgShift))}
+            ${svcEntries.length ? fact('Best service', `${esc(dp(svcEntries[0][0]))} · ${money(svcEntries[0][1])}`) : ''}
+            ${svcEntries.length > 1 ? fact('Weakest service', `${esc(dp(svcEntries[svcEntries.length - 1][0]))} · ${money(svcEntries[svcEntries.length - 1][1])}`) : ''}
+            ${cv !== null ? fact('Day-to-day variation', `${cv}%${cv <= 20 ? ' · steady' : cv <= 40 ? ' · some swing' : ' · uneven'}`) : ''}
+          </div>
+        </section>
+        <section class="pcard perf-labor">
+          <div class="pcard-h"><b>Labor efficiency</b><a class="panel-link" href="/payroll">Payroll →</a></div>
+          <div class="perf-swipe" id="perf-labor-swipe">
+            ${laborMetrics.map((m) => `<div class="perf-metric tone-${m.tone}">
+              <div class="perf-metric-l">${esc(m.label)}</div>
+              <div class="perf-metric-v">${m.value}</div>
+              ${m.sub ? `<div class="perf-metric-s">${esc(m.sub)}</div>` : ''}
+              <div class="perf-metric-f">${esc(m.foot)}</div>
+            </div>`).join('')}
+          </div>
+          <div class="perf-dots" id="perf-labor-dots">${laborMetrics.map((_, i) => `<span${i === 0 ? ' class="on"' : ''}></span>`).join('')}</div>
+        </section>
+      </div>
 
-    <div class="pgrid2">
-      <section class="pcard">
-        <div class="pcard-h"><b>Labor</b><a class="panel-link" href="/payroll">Payroll →</a></div>
-        ${fact('Wages', money(cur.wages))}
-        ${fact('Hours worked', cur.hours ? String(Math.round(cur.hours * 10) / 10) : '<i class="unset">none</i>')}
-        ${fact('Labor %', cur.laborPct === null ? '<i class="unset">—</i>' : cur.laborPct + '%')}
-        ${fact('Sales per labor hour', cur.salesPerHour === null ? '<i class="unset">—</i>' : money(cur.salesPerHour))}
-        ${fact('Wage cost per sales dollar', cur.sales ? '$' + (cur.wages / cur.sales).toFixed(3) : '<i class="unset">—</i>')}
+      <div class="pgrid2">
+        <section class="pcard">
+          <div class="pcard-h"><b>Biggest cost drivers</b><span class="muted">tracked costs</span></div>
+          ${costRows.length ? `<div class="sharebars perf-costbars">${costRows.map(([label, cents]) => {
+            const pctv = (cents / costTotal) * 100;
+            const chg = costPrev ? cents - (costPrev.get(label) || 0) : null;
+            const color = GROUP_COLOR[label] || '#64748b';
+            return `<div class="sb-row">
+              <div class="sb-h"><span class="sb-n">${esc(label)}</span>
+                <span class="sb-v">${money(cents)}<i>${pctv.toFixed(0)}%</i>${chg !== null && Math.abs(chg) >= 100 ? `<em class="${chg > 0 ? 'up' : 'down'}">${chg > 0 ? '+' : '−'}${money(Math.abs(chg))}</em>` : ''}</span></div>
+              <div class="sb-track"><span style="width:${pctv.toFixed(1)}%;background:${color}"></span></div></div>`;
+          }).join('')}</div>
+          <p class="perf-foot">Labor plus everything invoiced or expensed, bucketed. Rent, utilities and the like show up once you enter them — this is tracked cost, not total cost.</p>`
+            : '<div class="panel-empty">No costs tracked in this range yet.</div>'}
+        </section>
+        <section class="pcard">
+          <div class="pcard-h"><b>Vendor movement</b><a class="panel-link" href="/c/vendors">Vendors →</a></div>
+          ${vendMoves.length ? `<div class="perf-vend">${vendMoves.map((v) => `
+            <a class="perf-vrow" href="/c/invoices">
+              <span class="perf-vn">${esc(v.name)}</span>
+              <span class="perf-vv">${money(v.cents)}${v.chg !== null && Math.abs(v.chg) >= 100 ? ` <em class="${v.chg > 0 ? 'up' : 'down'}">${v.chg > 0 ? '+' : '−'}${money(Math.abs(v.chg))}</em>` : ''}</span>
+            </a>`).join('')}</div>
+            <div class="perf-facts">
+              ${fact('Largest invoice', money(biggestInvoice))}
+              ${vendConc !== null ? fact('Top vendor share', `${vendConc}% of vendor spend`) : ''}
+            </div>`
+            : '<div class="panel-empty">No invoices in this range.</div>'}
+        </section>
+      </div>
+
+      <div class="pgrid2">
+        <section class="pcard">
+          <div class="pcard-h"><b>Sales mix</b><span class="muted">${money(mixTotal)}</span></div>
+          <div class="perf-donut">
+            ${mixRows.length ? CH.donut(mixRows, { centerLabel: CH.shortMoney(mixTotal), centerSub: 'sales' }) : CH.empty('No category sales entered', 168)}
+            <div class="perf-legend">${mixRows.map((x) => `<div class="perf-leg"><i style="background:${x.color}"></i><span>${esc(x.label)}</span><b>${money(x.value)}</b><em>${((x.value / mixTotal) * 100).toFixed(0)}%</em>${prev && x.prev !== null ? CH.delta(x.value, x.prev) : ''}</div>`).join('')}</div>
+          </div>
+          ${mix.unsplit > 0 ? `<p class="perf-foot">${money(mix.unsplit)} from older shifts has no category split.</p>` : ''}
+        </section>
+        <section class="pcard">
+          <div class="pcard-h"><b>Where invoices went</b><span class="muted">${money(catTotal)}</span></div>
+          <div class="perf-donut">
+            ${catRowsColored.length ? CH.donut(catRowsColored, { centerLabel: CH.shortMoney(catTotal), centerSub: 'invoiced' }) : CH.empty('No invoices in this range', 168)}
+            <div class="perf-legend">${catRowsColored.map((x) => `<div class="perf-leg"><i style="background:${x.color}"></i><span>${esc(x.label)}</span><b>${money(x.value)}</b><em>${((x.value / catTotal) * 100).toFixed(0)}%</em></div>`).join('')}</div>
+          </div>
+        </section>
+      </div>
+
+      <section class="pcard perf-swchart">
+        <div class="pcard-h"><b>Sales against wages</b><span class="muted">where labor % comes from · tap a day</span></div>
+        <div class="perf-readout" id="perf-readout" hidden></div>
+        ${laborLine}
+        <script type="application/json" id="perf-readouts">${JSON.stringify(readouts).replace(/</g, '\\u003c')}</script>
       </section>
-      <section class="pcard">
-        <div class="pcard-h"><b>Food &amp; goods</b><a class="panel-link" href="/c/invoices">Invoices →</a></div>
-        ${fact('Invoiced this period', money(cur.invoiceTotal))}
-        ${fact('Of that, food &amp; drink', cur.cogs ? money(cur.cogs) : '<i class="unset">none tagged</i>')}
-        ${fact('Food cost %', cur.foodPct === null ? '<i class="unset">needs invoices</i>' : cur.foodPct + '%')}
-        ${topVendors.length ? topVendors.map((v) => fact(esc(v.name || 'Unknown vendor'), money(v.c))).join('') : '<div class="panel-empty">No invoices in this range.</div>'}
-      </section>
-    </div>
 
-    <div class="pgrid2">
-      <section class="pcard"><div class="pcard-h"><b>Invoice spending</b><span class="muted">by week</span></div>${invBar}</section>
-      <section class="pcard">
-        <div class="pcard-h"><b>Menu margin alerts</b><a class="panel-link" href="/menu">Menu costing →</a></div>
-        ${menuAlerts.length ? menuAlerts.map((c) => `
-          <a class="driver" href="/menu/${c.item.id}">
-            <span class="driver-dot bad"></span>
-            <span class="driver-b"><b>${esc(c.item.name)} — ${c.foodCostPct.toFixed(1)}% food cost</b>
-              <i>target ${c.target}% · ${money(c.totalCents)} to make, sells for ${money(c.sellCents)}</i></span>
-            <span class="driver-go">›</span></a>`).join('')
-          : '<div class="panel-empty">No active menu item is over its target. Items without a full cost are not counted.</div>'}
-      </section>
-    </div>
+      <div class="pgrid2">
+        <section class="pcard">
+          <div class="pcard-h"><b>Menu margin alerts</b><a class="panel-link" href="/menu">Menu costing →</a></div>
+          ${menuAlerts.length ? menuAlerts.map((c) => `
+            <a class="driver" href="/menu/${c.item.id}">
+              <span class="driver-dot bad"></span>
+              <span class="driver-b"><b>${esc(c.item.name)} — ${c.foodCostPct.toFixed(1)}% food cost</b>
+                <i>target ${c.target}% · ${money(c.totalCents)} to make, sells for ${money(c.sellCents)}</i></span>
+              <span class="driver-go">›</span></a>`).join('')
+            : '<div class="panel-empty">No active menu item is over its target. Items without a full cost are not counted.</div>'}
+        </section>
+        <section class="pcard perf-targets">
+          <div class="pcard-h"><b>Targets</b><span class="muted">points, not percent-of</span></div>
+          ${canWrite() ? `<form method="post" action="/costs/targets" class="perf-tgt-form">
+            <input type="hidden" name="back" value="${esc(qs)}">
+            <label>Labor %<input type="number" name="labor" min="1" max="199" value="${TGT.labor}"></label>
+            <label>Food %<input type="number" name="food" min="1" max="199" value="${TGT.food}"></label>
+            <label>Prime %<input type="number" name="prime" min="1" max="199" value="${TGT.prime}"></label>
+            <button class="bs-btn-sm" type="submit">Save</button>
+          </form>` : `<div class="perf-facts">${fact('Labor', TGT.labor + '%')}${fact('Food', TGT.food + '%')}${fact('Prime', TGT.prime + '%')}</div>`}
+          <p class="perf-foot">Gross profit is sales minus wages and goods, before rent, utilities and other overhead — it is not net profit.</p>
+        </section>
+      </div>
 
-    <p class="rangenote">Targets are rules of thumb for now — labor under ${TGT.labor}%, food under ${TGT.food}%, prime under ${TGT.prime}%.
-      Food and prime cost only count invoices you have logged, so they read low until the month's invoices are in.</p>`));
+      ${dqNotice}
+    </div>
+    <script>
+      (function () {
+        var rs = document.getElementById('perf-range'), cs = document.getElementById('perf-cmp'),
+            form = document.getElementById('perf-controls'), custom = form && form.querySelector('.perf-custom');
+        if (rs) rs.addEventListener('change', function () {
+          if (this.value === 'custom') { if (custom) { custom.hidden = false; var f = custom.querySelector('input'); if (f) f.focus(); } }
+          else form.requestSubmit();
+        });
+        if (cs) cs.addEventListener('change', function () { form.requestSubmit(); });
+
+        var swipe = document.getElementById('perf-labor-swipe'), dots = document.getElementById('perf-labor-dots');
+        if (swipe && dots) swipe.addEventListener('scroll', function () {
+          var one = swipe.querySelector('.perf-metric'); if (!one) return;
+          var i = Math.round(swipe.scrollLeft / (one.offsetWidth + 12));
+          [].forEach.call(dots.children, function (d, di) { d.className = di === i ? 'on' : ''; });
+        });
+
+        var ro = document.getElementById('perf-readout'), raw = document.getElementById('perf-readouts');
+        if (ro && raw) {
+          var data = JSON.parse(raw.textContent);
+          var m = function (c) { return '$' + (Math.round(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+          document.querySelectorAll('.perf-swchart .ch-hit').forEach(function (g) {
+            g.style.cursor = 'pointer';
+            var pick = function () {
+              var d = data[+g.getAttribute('data-i')]; if (!d) return;
+              document.querySelectorAll('.perf-swchart .ch-hit').forEach(function (x) { x.classList.remove('on'); });
+              g.classList.add('on'); ro.hidden = false;
+              ro.innerHTML = d.had
+                ? '<b>' + d.date + '</b><span>Sales <b>' + m(d.sales) + '</b></span><span>Wages <b>' + m(d.wages)
+                  + '</b></span><span>Labor <b>' + (d.lp === null ? '—' : d.lp + '%') + '</b></span><span>Hours <b>'
+                  + (d.hours || '—') + '</b></span><span>Sales/hr <b>' + (d.sph === null ? '—' : m(d.sph)) + '</b></span>'
+                : '<b>' + d.date + '</b><span>Closed — no service</span>';
+            };
+            g.addEventListener('mouseenter', pick);
+            g.addEventListener('click', pick);
+          });
+        }
+      })();
+    </script>`));
 });
 
 // ---------------------------------------------------------------------------
@@ -7344,14 +7625,24 @@ app.post('/c/recurring/:id/undo', (req, res) => {
 // it's the fallback rather than the design.
 // ---------------------------------------------------------------------------
 const INV_CATEGORIES = {
-  Food:     { color: '#059669', tint: '#ecfdf5' },
-  Coffee:   { color: '#b45309', tint: '#fffbeb' },
-  Beverage: { color: '#0891b2', tint: '#ecfeff' },
-  Alcohol:  { color: '#7c3aed', tint: '#f5f3ff' },
-  Supplies: { color: '#2563eb', tint: '#eff6ff' },
-  Repairs:  { color: '#ea580c', tint: '#fff7ed' },
-  Services: { color: '#0d9488', tint: '#f0fdfa' },
-  Other:    { color: '#64748b', tint: '#f8fafc' },
+  Food:        { color: '#059669', tint: '#ecfdf5' },
+  Coffee:      { color: '#b45309', tint: '#fffbeb' },
+  Beverage:    { color: '#0891b2', tint: '#ecfeff' },
+  Alcohol:     { color: '#7c3aed', tint: '#f5f3ff' },
+  Packaging:   { color: '#14b8a6', tint: '#f0fdfa' },
+  Supplies:    { color: '#2563eb', tint: '#eff6ff' },
+  Cleaning:    { color: '#0284c7', tint: '#f0f9ff' },
+  Repairs:     { color: '#ea580c', tint: '#fff7ed' },
+  Equipment:   { color: '#475569', tint: '#f8fafc' },
+  Utilities:   { color: '#4f46e5', tint: '#eef2ff' },
+  Rent:        { color: '#92400e', tint: '#fef3c7' },
+  Software:    { color: '#9333ea', tint: '#faf5ff' },
+  Insurance:   { color: '#0f766e', tint: '#f0fdfa' },
+  Marketing:   { color: '#db2777', tint: '#fdf2f8' },
+  Recruiting:  { color: '#c2410c', tint: '#fff7ed' },
+  Professional:{ color: '#1d4ed8', tint: '#eff6ff' },
+  Services:    { color: '#0d9488', tint: '#f0fdfa' },
+  Other:       { color: '#64748b', tint: '#f8fafc' },
 };
 const invCat = (c) => INV_CATEGORIES[c] || INV_CATEGORIES.Other;
 
@@ -7555,7 +7846,8 @@ function invoicesNeedingReview() {
 // ledger, and one figure that matters more than the rest — what the restaurant
 // currently owes its own staff.
 // ---------------------------------------------------------------------------
-const EXP_CATS = ['Groceries', 'Ice', 'Supplies', 'Cleaning', 'Repairs', 'Equipment',
+const EXP_CATS = ['Groceries', 'Ice', 'Supplies', 'Packaging', 'Cleaning', 'Repairs', 'Equipment',
+  'Utilities', 'Rent', 'Software', 'Insurance', 'Marketing', 'Recruiting', 'Professional',
   'Kitchen', 'Bar', 'Office', 'Travel', 'Other'];
 const EXP_PAID = ['Their own money', 'Company card', 'Company cash', 'Drawer cash', 'Other'];
 

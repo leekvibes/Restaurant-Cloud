@@ -115,7 +115,7 @@ function lineChart(series, opts = {}) {
     const cx = x(i);
     const dots = sets.map((s, si) => (s.values[i] && s.values[i].y != null)
       ? `<circle cx="${cx.toFixed(1)}" cy="${y(s.values[i].y).toFixed(1)}" r="3.5" fill="${s.color || ['#2563eb', '#d97706', '#059669', '#7c3aed'][si % 4]}"/>` : '').join('');
-    return `<g class="ch-hit"><rect x="${(cx - (W / pointCount) / 2).toFixed(1)}" y="0" width="${(W / pointCount).toFixed(1)}" height="${H}" fill="transparent"/>
+    return `<g class="ch-hit" data-i="${i}"><rect x="${(cx - (W / pointCount) / 2).toFixed(1)}" y="0" width="${(W / pointCount).toFixed(1)}" height="${H}" fill="transparent"/>
       <line class="ch-rule" x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${padT}" y2="${H - padB}"/>
       ${dots}<title>${esc(label)} — ${esc(readout)}</title></g>`;
   }).join('');
@@ -173,6 +173,67 @@ function shareBars(rows, opts = {}) {
   }).join('')}</div>`;
 }
 
+// One palette, so a category is the same colour in the donut, the legend and
+// the cost-driver bars on the same page.
+const PALETTE = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#0d9488', '#dc2626', '#64748b'];
+
+/**
+ * A donut for category SHARE — how a total splits, not a ranking (use shareBars
+ * or a bar chart when the order is the point). Rows keep their own colour so the
+ * legend beside it matches. The centre states the total.
+ */
+function donut(rows, opts = {}) {
+  const r = (rows || []).filter((x) => x && Number.isFinite(x.value) && x.value > 0);
+  const size = opts.size || 168;
+  if (!r.length) return empty(opts.empty || 'Nothing to break down yet', size);
+  const total = r.reduce((a, x) => a + x.value, 0) || 1;
+  const cx = size / 2, cy = size / 2, sw = opts.stroke || 26, rad = size / 2 - sw / 2 - 2;
+  const circ = 2 * Math.PI * rad;
+  let offset = 0;
+  const arcs = r.map((x, i) => {
+    const len = (x.value / total) * circ;
+    const colour = x.color || PALETTE[i % PALETTE.length];
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${rad.toFixed(2)}" fill="none" stroke="${colour}" stroke-width="${sw}"
+      stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}"
+      transform="rotate(-90 ${cx} ${cy})"><title>${esc(x.label)} — ${money(x.value)} · ${((x.value / total) * 100).toFixed(0)}%</title></circle>`;
+    offset += len;
+    return seg;
+  }).join('');
+  const centre = opts.centerLabel
+    ? `<text x="${cx}" y="${cy - 1}" text-anchor="middle" class="donut-c">${esc(opts.centerLabel)}</text>
+       <text x="${cx}" y="${cy + 15}" text-anchor="middle" class="donut-cs">${esc(opts.centerSub || '')}</text>` : '';
+  return `<svg viewBox="0 0 ${size} ${size}" class="donut" width="${size}" height="${size}" role="img">${arcs}${centre}</svg>`;
+}
+
+/**
+ * Grouped bars — two figures per category, current against a comparison, so the
+ * pair can be read side by side. Ranking and magnitude both stay honest; no
+ * stacked or dual-axis sleight of hand.
+ * @param groups [{label, a, b}]  a = current, b = comparison
+ */
+function groupedBar(groups, opts = {}) {
+  const g = (groups || []).filter((x) => x && (Number.isFinite(x.a) || Number.isFinite(x.b)));
+  const H = opts.height || 180;
+  if (!g.length) return empty(opts.empty || 'Nothing to compare yet', H);
+  const W = 1000, padT = 12, padB = 26;
+  const hi = Math.max(1, ...g.flatMap((x) => [x.a || 0, x.b || 0]));
+  const gw = W / g.length;
+  const colA = opts.colorA || '#2563eb', colB = opts.colorB || '#b9a888';
+  const fmt = opts.fmt || money;
+  const bw = Math.min(gw * 0.3, 60), gap = gw * 0.05;
+  const bars = g.map((x, i) => {
+    const ha = (x.a || 0) > 0 ? Math.max(2, ((x.a || 0) / hi) * (H - padT - padB)) : 0;
+    const hb = (x.b || 0) > 0 ? Math.max(2, ((x.b || 0) / hi) * (H - padT - padB)) : 0;
+    const mid = i * gw + gw / 2;
+    return `<g class="ch-bar">
+      <rect x="${(mid - bw - gap / 2).toFixed(1)}" y="${(H - padB - hb).toFixed(1)}" width="${bw.toFixed(1)}" height="${hb.toFixed(1)}" rx="2" fill="${colB}"><title>${esc(x.label)} · ${esc(opts.labelB || 'was')}: ${fmt(x.b || 0)}</title></rect>
+      <rect x="${(mid + gap / 2).toFixed(1)}" y="${(H - padB - ha).toFixed(1)}" width="${bw.toFixed(1)}" height="${ha.toFixed(1)}" rx="2" fill="${colA}"><title>${esc(x.label)} · ${esc(opts.labelA || 'now')}: ${fmt(x.a || 0)}</title></rect>
+      <text class="ch-tick" x="${mid.toFixed(1)}" y="${H - 7}" text-anchor="middle">${esc(x.label)}</text></g>`;
+  }).join('');
+  const legend = `<div class="ch-legend"><span><i style="background:${colA}"></i>${esc(opts.labelA || 'Now')}</span><span><i style="background:${colB}"></i>${esc(opts.labelB || 'Comparison')}</span></div>`;
+  return `<div class="chart">${legend}<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="chart-svg" style="height:${H}px">${bars}</svg></div>`;
+}
+
 /** A delta chip: +8.2% in green, -4% in red, or "no prior period". */
 function delta(now, before, opts = {}) {
   if (!Number.isFinite(before) || before === 0) return `<span class="dl dl-none">${esc(opts.noneLabel || 'no prior period')}</span>`;
@@ -183,4 +244,4 @@ function delta(now, before, opts = {}) {
   return `<span class="dl ${good ? 'dl-up' : 'dl-down'}">${pct > 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(1)}%</span>`;
 }
 
-module.exports = { spark, lineChart, barChart, shareBars, delta, money, shortMoney, empty };
+module.exports = { spark, lineChart, barChart, shareBars, donut, groupedBar, delta, money, shortMoney, empty, PALETTE };

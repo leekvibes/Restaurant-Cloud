@@ -177,7 +177,7 @@ test('this week and last week are compared, and the direction is right', async (
   // The written-out version of the same comparison lives on Performance, which
   // is the page that exists to explain why a number moved.
   const perf = await (await as(owner, '/costs?r=7')).text();
-  assert.match(perf, /Sales up 20\.0%/, 'and Performance says it in words');
+  assert.match(perf, /Sales rose 20\.0%/, 'and Performance says it in words');
 });
 
 test('a percentage of nothing is withheld, not printed as zero', async () => {

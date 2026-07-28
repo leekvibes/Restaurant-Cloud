@@ -189,4 +189,76 @@ const RANGES = [
   ['month', 'This month'], ['lastmonth', 'Last month'], ['ytd', 'Year to date'],
 ];
 
-module.exports = { shifts, period, previous, days, invoiceWeeks, range, RANGES, COGS_CATEGORIES, isDate };
+// --- comparison modes ------------------------------------------------------
+// Every comparison is LENGTH-MATCHED against the current range, which is the
+// whole point: a partial current week (Mon–Wed) must never be measured against
+// a full prior week. "Same days last week" and "previous month" shift the range
+// wholesale, so they stay the same shape — Mon–Wed vs Mon–Wed, the 1st–15th vs
+// the 1st–15th — rather than comparing a piece against a whole.
+const COMPARE_MODES = [
+  ['prev', 'Previous period'],
+  ['week', 'Same days last week'],
+  ['month', 'Previous month'],
+  ['none', 'No comparison'],
+];
+
+/** Same day-of-month one month earlier, clamped to that month's length. */
+function monthBack(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const idx = y * 12 + (m - 1) - 1;
+  const ny = Math.floor(idx / 12), nm = (idx % 12) + 1;
+  const last = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  return `${ny}-${String(nm).padStart(2, '0')}-${String(Math.min(d, last)).padStart(2, '0')}`;
+}
+
+/**
+ * The comparison window for a mode, or null for "no comparison". Length-matched
+ * to the current range in every case, so nothing partial is ever weighed
+ * against something whole. The label names the comparison in plain words.
+ */
+function compare(from, to, mode) {
+  if (mode === 'none') return null;
+  const span = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
+  if (mode === 'week') return { from: addDays(from, -7), to: addDays(to, -7), label: 'the same days last week' };
+  // A month back, but the SAME number of days — a 31-day month must not be
+  // measured against a 28-day February, which would invent ~11% of "movement"
+  // out of the calendar. Anchored to the same day a month earlier, then run for
+  // the current window's length, so 1st–15th compares to 1st–15th.
+  if (mode === 'month') { const f = monthBack(from); return { from: f, to: addDays(f, span - 1), label: 'the previous month' }; }
+  return { from: addDays(from, -span), to: addDays(from, -1), label: 'the previous period' };
+}
+
+// Invoice rows carrying the vendor, for the vendor-movement and cost-driver
+// sections. Vendor id is TEXT holding "1"/"1.0", so the join casts to REAL —
+// the same fix the rest of the app uses.
+const invoiceVendorRows = db.prepare(`SELECT i.vendor_id AS vendor_id, COALESCE(v.name,'Unknown vendor') AS name,
+  COALESCE(i.amount_cents,0) AS cents, i.invoice_date AS date, i.category AS category, i.id AS id
+  FROM m_invoices i LEFT JOIN m_vendors v ON CAST(v.id AS REAL) = CAST(i.vendor_id AS REAL)
+  WHERE i.invoice_date >= ? AND i.invoice_date <= ?`);
+const expenseRows = db.prepare(`SELECT COALESCE(amount_cents,0) AS cents, category, spent_on AS date
+  FROM m_expenses WHERE spent_on >= ? AND spent_on <= ?`);
+
+/** Invoice spend grouped by its own category (every category, not just COGS). */
+function spendByCategory(from, to) {
+  const m = new Map();
+  for (const i of invoiceRows.all(from, to)) m.set(i.category || 'Other', (m.get(i.category || 'Other') || 0) + i.cents);
+  return m;
+}
+
+/** Invoice spend grouped by vendor, largest first, with count and biggest bill. */
+function spendByVendor(from, to) {
+  const m = new Map();
+  for (const r of invoiceVendorRows.all(from, to)) {
+    const k = String(r.vendor_id || '0');
+    const e = m.get(k) || { id: r.vendor_id, name: r.name, cents: 0, count: 0, max: 0 };
+    e.cents += r.cents; e.count++; if (r.cents > e.max) e.max = r.cents;
+    m.set(k, e);
+  }
+  return [...m.values()].sort((a, b) => b.cents - a.cents);
+}
+
+module.exports = {
+  shifts, period, previous, days, invoiceWeeks, range, RANGES, COGS_CATEGORIES, isDate,
+  compare, COMPARE_MODES, monthBack, spendByCategory, spendByVendor,
+  invoiceVendorRows, expenseRows,
+};

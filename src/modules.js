@@ -63,7 +63,8 @@ const MODULES = [
       { name: 'name', label: 'What was bought', type: 'text', required: true, list: true },
       { name: 'where_bought', label: 'Where', type: 'text', list: true },
       { name: 'category', label: 'Category', type: 'select', list: true,
-        options: ['Groceries', 'Ice', 'Supplies', 'Cleaning', 'Repairs', 'Equipment',
+        options: ['Groceries', 'Ice', 'Supplies', 'Packaging', 'Cleaning', 'Repairs', 'Equipment',
+          'Utilities', 'Rent', 'Software', 'Insurance', 'Marketing', 'Recruiting', 'Professional',
           'Kitchen', 'Bar', 'Office', 'Travel', 'Other'] },
       { name: 'amount_cents', label: 'Amount', type: 'money', required: true, list: true },
       { name: 'paid_by', label: 'Who paid', type: 'text', required: true, list: true },
@@ -111,7 +112,9 @@ const MODULES = [
       { name: 'subtotal_cents', label: 'Subtotal (before tax)', type: 'money' },
       { name: 'tax_cents', label: 'Tax', type: 'money' },
       { name: 'category', label: 'Category', type: 'select', list: true,
-        options: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Supplies', 'Repairs', 'Services', 'Other'] },
+        options: ['Food', 'Coffee', 'Beverage', 'Alcohol', 'Packaging', 'Supplies', 'Cleaning',
+          'Repairs', 'Equipment', 'Utilities', 'Rent', 'Software', 'Insurance', 'Marketing',
+          'Recruiting', 'Professional', 'Services', 'Other'] },
       { name: 'status', label: 'Status', type: 'select', list: true, options: ['Unpaid', 'Paid'] },
       // How it was paid. Declared here as well as on the upload drawer so the
       // generic edit form can correct it later — the two have to agree or a
