@@ -692,6 +692,59 @@ test('somebody who left mid-period is still in the grid', async () => {
   assert.match(html, /· left/, 'marked as gone rather than silently dropped');
 });
 
+// ===========================================================================
+// The controls around the grid.
+// ===========================================================================
+
+test('a custom range shows hours and refuses to imply a decision', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const before = db.prepare('SELECT COUNT(*) n FROM timesheets').get().n;
+
+  // Deliberately starts ON a real period start and ends early — the dangerous
+  // shape, because a sheet is keyed on its start date alone, so a careless read
+  // would load the whole fortnight's record and hang it above one week.
+  const html = await text(`/payroll/timesheets?from=${per.start}&to=${plusDays(per.start, 6)}`);
+  assert.match(html, /Custom/, 'it says what it is');
+  assert.match(html, /Hours only/, 'and why the rest is missing');
+  assert.doesNotMatch(html, /ready to approve/i, 'no bulk approval on a span nobody can sign');
+  assert.doesNotMatch(html, /Approve all/, 'none at all');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM timesheets').get().n, before,
+    'and reading a range writes no record');
+});
+
+test('a real period is not mistaken for a custom range', async () => {
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?from=${per.start}&to=${per.end}`);
+  assert.doesNotMatch(html, /Hours only/, 'the exact span of a period is that period');
+});
+
+test('the status filter narrows the grid and says how far', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const all = await text(`/payroll/timesheets?p=${per.start}`);
+  const rows = (all.match(/class="tsg-row"/g) || []).length;
+  assert.ok(rows > 0, 'there are rows to narrow');
+
+  const none = await text(`/payroll/timesheets?p=${per.start}&st=approved`);
+  assert.match(none, /shown|No timesheets|nothing/i, 'a filter that matches nobody says so');
+  assert.strictEqual((none.match(/class="tsg-row"/g) || []).length, 0, 'and shows no rows');
+});
+
+test('the employee walker carries the period and stops at the ends', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  const ids = [...html.matchAll(/\/payroll\/timesheets\/(\d+)\?p=/g)].map((m) => Number(m[1]));
+  const uniq = [...new Set(ids)];
+  if (uniq.length < 2) return;                       // needs two people to walk between
+
+  const first = await text(`/payroll/timesheets/${uniq[0]}?p=${per.start}`);
+  assert.match(first, /class="tsw-at">1 of/, 'it says where you are');
+  assert.match(first, new RegExp(`/payroll/timesheets/\\d+\\?p=${per.start}`), 'and the arrow keeps the period');
+  assert.match(first, /tsx-arrow off/, 'the arrow at the end is disabled, not wrapped');
+});
+
 test('the migration stamps existing hours as legacy and leaves never-set rows to the clock', () => {
   // The rule that protects the owner's live database: anything already carrying
   // a figure was typed, pushed by the POS or imported, and none of them can be

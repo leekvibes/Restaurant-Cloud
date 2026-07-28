@@ -4303,3 +4303,15 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .tcl-r > .tcl-el::before { content: 'Elapsed'; }
   .tcl-r > .tcl-pay::before { content: 'Payable so far'; }
 }
+
+/* Walking the roster inside one period, so payroll review is a run through the
+   list rather than a trip back to the grid between every person. */
+.tsw-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.tsw { display: flex; align-items: center; gap: 8px; }
+.tsw-at { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.fs-chk { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0 8px; }
+.fs-chk input { width: 16px; height: 16px; }
+.tsm-filtered { font-family: var(--mono); font-size: 11.5px; color: var(--muted); align-self: center; }
+.tsm-range-f { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.tsm-range-f input { font-family: var(--mono); font-size: 12px; padding: 6px 8px;
+  border: 1px solid var(--field-border); background: var(--surface); color: var(--ink); }

@@ -15085,7 +15085,18 @@ app.get('/payroll/timesheets', (req, res) => {
   if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   const periods = recentPeriods(8);
   const pIdx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
-  const period = periods[pIdx] || currentPeriod();
+  // A custom range is READ-ONLY, and never reaches sheetFor.
+  //
+  // A timesheet is keyed on its start date alone, so a range that happens to
+  // begin on a real period start would silently load that whole fortnight's
+  // record — its status, its approvals, its transfers — and hang them above one
+  // week's numbers. There is no version of that which is not a lie. So a custom
+  // range shows hours and nothing that implies a decision was made about them.
+  const askedRange = MX.isDate(req.query.from) && MX.isDate(req.query.to);
+  const rangeSpan = askedRange ? clampRange(req.query.from, req.query.to) : null;
+  const custom = askedRange && !isPeriod(rangeSpan.from, rangeSpan.to);
+  const period = custom ? { start: rangeSpan.from, end: rangeSpan.to }
+    : (askedRange ? { start: rangeSpan.from, end: rangeSpan.to } : (periods[pIdx] || currentPeriod()));
   const otRule = OT.rule();
   // Everyone who belongs in this period, not merely everyone still employed.
   // Deactivating somebody does not un-work their shifts. A person who submitted
@@ -15107,9 +15118,18 @@ app.get('/payroll/timesheets', (req, res) => {
     const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
     const corrections = TC.q.pendingForEmployee.all(emp.id).filter((c) => entries.some((e) => e.id === c.time_entry_id));
     if (!entries.length && !corrections.length) return null;
-    const sheet = TC.sheetFor(emp.id, period);
+    // Not even a READ of sheetFor on a custom range: it looks a sheet up by
+    // start date, so a range beginning on a real period start would return that
+    // whole fortnight's record and speak for numbers it does not describe.
+    const sheet = custom
+      ? { id: null, employee_id: emp.id, period_start: period.start, period_end: period.end,
+        status: 'open', virtual: true }
+      : TC.sheetFor(emp.id, period);
     const issues = TC.issuesFor(entries, corrections);
-    const totals = TC.totalsFor(entries, { otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
+    // Overtime is per workweek and its bucketing is only correct across a real
+    // period; over an arbitrary span it dumps every day past the seventh into
+    // one bucket and reports the overflow as OT. Suppressed rather than wrong.
+    const totals = TC.totalsFor(entries, custom ? {} : { otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
       otThreshold: otRule.threshold, periodStart: period.start });
     // What the shifts in this period are carrying for them, for comparison.
     const ent = enteredBy.get(emp.id) || { h: 0, overridden: 0 };
@@ -15124,6 +15144,18 @@ app.get('/payroll/timesheets', (req, res) => {
       blockers: TC.approvalBlockers(sheet, issues),
       transferState: TC.transferStateOf(sheet, approval, transfer, entries) };
   }).filter(Boolean);
+
+  // --- the status filter ----------------------------------------------------
+  // One control rather than a permanent row of them: most of the time nothing
+  // is filtered, and a bank of always-visible chips is a bank of things to read
+  // before you can read the page.
+  const fSheet = String(req.query.st || '');
+  const fTrans = String(req.query.tr || '');
+  const fIssues = req.query.iss === '1';
+  const filtered = rows.filter((r) => (!fSheet || r.status === fSheet)
+    && (!fTrans || r.transferState === fTrans)
+    && (!fIssues || r.issues.some((i) => i.blocking) || r.blockers.length));
+  const filtering = !!(fSheet || fTrans || fIssues);
 
   // --- hours by day ---------------------------------------------------------
   // The spine is every date in the period, built here rather than read from the
@@ -15205,11 +15237,43 @@ app.get('/payroll/timesheets', (req, res) => {
         <span class="tsm-range">${esc(labelFor(period))}</span>
         <a class="tsx-arrow${pIdx > 0 ? '' : ' off'}"
            href="${pIdx > 0 ? `/payroll/timesheets?p=${periods[pIdx - 1].start}` : '#'}" aria-label="Later period">→</a>
-        <a class="tsx-today${pIdx === 0 ? ' on' : ''}" href="/payroll/timesheets">Today</a>
+        <a class="tsx-today${pIdx === 0 && !custom ? ' on' : ''}" href="/payroll/timesheets">Today</a>
+        ${custom ? '<span class="bs-fchip on">Custom</span>' : ''}
+        <form class="tsm-range-f" method="get" action="/payroll/timesheets">
+          <input type="date" name="from" value="${esc(period.start)}" aria-label="From">
+          <span>to</span>
+          <input type="date" name="to" value="${esc(period.end)}" aria-label="To">
+          <button class="bs-btn-sm" type="submit">Show</button>
+        </form>
       </nav>
-      <p class="tsm-counts">${submitted} submitted · ${notIn} not submitted · ${attention} need attention · ${approved} approved</p>
+      ${custom ? `<p class="tsm-counts">Hours only. A range that is not a pay period has no timesheet to sign,
+        so status, approval and payroll are not shown — and overtime is left out because its weeks are only
+        right across a real period. <a class="bs-act" href="/payroll/timesheets">Back to the current period</a>.</p>`
+        : `<p class="tsm-counts">${submitted} submitted · ${notIn} not submitted · ${attention} need attention · ${approved} approved</p>`}
 
-      ${rows.length ? `<section class="bs-panel tsg-panel">
+      <form class="tcm-filters" method="get" action="/payroll/timesheets">
+        <input type="hidden" name="p" value="${esc(period.start)}">
+        <details class="fsheet"${filtering ? ' open' : ''}><summary class="fs-btn">Filter${filtering
+          ? ` <b class="pa-badge">${filtered.length}</b>` : ''} <span class="fs-caret">▾</span></summary>
+          <div class="fs-pop"><div class="fs-body">
+            <div class="fs-h">Where the timesheet stands</div>
+            <select name="st" class="bs-sel"><option value="">Any</option>
+              ${Object.entries(TC.SHEET_LABEL).map(([k, v]) =>
+                `<option value="${esc(k)}"${k === fSheet ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select>
+            <div class="fs-h">Payroll</div>
+            <select name="tr" class="bs-sel"><option value="">Any</option>
+              ${Object.entries(TC.TRANSFER_LABEL).map(([k, v]) =>
+                `<option value="${esc(k)}"${k === fTrans ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select>
+            <label class="fs-chk"><input type="checkbox" name="iss" value="1"${fIssues ? ' checked' : ''}>
+              <span>Unresolved issues only</span></label>
+            <button class="bs-btn-sm" type="submit">Apply</button>
+            ${filtering ? `<a class="bs-btn-sm" href="/payroll/timesheets?p=${period.start}">Clear</a>` : ''}
+          </div></div>
+        </details>
+        ${filtering ? `<span class="tsm-filtered">${filtered.length} of ${rows.length} shown</span>` : ''}
+      </form>
+
+      ${filtered.length ? `<section class="bs-panel tsg-panel">
         <div class="bs-sec-h"><span class="bs-kicker">Hours by day</span></div>
         <div class="tsg-scroll">
           <div class="tsg" style="--tsg-cols:${days.length}">
@@ -15219,7 +15283,7 @@ app.get('/payroll/timesheets', (req, res) => {
                 ><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></span>`).join('')}
               <span class="tsg-tot tsg-corner">Period</span>
             </div>
-            ${rows.map(gridRow).join('')}
+            ${filtered.map(gridRow).join('')}
           </div>
         </div>
         <div class="tsg-pop" hidden></div>
@@ -15262,7 +15326,7 @@ app.get('/payroll/timesheets', (req, res) => {
         <p class="tsg-foot">${esc(TC.dayLabel(days[0]).replace(/^\w+, /, ''))} – ${esc(TC.dayLabel(days[days.length - 1]).replace(/^\w+, /, ''))}
           · scroll sideways for the rest of the period · tap a day for what is behind it</p>
       </section>` : ''}
-      ${canWrite() && readyToApprove ? `<form method="post" action="/payroll/timesheets/approve-all" class="ts-bulk">
+      ${canWrite() && readyToApprove && !custom ? `<form method="post" action="/payroll/timesheets/approve-all" class="ts-bulk">
         <input type="hidden" name="period" value="${esc(period.start)}">
         <div class="ts-bulk-t"><b>${readyToApprove} timesheet${readyToApprove === 1 ? '' : 's'} ready to approve</b>
           <i>${esc(rows.filter((r) => r.status === 'submitted' && !r.blockers.length).map((r) => r.emp.name).join(', ').slice(0, 90))}
@@ -15271,8 +15335,8 @@ app.get('/payroll/timesheets', (req, res) => {
         <button class="bs-btn" type="submit">Approve the clean ones</button>
       </form>` : ''}
 
-      ${rows.length ? `<div class="bs-lrows tcm-rows">
-        ${rows.map((r) => `<a class="bs-lr tcm-row ts-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
+      ${filtered.length ? `<div class="bs-lrows tcm-rows">
+        ${filtered.map((r) => `<a class="bs-lr tcm-row ts-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
           <span class="tcm-who"><b>${esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
           <span class="tcm-times">${r.sheet.submitted_at ? `sent ${esc(TC.stamp(r.sheet.submitted_at))}` : 'not submitted'}${
@@ -15307,10 +15371,38 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   const clocked = TC.toHours(v.totals.payable) || 0;
   const variance = Math.round((clocked - Number(entered)) * 100) / 100;
 
+  // Who sits either side of them in this period, so a payroll review is a run
+  // through the list rather than a trip back to the grid between every person.
+  // Built from the same union the ledger uses, in the same order, or "next"
+  // would mean something different on the two screens.
+  const siblingIds = [...new Set([
+    ...q.allEmployees.all().map((x) => x.id),
+    ...TC.gridPeople(period.start, period.end),
+    ...TC.sheetPeople(period.start),
+  ])];
+  const siblings = siblingIds.map((id) => q.employee.get(id)).filter(Boolean)
+    .filter((x) => TC.q.entriesInPeriod.all(x.id, period.start, period.end).length
+      || TC.sheetPeople(period.start).includes(x.id))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const at = siblings.findIndex((x) => x.id === emp.id);
+  const stepTo = (x) => (x ? `/payroll/timesheets/${x.id}?p=${period.start}` : '#');
+  const prev = at > 0 ? siblings[at - 1] : null;
+  const next = at > -1 && at < siblings.length - 1 ? siblings[at + 1] : null;
+  const walker = siblings.length > 1 ? `<nav class="tsw">
+      <a class="tsx-arrow${prev ? '' : ' off'}" href="${stepTo(prev)}"
+         ${prev ? `title="${esc(prev.name)}"` : 'aria-disabled="true"'}>←</a>
+      <span class="tsw-at">${at > -1 ? at + 1 : '—'} of ${siblings.length}</span>
+      <a class="tsx-arrow${next ? '' : ' off'}" href="${stepTo(next)}"
+         ${next ? `title="${esc(next.name)}"` : 'aria-disabled="true"'}>→</a>
+    </nav>` : '';
+
   res.send(layout(`${emp.name} · timesheet`, `
     ${flash(req)}
     <div class="bs-page tcm-page inc-detail">
-      <a class="bs-back" href="/payroll/timesheets?p=${period.start}">← Timesheets</a>
+      <div class="tsw-top">
+        <a class="bs-back" href="/payroll/timesheets?p=${period.start}">← Timesheets</a>
+        ${walker}
+      </div>
       <div class="inc-rec-head">
         <div class="inc-rec-title">
           <div class="inc-rec-line">${esc(labelFor(period))}</div>
