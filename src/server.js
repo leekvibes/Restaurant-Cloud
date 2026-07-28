@@ -7752,12 +7752,11 @@ function captureOverlay(kinds, args) {
           <div class="cap-doc-bar">
             <span id="cap-docname">—</span>
             <span class="cap-tool">
-              <button type="button" id="cap-zoom">+ zoom</button>
-              <button type="button" id="cap-rotate">⟳ rotate</button>
+              <button type="button" id="cap-zoom" aria-label="Open the original full size">↗ open</button>
               <button type="button" id="cap-replace">⇪ replace</button>
             </span>
           </div>
-          <div class="cap-sheet" id="cap-sheet"><span class="cap-none">No document — typed in by hand</span></div>
+          <div class="cap-sheet" id="cap-sheet"><span class="cap-none">No file · typed in</span></div>
         </div>
         <div class="cap-fields">
           <div id="cap-reading" hidden>
@@ -8021,7 +8020,7 @@ function captureScript(kinds) {
     var files = [];
     var touched = {};          // fields the person has edited — never overwritten
     var lastFocus = null;
-    var rot = 0, zoom = 1;
+    var docUrl = null;         // the uploaded file's object URL, for "open full size"
 
     var READ_URL = { invoice: '/c/invoices/read', expense: '/c/expenses/read', document: '/c/documents/read' };
     var READING = { invoice: 'Reading the invoice…', expense: 'Reading the receipt…', document: 'Reading the document…' };
@@ -8055,13 +8054,16 @@ function captureScript(kinds) {
       if (lastFocus && lastFocus.focus) lastFocus.focus();
     }
     function reset() {
-      files = []; touched = {}; rot = 0; zoom = 1;
+      files = []; touched = {}; docUrl = null;
       el('cap-step-drop').hidden = false;
       el('cap-step-work').hidden = true;
       el('cap-save').hidden = true;
       el('cap-pill').hidden = true;
       el('cap-title').textContent = 'Add ' + (KINDS.length > 1 ? 'an invoice or expense' : KINDS[0] === 'document' ? 'a document' : 'an expense');
-      el('cap-sheet').innerHTML = '<span class="cap-none">No document — typed in by hand</span>';
+      var sheet0 = el('cap-sheet');
+      sheet0.innerHTML = '<span class="cap-none">No file · typed in</span>';
+      sheet0.classList.remove('has-doc');
+      sheet0.onclick = null;
       el('cap-docname').textContent = '—';
       wrap.querySelectorAll('.cap-panel').forEach(function (f) { f.reset(); f.hidden = true; });
       wrap.querySelectorAll('.cap-mark').forEach(function (m) { m.textContent = ''; });
@@ -8185,18 +8187,22 @@ function captureScript(kinds) {
     function preview(list) {
       var f = list[0];
       el('cap-docname').textContent = f.name + (list.length > 1 ? ' · 1 of ' + list.length : '');
-      var url = URL.createObjectURL(f);
-      el('cap-sheet').innerHTML = /pdf/i.test(f.type)
-        ? '<iframe src="' + url + '" title="The document"></iframe>'
-        : '<img alt="The document you uploaded" src="' + url + '">';
-      applyView();
+      docUrl = URL.createObjectURL(f);
+      var sheet = el('cap-sheet');
+      sheet.innerHTML = /pdf/i.test(f.type)
+        ? '<iframe src="' + docUrl + '" title="The document"></iframe>'
+        : '<img alt="The document you uploaded" src="' + docUrl + '">';
+      // The thumbnail is deliberately small — the fields it filled are the point
+      // of the screen. "Open" (and a tap on the thumbnail) shows the original
+      // full size, the same as "open the scan" on the invoice panel.
+      sheet.classList.add('has-doc');
+      sheet.title = 'Open the original full size';
+      sheet.onclick = openFull;
     }
-    function applyView() {
-      var m = el('cap-sheet').querySelector('img');
-      if (m) m.style.transform = 'rotate(' + rot + 'deg) scale(' + zoom + ')';
-    }
-    el('cap-rotate').addEventListener('click', function () { rot = (rot + 90) % 360; applyView(); });
-    el('cap-zoom').addEventListener('click', function () { zoom = zoom >= 2 ? 1 : zoom + 0.5; applyView(); });
+    // A real button, so it works from the keyboard too — a click-only thumbnail
+    // would leave keyboard and screen-reader users no way to see the file.
+    function openFull() { if (docUrl) window.open(docUrl, '_blank'); }
+    el('cap-zoom').addEventListener('click', openFull);
 
     // --- what the reader found ----------------------------------------------
     // Typing wins. A field somebody has edited is theirs, and a read that

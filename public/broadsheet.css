@@ -3038,20 +3038,35 @@ body.cap-open { overflow: hidden; }
 .cap-drop-b { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 .cap-fmt { font-family: var(--mono); font-size: 11.5px; color: var(--faint); margin-top: 16px; }
 
-/* --- steps two and three: document left, answers right ------------------- */
-.cap-work { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.cap-doc { background: var(--docback, #e7dcc7); padding: 16px; min-height: 420px; }
-.cap-doc-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px;
+/* --- steps two and three: a compact receipt strip, then the answers -------
+   The scan used to fill a 340px-tall column beside the fields. On a phone that
+   column overflowed sideways (a tall receipt in an overflow:auto box) and the
+   fields were squeezed to nothing. Now the receipt is a small thumbnail — the
+   size of the one on the invoice list — with its name and the zoom/rotate/
+   replace tools beside it, and the fields run full width underneath. One
+   column, small photo, nothing to scroll sideways to. Tap the thumbnail to
+   open the original full size, the same affordance the invoice panel gives. */
+.cap-work { display: block; max-width: 880px; margin: 0 auto; }
+.cap-doc { display: flex; align-items: stretch; gap: 16px; padding: 16px 20px;
+  background: var(--docback, #e7dcc7); border-bottom: 1px solid var(--rule); }
+.cap-doc-bar { order: 2; flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
+  justify-content: center; align-items: flex-start; gap: 10px; margin: 0;
   font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-.cap-doc-bar .cap-tool { margin-left: auto; display: flex; gap: 14px; }
+.cap-doc-bar #cap-docname { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-doc-bar .cap-tool { margin: 0; display: flex; gap: 16px; flex-wrap: wrap; }
 .cap-doc-bar a, .cap-doc-bar button { font-family: var(--mono); font-size: 11px; color: var(--accent);
   background: none; border: 0; padding: 0; cursor: pointer; letter-spacing: .06em; text-transform: uppercase; }
-.cap-sheet { background: #fff; border: 1px solid #cabfa4; min-height: 340px; display: grid; place-items: center;
-  overflow: auto; }
-.cap-sheet img, .cap-sheet embed, .cap-sheet iframe { width: 100%; height: 100%; min-height: 340px; border: 0; display: block; }
-.cap-sheet .cap-none { color: var(--faint); font-family: var(--mono); font-size: 12px; padding: 40px; }
+.cap-sheet { order: 1; flex: none; width: 96px; height: 118px; box-sizing: border-box;
+  background: #fff; border: 1px solid #cabfa4; display: grid; place-items: center; overflow: hidden; }
+.cap-sheet.has-doc { cursor: zoom-in; }
+.cap-sheet img, .cap-sheet embed, .cap-sheet iframe { width: 100%; height: 100%; object-fit: cover; border: 0; display: block; }
+/* A PDF renders in an iframe that would otherwise swallow the tap; let it pass
+   through so the whole thumbnail opens the original. */
+.cap-sheet embed, .cap-sheet iframe { pointer-events: none; }
+.cap-sheet .cap-none { color: var(--faint); font-family: var(--mono); font-size: 9.5px; line-height: 1.4;
+  padding: 8px; text-align: center; }
 
-.cap-fields { padding: 18px 20px 22px; }
+.cap-fields { padding: 18px 20px 22px; min-width: 0; }
 .cap-kick { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
   color: var(--muted); border-bottom: 1px solid var(--ink); padding-bottom: 6px; margin-bottom: 14px;
   display: flex; align-items: baseline; gap: 8px; }
@@ -3152,9 +3167,19 @@ body.cap-open { overflow: hidden; }
   .cap-wrap { padding: 0; }
   .cap-card { max-height: 100vh; height: 100vh; width: 100%; }
   .cap-card { max-height: 100dvh; height: 100dvh; }   /* iOS: fit the visible area, not behind the URL bar */
-  .cap-work { grid-template-columns: 1fr; }
-  .cap-doc { min-height: 220px; }
-  .cap-sheet, .cap-sheet img, .cap-sheet embed, .cap-sheet iframe { min-height: 200px; }
+  /* The header packed Back + a long "read by ZWIN" pill + Cancel + Save onto
+     one row, which pushed Save clean off the right edge. Let it wrap: Back and
+     the actions share the top line, the title drops to its own line, and the
+     pill is dropped entirely — the per-field "✓ read" marks already say the
+     fields were read, so the banner was only taking room Save needed. */
+  .cap-head { flex-wrap: wrap; row-gap: 8px; gap: 10px; padding: 12px 16px; }
+  .cap-head .cap-back { order: 1; }
+  .cap-head .cap-acts { order: 2; margin-left: auto; gap: 10px; }
+  .cap-head .cap-title { order: 3; flex-basis: 100%; font-size: 19px; line-height: 1.15; }
+  .cap-head .cap-pill { display: none; }
+  .cap-work { max-width: none; }
+  .cap-doc { padding: 12px 16px; gap: 14px; }
+  .cap-sheet { width: 56px; height: 72px; }
   .cap-grid { grid-template-columns: 1fr; }
   .cap-f { border-right: 0; }
   .cap-title { font-size: 20px; }
