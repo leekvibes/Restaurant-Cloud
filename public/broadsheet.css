@@ -3972,3 +3972,92 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .an-push { flex-direction: column; align-items: stretch; gap: 12px; }
   .an-push-acts { justify-content: flex-end; }
 }
+
+/* ===========================================================================
+   TIME CLOCK — the manager's end. Reuses the incident detail furniture
+   (.inc-cols/.inc-facts/.inc-timeline) so a record reads the same everywhere.
+   ======================================================================== */
+.tcm-live { padding: 4px 0 2px; }
+.tcm-live-r { display: grid; grid-template-columns: 10px minmax(0,auto) minmax(0,1fr) auto; gap: 10px;
+  align-items: center; padding: 11px 2px; border-bottom: 1px dotted var(--rule-dotted);
+  text-decoration: none; color: inherit; }
+.tcm-live-r:last-child { border-bottom: 0; }
+.tcm-live-r:hover { background: var(--row-hover); }
+.tcm-live-r b { font-size: 14px; color: var(--headline); white-space: nowrap; }
+.tcm-live-r > span:nth-child(3) { font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcm-live-r i { font-style: normal; font-family: var(--mono); font-size: 11.5px; color: var(--body); white-space: nowrap; }
+.tcm-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); }
+.tcm-dot.on { background: var(--positive); }
+.tcm-dot.brk { background: var(--warning); }
+.tcm-dot.warn { background: var(--danger); }
+
+.tcm-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 16px 0 12px; }
+.tcm-filters label { display: flex; flex-direction: column; gap: 4px; }
+.tcm-filters label span { font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); }
+.tcm-filters input, .tcm-filters select { padding: 8px 10px; font: inherit; border-radius: 0;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
+
+.tcm-rows { border-top: 1px solid var(--rule); }
+.tcm-row { display: grid; grid-template-columns: 78px minmax(0,1fr) minmax(0,1.1fr) 72px auto 16px;
+  gap: 12px; align-items: center; padding: 12px 4px; border-bottom: 1px dotted var(--rule-dotted);
+  text-decoration: none; color: inherit; }
+.tcm-row:hover { background: var(--row-hover); }
+.tcm-when b, .tcm-who b { display: block; font-size: 13.5px; color: var(--headline); }
+.tcm-when i, .tcm-who i { font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.tcm-times { font-family: var(--mono); font-size: 12.5px; color: var(--body); }
+.tcm-times i { font-style: normal; color: var(--faint); margin-left: 6px; }
+.tcm-open { color: var(--warning); }
+.tcm-hrs { font-family: var(--mono); font-size: 13px; color: var(--headline); text-align: right; }
+.tcm-tags { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.tcm-tag { font-style: normal; font-family: var(--mono); font-size: 10px; padding: 1px 6px;
+  border: 1px solid var(--rule); color: var(--muted); }
+.tcm-tag.on { color: var(--positive); border-color: var(--positive); }
+.tcm-tag.ed { color: var(--accent); border-color: var(--accent); }
+.tcm-tag.warn { color: var(--warning); border-color: var(--warning); }
+
+.tcm-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; margin-top: 12px; }
+.tcm-form .tcm-f { display: grid; gap: 5px; min-width: 0; }
+.tcm-form .tcm-f.wide { grid-column: 1 / -1; }
+.tcm-f > span { font-family: var(--mono); font-size: 10px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--muted); }
+.tcm-f > span i { font-style: normal; color: var(--danger); letter-spacing: 0; text-transform: none; }
+.tcm-f input, .tcm-f select { width: 100%; box-sizing: border-box; padding: 9px 11px; font: inherit;
+  border-radius: 0; background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
+.tcm-form .bs-btn, .tcm-form .bs-btn-sm { grid-column: 1 / -1; justify-self: start; }
+.tcm-sub { border-top: 1px solid var(--rule); padding-top: 14px; }
+
+.tcm-brks { display: grid; gap: 8px; }
+.tcm-brk { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 9px 0; border-bottom: 1px dotted var(--rule-dotted); font-family: var(--mono); font-size: 12.5px; color: var(--body); }
+.tcm-brk form { display: flex; gap: 8px; align-items: center; }
+.tcm-inline { padding: 6px 9px; font: inherit; font-size: 12px; border-radius: 0;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule); width: 150px; }
+.tcm-corr { padding: 11px 0; border-bottom: 1px dotted var(--rule-dotted); font-size: 13.5px; color: var(--body); }
+.tcm-corr i { color: var(--muted); }
+.tcm-corr-m { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
+.tcm-decide { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.tcm-decide input { flex: 1 1 160px; padding: 6px 9px; font: inherit; font-size: 12px; border-radius: 0;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
+.tcm-var-up { color: var(--warning); }
+.tcm-var-dn { color: var(--accent); }
+.inc-st-active { color: var(--positive); border-color: var(--positive); }
+.inc-st-on-break { color: var(--warning); border-color: var(--warning); }
+.inc-st-complete { color: var(--muted); border-color: var(--rule); }
+.inc-st-missing-punch { color: var(--danger); border-color: var(--danger); }
+.inc-st-correction-pending { color: var(--warning); border-color: var(--warning); }
+
+@media (max-width: 760px) {
+  .tcm-row { grid-template-columns: 1fr auto; gap: 4px 10px; }
+  .tcm-when { grid-row: 1; grid-column: 1; display: flex; gap: 8px; align-items: baseline; }
+  .tcm-when b, .tcm-when i { display: inline; }
+  .tcm-who { grid-row: 2; grid-column: 1; }
+  .tcm-times { grid-row: 3; grid-column: 1 / -1; }
+  .tcm-hrs { grid-row: 1; grid-column: 2; }
+  .tcm-tags { grid-row: 2; grid-column: 2; }
+  .tcm-row .bs-lr-go { display: none; }
+  .tcm-form { grid-template-columns: 1fr; }
+  .tcm-live-r { grid-template-columns: 10px 1fr auto; }
+  .tcm-live-r > span:nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
+}

@@ -32,7 +32,7 @@ const AREAS = [
   // The portal's manager side sits with Staff: it is about the people, and
   // anybody trusted with the roster is the person who posts the board and
   // answers what the floor has run out of.
-  { key: 'staff',     label: 'Staff',           paths: ['/employees', '/staff-portal'] },
+  { key: 'staff',     label: 'Staff',           paths: ['/employees', '/staff-portal', '/timeclock'] },
   { key: 'settings',  label: 'Settings & users', paths: ['/settings', '/policy', '/positions', '/email', '/users'] },
 ];
 
@@ -87,6 +87,7 @@ const SECTIONS = [
     ['/c/notes', 'notes', 'Decisions log', '#7c3aed', 'trackers'],
   ] },
   { title: 'Team', links: [
+    ['/timeclock', 'shifts', 'Time clock', '#b45309', 'staff'],
     ['/staff-portal', 'tips', 'Portal', '#1a7a3c', 'staff'],
     ['/employees', 'staff', 'Staff', '#2563eb', 'staff'],
     ['/positions', 'positions', 'Positions', '#7c3aed', 'settings'],

@@ -17,6 +17,7 @@ const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertT
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const OT = require('./overtime');
+const TC = require('./timeclock');
 const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const MX = require('./metrics');
@@ -3301,6 +3302,21 @@ app.get('/portal', (req, res) => {
   // them — a staff member could not find it when it read like a section title.
   // It is the first row, and it carries a tag so it still stands out: the one
   // thing on this screen with something to do tonight.
+  // On the clock or off it — the one thing a person checks before anything
+  // else, so it sits above everything with the live state on it.
+  const tcActive = TC.q.active.get(emp.id);
+  // Its own class, not pt-row-do: that one means "you owe the office something
+  // tonight" and belongs to the submission row alone. Clocking in is a state,
+  // not a debt.
+  const clockRow = `
+    <a class="pt-row pt-row-clock" href="/portal/clock">
+      <span class="pt-ico">◷</span>
+      <span class="pt-row-t"><b>Time clock</b>
+        <i class="pt-tag${tcActive ? '' : ' done'}">${tcActive ? (tcActive.status === 'on_break' ? 'On break' : 'On the clock') : 'Clocked out'}</i>
+        <span>${tcActive ? `In at ${esc(TC.clockFace(tcActive.clock_in_at))} — tap to clock out` : 'Clock in when you start your shift'}</span></span>
+      <span class="pt-chev">›</span>
+    </a>`;
+
   const submitRow = !shape.tips ? '' : `
     <a class="pt-row pt-row-do" href="/portal/tips">
       <span class="pt-ico">✎</span>
@@ -3322,6 +3338,7 @@ app.get('/portal', (req, res) => {
 
       <div class="pt-kick"><span>What you can do</span></div>
       <div class="pt-rows">
+        ${clockRow}
         ${submitRow}
         ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
           hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
@@ -3768,6 +3785,403 @@ app.post('/portal/stock', (req, res) => {
   }
 
   res.redirect('/portal?sent=' + n);
+});
+
+// ---------------------------------------------------------------------------
+// TIME CLOCK — the employee end.
+//
+// Four screens in one route, because a time clock has exactly one honest
+// question at a time: are you on, are you on a break, are you off, or is
+// something missing. The state comes from the server, never from what the
+// phone thinks happened.
+//
+// Two rules the approved plan pinned:
+//   The PIN is the signature on a punch. Clocking OUT and asking for a
+//   correction both re-ask for it; clocking in does not, because they just
+//   typed it to get here.
+//   An expired browser session never closes an entry. The cookie lapsing is a
+//   browser fact, not a work fact — the shift stays open until somebody punches
+//   out. While a person is on the clock the cookie is refreshed on every load,
+//   so a normal shift never logs them out mid-service.
+// ---------------------------------------------------------------------------
+const pinOk = (emp, pin) => String(emp.pin || '') !== '' && String(emp.pin) === String(pin || '').trim();
+
+/**
+ * The positions a person may CLOCK IN as — strictly the ones assigned to them.
+ *
+ * Deliberately not rolesForEmployee(), which falls back to every position when
+ * somebody has none so a new hire can still hand in their tips on night one.
+ * That fallback is right for tips and wrong here: a punch names the job you are
+ * being paid for, so "nothing assigned" has to stop at the door rather than
+ * quietly offer the whole list.
+ */
+function clockPositionsFor(emp) {
+  const extra = q.rolesForEmployee.all(emp.id).map((r) => r.role);
+  const live = new Set(allRoles());
+  return [...new Set([emp.role, ...extra])].filter((r) => r && r !== 'manager' && live.has(r));
+}
+
+/** Somebody has been on the clock impossibly long — almost certainly a missed punch. */
+const STALE_HOURS = 16;
+const looksStale = (entry) => entry && TC.elapsedMinutes(entry) > STALE_HOURS * 60;
+
+function clockPage(req, who, opts = {}) {
+  const { emp } = who;
+  const cfg = TC.settings();
+  const active = TC.q.active.get(emp.id) || null;
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const allowed = clockPositionsFor(emp);
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+
+  const todays = TC.q.forEmployeeSince.all(emp.id, today).filter((e) => !TC.isOpen(e));
+  const err = opts.err ? `<div class="tc-err">${esc(opts.err)}</div>` : '';
+  const ok = opts.ok ? `<div class="tc-ok">${esc(opts.ok)}</div>` : '';
+
+  // --- the one card that matters ------------------------------------------
+  let card = '';
+  if (active && active.status === 'on_break') {
+    const br = TC.q.openBreak.get(active.id);
+    card = `
+      <div class="tc-state tc-break">
+        <div class="tc-kick">On break</div>
+        <div class="tc-live" data-since="${TC.toDate(br.start_at).getTime()}">0m</div>
+        <div class="tc-meta">Break started ${esc(TC.clockFace(br.start_at))} · ${esc(br.paid ? 'paid' : 'unpaid')}</div>
+        <form method="post" action="/portal/clock/break/end" class="tc-actions">
+          <button class="tc-btn tc-btn-go" type="submit" data-once>End break</button>
+        </form>
+      </div>`;
+  } else if (active) {
+    const stale = looksStale(active);
+    card = `
+      <div class="tc-state tc-on${stale ? ' tc-stale' : ''}">
+        <div class="tc-kick">${stale ? 'Still clocked in' : 'On the clock'}</div>
+        <div class="tc-live" data-since="${TC.toDate(active.clock_in_at).getTime()}">0m</div>
+        <div class="tc-meta">In at ${esc(TC.clockFace(active.clock_in_at))}
+          · ${esc(posName(active.position))}${active.daypart ? ' · ' + esc(dp(active.daypart)) : ''}</div>
+        ${stale ? `<p class="tc-note">That is over ${STALE_HOURS} hours. If you forgot to clock out,
+          clock out now and then ask your manager to fix the time.</p>` : ''}
+        <div class="tc-actions">
+          <form method="post" action="/portal/clock/break/start">
+            <button class="tc-btn tc-btn-quiet" type="submit" data-once>Start break</button>
+          </form>
+          <button class="tc-btn tc-btn-go" type="button" onclick="document.getElementById('tc-outsheet').hidden=false">Clock out</button>
+        </div>
+      </div>
+      <div class="tc-sheet" id="tc-outsheet" hidden>
+        <form method="post" action="/portal/clock/out">
+          <div class="tc-kick">Enter your PIN to clock out</div>
+          <input class="tc-pin" name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required>
+          <div class="tc-actions">
+            <button class="tc-btn tc-btn-quiet" type="button" onclick="document.getElementById('tc-outsheet').hidden=true">Cancel</button>
+            <button class="tc-btn tc-btn-go" type="submit" data-once>Clock out</button>
+          </div>
+        </form>
+      </div>`;
+  } else if (!allowed.length) {
+    card = `<div class="tc-state tc-blocked">
+      <div class="tc-kick">Cannot clock in</div>
+      <p class="tc-big">No position is assigned to you.</p>
+      <p class="tc-note">Ask your manager to add your position in Staff, then you can clock in.</p>
+    </div>`;
+  } else {
+    const one = allowed.length === 1;
+    const suggested = TC.suggestDaypart(TC.nowUtc(), cfg.dinnerFrom);
+    card = `
+      <div class="tc-state tc-off">
+        <div class="tc-kick">${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+        <p class="tc-big">You are clocked out.</p>
+        <form method="post" action="/portal/clock/in" class="tc-form">
+          ${one
+            ? `<input type="hidden" name="position" value="${esc(allowed[0])}">
+               <div class="tc-fixed"><span>Position</span><b>${esc(posName(allowed[0]))}</b></div>`
+            : `<label class="tc-field"><span>Which position are you working?</span>
+                 <select name="position" required>
+                   <option value="">Choose…</option>
+                   ${allowed.map((r) => `<option value="${esc(r)}">${esc(posName(r))}</option>`).join('')}
+                 </select></label>`}
+          <label class="tc-field"><span>Which service?</span>
+            <select name="daypart" required>
+              ${DAYPARTS.map((d) => `<option value="${d}"${d === suggested ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+            </select></label>
+          <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Clock in</button>
+        </form>
+      </div>`;
+  }
+
+  const entryRow = (e) => {
+    const bt = TC.breakTotals(e.id);
+    return `<a class="tc-row" href="/portal/clock/entry/${e.id}">
+      <span class="tc-row-l"><b>${esc(TC.clockFace(e.clock_in_at))} – ${esc(TC.clockFace(e.clock_out_at))}</b>
+        <i>${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}${e.edited ? ' · edited' : ''}</i></span>
+      <span class="tc-row-r"><b>${esc(TC.hm(e.payable_minutes))}</b>${bt.unpaid ? `<i>−${TC.hm(bt.unpaid)} break</i>` : ''}</span>
+    </a>`;
+  };
+
+  return portalPage('Time clock', `
+    ${portalSub('<a class="pt-back2" href="/portal">Portal</a>')}
+    <div class="pt-body tc-body">
+      ${err}${ok}
+      ${card}
+      ${todays.length ? `<div class="tc-kick tc-kick-sec">Earlier today</div>
+        <div class="tc-rows">${todays.map(entryRow).join('')}</div>` : ''}
+      <a class="tc-more" href="/portal/clock/history">Your time history ›</a>
+    </div>
+    <script>
+      // Live counters are display only — the server owns the real elapsed time.
+      (function () {
+        function tick() {
+          document.querySelectorAll('.tc-live[data-since]').forEach(function (el) {
+            var m = Math.max(0, Math.round((Date.now() - Number(el.getAttribute('data-since'))) / 60000));
+            el.textContent = m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + 'm';
+          });
+        }
+        tick(); setInterval(tick, 15000);
+        // A punch must not fire twice because a thumb bounced.
+        document.querySelectorAll('[data-once]').forEach(function (b) {
+          b.addEventListener('click', function () {
+            if (b.dataset.done) return;
+            b.dataset.done = '1';
+            setTimeout(function () { b.disabled = true; b.textContent = 'Working…'; }, 0);
+          });
+        });
+      })();
+    </script>`);
+}
+
+app.get('/portal/clock', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  // On the clock? Keep the session alive so a shift never signs itself out.
+  if (TC.q.active.get(who.emp.id)) setPortalCookie(req, res, who.emp.id);
+  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok }));
+});
+
+app.post('/portal/clock/in', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const back = (p) => res.redirect('/portal/clock?' + p);
+  const allowed = clockPositionsFor(emp);
+  if (!allowed.length) return back('err=' + encodeURIComponent('No position is assigned to you — ask your manager.'));
+  if (TC.q.active.get(emp.id)) return back('ok=' + encodeURIComponent('You are already clocked in.'));
+
+  const position = allowed.includes(req.body.position) ? req.body.position : (allowed.length === 1 ? allowed[0] : null);
+  if (!position) return back('err=' + encodeURIComponent('Choose the position you are working.'));
+  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  if (!daypart) return back('err=' + encodeURIComponent('Choose which service you are working.'));
+
+  const cfg = TC.settings();
+  const at = TC.nowUtc();                       // the server's clock, not the phone's
+  const bdate = TC.businessDateOf(at, cfg.cutoffHour);
+
+  try {
+    db.transaction(() => {
+      // The SAME find-or-create every other path uses. One shift per
+      // (date, daypart), so a clock-in and a tip submission meet on one row.
+      s.getOrIgnore.run(bdate, daypart);
+      const sh = s.findShift.get(bdate, daypart);
+      policyForShift(sh);
+      // Links the person to the service without touching hours — the manager's
+      // number stays the manager's number.
+      w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
+      const info = TC.q.openEntry.run({
+        employee_id: emp.id, shift_id: sh.id, business_date: bdate, daypart, position,
+        clock_in_at: at, source: 'portal', created_by: emp.name,
+      });
+      TC.logEvent('entry', info.lastInsertRowid, 'clock_in', emp.name, { after: at });
+    })();
+  } catch (e) {
+    // The partial unique index is the real guard against a double tap.
+    if (/UNIQUE/i.test(e.message)) return back('ok=' + encodeURIComponent('You are already clocked in.'));
+    throw e;
+  }
+  setPortalCookie(req, res, emp.id);
+  back('ok=' + encodeURIComponent('Clocked in.'));
+});
+
+app.post('/portal/clock/break/start', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const back = (p) => res.redirect('/portal/clock?' + p);
+  const active = TC.q.active.get(emp.id);
+  if (!active) return back('err=' + encodeURIComponent('You are not clocked in.'));
+  if (active.status === 'on_break') return back('ok=' + encodeURIComponent('You are already on a break.'));
+  const paid = TC.settings().breaksPaid ? 1 : 0;
+  try {
+    db.transaction(() => {
+      const info = TC.q.startBreak.run({ time_entry_id: active.id, employee_id: emp.id,
+        start_at: TC.nowUtc(), paid, source: 'employee', created_by: emp.name });
+      TC.q.setStatus.run({ id: active.id, status: 'on_break', by: emp.name });
+      TC.logEvent('break', info.lastInsertRowid, 'break_start', emp.name);
+    })();
+  } catch (e) {
+    if (/UNIQUE/i.test(e.message)) return back('ok=' + encodeURIComponent('You are already on a break.'));
+    throw e;
+  }
+  setPortalCookie(req, res, emp.id);
+  back('ok=' + encodeURIComponent('Break started.'));
+});
+
+app.post('/portal/clock/break/end', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const back = (p) => res.redirect('/portal/clock?' + p);
+  const active = TC.q.active.get(emp.id);
+  if (!active) return back('err=' + encodeURIComponent('You are not clocked in.'));
+  const br = TC.q.openBreak.get(active.id);
+  if (!br) { TC.q.setStatus.run({ id: active.id, status: 'active', by: emp.name }); return back('ok=' + encodeURIComponent('No break was running.')); }
+  const end = TC.nowUtc();
+  db.transaction(() => {
+    TC.q.endBreak.run({ id: br.id, end_at: end, raw: TC.minutesBetween(br.start_at, end) });
+    TC.q.setStatus.run({ id: active.id, status: 'active', by: emp.name });
+    TC.logEvent('break', br.id, 'break_end', emp.name, { after: end });
+  })();
+  setPortalCookie(req, res, emp.id);
+  back('ok=' + encodeURIComponent('Break ended.'));
+});
+
+app.post('/portal/clock/out', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const back = (p) => res.redirect('/portal/clock?' + p);
+  const active = TC.q.active.get(emp.id);
+  if (!active) return back('ok=' + encodeURIComponent('You are already clocked out.'));
+  // The PIN is the signature on the punch.
+  if (!pinOk(emp, req.body.pin)) return back('err=' + encodeURIComponent('That PIN did not match. Nothing was changed.'));
+  if (active.status === 'on_break' || TC.q.openBreak.get(active.id)) {
+    return back('err=' + encodeURIComponent('End your break first, then clock out.'));
+  }
+  const out = TC.nowUtc();
+  db.transaction(() => {
+    const raw = TC.minutesBetween(active.clock_in_at, out);
+    const bt = TC.breakTotals(active.id);
+    TC.q.closeEntry.run({ id: active.id, out, raw, paid: bt.paid, unpaid: bt.unpaid,
+      payable: Math.max(0, raw - bt.unpaid), by: emp.name });
+    TC.logEvent('entry', active.id, 'clock_out', emp.name, { after: out });
+  })();
+  back('ok=' + encodeURIComponent('Clocked out. Check the time and tell your manager if anything looks wrong.'));
+});
+
+/** One finished entry, and the place to ask for a fix. */
+app.get('/portal/clock/entry/:id', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e || e.employee_id !== emp.id) return res.redirect('/portal/clock');
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  const brs = TC.q.breaks.all(e.id);
+  const corr = TC.q.correctionsFor.all(e.id);
+  const fact = (k, v) => `<div class="tc-fact"><span>${k}</span><b>${v}</b></div>`;
+
+  res.send(portalPage('Your time', `
+    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
+      <div class="tc-facts">
+        ${fact('Clocked in', esc(TC.clockFace(e.clock_in_at)))}
+        ${fact('Clocked out', e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>still open</i>')}
+        ${fact('Position', esc(posName(e.position)))}
+        ${fact('Service', e.daypart ? esc(dp(e.daypart)) : '—')}
+        ${fact('Breaks', brs.length ? brs.map((b) => `${TC.clockFace(b.start_at)}–${b.end_at ? TC.clockFace(b.end_at) : '…'}`).join(', ') : 'none')}
+        ${fact('Payable', esc(TC.hm(e.payable_minutes)))}
+        ${e.edited ? fact('Edited', 'yes — see the history with your manager') : ''}
+      </div>
+      ${corr.length ? `<div class="tc-kick tc-kick-sec">Your requests</div>
+        <div class="tc-rows">${corr.map((c) => `<div class="tc-row"><span class="tc-row-l"><b>${esc(c.kind.replace(/_/g, ' '))}</b><i>${esc(c.reason)}</i></span>
+          <span class="tc-row-r"><b>${esc(c.decision)}</b></span></div>`).join('')}</div>` : ''}
+
+      <div class="tc-kick tc-kick-sec">Something wrong?</div>
+      <form method="post" action="/portal/clock/fix" class="tc-form tc-fix">
+        <input type="hidden" name="entry_id" value="${e.id}">
+        <label class="tc-field"><span>What needs fixing?</span>
+          <select name="kind" required>
+            <option value="missing_in">I forgot to clock in</option>
+            <option value="missing_out">I forgot to clock out</option>
+            <option value="wrong_in">Clock-in time is wrong</option>
+            <option value="wrong_out">Clock-out time is wrong</option>
+            <option value="break">A break is wrong</option>
+            <option value="missing_break">A break is missing</option>
+            <option value="wrong_position">Wrong position</option>
+            <option value="wrong_service">Wrong service</option>
+            <option value="other">Something else</option>
+          </select></label>
+        <label class="tc-field"><span>What should it say?</span>
+          <input name="proposed" placeholder="e.g. I clocked out at 10:15pm" maxlength="200"></label>
+        <label class="tc-field"><span>What happened? <i>required</i></span>
+          <textarea name="reason" rows="3" required maxlength="500" placeholder="A sentence is plenty."></textarea></label>
+        <label class="tc-field"><span>Your PIN</span>
+          <input class="tc-pin" name="pin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••" required></label>
+        <button class="tc-btn tc-btn-go" type="submit" data-once>Send to your manager</button>
+      </form>
+      <p class="tc-note">Your original times are never changed by a request — your manager sees both and decides.</p>
+    </div>
+    <script>document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});</script>`));
+});
+
+app.post('/portal/clock/fix', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const e = TC.q.byId.get(Number(req.body.entry_id));
+  if (!e || e.employee_id !== emp.id) return res.redirect('/portal/clock');
+  const back = (p) => res.redirect(`/portal/clock/entry/${e.id}?` + p);
+  if (!pinOk(emp, req.body.pin)) return back('err=1');
+  const reason = String(req.body.reason || '').trim().slice(0, 500);
+  if (!reason) return back('err=1');
+  const KINDS = ['missing_in', 'missing_out', 'wrong_in', 'wrong_out', 'break', 'missing_break', 'wrong_position', 'wrong_service', 'other'];
+  const kind = KINDS.includes(req.body.kind) ? req.body.kind : 'other';
+  db.transaction(() => {
+    const info = TC.q.addCorrection.run({
+      time_entry_id: e.id, employee_id: emp.id, kind, field: null,
+      original_value: `${e.clock_in_at} → ${e.clock_out_at || 'open'}`,
+      proposed_value: String(req.body.proposed || '').trim().slice(0, 200) || null,
+      reason, requested_by: emp.name,
+    });
+    TC.q.setStatus.run({ id: e.id, status: 'correction_pending', by: emp.name });
+    TC.logEvent('correction', info.lastInsertRowid, 'requested', emp.name, { reason });
+  })();
+  try {
+    PORTAL.adminNotify('timeclock', `${emp.name} asked to fix a time entry`,
+      { body: reason.slice(0, 140), href: `/timeclock/${e.id}` });
+  } catch { /* the request is saved regardless */ }
+  res.redirect('/portal/clock?ok=' + encodeURIComponent('Sent to your manager.'));
+});
+
+/** Today, this week, and what came before. */
+app.get('/portal/clock/history', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const cfg = TC.settings();
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const weekStart = addDays(today, -((new Date(today + 'T00:00:00').getDay() + 6) % 7));
+  const rows = TC.q.forEmployeeSince.all(emp.id, addDays(today, -60));
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+
+  const sum = (list) => list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+  const group = (label, list) => (!list.length ? '' : `
+    <div class="tc-kick tc-kick-sec">${label}<b>${TC.hm(sum(list))}</b></div>
+    <div class="tc-rows">${list.map((e) => `
+      <a class="tc-row" href="/portal/clock/entry/${e.id}">
+        <span class="tc-row-l"><b>${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</b>
+          <i>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : 'open'} · ${esc(posName(e.position))}</i></span>
+        <span class="tc-row-r"><b>${TC.isOpen(e) ? 'running' : esc(TC.hm(e.payable_minutes))}</b>${e.edited ? '<i>edited</i>' : ''}</span>
+      </a>`).join('')}</div>`);
+
+  res.send(portalPage('Your time history', `
+    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">Your time</h1>
+      ${group('Today', rows.filter((e) => e.business_date === today))}
+      ${group('This week', rows.filter((e) => e.business_date >= weekStart && e.business_date < today))}
+      ${group('Earlier', rows.filter((e) => e.business_date < weekStart))}
+      ${rows.length ? '' : '<p class="tc-note">Nothing recorded yet.</p>'}
+      <p class="tc-note">Hours shown are what the clock recorded. Your pay is worked out by your manager at the end of the period.</p>
+    </div>`));
 });
 
 /** The composer. Builds the list client-side and posts it in one field. */
@@ -12798,6 +13212,446 @@ app.get('/search', (req, res) => {
   res.json(out);
 });
 
+
+// ===========================================================================
+// TIME CLOCK — the manager's end: who is on now, and what needs fixing.
+//
+// Raw time entries, not a timesheet. Approval and payroll transfer are later
+// phases on purpose — this page exists so a missed punch can be corrected the
+// next morning while anybody still remembers what happened.
+//
+// Every manual change here demands a reason and writes an audit row naming the
+// editor who made it. Nothing is corrected quietly.
+// ===========================================================================
+const tcActor = (req) => (req.user && req.user.name) || 'Owner';
+const tcPosName = (slug) => (positions.bySlug.get(slug) || {}).name || slug || '—';
+const tcEmpName = (id) => (q.employee.get(id) || {}).name || `#${id}`;
+
+/** Guard: mutations are for editors. Viewers read. */
+function tcCanEdit(req, res) {
+  if (canWrite()) return true;
+  res.status(403).send(layout('Not allowed',
+    '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
+  return false;
+}
+
+app.get('/timeclock', (req, res) => {
+  if (!navAllowed('/timeclock')) {
+    return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  }
+  const cfg = TC.settings();
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const from = MX.isDate(req.query.from) ? req.query.from : addDays(today, -13);
+  const to = MX.isDate(req.query.to) ? req.query.to : today;
+  const fEmp = String(req.query.emp || '');
+  const fSvc = DAYPARTS.includes(req.query.svc) ? req.query.svc : '';
+  const fPos = String(req.query.pos || '');
+  const fStatus = String(req.query.st || '');
+
+  const all = TC.q.inRange.all(from, to);
+  const onNow = TC.q.allActive.all();
+  const pending = TC.q.pendingCorrections.all();
+  const stale = onNow.filter(looksStale);
+
+  const rows = all.filter((e) => (!fEmp || String(e.employee_id) === fEmp)
+    && (!fSvc || e.daypart === fSvc) && (!fPos || e.position === fPos)
+    && (!fStatus || e.status === fStatus));
+
+  const staff = q.allEmployees.all();
+  const usedPos = [...new Set(all.map((e) => e.position).filter(Boolean))];
+  const qs = (over) => {
+    const p = new URLSearchParams({ from, to, ...(fEmp && { emp: fEmp }), ...(fSvc && { svc: fSvc }),
+      ...(fPos && { pos: fPos }), ...(fStatus && { st: fStatus }), ...over });
+    return p.toString();
+  };
+
+  const statCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+
+  const totalMin = rows.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+  const strip = `<section class="bs-panel bs-strip">
+    ${statCell('On the clock', String(onNow.length), onNow.filter((e) => e.status === 'on_break').length
+      ? `${onNow.filter((e) => e.status === 'on_break').length} on break` : 'right now', onNow.length ? '' : 'ok')}
+    ${statCell('Needs a look', String(stale.length + pending.length),
+      stale.length ? `${stale.length} still open past ${STALE_HOURS}h` : pending.length ? `${pending.length} correction${pending.length === 1 ? '' : 's'}` : 'nothing waiting',
+      (stale.length + pending.length) ? 'warn' : 'ok')}
+    ${statCell('Entries', String(rows.length), `${esc(from)} → ${esc(to)}`)}
+    ${statCell('Clocked hours', TC.hm(totalMin), 'not sent to payroll', '')}
+  </section>`;
+
+  const liveRow = (e) => `<a class="tcm-live-r" href="/timeclock/${e.id}">
+    <span class="tcm-dot ${e.status === 'on_break' ? 'brk' : 'on'}"></span>
+    <b>${esc(tcEmpName(e.employee_id))}</b>
+    <span>${esc(tcPosName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''} · in ${esc(TC.clockFace(e.clock_in_at))}</span>
+    <i>${e.status === 'on_break' ? 'on break' : TC.hm(TC.elapsedMinutes(e))}${looksStale(e) ? ' · check' : ''}</i>
+  </a>`;
+
+  const row = (e) => {
+    const bt = TC.breakTotals(e.id);
+    return `<a class="bs-lr tcm-row" href="/timeclock/${e.id}">
+      <span class="tcm-when"><b>${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))}</b>
+        <i>${e.daypart ? esc(dp(e.daypart)) : '—'}</i></span>
+      <span class="tcm-who"><b>${esc(tcEmpName(e.employee_id))}</b><i>${esc(tcPosName(e.position))}</i></span>
+      <span class="tcm-times">${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i class="tcm-open">open</i>'}
+        ${bt.unpaid || bt.paid ? `<i>${TC.hm(bt.unpaid + bt.paid)} break</i>` : ''}</span>
+      <span class="tcm-hrs">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</span>
+      <span class="tcm-tags">${TC.isOpen(e) ? '<i class="tcm-tag on">on</i>' : ''}${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}
+        ${e.status === 'correction_pending' ? '<i class="tcm-tag warn">fix asked</i>' : ''}</span>
+      <span class="bs-lr-go">›</span>
+    </a>`;
+  };
+
+  res.send(layout('Time clock', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Time clock</h1>
+          <p class="bs-subline">Who is on now, and which punches need fixing. Clocked hours sit alongside the hours you enter on a shift — they are not sent to payroll.</p>
+        </div>
+      </div>
+      ${strip}
+
+      ${onNow.length ? `<section class="bs-panel tcm-live">
+        <div class="bs-sec-h"><span class="bs-kicker">On the clock</span></div>
+        ${onNow.map(liveRow).join('')}
+      </section>` : ''}
+
+      ${pending.length ? `<section class="bs-panel tcm-pending">
+        <div class="bs-sec-h"><span class="bs-kicker">Correction requests</span></div>
+        ${pending.map((c) => `<a class="tcm-live-r" href="/timeclock/${c.time_entry_id}">
+          <span class="tcm-dot warn"></span><b>${esc(tcEmpName(c.employee_id))}</b>
+          <span>${esc(c.kind.replace(/_/g, ' '))} — ${esc(String(c.reason).slice(0, 80))}</span><i>open</i></a>`).join('')}
+      </section>` : ''}
+
+      <form class="tcm-filters" method="get" action="/timeclock">
+        <label><span>From</span><input type="date" name="from" value="${esc(from)}"></label>
+        <label><span>To</span><input type="date" name="to" value="${esc(to)}"></label>
+        <details class="fsheet"><summary class="fs-btn">Filter <span class="fs-caret">▾</span></summary>
+          <div class="fs-body"><div class="fs-scrim" aria-hidden="true"></div><div class="fs-panel">
+            <div class="fs-h">Employee</div>
+            <select name="emp" class="bs-sel"><option value="">Anyone</option>
+              ${staff.map((s2) => `<option value="${s2.id}"${String(s2.id) === fEmp ? ' selected' : ''}>${esc(s2.name)}</option>`).join('')}</select>
+            <div class="fs-h">Service</div>
+            <select name="svc" class="bs-sel"><option value="">Any</option>
+              ${DAYPARTS.map((d) => `<option value="${d}"${d === fSvc ? ' selected' : ''}>${dp(d)}</option>`).join('')}</select>
+            <div class="fs-h">Position</div>
+            <select name="pos" class="bs-sel"><option value="">Any</option>
+              ${usedPos.map((p) => `<option value="${esc(p)}"${p === fPos ? ' selected' : ''}>${esc(tcPosName(p))}</option>`).join('')}</select>
+            <div class="fs-h">Status</div>
+            <select name="st" class="bs-sel"><option value="">Any</option>
+              ${TC.STATUSES.map((s3) => `<option value="${s3}"${s3 === fStatus ? ' selected' : ''}>${s3.replace(/_/g, ' ')}</option>`).join('')}</select>
+            <button class="bs-btn-sm" type="submit">Apply</button>
+          </div></div>
+        </details>
+        <button class="bs-btn-sm" type="submit">Go</button>
+        ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
+      </form>
+
+      ${rows.length ? `<div class="bs-lrows tcm-rows">${rows.map(row).join('')}</div>`
+        : '<div class="bs-blank"><b>No time entries</b><span>Nothing in this range yet.</span></div>'}
+    </div>`));
+});
+
+/** Add a punch a manager is entering on someone's behalf. */
+app.get('/timeclock/new', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const cfg = TC.settings();
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const staff = q.allEmployees.all().filter((e) => e.active);
+  res.send(layout('Add a punch', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <h1 class="bs-headline">Add a punch</h1>
+      <p class="bs-subline">For somebody who forgot to clock in or out. It is recorded as entered by you, with your reason.</p>
+      <form method="post" action="/timeclock/new" class="tcm-form">
+        <label class="tcm-f"><span>Employee</span>
+          <select name="employee_id" required><option value="">Choose…</option>
+            ${staff.map((s2) => `<option value="${s2.id}">${esc(s2.name)}</option>`).join('')}</select></label>
+        <label class="tcm-f"><span>Service</span>
+          <select name="daypart" required>${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}</select></label>
+        <label class="tcm-f"><span>Position</span>
+          <select name="position" required><option value="">Choose…</option>
+            ${allRoles().map((r) => `<option value="${esc(r)}">${esc(tcPosName(r))}</option>`).join('')}</select></label>
+        <label class="tcm-f"><span>Clocked in</span><input type="datetime-local" name="in" required></label>
+        <label class="tcm-f"><span>Clocked out <i>leave blank to leave them on the clock</i></span><input type="datetime-local" name="out"></label>
+        <label class="tcm-f wide"><span>Reason <i>required</i></span>
+          <input name="reason" required maxlength="300" placeholder="e.g. Forgot to clock in — confirmed start time with the closing manager."></label>
+        <button class="bs-btn" type="submit">Add the punch</button>
+      </form>
+    </div>`));
+});
+
+app.post('/timeclock/new', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const emp = q.employee.get(Number(req.body.employee_id));
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  const inAt = TC.localInputToUtc(req.body.in);
+  const outAt = TC.localInputToUtc(req.body.out);
+  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  const position = allRoles().includes(req.body.position) ? req.body.position : null;
+  if (!emp || !reason || !inAt || !daypart || !position) {
+    return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Fill in the employee, times, position and a reason.'));
+  }
+  if (outAt && outAt <= inAt) return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Clock-out must be after clock-in.'));
+  const cfg = TC.settings();
+  const bdate = TC.businessDateOf(inAt, cfg.cutoffHour);
+  const actor = tcActor(req);
+  let id;
+  try {
+    db.transaction(() => {
+      s.getOrIgnore.run(bdate, daypart);
+      const sh = s.findShift.get(bdate, daypart);
+      policyForShift(sh);
+      w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
+      if (outAt) {
+        const raw = TC.minutesBetween(inAt, outAt);
+        id = TC.q.addClosedEntry.run({ employee_id: emp.id, shift_id: sh.id, business_date: bdate,
+          daypart, position, clock_in_at: inAt, clock_out_at: outAt, source: 'manager',
+          raw, payable: raw, created_by: actor }).lastInsertRowid;
+      } else {
+        id = TC.q.openEntry.run({ employee_id: emp.id, shift_id: sh.id, business_date: bdate,
+          daypart, position, clock_in_at: inAt, source: 'manager', created_by: actor }).lastInsertRowid;
+      }
+      TC.logEvent('entry', id, 'manager_added', actor, { after: `${inAt} → ${outAt || 'open'}`, reason });
+    })();
+  } catch (e) {
+    if (/UNIQUE/i.test(e.message)) {
+      return res.redirect('/timeclock/new?msg=' + encodeURIComponent('That person is already on the clock — close their open entry first.'));
+    }
+    throw e;
+  }
+  res.redirect(`/timeclock/${id}?msg=` + encodeURIComponent('Punch added.'));
+});
+
+app.get('/timeclock/:id', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such time entry</h1><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
+  const brs = TC.q.breaks.all(e.id);
+  const events = TC.q.eventsFor.all('entry', e.id);
+  const corrs = TC.q.correctionsFor.all(e.id);
+  const bt = TC.breakTotals(e.id);
+  const sh = e.shift_id ? s.shiftById.get(e.shift_id) : null;
+  // The manager's number for the same person on the same shift, so the two can
+  // be read side by side. Neither overwrites the other.
+  const workRow = sh ? db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, e.employee_id) : null;
+  const clocked = TC.toHours(e.payable_minutes);
+  const entered = workRow ? Number(workRow.hours) : null;
+  const variance = (clocked != null && entered != null) ? Math.round((clocked - entered) * 100) / 100 : null;
+  const w2 = canWrite();
+  const fact = (k, v) => `<div class="inc-fact"><span>${k}</span><b>${v}</b></div>`;
+
+  res.send(layout(`Time entry #${e.id}`, `
+    ${flash(req)}
+    <div class="bs-page tcm-page inc-detail">
+      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <div class="inc-rec-head">
+        <div class="inc-rec-title">
+          <div class="inc-rec-line">${esc(tcEmpName(e.employee_id))} · ${esc(tcPosName(e.position))}</div>
+          <h1 class="bs-headline">${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
+          <p class="bs-subline">${e.daypart ? esc(dp(e.daypart)) : 'No service'} · entry #${e.id}${sh ? ` · <a class="bs-act" href="/shifts/${sh.id}">open the shift →</a>` : ''}</p>
+        </div>
+        <div class="inc-rec-status">
+          <span class="inc-st inc-st-${esc(e.status.replace(/_/g, '-'))}">${esc(e.status.replace(/_/g, ' '))}</span>
+          ${e.edited ? '<span class="tcm-tag ed">edited</span>' : ''}
+        </div>
+      </div>
+
+      <div class="inc-cols">
+        <div class="inc-main">
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">The punches</span></div>
+            <div class="inc-facts">
+              ${fact('Clocked in', esc(TC.clockFace(e.clock_in_at)))}
+              ${fact('Clocked out', e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i class="inc-unset">still open</i>')}
+              ${fact('Raw', e.raw_minutes != null ? esc(TC.hm(e.raw_minutes)) : '—')}
+              ${fact('Break', `${esc(TC.hm(bt.unpaid))} unpaid${bt.paid ? ` · ${TC.hm(bt.paid)} paid` : ''}`)}
+              ${fact('Payable (clocked)', e.payable_minutes != null ? `<b>${esc(TC.hm(e.payable_minutes))}</b>` : '—')}
+              ${fact('Entered on the shift', entered != null ? `${entered}h` : '<i class="inc-unset">none yet</i>')}
+              ${variance != null && Math.abs(variance) >= 0.01
+                ? fact('Difference', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
+            </div>
+            <p class="perf-foot">Clocked hours never overwrite the hours entered on the shift — the manager's number stays the manager's number.</p>
+          </section>
+
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Breaks</span></div>
+            ${brs.length ? `<div class="tcm-brks">${brs.map((b) => `
+              <div class="tcm-brk">
+                <span>${esc(TC.clockFace(b.start_at))} – ${b.end_at ? esc(TC.clockFace(b.end_at)) : '<i>running</i>'}
+                  · ${b.paid ? 'paid' : 'unpaid'}${b.raw_minutes != null ? ` · ${TC.hm(b.raw_minutes)}` : ''}</span>
+                ${w2 ? `<form method="post" action="/timeclock/break/${b.id}/delete" style="margin:0">
+                  <input type="hidden" name="entry" value="${e.id}">
+                  <input name="reason" placeholder="reason" required maxlength="200" class="tcm-inline">
+                  <button class="bs-btn-sm" type="submit">Remove</button></form>` : ''}
+              </div>`).join('')}</div>` : '<p class="inc-hint">No breaks recorded.</p>'}
+            ${w2 ? `<form method="post" action="/timeclock/${e.id}/break" class="tcm-form tcm-sub">
+              <div class="inc-kick">Add a break</div>
+              <label class="tcm-f"><span>Start</span><input type="datetime-local" name="start" required></label>
+              <label class="tcm-f"><span>End</span><input type="datetime-local" name="end" required></label>
+              <label class="tcm-f"><span>Paid?</span><select name="paid"><option value="0">Unpaid</option><option value="1">Paid</option></select></label>
+              <label class="tcm-f wide"><span>Reason <i>required</i></span><input name="reason" required maxlength="300"></label>
+              <button class="bs-btn-sm" type="submit">Add break</button>
+            </form>` : ''}
+          </section>
+
+          ${w2 ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Correct this entry</span></div>
+            <form method="post" action="/timeclock/${e.id}/edit" class="tcm-form">
+              <label class="tcm-f"><span>Clocked in</span><input type="datetime-local" name="in" value="${esc(TC.utcToLocalInput(e.clock_in_at))}" required></label>
+              <label class="tcm-f"><span>Clocked out</span><input type="datetime-local" name="out" value="${esc(TC.utcToLocalInput(e.clock_out_at))}"></label>
+              <label class="tcm-f"><span>Position</span><select name="position">
+                ${allRoles().map((r) => `<option value="${esc(r)}"${r === e.position ? ' selected' : ''}>${esc(tcPosName(r))}</option>`).join('')}</select></label>
+              <label class="tcm-f"><span>Service</span><select name="daypart">
+                ${DAYPARTS.map((d) => `<option value="${d}"${d === e.daypart ? ' selected' : ''}>${dp(d)}</option>`).join('')}</select></label>
+              <label class="tcm-f wide"><span>Reason <i>required</i></span>
+                <input name="reason" required maxlength="300" placeholder="Why the change — this is kept forever."></label>
+              <button class="bs-btn" type="submit">Save the correction</button>
+            </form>
+          </section>` : ''}
+
+          ${corrs.length ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">What ${esc(tcEmpName(e.employee_id))} asked for</span></div>
+            ${corrs.map((c) => `<div class="tcm-corr">
+              <div><b>${esc(c.kind.replace(/_/g, ' '))}</b> — ${esc(c.reason)}
+                ${c.proposed_value ? `<i>“${esc(c.proposed_value)}”</i>` : ''}</div>
+              <div class="tcm-corr-m">${esc(c.requested_by)} · ${esc(TC.stamp(c.requested_at))} · <b>${esc(c.decision)}</b>${c.decision_note ? ' — ' + esc(c.decision_note) : ''}</div>
+              ${w2 && c.decision === 'pending' ? `<form method="post" action="/timeclock/correction/${c.id}" class="tcm-decide">
+                <input name="note" placeholder="note (optional)" maxlength="200">
+                <button class="bs-btn-sm" name="decision" value="approved" type="submit">Accept</button>
+                <button class="bs-btn-sm" name="decision" value="rejected" type="submit">Reject</button>
+              </form>` : ''}
+            </div>`).join('')}
+            <p class="inc-hint">Accepting a request records the decision — make the actual change above so the punch and the reason stay together.</p>
+          </section>` : ''}
+        </div>
+
+        <aside class="inc-side">
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">History</span></div>
+            <ul class="inc-timeline">
+              ${events.length ? events.map((ev) => `<li class="inc-ev"><span class="inc-ev-dot"></span>
+                <div class="inc-ev-body">
+                  <div class="inc-ev-head"><b>${esc(ev.actor || 'system')}</b><span>${esc(TC.stamp(ev.at))}</span></div>
+                  <div class="inc-ev-note">${esc(ev.action.replace(/_/g, ' '))}</div>
+                  ${ev.before_val ? `<div class="inc-ev-change">was ${esc(ev.before_val)}</div>` : ''}
+                  ${ev.after_val ? `<div class="inc-ev-change">now ${esc(ev.after_val)}</div>` : ''}
+                  ${ev.reason ? `<div class="inc-ev-change">“${esc(ev.reason)}”</div>` : ''}
+                </div></li>`).join('') : '<li class="inc-hint">Nothing yet.</li>'}
+            </ul>
+          </section>
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Record</span></div>
+            <div class="inc-facts">
+              ${fact('Source', esc(e.source))}
+              ${fact('Created', esc(TC.stamp(e.created_at)))}
+              ${fact('By', esc(e.created_by || '—'))}
+              ${e.updated_at ? fact('Last change', `${esc(TC.stamp(e.updated_at))} · ${esc(e.updated_by || '')}`) : ''}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>`));
+});
+
+app.post('/timeclock/:id/edit', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).end();
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  if (!reason) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A reason is required.'));
+  const inAt = TC.localInputToUtc(req.body.in) || e.clock_in_at;
+  const outAt = TC.localInputToUtc(req.body.out);
+  if (outAt && outAt <= inAt) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Clock-out must be after clock-in.'));
+  const position = allRoles().includes(req.body.position) ? req.body.position : e.position;
+  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : e.daypart;
+  const actor = tcActor(req);
+  const before = `${e.clock_in_at} → ${e.clock_out_at || 'open'} · ${e.position}${e.daypart ? '/' + e.daypart : ''}`;
+
+  db.transaction(() => {
+    TC.q.editEntry.run({ id: e.id, in: inAt, out: outAt, daypart, position, by: actor });
+    // The service or the day may have moved — re-link to the right shift, still
+    // through the one find-or-create every path uses.
+    const bdate = TC.businessDateOf(inAt, TC.settings().cutoffHour);
+    if (daypart) {
+      s.getOrIgnore.run(bdate, daypart);
+      const sh = s.findShift.get(bdate, daypart);
+      policyForShift(sh);
+      w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: e.employee_id, role: position });
+      TC.q.setShift.run({ id: e.id, shift_id: sh.id });
+      db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, e.id);
+    }
+    const fresh = TC.q.byId.get(e.id);
+    if (fresh.clock_out_at) {
+      TC.recompute(fresh);
+      if (fresh.status !== 'locked') TC.q.setStatus.run({ id: e.id, status: 'complete', by: actor });
+    }
+    TC.logEvent('entry', e.id, 'manager_edit', actor,
+      { before, after: `${inAt} → ${outAt || 'open'} · ${position}${daypart ? '/' + daypart : ''}`, reason });
+  })();
+  res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Correction saved.'));
+});
+
+app.post('/timeclock/:id/break', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).end();
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  const start = TC.localInputToUtc(req.body.start), end = TC.localInputToUtc(req.body.end);
+  if (!reason || !start || !end || end <= start) {
+    return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A break needs a start, a later end, and a reason.'));
+  }
+  const actor = tcActor(req);
+  db.transaction(() => {
+    const info = TC.q.startBreak.run({ time_entry_id: e.id, employee_id: e.employee_id,
+      start_at: start, paid: req.body.paid === '1' ? 1 : 0, source: 'manager', created_by: actor });
+    TC.q.endBreak.run({ id: info.lastInsertRowid, end_at: end, raw: TC.minutesBetween(start, end) });
+    TC.recompute(TC.q.byId.get(e.id));
+    TC.logEvent('break', info.lastInsertRowid, 'manager_added', actor, { after: `${start} → ${end}`, reason });
+    TC.logEvent('entry', e.id, 'break_added', actor, { after: `${start} → ${end}`, reason });
+  })();
+  res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Break added.'));
+});
+
+app.post('/timeclock/break/:bid/delete', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const b = TC.q.breakById.get(Number(req.params.bid));
+  if (!b) return res.status(404).end();
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  if (!reason) return res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('A reason is required.'));
+  const actor = tcActor(req);
+  db.transaction(() => {
+    TC.logEvent('entry', b.time_entry_id, 'break_removed', actor,
+      { before: `${b.start_at} → ${b.end_at || 'open'}`, reason });
+    TC.q.delBreak.run(b.id);
+    const e = TC.q.byId.get(b.time_entry_id);
+    if (e && e.clock_out_at) TC.recompute(e);
+    // Removing the break somebody was on leaves them working, not stranded.
+    if (e && e.status === 'on_break') TC.q.setStatus.run({ id: e.id, status: 'active', by: actor });
+  })();
+  res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('Break removed.'));
+});
+
+app.post('/timeclock/correction/:id', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const c = TC.q.correctionById.get(Number(req.params.id));
+  if (!c) return res.status(404).end();
+  const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
+  const actor = tcActor(req);
+  db.transaction(() => {
+    TC.q.decideCorrection.run({ id: c.id, decision, by: actor, note: String(req.body.note || '').trim().slice(0, 200) || null });
+    TC.logEvent('correction', c.id, decision, actor);
+    // The entry stops flagging itself once nothing is left pending.
+    const stillOpen = TC.q.correctionsFor.all(c.time_entry_id).some((x) => x.id !== c.id && x.decision === 'pending');
+    const e = TC.q.byId.get(c.time_entry_id);
+    if (e && !stillOpen && e.status === 'correction_pending') {
+      TC.q.setStatus.run({ id: e.id, status: e.clock_out_at ? 'complete' : 'active', by: actor });
+    }
+  })();
+  res.redirect(`/timeclock/${c.time_entry_id}?msg=` + encodeURIComponent(`Request ${decision}.`));
+});
 
 // ===========================================================================
 // INCIDENT LOG — a structured, append-only incident record.
