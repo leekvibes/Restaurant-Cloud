@@ -447,6 +447,12 @@ function applyCorrection(c, actor, opts = {}) {
       }
       note('clock_in_corrected', entry.clock_in_at, at);
       db.prepare('UPDATE time_entries SET clock_in_at = ? WHERE id = ?').run(at, entry.id);
+      // The trading day comes from the clock-in, so moving it can move the day —
+      // a punch corrected across the early-morning cutoff belongs to the other
+      // night, and to the other pay period. Re-file it exactly as the manager
+      // edit route does, or the same correction gives two different records
+      // depending on who made it.
+      if (opts.relink) opts.relink(q.byId.get(entry.id));
       return finish(`clock-in ${clockFace(entry.clock_in_at)} → ${clockFace(at)}`);
     }
     case 'missing_out':
@@ -532,8 +538,21 @@ q.entriesInPeriod = db.prepare(`SELECT * FROM time_entries WHERE employee_id = ?
 q.pendingForEmployee = db.prepare(`SELECT c.* FROM time_corrections c
   WHERE c.employee_id = ? AND c.decision = 'pending'`);
 
-/** The row for a person and period, created on first look. */
-function sheetFor(employeeId, period) {
+/**
+ * The row for a person and period.
+ *
+ * Reading does NOT create it: a view-only account opening a page must not write
+ * to the database, and an untouched period needs no row to be described. The
+ * row appears the moment something is actually recorded against it.
+ */
+function sheetFor(employeeId, period, opts = {}) {
+  const found = q.sheet.get(employeeId, period.start);
+  if (found) return found;
+  if (!opts.create) {
+    return { id: null, employee_id: employeeId, period_start: period.start, period_end: period.end,
+      status: 'open', submitted_at: null, submitted_note: null, submitted_totals: null,
+      returned_at: null, returned_by: null, returned_reason: null, resubmit_needed: 0, virtual: true };
+  }
   q.makeSheet.run({ employee_id: employeeId, period_start: period.start, period_end: period.end });
   return q.sheet.get(employeeId, period.start);
 }
@@ -576,12 +595,9 @@ function issuesFor(entries, corrections) {
     }
   }
   for (const c of corrections) {
-    if (c.decision === 'pending') {
-      add(true, `A correction is still waiting on your manager (${String(c.kind).replace(/_/g, ' ')})`, c.time_entry_id);
-    }
-    if (c.apply_error && c.decision === 'pending') {
-      add(true, `A correction could not be applied: ${c.apply_error}`, c.time_entry_id);
-    }
+    if (c.decision !== 'pending') continue;
+    if (c.apply_error) add(true, `A correction could not be applied: ${c.apply_error}`, c.time_entry_id);
+    else add(true, `A correction is still waiting on your manager (${String(c.kind).replace(/_/g, ' ')})`, c.time_entry_id);
   }
   return out;
 }

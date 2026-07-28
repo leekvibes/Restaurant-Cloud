@@ -4043,6 +4043,7 @@ app.post('/portal/clock/in', (req, res) => {
         clock_in_at: at, source: 'portal', created_by: emp.name,
       });
       TC.logEvent('entry', info.lastInsertRowid, 'clock_in', emp.name, { after: at });
+      tcTouchDates(emp.id, [bdate], emp.name, 'a new shift was clocked in');
     })();
   } catch (e) {
     // The partial unique index is the real guard against a double tap.
@@ -4115,6 +4116,7 @@ app.post('/portal/clock/out', (req, res) => {
     TC.q.closeEntry.run({ id: active.id, out, raw, paid: bt.paid, unpaid: bt.unpaid,
       payable: Math.max(0, raw - bt.unpaid), by: emp.name });
     TC.logEvent('entry', active.id, 'clock_out', emp.name, { after: out });
+    tcTouchDates(emp.id, [active.business_date], emp.name, 'a shift was clocked out');
   })();
   back('ok=' + encodeURIComponent('Clocked out. Check the time and tell your manager if anything looks wrong.'));
 });
@@ -4324,8 +4326,8 @@ const tsPeriodsFor = () => recentPeriods(8);
 const tsFindPeriod = (start) => tsPeriodsFor().find((p) => p.start === start) || currentPeriod();
 
 /** Everything one period needs, gathered once. */
-function tsView(emp, period) {
-  const sheet = TC.sheetFor(emp.id, period);
+function tsView(emp, period, opts = {}) {
+  const sheet = TC.sheetFor(emp.id, period, opts);
   const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
   const corrections = TC.q.pendingForEmployee.all(emp.id)
     .filter((c) => entries.some((e) => e.id === c.time_entry_id));
@@ -4374,6 +4376,8 @@ app.get('/portal/timesheet', (req, res) => {
   res.send(portalPage('Your timesheet', `
     ${portalSub('<a class="pt-back2" href="/portal">Portal</a>')}
     <div class="pt-body tc-body">
+      ${req.query.err ? `<div class="tc-err">${esc(req.query.err)}</div>` : ''}
+      ${req.query.ok ? `<div class="tc-ok">${esc(req.query.ok)}</div>` : ''}
       <div class="ts-head">
         <div class="tc-kick">Pay period</div>
         <h1 class="tc-h">${esc(labelFor(period))}</h1>
@@ -4418,6 +4422,7 @@ app.get('/portal/timesheet', (req, res) => {
         </div>`
         : `<form method="post" action="/portal/timesheet/submit" class="ts-submit">
             <input type="hidden" name="period" value="${esc(period.start)}">
+            <input type="hidden" name="seen" value="${v.totals.payable}">
             ${blocking.length
               ? `<p class="tc-note">You cannot submit yet — ${blocking.length} thing${blocking.length === 1 ? '' : 's'} above ${blocking.length === 1 ? 'needs' : 'need'} fixing first.</p>`
               : `<label class="ts-confirm"><input type="checkbox" name="confirm" value="1" required>
@@ -4448,16 +4453,22 @@ app.post('/portal/timesheet/submit', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const { emp } = who;
-  const period = tsFindPeriod(req.body.period);
+  const period = tsPeriodsFor().find((p) => p.start === req.body.period);
+  if (!period) return res.redirect('/portal/timesheet?err=' + encodeURIComponent('That pay period is not open for submission.'));
   const back = (p) => res.redirect(`/portal/timesheet?p=${period.start}&` + p);
   if (!pinOk(emp, req.body.pin)) return back('err=' + encodeURIComponent('That PIN did not match.'));
   if (req.body.confirm !== '1') return back('err=' + encodeURIComponent('Tick the box to confirm the hours.'));
 
   // Validated again on the server: the page may have been open while something
   // changed, and a signature on stale hours is worth nothing.
-  const v = tsView(emp, period);
+  const v = tsView(emp, period, { create: true });
   if (v.issues.some((i) => i.blocking)) {
     return back('err=' + encodeURIComponent('Something still needs fixing — have another look.'));
+  }
+  // The signature belongs to the hours that were on screen. If they moved while
+  // the page was open, show the new ones rather than signing them silently.
+  if (String(req.body.seen || '') !== String(v.totals.payable)) {
+    return back('err=' + encodeURIComponent('Your hours changed while this was open — check them and submit again.'));
   }
   db.transaction(() => {
     TC.q.submitSheet.run({ id: v.sheet.id, note: String(req.body.note || '').trim().slice(0, 300) || null,
@@ -13521,15 +13532,28 @@ const tcActor = (req) => (req.user && req.user.name) || 'Owner';
  * the submission stays on the record as history, and the sheet asks to be
  * signed again. Called from every path that can move a punch or a break.
  */
-function tcTouchTimesheet(entryId, actor, why) {
+function tcTouchDates(employeeId, dates, actor, why) {
+  const seen = new Set();
+  for (const d of dates.filter(Boolean)) {
+    const per = recentPeriods(12).find((p) => d >= p.start && d <= p.end);
+    if (!per || seen.has(per.start)) continue;
+    seen.add(per.start);
+    const sheet = TC.q.sheet.get(employeeId, per.start);
+    if (!sheet || sheet.status !== 'submitted' || sheet.resubmit_needed) continue;
+    TC.q.markResubmit.run({ id: sheet.id });
+    TC.logEvent('timesheet', sheet.id, 'reopened_by_change', actor, { reason: why });
+  }
+}
+/**
+ * @param dates  every business date the change touched. An edit that moves a
+ *   punch across a period boundary has to unsettle BOTH sheets — the one that
+ *   is losing the hours and the one gaining them — so pass the date before the
+ *   change as well as after. Passing only the new one marks the wrong sheet.
+ */
+function tcTouchTimesheet(entryId, actor, why, alsoDates = []) {
   const e = TC.q.byId.get(entryId);
   if (!e) return;
-  const per = recentPeriods(12).find((p) => e.business_date >= p.start && e.business_date <= p.end);
-  if (!per) return;
-  const sheet = TC.q.sheet.get(e.employee_id, per.start);
-  if (!sheet || sheet.status !== 'submitted' || sheet.resubmit_needed) return;
-  TC.q.markResubmit.run({ id: sheet.id });
-  TC.logEvent('timesheet', sheet.id, 'reopened_by_change', actor, { reason: why });
+  tcTouchDates(e.employee_id, [e.business_date, ...alsoDates], actor, why);
 }
 const tcPosName = (slug) => (positions.bySlug.get(slug) || {}).name || slug || '—';
 const tcEmpName = (id) => (q.employee.get(id) || {}).name || `#${id}`;
@@ -13722,6 +13746,8 @@ app.post('/timeclock/new', (req, res) => {
           daypart, position, clock_in_at: inAt, source: 'manager', created_by: actor }).lastInsertRowid;
       }
       TC.logEvent('entry', id, 'manager_added', actor, { after: `${inAt} → ${outAt || 'open'}`, reason });
+      // A new punch changes the period's total just as surely as moving one.
+      tcTouchDates(emp.id, [bdate], actor, 'a manager added a punch');
     })();
   } catch (e) {
     if (/UNIQUE/i.test(e.message)) {
@@ -13832,7 +13858,7 @@ app.get('/timeclock/:id', (req, res) => {
                 <button class="bs-btn-sm" name="decision" value="rejected" type="submit">Reject</button>
               </form>` : ''}
             </div>`).join('')}
-            <p class="inc-hint">Accepting a request records the decision — make the actual change above so the punch and the reason stay together.</p>
+            <p class="inc-hint">Accepting a request carries it out and recalculates the hours. If it cannot be applied you are told why and it stays open. A “something else” request is only ever marked handled — make that change on the entry yourself.</p>
           </section>` : ''}
         </div>
 
@@ -13877,6 +13903,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
   const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : e.daypart;
   const actor = tcActor(req);
   const before = `${e.clock_in_at} → ${e.clock_out_at || 'open'} · ${e.position}${e.daypart ? '/' + e.daypart : ''}`;
+  const wasDate = e.business_date;   // the sheet losing these hours, if it moves
 
   db.transaction(() => {
     TC.q.editEntry.run({ id: e.id, in: inAt, out: outAt, daypart, position, by: actor });
@@ -13898,7 +13925,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
     }
     TC.logEvent('entry', e.id, 'manager_edit', actor,
       { before, after: `${inAt} → ${outAt || 'open'} · ${position}${daypart ? '/' + daypart : ''}`, reason });
-    tcTouchTimesheet(e.id, actor, 'a manager corrected the times');
+    tcTouchTimesheet(e.id, actor, 'a manager corrected the times', [wasDate]);
   })();
   res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Correction saved.'));
 });
@@ -13969,10 +13996,14 @@ app.post('/timeclock/correction/:id', (req, res) => {
   if (c.decision !== 'pending') return done('That request was already decided.');
 
   const settle = () => {
-    // The entry stops flagging itself once nothing is left pending on it.
     const stillOpen = TC.q.correctionsFor.all(c.time_entry_id).some((x) => x.id !== c.id && x.decision === 'pending');
     const e = TC.q.byId.get(c.time_entry_id);
-    if (e && !stillOpen && e.status === 'correction_pending') {
+    if (!e) return;
+    if (stillOpen) {
+      // Applying one request must not clear the flag while another is waiting —
+      // the badge is how a manager finds the entry that still needs them.
+      if (e.status !== 'correction_pending') TC.q.setStatus.run({ id: e.id, status: 'correction_pending', by: actor });
+    } else if (e.status === 'correction_pending') {
       TC.q.setStatus.run({ id: e.id, status: e.clock_out_at ? 'complete' : 'active', by: actor });
     }
   };
@@ -13985,6 +14016,19 @@ app.post('/timeclock/correction/:id', (req, res) => {
       settle();
     })();
     return done('Request rejected — the entry is unchanged.');
+  }
+
+  if (c.kind === 'other') {
+    // Nothing machine-applicable to do. Accepting it means "seen, and handled
+    // by hand" — the manual edit is audited on its own. Left unresolvable it
+    // would block the employee's timesheet forever.
+    db.transaction(() => {
+      TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
+      TC.logEvent('correction', c.id, 'acknowledged', actor,
+        { reason: note || 'handled by hand — see the entry history' });
+      settle();
+    })();
+    return done('Marked handled. Make any change on the entry itself so the reason travels with it.');
   }
 
   try {
@@ -14207,7 +14251,7 @@ app.post('/payroll/timesheets/:empId/return', (req, res) => {
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
   if (!reason) return back('A reason is required.');
-  const sheet = TC.sheetFor(emp.id, period);
+  const sheet = TC.sheetFor(emp.id, period, { create: true });
   if (sheet.status !== 'submitted') return back('That timesheet is not submitted.');
   const actor = tcActor(req);
   db.transaction(() => {

@@ -489,12 +489,19 @@ test('a failed application rolls back completely — no half-applied state', asy
   assert.strictEqual(corr(cid).decision, 'pending');
 });
 
-test('an "other" request cannot be auto-applied, and says so instead of pretending', async () => {
+test('an "other" request is marked handled, not applied — and stops blocking', async () => {
   const id = seedEntry(EMP.solo, '2026-06-13', '09:00', '17:00');
+  const before = entry(id);
   const cid = request(id, EMP.solo, 'other', {});
-  await decide(cid, 'approved');
-  assert.strictEqual(corr(cid).decision, 'pending', 'not marked approved');
-  assert.match(corr(cid).apply_error || '', /by hand|specific change/i, 'and explains why');
+  await decide(cid, 'approved', 'sorted it with them');
+  const c = corr(cid);
+  assert.strictEqual(c.decision, 'approved', 'it resolves — otherwise it blocks their timesheet forever');
+  assert.ok(!c.applied_at, 'but nothing was auto-applied');
+  const after = entry(id);
+  assert.strictEqual(after.clock_in_at, before.clock_in_at, 'and the punch is untouched');
+  assert.strictEqual(after.edited, 0);
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='correction' AND entity_id=? AND action='acknowledged'").get(cid);
+  assert.ok(ev, 'recorded as handled by hand');
 });
 
 test('applying a correction never touches manager-entered work.hours', async () => {
@@ -508,6 +515,12 @@ test('applying a correction never touches manager-entered work.hours', async () 
 const P = require('../src/periods');
 const T2 = require('../src/timeclock');
 const sheetOf = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(empId, start);
+/** Submit the way the form does: carrying the totals the page displayed. */
+async function submitSheet(empId, pin, per, extra = {}, cookie) {
+  const seen = T2.totalsFor(T2.q.entriesInPeriod.all(empId, per.start, per.end)).payable;
+  return post('/portal/timesheet/submit',
+    { period: per.start, confirm: '1', pin, seen: String(seen), ...extra }, { cookie });
+}
 const curPeriod = () => P.currentPeriod();
 
 /**
@@ -532,9 +545,11 @@ test('the timesheet totals a period from its entries', async () => {
   const html = await text('/portal/timesheet', { cookie });
   assert.match(html, /Pay period/, 'the page renders');
   assert.match(html, /payable this period/, 'with a headline total');
-  const s = sheetOf(EMP.none, per.start);
-  assert.ok(s, 'a timesheet row exists for the period');
-  assert.strictEqual(s.status, 'open');
+  // Reading a period must NOT write to the database — a view-only account
+  // opening this page creates nothing. The row appears when something is
+  // actually recorded against it, which is the submission.
+  assert.strictEqual(sheetOf(EMP.none, per.start), undefined, 'looking at it creates no row');
+  assert.match(html, /OPEN|Open/, 'and it still reads as open');
   const tot = T2.totalsFor(T2.q.entriesInPeriod.all(EMP.none, per.start, per.end));
   assert.strictEqual(tot.payable, 480, 'eight hours payable');
 });
@@ -545,8 +560,8 @@ test('a still-running entry blocks submission', async () => {
     VALUES (?, ?, 'cafe', 'server', datetime('now','-2 hours'), 'active', 'manager')`)
     .run(EMP.none, T2.businessDateOf(T2.nowUtc(), T2.settings().cutoffHour)).lastInsertRowid;
   const per = curPeriod();
-  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3333' }, { cookie });
-  assert.notStrictEqual(sheetOf(EMP.none, per.start).status, 'submitted', 'refused while they are still on the clock');
+  await submitSheet(EMP.none, '3333', per, {}, cookie);
+  assert.notStrictEqual((sheetOf(EMP.none, per.start) || {}).status, 'submitted', 'refused while they are still on the clock');
   const html = await text('/portal/timesheet', { cookie });
   assert.match(html, /Still on the clock/, 'and it says why');
   db.prepare('DELETE FROM time_entries WHERE id = ?').run(open);
@@ -555,7 +570,7 @@ test('a still-running entry blocks submission', async () => {
 test('a clean timesheet submits, with the totals it showed', async () => {
   const per = curPeriod();
   const cookie = await signIn('3333');
-  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3333', note: 'all good' }, { cookie });
+  await submitSheet(EMP.none, '3333', per, { note: 'all good' }, cookie);
   const s = sheetOf(EMP.none, per.start);
   assert.strictEqual(s.status, 'submitted');
   assert.ok(s.submitted_at, 'stamped');
@@ -568,7 +583,7 @@ test('submitting needs the PIN and the confirmation', async () => {
   const per = curPeriod();
   const cookie = await signIn('3222');
   seedInPeriod(EMP.multi, 2, '10:00', '14:00');
-  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '0000' }, { cookie });
+  await submitSheet(EMP.multi, '0000', per, {}, cookie);
   assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted', 'wrong PIN, no signature');
   await post('/portal/timesheet/submit', { period: per.start, pin: '3222' }, { cookie });
   assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted', 'unticked box, no signature');
@@ -592,7 +607,7 @@ test('the employee sees why it came back, and can submit again', async () => {
   const html = await text('/portal/timesheet', { cookie });
   assert.match(html, /Sent back for a correction/, 'they are told');
   assert.match(html, /Tuesday looks short/, 'and why');
-  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3333' }, { cookie });
+  await submitSheet(EMP.none, '3333', per, {}, cookie);
   const s = sheetOf(EMP.none, per.start);
   assert.strictEqual(s.status, 'submitted', 'resubmitted');
   assert.strictEqual(s.resubmit_needed, 0);
@@ -661,7 +676,7 @@ test('a manager edit to a SUBMITTED timesheet forces resubmission', async () => 
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND business_date >= ? AND business_date <= ?")
     .run(EMP.multi, per.start, per.end);
   const eid = seedInPeriod(EMP.multi, 3, '09:00', '15:00');
-  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3222' }, { cookie });
+  await submitSheet(EMP.multi, '3222', per, {}, cookie);
   assert.strictEqual(sheetOf(EMP.multi, per.start).status, 'submitted', 'signed off');
   assert.strictEqual(sheetOf(EMP.multi, per.start).resubmit_needed, 0);
 
@@ -679,10 +694,77 @@ test('a manager edit to a SUBMITTED timesheet forces resubmission', async () => 
 test('a manager break change also forces resubmission', async () => {
   const per = curPeriod();
   const cookie = await signIn('3222');
-  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3222' }, { cookie });
+  await submitSheet(EMP.multi, '3222', per, {}, cookie);
   assert.strictEqual(sheetOf(EMP.multi, per.start).resubmit_needed, 0, 'signed again');
   const day = require('../src/dates').addDays(per.start, 3);
   const eid = db.prepare('SELECT id FROM time_entries WHERE employee_id = ? AND business_date = ?').get(EMP.multi, day).id;
   await post(`/timeclock/${eid}/break`, { start: `${day}T12:00`, end: `${day}T12:30`, paid: '0', reason: 'took a break' });
   assert.strictEqual(sheetOf(EMP.multi, per.start).resubmit_needed, 1, 'adding a break unsettles it too');
+});
+
+// --- regressions the adversarial review found ------------------------------
+
+test('a corrected clock-in that crosses the cutoff re-files to the right trading day', async () => {
+  const T = require('../src/timeclock');
+  // Punched in at 03:30 — before the 4am cutoff, so it belongs to the night
+  // before. Corrected to 05:30, it belongs to the new day, and the entry has to
+  // move with it: same trading day, same shift, same pay period as the manager
+  // edit route would give.
+  const i = T.localInputToUtc('2026-05-01T03:30');
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'cafe','server',?,?,'complete','manager',240,240)`)
+    .run(EMP.multi, '2026-04-30', i, T.localInputToUtc('2026-05-01T07:30')).lastInsertRowid;
+  assert.strictEqual(entry(id).business_date, '2026-04-30', 'filed on the night it started');
+
+  const cid = request(id, EMP.multi, 'wrong_in', { at: T.localInputToUtc('2026-05-01T05:30') });
+  await decide(cid, 'approved');
+  const e = entry(id);
+  assert.strictEqual(e.business_date, '2026-05-01', 'the trading day moved with the punch');
+  assert.ok(e.shift_id, 'and it is linked to a shift');
+  const sh = db.prepare('SELECT * FROM shifts WHERE id = ?').get(e.shift_id);
+  assert.strictEqual(sh.date, '2026-05-01', 'the shift for the day it now belongs to');
+  const dupes = db.prepare('SELECT date, daypart, COUNT(*) c FROM shifts GROUP BY date, daypart HAVING c > 1').all();
+  assert.strictEqual(dupes.length, 0, 'and still no duplicate shifts');
+});
+
+test('adding a punch to a signed period asks for it to be signed again', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3333');
+  await submitSheet(EMP.none, '3333', per, {}, cookie);
+  assert.strictEqual(sheetOf(EMP.none, per.start).resubmit_needed, 0, 'signed');
+
+  const day = require('../src/dates').addDays(per.start, 5);
+  await post('/timeclock/new', { employee_id: String(EMP.none), daypart: 'cafe', position: 'server',
+    in: `${day}T09:00`, out: `${day}T12:00`, reason: 'forgot to clock in' });
+  assert.strictEqual(sheetOf(EMP.none, per.start).resubmit_needed, 1,
+    'a whole new punch changes the total just as surely as moving one');
+});
+
+test('signing off hours that changed while the page was open is refused', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3333');
+  const res = await post('/portal/timesheet/submit',
+    { period: per.start, confirm: '1', pin: '3333', seen: '1' }, { cookie });   // stale figure
+  assert.strictEqual(res.status, 302);
+  assert.match(res.headers.get('location') || '', /err=/, 'sent back with a message');
+  assert.notStrictEqual(sheetOf(EMP.none, per.start).resubmit_needed, 0, 'and it is still unsigned');
+});
+
+test('a submission naming a period that is not open is refused', async () => {
+  const cookie = await signIn('3333');
+  const res = await post('/portal/timesheet/submit',
+    { period: '1999-01-01', confirm: '1', pin: '3333', seen: '0' }, { cookie });
+  assert.match(res.headers.get('location') || '', /err=/, 'no silent fallback to the current period');
+});
+
+test('one pending correction is one issue, not two', () => {
+  const T = require('../src/timeclock');
+  const id = seedEntry(EMP.solo, '2026-04-02', '09:00', '17:00');
+  const cid = request(id, EMP.solo, 'wrong_in', { at: T.localInputToUtc('2026-04-02T23:00') });
+  const c = db.prepare('SELECT * FROM time_corrections WHERE id = ?').get(cid);
+  db.prepare("UPDATE time_corrections SET apply_error = 'nope' WHERE id = ?").run(cid);
+  const issues = T.issuesFor([entry(id)], [db.prepare('SELECT * FROM time_corrections WHERE id = ?').get(cid)]);
+  const about = issues.filter((i) => /correction/i.test(i.text));
+  assert.strictEqual(about.length, 1, 'a single request produces a single line');
 });
