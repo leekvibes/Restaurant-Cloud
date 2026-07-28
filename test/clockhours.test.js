@@ -390,6 +390,73 @@ test('the shift sheet marks which numbers are the clock\'s', async () => {
   assert.match(html, /from the clock/, 'and the input says so rather than pre-filling');
 });
 
+// ===========================================================================
+// The record refusing to be corrupted, and figures refusing to be invented.
+// ===========================================================================
+
+test('no timesheet can be opened for a span that is not a pay period', () => {
+  const T = require('../src/timeclock');
+  const P = require('../src/periods');
+  const per = P.recentPeriods(2)[1];
+  const before = db.prepare('SELECT COUNT(*) n FROM timesheets').get().n;
+
+  // Starts on a real period start, ends a week early — the dangerous one,
+  // because it would silently load and speak for the whole real fortnight.
+  assert.throws(() => T.sheetFor(E.both, { start: per.start, end: '2026-07-10' }, { create: true }),
+    /not a pay period/, 'a truncated span is refused');
+  // Starts nowhere in particular — this one would mint an unreachable orphan.
+  assert.throws(() => T.sheetFor(E.both, { start: '2026-07-08', end: '2026-07-14' }, { create: true }),
+    /not a pay period/, 'an arbitrary span is refused');
+
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM timesheets').get().n, before,
+    'and neither wrote a row');
+  // Reading an arbitrary range stays perfectly fine.
+  const v = T.sheetFor(E.both, { start: '2026-07-08', end: '2026-07-14' });
+  assert.strictEqual(v.id, null, 'a read of a non-period returns a virtual sheet, not a record');
+});
+
+test('the missing-punch filter finds punches that ended without a clock-out', async () => {
+  // TC.alerts deep-links here. The status it named is never written by any path,
+  // so the link used to land on an empty page — the one screen telling you
+  // somebody forgot to clock out pointing at a page that said nothing was wrong.
+  await punch(E.long, '2026-04-02', '09:00', null, 'dinner');
+  const e = entriesOf(E.long).slice(-1)[0];
+  db.prepare("UPDATE time_entries SET status = 'complete' WHERE id = ?").run(e.id);
+
+  const html = await text('/timeclock?st=missing_punch&from=2026-04-01&to=2026-04-03');
+  assert.match(html, new RegExp(`/timeclock/${e.id}"`), 'the entry with no clock-out is listed');
+  const clean = await text('/timeclock?st=missing_punch&from=2026-03-04&to=2026-03-04');
+  assert.doesNotMatch(clean, /tcm-row/, 'and a day of finished punches lists none');
+});
+
+test('a difference is only called an override when somebody actually typed one', async () => {
+  // hours_source 'legacy' covers every figure that predates the clock — on a
+  // real database, almost all of them. Calling that gap an override would put a
+  // confident red number on nearly every historical shift for an edit nobody
+  // made. The two sides are not even built the same way.
+  const sh = shiftOn('2026-03-04', 'dinner');       // E.split, clock-owned, 7.533h
+  db.prepare("UPDATE work SET hours = 9, hours_source = 'legacy' WHERE shift_id = ? AND employee_id = ?")
+    .run(sh.id, E.split);
+  const e = entriesOf(E.split)[0];
+  const legacy = await text(`/timeclock/${e.id}`);
+  assert.doesNotMatch(legacy, /Override/, 'a legacy figure is not an override');
+
+  db.prepare("UPDATE work SET hours_source = 'manager' WHERE shift_id = ? AND employee_id = ?")
+    .run(sh.id, E.split);
+  const typed = await text(`/timeclock/${e.id}`);
+  assert.match(typed, /Override/, 'a typed one is');
+});
+
+test('the long-shift threshold on the page is the one in settings', async () => {
+  const before = await text('/timeclock');
+  assert.doesNotMatch(before, /past 16h/, 'nothing is hardcoded to 16 once a setting exists');
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '10', pin_fix: '1', require_service: '1', alerts: '1' });
+  const T = require('../src/timeclock');
+  assert.strictEqual(T.settings().longShift, 10, 'the setting took');
+  // Restore, so later assertions read the documented defaults.
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_fix: '1', require_service: '1', alerts: '1' });
+});
+
 test('the migration stamps existing hours as legacy and leaves never-set rows to the clock', () => {
   // The rule that protects the owner's live database: anything already carrying
   // a figure was typed, pushed by the POS or imported, and none of them can be

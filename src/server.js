@@ -3919,9 +3919,17 @@ function clockPositionsFor(emp) {
   return [...new Set([emp.role, ...extra])].filter((r) => r && r !== 'manager' && live.has(r));
 }
 
-/** Somebody has been on the clock impossibly long — almost certainly a missed punch. */
-const STALE_HOURS = 16;
-const looksStale = (entry) => entry && TC.elapsedMinutes(entry) > STALE_HOURS * 60;
+/**
+ * Somebody has been on the clock impossibly long — almost certainly a missed
+ * punch. The threshold is the owner's own tc_long_shift setting, not a constant.
+ *
+ * It was 16 hardcoded here while Settings wrote tc_long_shift, and the dashboard
+ * alert and syncShiftHours both honoured the setting. An owner who set 10 hours
+ * got an alert at 10 from one screen and "still open past 16h" from another,
+ * with nothing flagged on the page until 16.
+ */
+const staleHours = () => TC.settings().longShift;
+const looksStale = (entry) => entry && TC.elapsedMinutes(entry) > staleHours() * 60;
 
 /**
  * Where somebody stands right now, in the words the portal uses everywhere.
@@ -4019,7 +4027,7 @@ function clockPage(req, who, opts = {}) {
         <div class="tc-meta">In at ${esc(TC.clockFace(active.clock_in_at))}
           · ${esc(posName(active.position))}${active.daypart ? ' · ' + esc(dp(active.daypart)) : ''}</div>
         ${TC.breakTotals(active.id).unpaid ? `<div class="tc-sub">Less ${TC.hm(TC.breakTotals(active.id).unpaid)} of break so far</div>` : ''}
-        ${stale ? `<p class="tc-note">That is over ${STALE_HOURS} hours. If you forgot to clock out,
+        ${stale ? `<p class="tc-note">That is over ${staleHours()} hours. If you forgot to clock out,
           clock out now and then ask your manager to fix the time.</p>` : ''}
         <div class="tc-actions">
           <form method="post" action="/portal/clock/break/start">
@@ -14003,9 +14011,18 @@ app.get('/timeclock', (req, res) => {
   const pending = TC.q.pendingCorrections.all();
   const stale = onNow.filter(looksStale);
 
+  // 'missing_punch' is in the STATUSES list but no code path ever writes it —
+  // every setStatus call writes active, on_break, complete or correction_pending.
+  // So the dashboard alert's deep link to ?st=missing_punch always came back
+  // empty: the one screen that tells you somebody forgot to clock out linked to
+  // a page that then said there was nothing. It stays a valid filter value and
+  // means what a reader would assume — a punch that ended without a clock-out.
+  const missingPunch = (e) => !e.clock_out_at && e.status !== 'active' && e.status !== 'on_break';
+  const matchStatus = (e) => (fStatus === 'missing_punch' ? missingPunch(e) : e.status === fStatus);
+
   const rows = all.filter((e) => (!fEmp || String(e.employee_id) === fEmp)
     && (!fSvc || e.daypart === fSvc) && (!fPos || e.position === fPos)
-    && (!fStatus || e.status === fStatus));
+    && (!fStatus || matchStatus(e)));
 
   const staff = q.allEmployees.all();
   const usedPos = [...new Set(all.map((e) => e.position).filter(Boolean))];
@@ -14023,7 +14040,7 @@ app.get('/timeclock', (req, res) => {
     ${statCell('On the clock', String(onNow.length), onNow.filter((e) => e.status === 'on_break').length
       ? `${onNow.filter((e) => e.status === 'on_break').length} on break` : 'right now', onNow.length ? '' : 'ok')}
     ${statCell('Needs a look', String(stale.length + pending.length),
-      stale.length ? `${stale.length} still open past ${STALE_HOURS}h` : pending.length ? `${pending.length} correction${pending.length === 1 ? '' : 's'}` : 'nothing waiting',
+      stale.length ? `${stale.length} still open past ${staleHours()}h` : pending.length ? `${pending.length} correction${pending.length === 1 ? '' : 's'}` : 'nothing waiting',
       (stale.length + pending.length) ? 'warn' : 'ok')}
     ${statCell('Entries', String(rows.length), `${esc(from)} → ${esc(to)}`)}
     ${statCell('Clocked hours', TC.hm(totalMin), 'what the shifts are paying on', '')}
@@ -14434,7 +14451,15 @@ app.get('/timeclock/:id', (req, res) => {
               ${hoursSource === 'clock'
                 ? fact('On the shift', `<b>${entered}h</b> <span class="tcm-tag">from the clock</span>`)
                 : fact('Entered on the shift', entered != null ? `${entered}h` : '<i class="inc-unset">none yet</i>')}
-              ${hoursSource !== 'clock' && variance != null && Math.abs(variance) >= 0.01
+              <!-- ONLY for a number somebody typed. 'legacy' means a figure that
+                   predates the clock, and on a real database almost every row is
+                   legacy — calling that gap an override would put a confident
+                   red number on nearly every historical shift, describing an
+                   edit nobody made. The two sides are also not built the same
+                   way (work.hours excludes over-long punches, open entries and
+                   emailed shifts; the clocked total does not), so a difference
+                   between them is only meaningful when a person is behind it. -->
+              ${hoursSource === 'manager' && variance != null && Math.abs(variance) >= 0.01
                 ? fact('Override', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
             </div>
             <p class="perf-foot">${hoursSource === 'clock'
@@ -14743,11 +14768,17 @@ app.post('/timeclock/correction/:id', (req, res) => {
 // the identical statement once per employee per request, and the detail page
 // compiled it a third time. Hoisted, and the ledger's version groups so one
 // call answers for the whole roster.
-const qEnteredByEmp = db.prepare(`SELECT w.employee_id, COALESCE(SUM(w.hours), 0) h
+// `overridden` counts rows a manager actually typed. Everything else — the
+// clock's own writes, and the 'legacy' figures that predate it — is not an
+// override, and a difference against it is not worth showing: the two sides are
+// not built the same way, so the gap is noise unless a person put it there.
+const qEnteredByEmp = db.prepare(`SELECT w.employee_id, COALESCE(SUM(w.hours), 0) h,
+          COALESCE(SUM(w.hours_source = 'manager'), 0) AS overridden
     FROM work w JOIN shifts sh ON sh.id = w.shift_id
    WHERE sh.date >= ? AND sh.date <= ?
    GROUP BY w.employee_id`);
-const qEnteredForEmp = db.prepare(`SELECT COALESCE(SUM(w.hours), 0) h
+const qEnteredForEmp = db.prepare(`SELECT COALESCE(SUM(w.hours), 0) h,
+          COALESCE(SUM(w.hours_source = 'manager'), 0) AS overridden
     FROM work w JOIN shifts sh ON sh.id = w.shift_id
    WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`);
 
@@ -14760,7 +14791,7 @@ app.get('/payroll/timesheets', (req, res) => {
   const staff = q.allEmployees.all();
 
   // One call for the whole roster, before the loop rather than inside it.
-  const enteredBy = new Map(qEnteredByEmp.all(period.start, period.end).map((r) => [r.employee_id, r.h]));
+  const enteredBy = new Map(qEnteredByEmp.all(period.start, period.end).map((r) => [r.employee_id, r]));
 
   const rows = staff.map((emp) => {
     const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
@@ -14771,11 +14802,13 @@ app.get('/payroll/timesheets', (req, res) => {
     const totals = TC.totalsFor(entries, { otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
       otThreshold: otRule.threshold, periodStart: period.start });
     // What the shifts in this period are carrying for them, for comparison.
-    const entered = enteredBy.get(emp.id) || 0;
+    const ent = enteredBy.get(emp.id) || { h: 0, overridden: 0 };
+    const entered = ent.h;
     const clocked = TC.toHours(totals.payable) || 0;
     const approval = sheet.id ? TC.q.currentApproval.get(sheet.id) : null;
     const transfer = sheet.id ? TC.q.currentTransfer.get(sheet.id) : null;
     return { emp, sheet, entries, corrections, issues, totals, entered: Number(entered),
+      overridden: !!ent.overridden,
       clocked, variance: Math.round((clocked - Number(entered)) * 100) / 100,
       status: TC.sheetStatus(sheet, issues), approval, transfer,
       blockers: TC.approvalBlockers(sheet, issues),
@@ -14841,7 +14874,7 @@ app.get('/payroll/timesheets', (req, res) => {
           <span class="tcm-who"><b>${esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
           <span class="tcm-times">${r.sheet.submitted_at ? `sent ${esc(TC.stamp(r.sheet.submitted_at))}` : 'not submitted'}${
-            Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h vs entered</i>` : ''}</span>
+            r.overridden && Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h vs entered</i>` : ''}</span>
           <span class="tcm-tags">
             <i class="tcm-tag ${['approved', 'locked'].includes(r.status) ? 'on' : r.status === 'submitted' ? 'ed' : r.status === 'needs_attention' ? 'warn' : ''}">${esc(TC.SHEET_LABEL[r.status])}</i>
             ${r.transferState === 'transferred' ? '<i class="tcm-tag on">sent</i>' : ''}
@@ -14866,7 +14899,9 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   const transfers = v.sheet.id ? TC.q.transfersFor.all(v.sheet.id) : [];
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   const fact = (k, val) => `<div class="inc-fact"><span>${k}</span><b>${val}</b></div>`;
-  const entered = qEnteredForEmp.get(emp.id, period.start, period.end).h;
+  const ent = qEnteredForEmp.get(emp.id, period.start, period.end);
+  const entered = ent.h;
+  const overridden = !!ent.overridden;
   const clocked = TC.toHours(v.totals.payable) || 0;
   const variance = Math.round((clocked - Number(entered)) * 100) / 100;
 
@@ -14896,7 +14931,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               ${fact('Unpaid break', esc(TC.hm(v.totals.unpaid)))}
               ${v.otRule.enabled && !emp.ot_exempt ? fact('Regular / overtime', `${esc(TC.hm(v.totals.regular))} / ${esc(TC.hm(v.totals.overtime))}`) : ''}
               ${fact('On the shifts', `${entered}h`)}
-              ${Math.abs(variance) >= 0.01 ? fact('Override', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
+              ${overridden && Math.abs(variance) >= 0.01 ? fact('Override', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
             </div>
             <p class="perf-foot">These are the clock's figures beside what each shift is carrying. They agree unless somebody typed over them, and a difference here is the size of that override.</p>
           </section>

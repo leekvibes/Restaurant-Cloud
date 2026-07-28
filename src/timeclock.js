@@ -30,6 +30,8 @@
 
 const { db, w } = require('./db');
 const { isoDate, addDays } = require('./dates');
+// periods.js pulls only db and dates, so there is no cycle back to here.
+const P = require('./periods');
 
 // --- schema ----------------------------------------------------------------
 // Created idempotently at load, the same convention modules.js and the incident
@@ -793,6 +795,21 @@ function sheetFor(employeeId, period, opts = {}) {
     return { id: null, employee_id: employeeId, period_start: period.start, period_end: period.end,
       status: 'open', submitted_at: null, submitted_note: null, submitted_totals: null,
       returned_at: null, returned_by: null, returned_reason: null, resubmit_needed: 0, virtual: true };
+  }
+  // A timesheet is keyed on its START DATE alone — UNIQUE(employee_id,
+  // period_start) — and nothing validates that the span handed in is a real pay
+  // period. Opening one for an arbitrary range does lasting damage two ways: a
+  // range that happens to begin on a period start silently loads that whole
+  // period's sheet, so a fortnight's "approved" sits above one week's numbers;
+  // and a range beginning anywhere else mints a SECOND row covering dates that
+  // already belong to a real sheet — unreachable forever after, because
+  // recentPeriods only ever generates anchor-aligned starts, so nothing can find
+  // it again to mark it stale, return it, or approve it.
+  //
+  // Reading an arbitrary range is fine and useful. Creating a record for one is
+  // not, and the refusal belongs here rather than in each of the four callers.
+  if (!P.isPeriod(period.start, period.end)) {
+    throw new ClockError(`${period.start} to ${period.end} is not a pay period, so no timesheet can be opened for it.`);
   }
   q.makeSheet.run({ employee_id: employeeId, period_start: period.start, period_end: period.end });
   return q.sheet.get(employeeId, period.start);
