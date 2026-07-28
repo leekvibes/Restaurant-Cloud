@@ -73,6 +73,11 @@ const MODULES = [
       { name: 'paid_with', label: 'Paid with', type: 'select',
         options: ['Their own money', 'Company card', 'Company cash', 'Drawer cash', 'Other'] },
       { name: 'reimbursed_on', label: 'Paid back on', type: 'date' },
+      // Where the money came from when they were paid back — so a cash-drawer
+      // payout is traceable, not just "settled at some point". For a drawer
+      // payout, `reimbursed_on` is the day it left the drawer.
+      { name: 'reimbursed_via', label: 'Paid back via', type: 'select',
+        options: ['Cash drawer', 'Company cash', 'Company card', 'Check', 'Bank transfer', 'Other'] },
       { name: 'file', label: 'Receipt photo', type: 'file', list: true, multiple: true },
       { name: 'pages', label: 'Pages', type: 'pages', pagesOf: 'file' },
       { name: 'notes', label: 'Notes', type: 'textarea' },

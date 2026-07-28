@@ -8010,6 +8010,84 @@ function quickExpenseScript() {
   </script>`;
 }
 
+/**
+ * The "paid back" dialog. Settling up used to be one silent button; now it asks
+ * where the money came from, because a card refund and cash out of the till are
+ * not the same entry, and a drawer payout needs the day it left the drawer so
+ * the count can be squared against it. One dialog serves the whole page — each
+ * row's button hands it the expense id, who is owed, and how much.
+ */
+function paybackModal(today) {
+  return `
+  <div class="pb-scrim" id="pb-scrim" hidden></div>
+  <div class="pb-modal" id="pb-modal" role="dialog" aria-modal="true" aria-labelledby="pb-title" hidden>
+    <form method="post" id="pb-form" action="">
+      <div class="pb-head">
+        <h2 class="pb-h" id="pb-title">How were they paid back?</h2>
+        <p class="pb-sub" id="pb-sub">Record where the money came from.</p>
+      </div>
+      <label class="pb-field">
+        <span class="pb-lab">Paid back from</span>
+        <select name="via" id="pb-via">
+          ${REIMBURSED_VIA.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}
+        </select>
+      </label>
+      <label class="pb-field" id="pb-drawer-wrap">
+        <span class="pb-lab">Date it came out of the drawer</span>
+        <input type="date" name="drawer_date" id="pb-drawer-date" value="${esc(today)}">
+      </label>
+      <div class="pb-acts">
+        <button type="button" class="bs-btn-sm" id="pb-cancel">Cancel</button>
+        <button type="submit" class="bs-btn">Mark paid back</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function paybackScript() {
+  return `<script>
+  (function () {
+    var scrim = document.getElementById('pb-scrim'),
+        modal = document.getElementById('pb-modal'),
+        form = document.getElementById('pb-form'),
+        via = document.getElementById('pb-via'),
+        wrap = document.getElementById('pb-drawer-wrap'),
+        sub = document.getElementById('pb-sub'),
+        cancel = document.getElementById('pb-cancel');
+    if (!modal) return;
+    var last = null;
+    // The drawer date only means anything for a drawer payout.
+    function toggle() { wrap.hidden = via.value !== 'Cash drawer'; }
+    function open(id, who, amt) {
+      last = document.activeElement;
+      form.action = '/c/expenses/' + id + '/reimburse';
+      sub.textContent = (who || 'Someone') + (amt ? ' · ' + amt : '');
+      via.value = 'Cash drawer'; toggle();
+      scrim.hidden = false; modal.hidden = false;
+      document.body.classList.add('pb-open');
+      setTimeout(function () { via.focus(); }, 40);
+    }
+    function close() {
+      scrim.hidden = true; modal.hidden = true;
+      document.body.classList.remove('pb-open');
+      if (last && last.focus) last.focus();
+    }
+    via.addEventListener('change', toggle);
+    cancel.addEventListener('click', close);
+    scrim.addEventListener('click', close);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !modal.hidden) { e.preventDefault(); close(); }
+    });
+    document.querySelectorAll('[data-pb]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.preventDefault();
+        open(b.getAttribute('data-pb'), b.getAttribute('data-who'), b.getAttribute('data-amt'));
+      });
+    });
+  })();
+  </script>`;
+}
+
 function captureScript(kinds) {
   return `<script>
   (function () {
@@ -9145,12 +9223,14 @@ app.get('/c/expenses', (req, res) => {
                      you looking for the shop. "Where" is not repeated: it is
                      the headline of the row you just opened. */''}
               <div class="bs-ivf"><span>What was bought</span><b>${esc(r.name || '—')}</b></div>
-              <div class="bs-ivf"><span>Paid back</span><b>${r.reimbursed_on ? esc(niceDate(r.reimbursed_on)) : '<i class="bs-em">not yet</i>'}</b></div>
+              <div class="bs-ivf"><span>Paid back</span><b>${r.reimbursed_on
+                ? esc(niceDate(r.reimbursed_on)) + (r.reimbursed_via ? ` <i class="bs-em">via ${esc(r.reimbursed_via)}</i>` : '')
+                : '<i class="bs-em">not yet</i>'}</b></div>
             </div>
             ${r.notes ? `<div class="bs-ivnote">${esc(r.notes)}</div>` : ''}
             <div class="bs-ivacts">
-              ${canWrite() && owe ? `<form method="post" action="/c/expenses/${r.id}/reimburse" style="margin:0">
-                <button class="bs-btn" type="submit">Mark paid back</button></form>` : ''}
+              ${canWrite() && owe ? `<button type="button" class="bs-btn" data-pb="${r.id}"
+                data-who="${esc(r.paid_by || '')}" data-amt="${esc(money(r.amount_cents || 0))}">Mark paid back</button>` : ''}
               ${canWrite() && r.reimbursed_on ? `<form method="post" action="/c/expenses/${r.id}/reimburse" style="margin:0">
                 <input type="hidden" name="undo" value="1">
                 <button class="bs-btn-sm" type="submit">Not paid back after all</button></form>` : ''}
@@ -9251,7 +9331,7 @@ app.get('/c/expenses', (req, res) => {
       ${body}
       <div class="bs-blank" id="xnone" style="display:none"><b>Nothing matches</b><span>Try a different search or filter.</span></div>
     </div>
-    ${canWrite() ? captureOverlay(['expense'], { today }) + quickExpense(today) : ''}
+    ${canWrite() ? captureOverlay(['expense'], { today }) + quickExpense(today) + paybackModal(today) : ''}
     <script>
       (function () {
         var q = '', mode = 'all', val = '';
@@ -9303,24 +9383,36 @@ app.get('/c/expenses', (req, res) => {
         });
       })();
     </script>
-    ${canWrite() ? captureScript(['expense']) + quickExpenseScript() : ''}`));
+    ${canWrite() ? captureScript(['expense']) + quickExpenseScript() + paybackScript() : ''}`));
 });
 
 /**
  * Paid back, or not after all.
  *
  * A date rather than a flag: "when" answers questions a yes cannot, and the
- * settle-up conversation is always about a week, not a boolean.
+ * settle-up conversation is always about a week, not a boolean. Paying somebody
+ * back also asks WHERE the money came from — cash out of the drawer is not the
+ * same as a company-card refund, and if it left the drawer we want the day it
+ * did, so the till can be reconciled against it later. That is what the popup
+ * on "Mark paid back" collects; the generic edit form can still fix it after.
  */
+const REIMBURSED_VIA = ['Cash drawer', 'Company cash', 'Company card', 'Check', 'Bank transfer', 'Other'];
 app.post('/c/expenses/:id/reimburse', (req, res) => {
   if (!canWrite()) return res.status(403).end();
   const id = Number(req.params.id);
   const row = db.prepare('SELECT id FROM m_expenses WHERE id = ?').get(id);
   if (!row) return res.status(404).end();
-  const undo = req.body.undo === '1';
-  db.prepare('UPDATE m_expenses SET reimbursed_on = ? WHERE id = ?')
-    .run(undo ? null : isoDate(startOfToday()), id);
-  res.redirect('/c/expenses?msg=' + encodeURIComponent(undo ? 'Marked as still owed.' : 'Marked paid back.'));
+  if (req.body.undo === '1') {
+    db.prepare('UPDATE m_expenses SET reimbursed_on = NULL, reimbursed_via = NULL WHERE id = ?').run(id);
+    return res.redirect('/c/expenses?msg=' + encodeURIComponent('Marked as still owed.'));
+  }
+  const via = REIMBURSED_VIA.includes(req.body.via) ? req.body.via : null;
+  // For a drawer payout the "paid back on" date IS the day it came out of the
+  // drawer, so we take the picked date; every other method is settled today.
+  const drawerDate = String(req.body.drawer_date || '').slice(0, 10);
+  const on = (via === 'Cash drawer' && drawerDate) ? drawerDate : isoDate(startOfToday());
+  db.prepare('UPDATE m_expenses SET reimbursed_on = ?, reimbursed_via = ? WHERE id = ?').run(on, via, id);
+  res.redirect('/c/expenses?msg=' + encodeURIComponent('Marked paid back' + (via ? ' · ' + via : '') + '.'));
 });
 
 

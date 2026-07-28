@@ -3216,6 +3216,28 @@ body.cap-open.qx-open [data-cap] { display: none; }
    loudly rather than worked around per element. */
 [data-cap] [hidden], [data-qx] [hidden] { display: none !important; }
 
+/* --- the "paid back" dialog: where the reimbursement money came from -------
+   A small centred dialog, opened from a row's "Mark paid back". Neither the
+   scrim nor the card sets `display`, so the plain [hidden] attribute hides them
+   with nothing to override — the field inside it, which does toggle, is guarded
+   below for the same reason the cap overlay is. */
+.pb-scrim { position: fixed; inset: 0; background: rgba(31, 29, 26, .55); z-index: 88; }
+.pb-modal { position: fixed; z-index: 89; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px)); box-sizing: border-box; background: var(--paper);
+  border: 1px solid var(--rule-strong, var(--ink)); box-shadow: 0 24px 60px rgba(31, 29, 26, .28); padding: 22px; }
+body.pb-open { overflow: hidden; }
+.pb-head { margin-bottom: 16px; }
+.pb-h { font-family: var(--serif); font-size: 22px; font-weight: 500; color: var(--headline); margin: 0; }
+.pb-sub { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+.pb-field { display: block; margin-bottom: 14px; }
+.pb-field[hidden] { display: none; }
+.pb-lab { display: block; font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.pb-field select, .pb-field input { width: 100%; box-sizing: border-box; padding: 11px 12px; font: inherit;
+  font-size: 15px; border-radius: 0; background: var(--surface); color: var(--ink); border: 1px solid var(--rule); }
+.pb-field select:focus, .pb-field input:focus { outline: 0; border-color: var(--accent); }
+.pb-acts { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+
 /* ===========================================================================
    MONTH HEADERS — the thing you click to open a month
    ---------------------------------------------------------------------------
