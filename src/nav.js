@@ -26,7 +26,7 @@ const AREAS = [
   // every account's feature list.
   { key: 'costs',     label: 'Performance',     paths: ['/costs', '/performance'] },
   { key: 'cash',      label: 'Cash',            paths: ['/cash'] },
-  { key: 'payroll',   label: 'Payroll',         paths: ['/payroll'] },
+  { key: 'payroll',   label: 'Payroll',         paths: ['/payroll'] },   // includes /payroll/timesheets
   { key: 'trackers',  label: 'Trackers & logs', paths: ['/c/'] },
   { key: 'menu',      label: 'Menu costing',    paths: ['/menu'] },
   // The portal's manager side sits with Staff: it is about the people, and

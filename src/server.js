@@ -3339,6 +3339,7 @@ app.get('/portal', (req, res) => {
       <div class="pt-kick"><span>What you can do</span></div>
       <div class="pt-rows">
         ${clockRow}
+        ${row('/portal/timesheet', '▤', 'Your timesheet', 'Check and sign off your pay period')}
         ${submitRow}
         ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
           hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
@@ -4148,31 +4149,69 @@ app.get('/portal/clock/entry/:id', (req, res) => {
           <span class="tc-row-r"><b>${esc(c.decision)}</b></span></div>`).join('')}</div>` : ''}
 
       <div class="tc-kick tc-kick-sec">Something wrong?</div>
-      <form method="post" action="/portal/clock/fix" class="tc-form tc-fix">
+      ${/* The request is structured, not a sentence: a manager approving it
+             should APPLY it, and prose cannot be applied. Each kind reveals
+             exactly the field it needs and nothing else. */''}
+      <form method="post" action="/portal/clock/fix" class="tc-form tc-fix" id="fixform">
         <input type="hidden" name="entry_id" value="${e.id}">
         <label class="tc-field"><span>What needs fixing?</span>
-          <select name="kind" required>
-            <option value="missing_in">I forgot to clock in</option>
-            <option value="missing_out">I forgot to clock out</option>
+          <select name="kind" id="fixkind" required>
             <option value="wrong_in">Clock-in time is wrong</option>
-            <option value="wrong_out">Clock-out time is wrong</option>
-            <option value="break">A break is wrong</option>
+            <option value="wrong_out">Clock-out time is wrong${e.clock_out_at ? '' : ' / missing'}</option>
             <option value="missing_break">A break is missing</option>
+            ${brs.length ? '<option value="break">A break time is wrong</option>' : ''}
             <option value="wrong_position">Wrong position</option>
             <option value="wrong_service">Wrong service</option>
             <option value="other">Something else</option>
           </select></label>
-        <label class="tc-field"><span>What should it say?</span>
-          <input name="proposed" placeholder="e.g. I clocked out at 10:15pm" maxlength="200"></label>
+
+        <div class="tc-fixfield" data-for="wrong_in">
+          <label class="tc-field"><span>It should have been</span>
+            <input type="datetime-local" name="at_in" value="${esc(TC.utcToLocalInput(e.clock_in_at))}"></label></div>
+        <div class="tc-fixfield" data-for="wrong_out" hidden>
+          <label class="tc-field"><span>It should have been</span>
+            <input type="datetime-local" name="at_out" value="${esc(TC.utcToLocalInput(e.clock_out_at) || TC.utcToLocalInput(e.clock_in_at))}"></label></div>
+        <div class="tc-fixfield" data-for="missing_break" hidden>
+          <label class="tc-field"><span>Break started</span><input type="datetime-local" name="brk_start"></label>
+          <label class="tc-field"><span>Break ended</span><input type="datetime-local" name="brk_end"></label></div>
+        ${brs.length ? `<div class="tc-fixfield" data-for="break" hidden>
+          <label class="tc-field"><span>Which break</span><select name="break_id">
+            ${brs.map((b) => `<option value="${b.id}">${esc(TC.clockFace(b.start_at))}–${b.end_at ? esc(TC.clockFace(b.end_at)) : 'open'}</option>`).join('')}
+          </select></label>
+          <label class="tc-field"><span>It should have started</span><input type="datetime-local" name="bfix_start"></label>
+          <label class="tc-field"><span>and ended</span><input type="datetime-local" name="bfix_end"></label></div>` : ''}
+        <div class="tc-fixfield" data-for="wrong_position" hidden>
+          <label class="tc-field"><span>It should have been</span><select name="position">
+            ${clockPositionsFor(emp).map((r) => `<option value="${esc(r)}"${r === e.position ? ' selected' : ''}>${esc(posName(r))}</option>`).join('')}
+          </select></label></div>
+        <div class="tc-fixfield" data-for="wrong_service" hidden>
+          <label class="tc-field"><span>It should have been</span><select name="daypart">
+            ${DAYPARTS.map((d) => `<option value="${d}"${d === e.daypart ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+          </select></label></div>
+        <div class="tc-fixfield" data-for="other" hidden>
+          <label class="tc-field"><span>What should it say?</span>
+            <input name="proposed" maxlength="200" placeholder="Describe it and your manager will sort it out"></label></div>
+
         <label class="tc-field"><span>What happened? <i>required</i></span>
           <textarea name="reason" rows="3" required maxlength="500" placeholder="A sentence is plenty."></textarea></label>
         <label class="tc-field"><span>Your PIN</span>
           <input class="tc-pin" name="pin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••" required></label>
         <button class="tc-btn tc-btn-go" type="submit" data-once>Send to your manager</button>
       </form>
-      <p class="tc-note">Your original times are never changed by a request — your manager sees both and decides.</p>
+      <p class="tc-note">Your original times are never changed by a request — your manager sees both, and approving it puts your time right.</p>
     </div>
-    <script>document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});</script>`));
+    <script>
+      (function () {
+        var k = document.getElementById('fixkind');
+        function show() {
+          document.querySelectorAll('.tc-fixfield').forEach(function (d) {
+            d.hidden = d.getAttribute('data-for') !== k.value;
+          });
+        }
+        k.addEventListener('change', show); show();
+      })();
+      document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});
+    </script>`));
 });
 
 app.post('/portal/clock/fix', (req, res) => {
@@ -4187,15 +4226,48 @@ app.post('/portal/clock/fix', (req, res) => {
   if (!reason) return back('err=1');
   const KINDS = ['missing_in', 'missing_out', 'wrong_in', 'wrong_out', 'break', 'missing_break', 'wrong_position', 'wrong_service', 'other'];
   const kind = KINDS.includes(req.body.kind) ? req.body.kind : 'other';
+
+  // Turn the form into something approval can ACT on. Times arrive as local
+  // wall clock and are stored as UTC here, once, so applying later is exact.
+  const b = req.body;
+  let payload = null, summary = null;
+  if (kind === 'wrong_in' || kind === 'missing_in') {
+    const at = TC.localInputToUtc(b.at_in);
+    if (!at) return back('err=1');
+    payload = { at }; summary = `clock-in → ${TC.clockFace(at)}`;
+  } else if (kind === 'wrong_out' || kind === 'missing_out') {
+    const at = TC.localInputToUtc(b.at_out);
+    if (!at) return back('err=1');
+    payload = { at }; summary = `clock-out → ${TC.clockFace(at)}`;
+  } else if (kind === 'missing_break') {
+    const start = TC.localInputToUtc(b.brk_start), end = TC.localInputToUtc(b.brk_end);
+    if (!start || !end) return back('err=1');
+    payload = { start, end, paid: TC.settings().breaksPaid }; summary = `add break ${TC.clockFace(start)}–${TC.clockFace(end)}`;
+  } else if (kind === 'break') {
+    const start = TC.localInputToUtc(b.bfix_start), end = TC.localInputToUtc(b.bfix_end);
+    if (!start || !end) return back('err=1');
+    payload = { break_id: Number(b.break_id) || null, start, end }; summary = `break → ${TC.clockFace(start)}–${TC.clockFace(end)}`;
+  } else if (kind === 'wrong_position') {
+    if (!clockPositionsFor(emp).includes(b.position)) return back('err=1');
+    payload = { position: b.position }; summary = `position → ${b.position}`;
+  } else if (kind === 'wrong_service') {
+    if (!DAYPARTS.includes(b.daypart)) return back('err=1');
+    payload = { daypart: b.daypart }; summary = `service → ${dp(b.daypart)}`;
+  } else {
+    summary = String(b.proposed || '').trim().slice(0, 200) || null;
+  }
+
   db.transaction(() => {
     const info = TC.q.addCorrection.run({
       time_entry_id: e.id, employee_id: emp.id, kind, field: null,
       original_value: `${e.clock_in_at} → ${e.clock_out_at || 'open'}`,
-      proposed_value: String(req.body.proposed || '').trim().slice(0, 200) || null,
+      proposed_value: summary,
       reason, requested_by: emp.name,
     });
+    db.prepare('UPDATE time_corrections SET payload = ? WHERE id = ?')
+      .run(payload ? JSON.stringify(payload) : null, info.lastInsertRowid);
     TC.q.setStatus.run({ id: e.id, status: 'correction_pending', by: emp.name });
-    TC.logEvent('correction', info.lastInsertRowid, 'requested', emp.name, { reason });
+    TC.logEvent('correction', info.lastInsertRowid, 'requested', emp.name, { after: summary, reason });
   })();
   try {
     PORTAL.adminNotify('timeclock', `${emp.name} asked to fix a time entry`,
@@ -4235,6 +4307,169 @@ app.get('/portal/clock/history', (req, res) => {
       ${rows.length ? '' : '<p class="tc-note">Nothing recorded yet.</p>'}
       <p class="tc-note">Hours shown are what the clock recorded. Your pay is worked out by your manager at the end of the period.</p>
     </div>`));
+});
+
+// ---------------------------------------------------------------------------
+// TIMESHEETS — the employee end.
+//
+// A pay period read back to the person who worked it, so they can check it and
+// say "yes, that is what I did" before anybody is paid on it. It shows the
+// entries themselves rather than a copy: correct a punch and this moves with it.
+//
+// Submission is a signature, not a save. It is refused while anything is still
+// running or contradicts itself, because signing off hours that are still
+// changing means nothing.
+// ---------------------------------------------------------------------------
+const tsPeriodsFor = () => recentPeriods(8);
+const tsFindPeriod = (start) => tsPeriodsFor().find((p) => p.start === start) || currentPeriod();
+
+/** Everything one period needs, gathered once. */
+function tsView(emp, period) {
+  const sheet = TC.sheetFor(emp.id, period);
+  const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
+  const corrections = TC.q.pendingForEmployee.all(emp.id)
+    .filter((c) => entries.some((e) => e.id === c.time_entry_id));
+  const issues = TC.issuesFor(entries, corrections);
+  const otRule = OT.rule();
+  const totals = TC.totalsFor(entries, {
+    otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
+    otThreshold: otRule.threshold, periodStart: period.start,
+  });
+  return { sheet, entries, corrections, issues, totals, status: TC.sheetStatus(sheet, issues), otRule };
+}
+
+app.get('/portal/timesheet', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const periods = tsPeriodsFor();
+  const period = tsFindPeriod(req.query.p);
+  const v = tsView(emp, period);
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  const hrs = (m) => (m ? (Math.round((m / 60) * 100) / 100) + 'h' : '0h');
+
+  const dayBlock = ([date, list]) => {
+    const dayMin = list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+    return `<details class="ts-day">
+      <summary class="ts-day-h">
+        <span class="ts-day-d">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</span>
+        <span class="ts-day-m">${list.length} ${list.length === 1 ? 'session' : 'sessions'}</span>
+        <span class="ts-day-t">${esc(TC.hm(dayMin))}</span>
+      </summary>
+      ${list.map((e) => {
+        const bt = TC.breakTotals(e.id);
+        return `<a class="ts-entry" href="/portal/clock/entry/${e.id}">
+          <span class="ts-e-l"><b>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'}</b>
+            <i>${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}${bt.unpaid ? ' · ' + TC.hm(bt.unpaid) + ' break' : ''}${e.edited ? ' · edited' : ''}</i></span>
+          <span class="ts-e-r">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</span>
+        </a>`;
+      }).join('')}
+    </details>`;
+  };
+
+  const blocking = v.issues.filter((i) => i.blocking);
+  const statusLabel = TC.SHEET_LABEL[v.status] || v.status;
+  const submitted = v.sheet.status === 'submitted' && !v.sheet.resubmit_needed;
+
+  res.send(portalPage('Your timesheet', `
+    ${portalSub('<a class="pt-back2" href="/portal">Portal</a>')}
+    <div class="pt-body tc-body">
+      <div class="ts-head">
+        <div class="tc-kick">Pay period</div>
+        <h1 class="tc-h">${esc(labelFor(period))}</h1>
+        <span class="ts-status ts-${esc(v.status)}">${esc(statusLabel)}</span>
+      </div>
+
+      <div class="ts-total">
+        <div class="ts-total-v">${esc(TC.hm(v.totals.payable))}</div>
+        <div class="ts-total-l">payable this period</div>
+      </div>
+      <div class="tc-facts">
+        <div class="tc-fact"><span>Worked</span><b>${hrs(v.totals.raw)}</b></div>
+        <div class="tc-fact"><span>Unpaid break</span><b>−${hrs(v.totals.unpaid)}</b></div>
+        ${v.totals.paid ? `<div class="tc-fact"><span>Paid break</span><b>${hrs(v.totals.paid)}</b></div>` : ''}
+        ${v.otRule.enabled && !emp.ot_exempt ? `<div class="tc-fact"><span>Regular</span><b>${hrs(v.totals.regular)}</b></div>
+          <div class="tc-fact"><span>Overtime</span><b>${hrs(v.totals.overtime)}</b></div>` : ''}
+      </div>
+      ${v.otRule.enabled && !emp.ot_exempt ? '<p class="tc-note">Overtime is shown for your information. Your manager works out final pay.</p>' : ''}
+
+      ${v.sheet.status === 'returned' ? `<div class="ts-returned">
+        <b>Sent back for a correction</b>
+        <p>${esc(v.sheet.returned_reason || '')}</p>
+        <i>${esc(v.sheet.returned_by || 'Your manager')} · ${esc(TC.stamp(v.sheet.returned_at))}</i>
+      </div>` : ''}
+      ${v.sheet.resubmit_needed && v.sheet.status === 'submitted' ? `<div class="ts-returned">
+        <b>Something changed after you submitted</b>
+        <p>Have another look and submit it again.</p></div>` : ''}
+
+      ${v.issues.length ? `<div class="tc-kick tc-kick-sec">Needs a look</div>
+        <div class="ts-issues">${v.issues.map((i) => `
+          <a class="ts-issue${i.blocking ? ' bad' : ''}" href="${i.entryId ? '/portal/clock/entry/' + i.entryId : '/portal/clock'}">
+            <span>${esc(i.text)}</span><i>${i.blocking ? 'must be fixed' : 'worth checking'}</i></a>`).join('')}</div>` : ''}
+
+      <div class="tc-kick tc-kick-sec">Your days<b>${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'}</b></div>
+      ${v.entries.length ? TC.byDay(v.entries).map(dayBlock).join('')
+        : '<p class="tc-note">Nothing recorded in this period yet.</p>'}
+
+      ${submitted ? `<div class="ts-done">
+          <b>Submitted ${esc(TC.stamp(v.sheet.submitted_at))}</b>
+          <p>${esc(v.sheet.submitted_note || 'You confirmed these hours are right.')}</p>
+          <i>Need a change? Open the day and ask for a correction.</i>
+        </div>`
+        : `<form method="post" action="/portal/timesheet/submit" class="ts-submit">
+            <input type="hidden" name="period" value="${esc(period.start)}">
+            ${blocking.length
+              ? `<p class="tc-note">You cannot submit yet — ${blocking.length} thing${blocking.length === 1 ? '' : 's'} above ${blocking.length === 1 ? 'needs' : 'need'} fixing first.</p>`
+              : `<label class="ts-confirm"><input type="checkbox" name="confirm" value="1" required>
+                   <span>These hours are right, as far as I know.</span></label>
+                 <label class="tc-field"><span>Anything to add? <i>optional</i></span>
+                   <input name="note" maxlength="300" placeholder="Only if something needs saying"></label>
+                 <label class="tc-field"><span>Your PIN</span>
+                   <input class="tc-pin" name="pin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••" required></label>
+                 <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Submit timesheet</button>`}
+          </form>`}
+
+      <div class="tc-kick tc-kick-sec">Earlier periods</div>
+      <div class="tc-rows">
+        ${periods.slice(1).map((p) => {
+          const s2 = TC.q.sheet.get(emp.id, p.start);
+          const st = s2 ? (s2.resubmit_needed && s2.status === 'submitted' ? 'needs_attention' : s2.status) : 'open';
+          return `<a class="tc-row" href="/portal/timesheet?p=${p.start}">
+            <span class="tc-row-l"><b>${esc(labelFor(p))}</b><i>${esc(TC.SHEET_LABEL[st] || st)}</i></span>
+            <span class="tc-row-r"><b>${esc(TC.hm(TC.totalsFor(TC.q.entriesInPeriod.all(emp.id, p.start, p.end)).payable))}</b></span>
+          </a>`;
+        }).join('')}
+      </div>
+    </div>
+    <script>document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});</script>`));
+});
+
+app.post('/portal/timesheet/submit', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const period = tsFindPeriod(req.body.period);
+  const back = (p) => res.redirect(`/portal/timesheet?p=${period.start}&` + p);
+  if (!pinOk(emp, req.body.pin)) return back('err=' + encodeURIComponent('That PIN did not match.'));
+  if (req.body.confirm !== '1') return back('err=' + encodeURIComponent('Tick the box to confirm the hours.'));
+
+  // Validated again on the server: the page may have been open while something
+  // changed, and a signature on stale hours is worth nothing.
+  const v = tsView(emp, period);
+  if (v.issues.some((i) => i.blocking)) {
+    return back('err=' + encodeURIComponent('Something still needs fixing — have another look.'));
+  }
+  db.transaction(() => {
+    TC.q.submitSheet.run({ id: v.sheet.id, note: String(req.body.note || '').trim().slice(0, 300) || null,
+      totals: JSON.stringify(v.totals) });
+    TC.logEvent('timesheet', v.sheet.id, 'submitted', emp.name,
+      { after: `${TC.hm(v.totals.payable)} payable`, reason: String(req.body.note || '').slice(0, 200) || null });
+  })();
+  try {
+    PORTAL.adminNotify('timesheet', `${emp.name} submitted a timesheet`,
+      { body: `${labelFor(period)} · ${TC.hm(v.totals.payable)}`, href: '/payroll/timesheets?p=' + period.start });
+  } catch { /* saved regardless */ }
+  back('ok=' + encodeURIComponent('Timesheet submitted.'));
 });
 
 /** The composer. Builds the list client-side and posts it in one field. */
@@ -13277,6 +13512,25 @@ app.get('/search', (req, res) => {
 // editor who made it. Nothing is corrected quietly.
 // ===========================================================================
 const tcActor = (req) => (req.user && req.user.name) || 'Owner';
+
+/**
+ * Anything that changes an entry's hours has to unsettle the signature on them.
+ *
+ * A person submits a timesheet meaning "these hours are right". Change the
+ * hours afterwards and that sentence is no longer about the same numbers — so
+ * the submission stays on the record as history, and the sheet asks to be
+ * signed again. Called from every path that can move a punch or a break.
+ */
+function tcTouchTimesheet(entryId, actor, why) {
+  const e = TC.q.byId.get(entryId);
+  if (!e) return;
+  const per = recentPeriods(12).find((p) => e.business_date >= p.start && e.business_date <= p.end);
+  if (!per) return;
+  const sheet = TC.q.sheet.get(e.employee_id, per.start);
+  if (!sheet || sheet.status !== 'submitted' || sheet.resubmit_needed) return;
+  TC.q.markResubmit.run({ id: sheet.id });
+  TC.logEvent('timesheet', sheet.id, 'reopened_by_change', actor, { reason: why });
+}
 const tcPosName = (slug) => (positions.bySlug.get(slug) || {}).name || slug || '—';
 const tcEmpName = (id) => (q.employee.get(id) || {}).name || `#${id}`;
 
@@ -13570,7 +13824,8 @@ app.get('/timeclock/:id', (req, res) => {
             ${corrs.map((c) => `<div class="tcm-corr">
               <div><b>${esc(c.kind.replace(/_/g, ' '))}</b> — ${esc(c.reason)}
                 ${c.proposed_value ? `<i>“${esc(c.proposed_value)}”</i>` : ''}</div>
-              <div class="tcm-corr-m">${esc(c.requested_by)} · ${esc(TC.stamp(c.requested_at))} · <b>${esc(c.decision)}</b>${c.decision_note ? ' — ' + esc(c.decision_note) : ''}</div>
+              <div class="tcm-corr-m">${esc(c.requested_by)} · ${esc(TC.stamp(c.requested_at))} · <b>${esc(c.decision)}</b>${c.applied_at ? ' · applied' : ''}${c.decision_note ? ' — ' + esc(c.decision_note) : ''}</div>
+              ${c.apply_error && c.decision === 'pending' ? `<div class="tcm-corr-err">Could not apply: ${esc(c.apply_error)}</div>` : ''}
               ${w2 && c.decision === 'pending' ? `<form method="post" action="/timeclock/correction/${c.id}" class="tcm-decide">
                 <input name="note" placeholder="note (optional)" maxlength="200">
                 <button class="bs-btn-sm" name="decision" value="approved" type="submit">Accept</button>
@@ -13643,6 +13898,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
     }
     TC.logEvent('entry', e.id, 'manager_edit', actor,
       { before, after: `${inAt} → ${outAt || 'open'} · ${position}${daypart ? '/' + daypart : ''}`, reason });
+    tcTouchTimesheet(e.id, actor, 'a manager corrected the times');
   })();
   res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Correction saved.'));
 });
@@ -13664,6 +13920,7 @@ app.post('/timeclock/:id/break', (req, res) => {
     TC.recompute(TC.q.byId.get(e.id));
     TC.logEvent('break', info.lastInsertRowid, 'manager_added', actor, { after: `${start} → ${end}`, reason });
     TC.logEvent('entry', e.id, 'break_added', actor, { after: `${start} → ${end}`, reason });
+    tcTouchTimesheet(e.id, actor, 'a manager added a break');
   })();
   res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Break added.'));
 });
@@ -13683,27 +13940,281 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
     if (e && e.clock_out_at) TC.recompute(e);
     // Removing the break somebody was on leaves them working, not stranded.
     if (e && e.status === 'on_break') TC.q.setStatus.run({ id: e.id, status: 'active', by: actor });
+    tcTouchTimesheet(b.time_entry_id, actor, 'a manager removed a break');
   })();
   res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('Break removed.'));
 });
 
+/**
+ * Decide a correction — and, when it is approved, CARRY IT OUT.
+ *
+ * Approval and application are one transaction. An approved request is never
+ * left sitting unapplied: if the change would not be valid — it would overlap
+ * another punch, or run a break past the clock-out — nothing is written, the
+ * request stays pending, and the manager is told why. The alternative is a
+ * request marked approved that quietly changed nothing, which is the worst of
+ * both worlds because everyone believes it was handled.
+ */
 app.post('/timeclock/correction/:id', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   const c = TC.q.correctionById.get(Number(req.params.id));
   if (!c) return res.status(404).end();
   const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
   const actor = tcActor(req);
-  db.transaction(() => {
-    TC.q.decideCorrection.run({ id: c.id, decision, by: actor, note: String(req.body.note || '').trim().slice(0, 200) || null });
-    TC.logEvent('correction', c.id, decision, actor);
-    // The entry stops flagging itself once nothing is left pending.
+  const note = String(req.body.note || '').trim().slice(0, 200) || null;
+  const done = (msg) => res.redirect(`/timeclock/${c.time_entry_id}?msg=` + encodeURIComponent(msg));
+  // Decided once, applied once. Without this a double submit — or a back
+  // button — would run the change twice and add the same break, or move the
+  // same punch again.
+  if (c.decision !== 'pending') return done('That request was already decided.');
+
+  const settle = () => {
+    // The entry stops flagging itself once nothing is left pending on it.
     const stillOpen = TC.q.correctionsFor.all(c.time_entry_id).some((x) => x.id !== c.id && x.decision === 'pending');
     const e = TC.q.byId.get(c.time_entry_id);
     if (e && !stillOpen && e.status === 'correction_pending') {
       TC.q.setStatus.run({ id: e.id, status: e.clock_out_at ? 'complete' : 'active', by: actor });
     }
+  };
+
+  if (decision === 'rejected') {
+    // A rejection touches the punch, never. It is only a decision.
+    db.transaction(() => {
+      TC.q.decideCorrection.run({ id: c.id, decision, by: actor, note });
+      TC.logEvent('correction', c.id, 'rejected', actor, { reason: note });
+      settle();
+    })();
+    return done('Request rejected — the entry is unchanged.');
+  }
+
+  try {
+    let summary = '';
+    db.transaction(() => {
+      summary = TC.applyCorrection(c, actor, {
+        validPositions: allRoles(),
+        validDayparts: DAYPARTS,
+        // Re-link through the one find-or-create every path uses, so moving a
+        // service can never mint a second shift for it.
+        relink: (entry) => {
+          if (!entry.daypart) return;
+          const bdate = TC.businessDateOf(entry.clock_in_at, TC.settings().cutoffHour);
+          s.getOrIgnore.run(bdate, entry.daypart);
+          const sh = s.findShift.get(bdate, entry.daypart);
+          policyForShift(sh);
+          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: entry.employee_id, role: entry.position });
+          TC.q.setShift.run({ id: entry.id, shift_id: sh.id });
+          db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, entry.id);
+        },
+      });
+      TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
+      db.prepare("UPDATE time_corrections SET applied_at = datetime('now'), apply_error = NULL WHERE id = ?").run(c.id);
+      TC.logEvent('correction', c.id, 'approved_and_applied', actor, { after: summary, reason: note });
+      // Hours that changed after somebody signed for them are no longer the
+      // hours they signed for. The submission stands as a record, but it has to
+      // be made again against the new figures.
+      tcTouchTimesheet(c.time_entry_id, actor, `a correction changed the hours — ${summary}`);
+      settle();
+    })();
+    return done(`Approved and applied — ${summary}.`);
+  } catch (err) {
+    // Nothing was written: the transaction rolled back. Say what stopped it and
+    // leave the request where a manager can still act on it.
+    const msg = err instanceof TC.ClockError ? err.message : 'That change could not be applied.';
+    try { db.prepare('UPDATE time_corrections SET apply_error = ? WHERE id = ?').run(msg.slice(0, 300), c.id); } catch { /* best effort */ }
+    return done(`Not applied — ${msg} The request is still open.`);
+  }
+});
+
+// ===========================================================================
+// TIMESHEETS — the manager's ledger, sitting with Payroll because that is what
+// it prepares. Review and return only: approving, locking and transferring
+// hours belong to the next phase and are deliberately absent.
+// ===========================================================================
+app.get('/payroll/timesheets', (req, res) => {
+  if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const periods = recentPeriods(8);
+  const period = periods.find((p) => p.start === req.query.p) || currentPeriod();
+  const otRule = OT.rule();
+  const staff = q.allEmployees.all();
+
+  const rows = staff.map((emp) => {
+    const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
+    const corrections = TC.q.pendingForEmployee.all(emp.id).filter((c) => entries.some((e) => e.id === c.time_entry_id));
+    if (!entries.length && !corrections.length) return null;
+    const sheet = TC.sheetFor(emp.id, period);
+    const issues = TC.issuesFor(entries, corrections);
+    const totals = TC.totalsFor(entries, { otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
+      otThreshold: otRule.threshold, periodStart: period.start });
+    // The hours a manager typed on the shifts in this period, for comparison.
+    const entered = db.prepare(`SELECT COALESCE(SUM(w.hours),0) h FROM work w JOIN shifts sh ON sh.id = w.shift_id
+      WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`).get(emp.id, period.start, period.end).h;
+    const clocked = TC.toHours(totals.payable) || 0;
+    return { emp, sheet, entries, corrections, issues, totals, entered: Number(entered),
+      clocked, variance: Math.round((clocked - Number(entered)) * 100) / 100,
+      status: TC.sheetStatus(sheet, issues) };
+  }).filter(Boolean);
+
+  const statCell = (l, v, s, tone) => `<div class="bs-strip-c"><span class="bs-strip-l">${l}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${v}</span><span class="bs-strip-s">${s}</span></div>`;
+  const submitted = rows.filter((r) => r.status === 'submitted').length;
+  const attention = rows.filter((r) => r.status === 'needs_attention').length;
+  const totalMin = rows.reduce((a, r) => a + r.totals.payable, 0);
+
+  res.send(layout('Timesheets', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Timesheets</h1>
+          <p class="bs-subline">What the clock recorded this period, and who has signed it off. Nothing here is sent to payroll — <a class="bs-act" href="/payroll">Payroll</a> still runs on the hours you enter on a shift.</p>
+        </div>
+      </div>
+      <section class="bs-panel bs-strip">
+        ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}`)}
+        ${statCell('Submitted', String(submitted), submitted === rows.length && rows.length ? 'everyone' : 'signed off', submitted ? 'ok' : '')}
+        ${statCell('Needs attention', String(attention), attention ? 'issues to clear' : 'nothing outstanding', attention ? 'warn' : 'ok')}
+        ${statCell('Period', esc(period.start.slice(5)), esc(labelFor(period)))}
+      </section>
+
+      <form class="tcm-filters" method="get" action="/payroll/timesheets">
+        <label><span>Pay period</span><select name="p" onchange="this.form.submit()">
+          ${periods.map((p) => `<option value="${p.start}"${p.start === period.start ? ' selected' : ''}>${esc(labelFor(p))}</option>`).join('')}
+        </select></label>
+      </form>
+
+      ${rows.length ? `<div class="bs-lrows tcm-rows">
+        ${rows.map((r) => `<a class="bs-lr tcm-row ts-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
+          <span class="tcm-who"><b>${esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
+          <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
+          <span class="tcm-times">entered ${r.entered}h${Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h</i>` : ''}</span>
+          <span class="tcm-tags">
+            <i class="tcm-tag ${r.status === 'submitted' ? 'on' : r.status === 'needs_attention' ? 'warn' : ''}">${esc(TC.SHEET_LABEL[r.status])}</i>
+            ${r.corrections.length ? `<i class="tcm-tag warn">${r.corrections.length} fix</i>` : ''}
+          </span>
+          <span class="bs-lr-go">›</span>
+        </a>`).join('')}</div>`
+        : '<div class="bs-blank"><b>No time recorded</b><span>Nobody clocked in during this period.</span></div>'}
+    </div>`));
+});
+
+app.get('/payroll/timesheets/:empId', (req, res) => {
+  if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const emp = q.employee.get(Number(req.params.empId));
+  if (!emp) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such employee</h1></div>'));
+  const periods = recentPeriods(8);
+  const period = periods.find((p) => p.start === req.query.p) || currentPeriod();
+  const v = tsView(emp, period);
+  const events = TC.q.eventsFor.all('timesheet', v.sheet.id);
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  const fact = (k, val) => `<div class="inc-fact"><span>${k}</span><b>${val}</b></div>`;
+  const entered = db.prepare(`SELECT COALESCE(SUM(w.hours),0) h FROM work w JOIN shifts sh ON sh.id = w.shift_id
+    WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`).get(emp.id, period.start, period.end).h;
+  const clocked = TC.toHours(v.totals.payable) || 0;
+  const variance = Math.round((clocked - Number(entered)) * 100) / 100;
+
+  res.send(layout(`${emp.name} · timesheet`, `
+    ${flash(req)}
+    <div class="bs-page tcm-page inc-detail">
+      <a class="bs-back" href="/payroll/timesheets?p=${period.start}">← Timesheets</a>
+      <div class="inc-rec-head">
+        <div class="inc-rec-title">
+          <div class="inc-rec-line">${esc(labelFor(period))}</div>
+          <h1 class="bs-headline">${esc(emp.name)}</h1>
+          <p class="bs-subline">${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'} · clocked hours only, nothing sent to payroll</p>
+        </div>
+        <div class="inc-rec-status"><span class="inc-st inc-st-${esc(v.status.replace(/_/g, '-'))}">${esc(TC.SHEET_LABEL[v.status])}</span></div>
+      </div>
+
+      <div class="inc-cols">
+        <div class="inc-main">
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">The period</span></div>
+            <div class="inc-facts">
+              ${fact('Payable (clocked)', `<b>${esc(TC.hm(v.totals.payable))}</b>`)}
+              ${fact('Worked', esc(TC.hm(v.totals.raw)))}
+              ${fact('Unpaid break', esc(TC.hm(v.totals.unpaid)))}
+              ${v.otRule.enabled && !emp.ot_exempt ? fact('Regular / overtime', `${esc(TC.hm(v.totals.regular))} / ${esc(TC.hm(v.totals.overtime))}`) : ''}
+              ${fact('Entered on shifts', `${entered}h`)}
+              ${Math.abs(variance) >= 0.01 ? fact('Difference', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
+            </div>
+            <p class="perf-foot">Payroll still runs on the hours entered on each shift. These are the clock's figures, side by side.</p>
+          </section>
+
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Days</span></div>
+            ${v.entries.length ? TC.byDay(v.entries).map(([date, list]) => `
+              <div class="ts-mday"><div class="ts-mday-h">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</div>
+                ${list.map((e) => `<a class="ts-mrow" href="/timeclock/${e.id}">
+                  <span>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'} · ${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
+                  <b>${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b></a>`).join('')}
+              </div>`).join('')
+              : '<p class="inc-hint">Nothing recorded.</p>'}
+          </section>
+
+          ${v.issues.length ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Issues</span></div>
+            ${v.issues.map((i) => `<a class="ts-issue${i.blocking ? ' bad' : ''}" href="${i.entryId ? '/timeclock/' + i.entryId : '#'}">
+              <span>${esc(i.text)}</span><i>${i.blocking ? 'blocking' : 'note'}</i></a>`).join('')}
+          </section>` : ''}
+        </div>
+
+        <aside class="inc-side">
+          ${canWrite() && v.sheet.status === 'submitted' ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Send it back</span></div>
+            <form method="post" action="/payroll/timesheets/${emp.id}/return" class="tcm-form">
+              <input type="hidden" name="period" value="${period.start}">
+              <label class="tcm-f wide"><span>Reason <i>required</i></span>
+                <input name="reason" required maxlength="300" placeholder="What needs correcting"></label>
+              <button class="bs-btn-sm" type="submit">Return to ${esc(firstName(emp.name))}</button>
+            </form>
+            <p class="inc-hint">Approving and locking come in the next phase.</p>
+          </section>` : ''}
+
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Submission</span></div>
+            <div class="inc-facts">
+              ${fact('Status', esc(TC.SHEET_LABEL[v.status]))}
+              ${v.sheet.submitted_at ? fact('Submitted', esc(TC.stamp(v.sheet.submitted_at))) : ''}
+              ${v.sheet.submitted_note ? fact('Their note', esc(v.sheet.submitted_note)) : ''}
+              ${v.sheet.returned_at ? fact('Returned', `${esc(TC.stamp(v.sheet.returned_at))} · ${esc(v.sheet.returned_by || '')}`) : ''}
+              ${v.sheet.returned_reason ? fact('Why', esc(v.sheet.returned_reason)) : ''}
+              ${v.sheet.resubmit_needed ? fact('Resubmit', 'needed — something changed') : ''}
+            </div>
+          </section>
+
+          <section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">History</span></div>
+            <ul class="inc-timeline">
+              ${events.length ? events.map((ev) => `<li class="inc-ev"><span class="inc-ev-dot"></span>
+                <div class="inc-ev-body"><div class="inc-ev-head"><b>${esc(ev.actor || '')}</b><span>${esc(TC.stamp(ev.at))}</span></div>
+                <div class="inc-ev-note">${esc(ev.action.replace(/_/g, ' '))}</div>
+                ${ev.after_val ? `<div class="inc-ev-change">${esc(ev.after_val)}</div>` : ''}
+                ${ev.reason ? `<div class="inc-ev-change">“${esc(ev.reason)}”</div>` : ''}</div></li>`).join('')
+                : '<li class="inc-hint">Nothing yet.</li>'}
+            </ul>
+          </section>
+        </aside>
+      </div>
+    </div>`));
+});
+
+app.post('/payroll/timesheets/:empId/return', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed',
+    '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p></div>'));
+  const emp = q.employee.get(Number(req.params.empId));
+  if (!emp) return res.status(404).end();
+  const periods = recentPeriods(8);
+  const period = periods.find((p) => p.start === req.body.period) || currentPeriod();
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
+  if (!reason) return back('A reason is required.');
+  const sheet = TC.sheetFor(emp.id, period);
+  if (sheet.status !== 'submitted') return back('That timesheet is not submitted.');
+  const actor = tcActor(req);
+  db.transaction(() => {
+    TC.q.returnSheet.run({ id: sheet.id, by: actor, reason });
+    TC.logEvent('timesheet', sheet.id, 'returned', actor, { reason });
   })();
-  res.redirect(`/timeclock/${c.time_entry_id}?msg=` + encodeURIComponent(`Request ${decision}.`));
+  back(`Returned to ${emp.name}.`);
 });
 
 // ===========================================================================

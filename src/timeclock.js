@@ -101,6 +101,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tc_entry ON time_corrections (time_entry_id);
   CREATE INDEX IF NOT EXISTS idx_tc_open ON time_corrections (decision);
+  CREATE INDEX IF NOT EXISTS idx_tc_emp ON time_corrections (employee_id);
 
   -- Append-only. Every mutation lands here with before/after and a reason.
   CREATE TABLE IF NOT EXISTS time_events (
@@ -113,6 +114,39 @@ db.exec(`
     before_val TEXT, after_val TEXT, reason TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_tev ON time_events (entity, entity_id, id);
+`);
+
+// A correction has to be machine-applicable, not prose. `payload` carries the
+// structured request — the exact timestamps, position or service being asked
+// for — so approving it can act rather than just agree with it. The older
+// free-text `proposed_value` stays as the human-readable summary.
+(function addPayload() {
+  const cols = db.prepare('PRAGMA table_info(time_corrections)').all().map((c) => c.name);
+  if (!cols.includes('payload')) db.exec('ALTER TABLE time_corrections ADD COLUMN payload TEXT');
+  if (!cols.includes('applied_at')) db.exec('ALTER TABLE time_corrections ADD COLUMN applied_at TEXT');
+  if (!cols.includes('apply_error')) db.exec('ALTER TABLE time_corrections ADD COLUMN apply_error TEXT');
+})();
+
+// A timesheet is a pay period's worth of one person's time, plus the fact of
+// their submitting it. It deliberately stores NO punches: the entries are the
+// source of truth and a copy here would be a second version to drift. What it
+// does keep is the totals as they stood at submission, because "what did I
+// agree to" has to survive a later correction.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS timesheets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id   INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    period_start  TEXT NOT NULL,
+    period_end    TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'open',
+    submitted_at  TEXT, submitted_note TEXT, submitted_totals TEXT,
+    returned_at   TEXT, returned_by TEXT, returned_reason TEXT,
+    resubmit_needed INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(employee_id, period_start)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ts_period ON timesheets (period_start);
+  CREATE INDEX IF NOT EXISTS idx_ts_emp ON timesheets (employee_id, period_start);
 `);
 
 // --- settings --------------------------------------------------------------
@@ -333,9 +367,282 @@ class ClockError extends Error {
   constructor(msg, code) { super(msg); this.code = code || 'invalid'; }
 }
 
+// --- overlap guards --------------------------------------------------------
+// Two punches for one person cannot cover the same minute, and neither can two
+// breaks on one entry. Checked before any correction lands, because an approved
+// change that creates an overlap is a payroll figure counted twice.
+q.overlapping = db.prepare(`SELECT * FROM time_entries
+  WHERE employee_id = @employee_id AND id <> @id
+    AND clock_in_at < @end
+    AND (clock_out_at IS NULL OR clock_out_at > @start)`);
+q.breaksOther = db.prepare('SELECT * FROM time_breaks WHERE time_entry_id = ? AND id <> ?');
+
+/** Throws if [start,end) would collide with another entry for the same person. */
+function assertNoEntryOverlap(entry, start, end) {
+  const clash = q.overlapping.all({ employee_id: entry.employee_id, id: entry.id, start, end: end || '9999-12-31 23:59:59' });
+  if (clash.length) {
+    throw new ClockError(`That would overlap another time entry (#${clash[0].id}, `
+      + `${clockFace(clash[0].clock_in_at)}–${clash[0].clock_out_at ? clockFace(clash[0].clock_out_at) : 'still open'}).`);
+  }
+}
+
+/** Throws if a break would fall outside its entry or collide with another. */
+function assertBreakFits(entry, breakId, start, end) {
+  if (!(start < end)) throw new ClockError('A break has to end after it starts.');
+  if (start < entry.clock_in_at) throw new ClockError('A break cannot start before the clock-in.');
+  if (entry.clock_out_at && end > entry.clock_out_at) throw new ClockError('A break cannot end after the clock-out.');
+  for (const b of q.breaksOther.all(entry.id, breakId || 0)) {
+    const bEnd = b.end_at || '9999-12-31 23:59:59';
+    if (start < bEnd && end > b.start_at) {
+      throw new ClockError(`That would overlap another break (${clockFace(b.start_at)}–${b.end_at ? clockFace(b.end_at) : 'still running'}).`);
+    }
+  }
+}
+
+// --- applying an approved correction ---------------------------------------
+/**
+ * Carry out what a correction asked for.
+ *
+ * The rule this exists to enforce: an approved request is never left unapplied.
+ * Approval and application happen together or not at all — the caller runs this
+ * inside the same transaction that records the decision, so a change that fails
+ * validation leaves the request pending with a message rather than approved and
+ * quietly ignored.
+ *
+ * Every path writes the original value into the audit before overwriting it, so
+ * the punch as first recorded is readable forever.
+ *
+ * @param opts.validPositions  slugs the entry may be moved to
+ * @param opts.validDayparts   services the entry may be moved to
+ * @param opts.relink          (entry, businessDate, daypart, position) → shiftId
+ */
+function applyCorrection(c, actor, opts = {}) {
+  const entry = q.byId.get(c.time_entry_id);
+  if (!entry) throw new ClockError('That time entry no longer exists.');
+  if (entry.status === 'locked') throw new ClockError('That entry is locked — reopen it first.');
+  let payload = {};
+  try { payload = JSON.parse(c.payload || '{}') || {}; } catch { payload = {}; }
+
+  const note = (action, before, after) => {
+    logEvent('entry', entry.id, action, actor, { before, after, reason: `approved correction #${c.id}: ${c.reason}` });
+  };
+  const finish = (summary) => {
+    const fresh = q.byId.get(entry.id);
+    if (fresh.clock_out_at) recompute(fresh);
+    db.prepare("UPDATE time_entries SET edited = 1, updated_at = datetime('now'), updated_by = @by WHERE id = @id")
+      .run({ id: entry.id, by: actor });
+    return summary;
+  };
+
+  switch (c.kind) {
+    case 'missing_in':
+    case 'wrong_in': {
+      const at = payload.at;
+      if (!at) throw new ClockError('That request did not include a time to set.');
+      if (entry.clock_out_at && at >= entry.clock_out_at) throw new ClockError('The clock-in has to be before the clock-out.');
+      assertNoEntryOverlap(entry, at, entry.clock_out_at);
+      // Breaks must still sit inside the shift after the punch moves.
+      for (const b of q.breaks.all(entry.id)) {
+        if (b.start_at < at) throw new ClockError('A recorded break would fall before that clock-in — fix the break first.');
+      }
+      note('clock_in_corrected', entry.clock_in_at, at);
+      db.prepare('UPDATE time_entries SET clock_in_at = ? WHERE id = ?').run(at, entry.id);
+      return finish(`clock-in ${clockFace(entry.clock_in_at)} → ${clockFace(at)}`);
+    }
+    case 'missing_out':
+    case 'wrong_out': {
+      const at = payload.at;
+      if (!at) throw new ClockError('That request did not include a time to set.');
+      if (at <= entry.clock_in_at) throw new ClockError('The clock-out has to be after the clock-in.');
+      assertNoEntryOverlap(entry, entry.clock_in_at, at);
+      for (const b of q.breaks.all(entry.id)) {
+        if (b.end_at && b.end_at > at) throw new ClockError('A recorded break would run past that clock-out — fix the break first.');
+        if (!b.end_at) throw new ClockError('A break is still open on this entry — close it first.');
+      }
+      note('clock_out_corrected', entry.clock_out_at || 'open', at);
+      db.prepare("UPDATE time_entries SET clock_out_at = ?, status = 'complete' WHERE id = ?").run(at, entry.id);
+      return finish(`clock-out ${entry.clock_out_at ? clockFace(entry.clock_out_at) : 'missing'} → ${clockFace(at)}`);
+    }
+    case 'missing_break': {
+      const { start, end } = payload;
+      if (!start || !end) throw new ClockError('That request did not include the break times.');
+      assertBreakFits(entry, null, start, end);
+      const paid = payload.paid ? 1 : 0;
+      const info = q.startBreak.run({ time_entry_id: entry.id, employee_id: entry.employee_id,
+        start_at: start, paid, source: 'manager', created_by: actor });
+      q.endBreak.run({ id: info.lastInsertRowid, end_at: end, raw: minutesBetween(start, end) });
+      note('break_added', null, `${clockFace(start)}–${clockFace(end)}`);
+      return finish(`break added ${clockFace(start)}–${clockFace(end)}`);
+    }
+    case 'break': {
+      const { break_id: bid, start, end } = payload;
+      const b = bid ? q.breakById.get(Number(bid)) : q.breaks.all(entry.id)[0];
+      if (!b || b.time_entry_id !== entry.id) throw new ClockError('That break is not on this entry.');
+      if (!start || !end) throw new ClockError('That request did not include the break times.');
+      assertBreakFits(entry, b.id, start, end);
+      const paid = payload.paid == null ? b.paid : (payload.paid ? 1 : 0);
+      note('break_corrected', `${clockFace(b.start_at)}–${b.end_at ? clockFace(b.end_at) : 'open'}`, `${clockFace(start)}–${clockFace(end)}`);
+      q.editBreak.run({ id: b.id, start_at: start, end_at: end, paid, raw: minutesBetween(start, end) });
+      // Correcting the break somebody was on leaves them working, not stranded.
+      if (entry.status === 'on_break') q.setStatus.run({ id: entry.id, status: entry.clock_out_at ? 'complete' : 'active', by: actor });
+      return finish(`break ${clockFace(start)}–${clockFace(end)}`);
+    }
+    case 'wrong_position': {
+      const pos = payload.position;
+      if (!pos || !(opts.validPositions || []).includes(pos)) throw new ClockError('That is not a position this person can work.');
+      note('position_corrected', entry.position, pos);
+      db.prepare('UPDATE time_entries SET position = ? WHERE id = ?').run(pos, entry.id);
+      if (opts.relink) opts.relink(q.byId.get(entry.id));
+      return finish(`position ${entry.position} → ${pos}`);
+    }
+    case 'wrong_service': {
+      const dp2 = payload.daypart;
+      if (!dp2 || !(opts.validDayparts || []).includes(dp2)) throw new ClockError('That is not a service that exists.');
+      note('service_corrected', entry.daypart || 'none', dp2);
+      db.prepare('UPDATE time_entries SET daypart = ? WHERE id = ?').run(dp2, entry.id);
+      // Moving the service moves which shift this belongs to. Re-linked through
+      // the same find-or-create every path uses, so no duplicate is minted.
+      if (opts.relink) opts.relink(q.byId.get(entry.id));
+      return finish(`service ${entry.daypart || 'none'} → ${dp2}`);
+    }
+    default:
+      // 'other' has nothing structured to act on. Say so plainly rather than
+      // marking it approved and changing nothing.
+      throw new ClockError('This request has no specific change to apply — correct the entry by hand, then reject the request with a note.');
+  }
+}
+
+// ===========================================================================
+// TIMESHEETS — a pay period, read from the entries rather than copied from them.
+// ===========================================================================
+q.sheet = db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?');
+q.sheetById = db.prepare('SELECT * FROM timesheets WHERE id = ?');
+q.sheetsForPeriod = db.prepare('SELECT * FROM timesheets WHERE period_start = ?');
+q.sheetsForEmployee = db.prepare('SELECT * FROM timesheets WHERE employee_id = ? ORDER BY period_start DESC');
+q.makeSheet = db.prepare(`INSERT OR IGNORE INTO timesheets (employee_id, period_start, period_end)
+  VALUES (@employee_id, @period_start, @period_end)`);
+q.submitSheet = db.prepare(`UPDATE timesheets SET status = 'submitted', submitted_at = datetime('now'),
+  submitted_note = @note, submitted_totals = @totals, resubmit_needed = 0, returned_at = NULL,
+  returned_by = NULL, returned_reason = NULL WHERE id = @id`);
+q.returnSheet = db.prepare(`UPDATE timesheets SET status = 'returned', returned_at = datetime('now'),
+  returned_by = @by, returned_reason = @reason, resubmit_needed = 1 WHERE id = @id`);
+q.markResubmit = db.prepare("UPDATE timesheets SET resubmit_needed = 1 WHERE id = @id AND status = 'submitted'");
+q.entriesInPeriod = db.prepare(`SELECT * FROM time_entries WHERE employee_id = ?
+  AND business_date >= ? AND business_date <= ? ORDER BY business_date, clock_in_at`);
+q.pendingForEmployee = db.prepare(`SELECT c.* FROM time_corrections c
+  WHERE c.employee_id = ? AND c.decision = 'pending'`);
+
+/** The row for a person and period, created on first look. */
+function sheetFor(employeeId, period) {
+  q.makeSheet.run({ employee_id: employeeId, period_start: period.start, period_end: period.end });
+  return q.sheet.get(employeeId, period.start);
+}
+
+/**
+ * Everything wrong with a period's time, each tied to the entry it came from.
+ *
+ * Blocking issues stop a submission — you cannot sign off hours that are still
+ * running or contradict each other. The rest are worth saying but not worth
+ * refusing over.
+ */
+function issuesFor(entries, corrections) {
+  const out = [];
+  const add = (blocking, text, entryId) => out.push({ blocking, text, entryId });
+  const sorted = entries.slice().sort((a, b) => a.clock_in_at.localeCompare(b.clock_in_at));
+
+  for (const e of entries) {
+    if (e.status === 'active' || e.status === 'on_break') {
+      add(true, `Still on the clock from ${clockFace(e.clock_in_at)} on ${e.business_date}`, e.id);
+    } else if (!e.clock_out_at) {
+      add(true, `No clock-out on ${e.business_date}`, e.id);
+    }
+    if (!e.position) add(true, `No position recorded on ${e.business_date}`, e.id);
+    if (!e.daypart) add(false, `No service recorded on ${e.business_date}`, e.id);
+    if (e.clock_out_at && e.clock_out_at <= e.clock_in_at) add(true, `The times on ${e.business_date} do not make sense`, e.id);
+    if (e.raw_minutes != null && e.raw_minutes < 0) add(true, `Negative duration on ${e.business_date}`, e.id);
+    const brs = q.breaks.all(e.id);
+    for (const b of brs) if (!b.end_at) add(true, `A break is still open on ${e.business_date}`, e.id);
+    // Breaks that cover the same minute twice.
+    const done = brs.filter((b) => b.end_at).sort((a, b) => a.start_at.localeCompare(b.start_at));
+    for (let i = 1; i < done.length; i++) {
+      if (done[i].start_at < done[i - 1].end_at) add(true, `Two breaks overlap on ${e.business_date}`, e.id);
+    }
+  }
+  // Entries that cover the same minute twice.
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    if (prev.clock_out_at && sorted[i].clock_in_at < prev.clock_out_at) {
+      add(true, `Two entries overlap on ${sorted[i].business_date}`, sorted[i].id);
+    }
+  }
+  for (const c of corrections) {
+    if (c.decision === 'pending') {
+      add(true, `A correction is still waiting on your manager (${String(c.kind).replace(/_/g, ' ')})`, c.time_entry_id);
+    }
+    if (c.apply_error && c.decision === 'pending') {
+      add(true, `A correction could not be applied: ${c.apply_error}`, c.time_entry_id);
+    }
+  }
+  return out;
+}
+
+/**
+ * A period's totals for one person. Overtime is computed for DISPLAY only, and
+ * only when the owner has overtime switched on — the payroll toggle stays the
+ * authority and nothing here is pushed into pay.
+ */
+function totalsFor(entries, opts = {}) {
+  let raw = 0, paid = 0, unpaid = 0, payable = 0;
+  for (const e of entries) {
+    if (!e.clock_out_at) continue;              // still running: not countable yet
+    raw += e.raw_minutes || 0;
+    paid += e.paid_break_min || 0;
+    unpaid += e.unpaid_break_min || 0;
+    payable += e.payable_minutes || 0;
+  }
+  // Weekly overtime, measured per workweek the way payroll does it — never
+  // per period, never per day.
+  let overtime = 0;
+  if (opts.otEnabled && !opts.otExempt && opts.periodStart) {
+    const week = new Map();
+    for (const e of entries) {
+      if (!e.clock_out_at) continue;
+      const days = Math.floor((new Date(e.business_date) - new Date(opts.periodStart)) / 86400000);
+      const wk = days < 7 ? 0 : 1;
+      week.set(wk, (week.get(wk) || 0) + (e.payable_minutes || 0));
+    }
+    const threshold = (opts.otThreshold || 40) * 60;
+    for (const mins of week.values()) if (mins > threshold) overtime += mins - threshold;
+  }
+  return { raw, paid, unpaid, payable, overtime, regular: Math.max(0, payable - overtime) };
+}
+
+/** Group a period's entries by business date, newest first. */
+function byDay(entries) {
+  const m = new Map();
+  for (const e of entries) {
+    if (!m.has(e.business_date)) m.set(e.business_date, []);
+    m.get(e.business_date).push(e);
+  }
+  return [...m.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+}
+
+/** What a timesheet's status should read as right now. */
+function sheetStatus(sheet, issues) {
+  if (sheet.status === 'returned') return 'returned';
+  if (sheet.status === 'submitted') return sheet.resubmit_needed ? 'needs_attention' : 'submitted';
+  return issues.some((i) => i.blocking) ? 'needs_attention' : 'open';
+}
+const SHEET_LABEL = {
+  open: 'Open', needs_attention: 'Needs attention', submitted: 'Submitted',
+  returned: 'Returned', approved: 'Approved', locked: 'Locked', transferred: 'Transferred',
+};
+
 module.exports = {
+  sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL,
   q, settings, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
   clockFace, stamp, hm, toHours, breakTotals, recompute, elapsedMinutes, logEvent,
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
+  applyCorrection, assertNoEntryOverlap, assertBreakFits,
 };

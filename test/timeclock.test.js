@@ -18,6 +18,11 @@ const PORT = 3989;                     // unique across the suite
 const BASE = `http://127.0.0.1:${PORT}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-tc-'));
 const DB = path.join(dir, 'tc.db');
+// Point the modules this file requires at the SAME database the server uses.
+// Without it `require('../src/timeclock')` opens the default data.db and every
+// query here would read a different restaurant's data.
+process.env.DB_PATH = DB;
+process.env.TZ = process.env.TZ || 'America/New_York';
 let child, Database, db;
 
 const post = (p, body, headers = {}) => fetch(BASE + p, {
@@ -235,13 +240,14 @@ test('an employee correction needs the PIN and a reason, and never edits the pun
   const done = entriesOf(EMP.solo).filter((e) => e.status === 'complete')[0];
   const original = done.clock_in_at;
 
-  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', reason: '', pin: '3111' }, { cookie });
+  const at = require('../src/timeclock').utcToLocalInput(done.clock_out_at);
+  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', at_out: at, reason: '', pin: '3111' }, { cookie });
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE time_entry_id = ?').get(done.id).n, 0, 'no reason, no request');
 
-  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', reason: 'left at 10.15', pin: '0000' }, { cookie });
+  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', at_out: at, reason: 'left at 10.15', pin: '0000' }, { cookie });
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE time_entry_id = ?').get(done.id).n, 0, 'wrong PIN, no request');
 
-  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', reason: 'left at 10.15', pin: '3111' }, { cookie });
+  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', at_out: at, reason: 'left at 10.15', pin: '3111' }, { cookie });
   const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC LIMIT 1').get(done.id);
   assert.ok(c, 'the request is recorded');
   assert.strictEqual(c.decision, 'pending');
@@ -312,4 +318,371 @@ test('payroll and the overtime toggle are untouched by any of this', async () =>
   assert.match(html, /overtime/i, 'the overtime control is still on the payroll page');
   const otRow = db.prepare("SELECT value FROM settings WHERE key = 'ot_enabled'").get();
   assert.ok(otRow === undefined || otRow.value === '0', 'and overtime is still off by default');
+});
+
+// ===========================================================================
+// APPROVED CORRECTIONS APPLY THEMSELVES
+//
+// The rule under test: an approved request is never left unapplied. Approval
+// and application are one transaction, so a change that cannot be made validly
+// leaves the request pending and the punch untouched — never "approved" against
+// a record that did not move.
+// ===========================================================================
+
+/** File a structured request straight into the table, the way the portal does. */
+function request(entryId, empId, kind, payload, reason = 'because') {
+  const info = db.prepare(`INSERT INTO time_corrections
+    (time_entry_id, employee_id, kind, original_value, proposed_value, reason, requested_by, payload)
+    VALUES (?,?,?,?,?,?,?,?)`)
+    .run(entryId, empId, kind, 'original', 'summary', reason, 'Tester', JSON.stringify(payload));
+  db.prepare("UPDATE time_entries SET status = 'correction_pending' WHERE id = ?").run(entryId);
+  return info.lastInsertRowid;
+}
+const decide = (cid, decision, note = '') => post(`/timeclock/correction/${cid}`, { decision, note });
+const entry = (id) => db.prepare('SELECT * FROM time_entries WHERE id = ?').get(id);
+const corr = (id) => db.prepare('SELECT * FROM time_corrections WHERE id = ?').get(id);
+const evOf = (id) => db.prepare("SELECT * FROM time_events WHERE entity='entry' AND entity_id=? ORDER BY id").all(id);
+
+/** A finished entry on its own day, safely away from the others. */
+function seedEntry(empId, day, inLocal, outLocal, position = 'server', daypart = 'cafe') {
+  const toUtc = (v) => require('../src/timeclock').localInputToUtc(v);
+  const i = toUtc(`${day}T${inLocal}`), o = outLocal ? toUtc(`${day}T${outLocal}`) : null;
+  const raw = o ? Math.round((new Date(o.replace(' ', 'T') + 'Z') - new Date(i.replace(' ', 'T') + 'Z')) / 60000) : null;
+  return db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,?,?,?,?,?,'manager',?,?)`)
+    .run(empId, day, daypart, position, i, o, o ? 'complete' : 'missing_punch', raw, raw).lastInsertRowid;
+}
+
+test('an approved missing clock-out is inserted automatically', async () => {
+  const id = seedEntry(EMP.multi, '2026-06-01', '09:00', null);
+  const cid = request(id, EMP.multi, 'missing_out', { at: require('../src/timeclock').localInputToUtc('2026-06-01T17:00') });
+  await decide(cid, 'approved');
+  const e = entry(id);
+  assert.ok(e.clock_out_at, 'the clock-out was written');
+  assert.strictEqual(e.status, 'complete', 'and the entry closed');
+  assert.strictEqual(e.payable_minutes, 480, 'eight hours, recalculated');
+  assert.strictEqual(e.edited, 1, 'flagged as edited');
+  assert.strictEqual(corr(cid).decision, 'approved');
+  assert.ok(corr(cid).applied_at, 'and stamped as applied');
+});
+
+test('an approved clock-in change replaces the value and keeps the original in history', async () => {
+  const id = seedEntry(EMP.multi, '2026-06-02', '09:00', '17:00');
+  const before = entry(id).clock_in_at;
+  const cid = request(id, EMP.multi, 'wrong_in', { at: require('../src/timeclock').localInputToUtc('2026-06-02T08:00') });
+  await decide(cid, 'approved');
+  const e = entry(id);
+  assert.notStrictEqual(e.clock_in_at, before, 'the punch moved');
+  assert.strictEqual(e.payable_minutes, 540, 'nine hours now');
+  const ev = evOf(id).find((x) => x.action === 'clock_in_corrected');
+  assert.ok(ev, 'an audit event names the change');
+  assert.strictEqual(ev.before_val, before, 'carrying the ORIGINAL value');
+  assert.ok(ev.after_val && ev.reason, 'the new value and the reason too');
+});
+
+test('an approved clock-out change recalculates payable time', async () => {
+  const id = seedEntry(EMP.multi, '2026-06-03', '09:00', '17:00');
+  const cid = request(id, EMP.multi, 'wrong_out', { at: require('../src/timeclock').localInputToUtc('2026-06-03T18:30') });
+  await decide(cid, 'approved');
+  assert.strictEqual(entry(id).payable_minutes, 570, 'nine and a half hours');
+});
+
+test('an approved missing break is created and subtracted', async () => {
+  const T = require('../src/timeclock');
+  const id = seedEntry(EMP.multi, '2026-06-04', '09:00', '17:00');
+  const cid = request(id, EMP.multi, 'missing_break',
+    { start: T.localInputToUtc('2026-06-04T12:00'), end: T.localInputToUtc('2026-06-04T12:30'), paid: false });
+  await decide(cid, 'approved');
+  const e = entry(id);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(id).n, 1, 'the break exists');
+  assert.strictEqual(e.unpaid_break_min, 30, 'thirty unpaid minutes');
+  assert.strictEqual(e.payable_minutes, 450, 'and payable time drops by them');
+});
+
+test('an approved break correction moves the break and re-totals', async () => {
+  const T = require('../src/timeclock');
+  const id = seedEntry(EMP.multi, '2026-06-05', '09:00', '17:00');
+  const bid = db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes, source)
+    VALUES (?,?,?,?,0,30,'employee')`)
+    .run(id, EMP.multi, T.localInputToUtc('2026-06-05T12:00'), T.localInputToUtc('2026-06-05T12:30')).lastInsertRowid;
+  const cid = request(id, EMP.multi, 'break',
+    { break_id: bid, start: T.localInputToUtc('2026-06-05T12:00'), end: T.localInputToUtc('2026-06-05T13:00') });
+  await decide(cid, 'approved');
+  assert.strictEqual(db.prepare('SELECT raw_minutes FROM time_breaks WHERE id = ?').get(bid).raw_minutes, 60, 'the break is an hour now');
+  assert.strictEqual(entry(id).payable_minutes, 420, 'seven payable hours');
+});
+
+test('an approved position change is applied', async () => {
+  const id = seedEntry(EMP.multi, '2026-06-06', '09:00', '17:00', 'server');
+  const cid = request(id, EMP.multi, 'wrong_position', { position: 'busser' });
+  await decide(cid, 'approved');
+  assert.strictEqual(entry(id).position, 'busser');
+  assert.ok(evOf(id).some((x) => x.action === 'position_corrected' && x.before_val === 'server'));
+});
+
+test('an approved service change moves the entry and reuses the right shift', async () => {
+  const id = seedEntry(EMP.multi, '2026-06-07', '09:00', '17:00', 'server', 'cafe');
+  const cid = request(id, EMP.multi, 'wrong_service', { daypart: 'dinner' });
+  await decide(cid, 'approved');
+  const e = entry(id);
+  assert.strictEqual(e.daypart, 'dinner');
+  const sh = db.prepare('SELECT * FROM shifts WHERE id = ?').get(e.shift_id);
+  assert.strictEqual(sh.daypart, 'dinner', 'now linked to the dinner shift');
+  assert.strictEqual(sh.date, '2026-06-07', 'on the same business date');
+  const dupes = db.prepare('SELECT date, daypart, COUNT(*) c FROM shifts GROUP BY date, daypart HAVING c > 1').all();
+  assert.strictEqual(dupes.length, 0, 'and no duplicate shift was minted');
+});
+
+test('a rejected correction changes nothing at all', async () => {
+  const id = seedEntry(EMP.multi, '2026-06-08', '09:00', '17:00');
+  const snap = entry(id);
+  const cid = request(id, EMP.multi, 'wrong_out', { at: require('../src/timeclock').localInputToUtc('2026-06-08T23:00') });
+  await decide(cid, 'rejected', 'not what the roster says');
+  const e = entry(id);
+  assert.strictEqual(e.clock_out_at, snap.clock_out_at, 'the punch is untouched');
+  assert.strictEqual(e.payable_minutes, snap.payable_minutes, 'and so are the totals');
+  assert.strictEqual(e.edited, 0, 'it is not even marked edited');
+  assert.strictEqual(corr(cid).decision, 'rejected');
+  assert.ok(!corr(cid).applied_at, 'nothing was applied');
+});
+
+test('a correction that would overlap another entry is refused and stays pending', async () => {
+  const T = require('../src/timeclock');
+  const a = seedEntry(EMP.solo, '2026-06-10', '09:00', '13:00');
+  const b = seedEntry(EMP.solo, '2026-06-10', '14:00', '18:00');
+  const snap = entry(b);
+  // Pull b's clock-in back into a's hours.
+  const cid = request(b, EMP.solo, 'wrong_in', { at: T.localInputToUtc('2026-06-10T12:00') });
+  await decide(cid, 'approved');
+  assert.strictEqual(entry(b).clock_in_at, snap.clock_in_at, 'the punch did not move');
+  assert.strictEqual(corr(cid).decision, 'pending', 'and the request is STILL PENDING, not approved');
+  assert.match(corr(cid).apply_error || '', /overlap/i, 'with the reason recorded');
+  assert.strictEqual(entry(a).clock_out_at, entry(a).clock_out_at, 'the other entry is untouched');
+});
+
+test('a break correction that would run past the clock-out is refused', async () => {
+  const T = require('../src/timeclock');
+  const id = seedEntry(EMP.solo, '2026-06-11', '09:00', '17:00');
+  const bid = db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes, source)
+    VALUES (?,?,?,?,0,30,'employee')`)
+    .run(id, EMP.solo, T.localInputToUtc('2026-06-11T12:00'), T.localInputToUtc('2026-06-11T12:30')).lastInsertRowid;
+  const cid = request(id, EMP.solo, 'break',
+    { break_id: bid, start: T.localInputToUtc('2026-06-11T16:30'), end: T.localInputToUtc('2026-06-11T18:00') });
+  await decide(cid, 'approved');
+  assert.strictEqual(corr(cid).decision, 'pending', 'refused');
+  assert.strictEqual(db.prepare('SELECT raw_minutes FROM time_breaks WHERE id = ?').get(bid).raw_minutes, 30, 'the break is unchanged');
+});
+
+test('a failed application rolls back completely — no half-applied state', async () => {
+  const T = require('../src/timeclock');
+  const id = seedEntry(EMP.solo, '2026-06-12', '09:00', '17:00');
+  const before = entry(id);
+  const evsBefore = evOf(id).length;
+  // A clock-in AFTER the clock-out: invalid, and it must leave nothing behind.
+  const cid = request(id, EMP.solo, 'wrong_in', { at: T.localInputToUtc('2026-06-12T20:00') });
+  await decide(cid, 'approved');
+  const after = entry(id);
+  assert.strictEqual(after.clock_in_at, before.clock_in_at, 'punch unchanged');
+  assert.strictEqual(after.edited, 0, 'not marked edited');
+  assert.strictEqual(evOf(id).length, evsBefore, 'and NO audit row was left behind by the rolled-back attempt');
+  assert.strictEqual(corr(cid).decision, 'pending');
+});
+
+test('an "other" request cannot be auto-applied, and says so instead of pretending', async () => {
+  const id = seedEntry(EMP.solo, '2026-06-13', '09:00', '17:00');
+  const cid = request(id, EMP.solo, 'other', {});
+  await decide(cid, 'approved');
+  assert.strictEqual(corr(cid).decision, 'pending', 'not marked approved');
+  assert.match(corr(cid).apply_error || '', /by hand|specific change/i, 'and explains why');
+});
+
+test('applying a correction never touches manager-entered work.hours', async () => {
+  const rows = db.prepare('SELECT hours FROM work').all();
+  assert.ok(rows.every((r) => Number(r.hours) === 0), 'still zero everywhere the clock touched');
+});
+
+// ===========================================================================
+// TIMESHEETS — a pay period signed off by the person who worked it.
+// ===========================================================================
+const P = require('../src/periods');
+const T2 = require('../src/timeclock');
+const sheetOf = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(empId, start);
+const curPeriod = () => P.currentPeriod();
+
+/**
+ * A clean, complete entry on a definite day INSIDE the current pay period.
+ * Anchored to the period rather than to "hours ago", so the test does not drift
+ * across a period boundary depending on when it runs.
+ */
+function seedInPeriod(empId, dayOffset = 1, from = '09:00', to = '17:00') {
+  const per = curPeriod();
+  const day = require('../src/dates').addDays(per.start, dayOffset);
+  const i = T2.localInputToUtc(`${day}T${from}`), o = T2.localInputToUtc(`${day}T${to}`);
+  const raw = Math.round((new Date(o.replace(' ', 'T') + 'Z') - new Date(i.replace(' ', 'T') + 'Z')) / 60000);
+  return db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'cafe','server',?,?,'complete','manager',?,?)`).run(empId, day, i, o, raw, raw).lastInsertRowid;
+}
+
+test('the timesheet totals a period from its entries', async () => {
+  const per = curPeriod();
+  const eid = seedInPeriod(EMP.none, 1);               // an 8-hour day inside the period
+  const cookie = await signIn('3333');
+  const html = await text('/portal/timesheet', { cookie });
+  assert.match(html, /Pay period/, 'the page renders');
+  assert.match(html, /payable this period/, 'with a headline total');
+  const s = sheetOf(EMP.none, per.start);
+  assert.ok(s, 'a timesheet row exists for the period');
+  assert.strictEqual(s.status, 'open');
+  const tot = T2.totalsFor(T2.q.entriesInPeriod.all(EMP.none, per.start, per.end));
+  assert.strictEqual(tot.payable, 480, 'eight hours payable');
+});
+
+test('a still-running entry blocks submission', async () => {
+  const cookie = await signIn('3333');
+  const open = db.prepare(`INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, status, source)
+    VALUES (?, ?, 'cafe', 'server', datetime('now','-2 hours'), 'active', 'manager')`)
+    .run(EMP.none, T2.businessDateOf(T2.nowUtc(), T2.settings().cutoffHour)).lastInsertRowid;
+  const per = curPeriod();
+  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3333' }, { cookie });
+  assert.notStrictEqual(sheetOf(EMP.none, per.start).status, 'submitted', 'refused while they are still on the clock');
+  const html = await text('/portal/timesheet', { cookie });
+  assert.match(html, /Still on the clock/, 'and it says why');
+  db.prepare('DELETE FROM time_entries WHERE id = ?').run(open);
+});
+
+test('a clean timesheet submits, with the totals it showed', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3333');
+  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3333', note: 'all good' }, { cookie });
+  const s = sheetOf(EMP.none, per.start);
+  assert.strictEqual(s.status, 'submitted');
+  assert.ok(s.submitted_at, 'stamped');
+  assert.strictEqual(s.submitted_note, 'all good');
+  const snap = JSON.parse(s.submitted_totals);
+  assert.strictEqual(snap.payable, 480, 'the totals they agreed to are kept');
+});
+
+test('submitting needs the PIN and the confirmation', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3222');
+  seedInPeriod(EMP.multi, 2, '10:00', '14:00');
+  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '0000' }, { cookie });
+  assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted', 'wrong PIN, no signature');
+  await post('/portal/timesheet/submit', { period: per.start, pin: '3222' }, { cookie });
+  assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted', 'unticked box, no signature');
+});
+
+test('a manager can return a submitted timesheet, with a reason', async () => {
+  const per = curPeriod();
+  await post(`/payroll/timesheets/${EMP.none}/return`, { period: per.start, reason: '' });
+  assert.strictEqual(sheetOf(EMP.none, per.start).status, 'submitted', 'no reason, no return');
+  await post(`/payroll/timesheets/${EMP.none}/return`, { period: per.start, reason: 'Tuesday looks short' });
+  const s = sheetOf(EMP.none, per.start);
+  assert.strictEqual(s.status, 'returned');
+  assert.strictEqual(s.returned_reason, 'Tuesday looks short');
+  assert.ok(s.returned_by, 'naming who sent it back');
+  assert.strictEqual(s.resubmit_needed, 1);
+});
+
+test('the employee sees why it came back, and can submit again', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3333');
+  const html = await text('/portal/timesheet', { cookie });
+  assert.match(html, /Sent back for a correction/, 'they are told');
+  assert.match(html, /Tuesday looks short/, 'and why');
+  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3333' }, { cookie });
+  const s = sheetOf(EMP.none, per.start);
+  assert.strictEqual(s.status, 'submitted', 'resubmitted');
+  assert.strictEqual(s.resubmit_needed, 0);
+  assert.ok(!s.returned_at, 'and the return is cleared');
+});
+
+test('an approved correction after submission forces a resubmission', async () => {
+  const T = require('../src/timeclock');
+  const per = curPeriod();
+  assert.strictEqual(sheetOf(EMP.none, per.start).status, 'submitted', 'starts submitted');
+  const e = T.q.entriesInPeriod.all(EMP.none, per.start, per.end)[0];
+  const newOut = T.localInputToUtc(T.utcToLocalInput(e.clock_out_at).slice(0, 11) + '23:30');
+  const cid = request(e.id, EMP.none, 'wrong_out', { at: newOut });
+  await decide(cid, 'approved');
+  const s = sheetOf(EMP.none, per.start);
+  assert.strictEqual(s.status, 'submitted', 'the submission record stands');
+  assert.strictEqual(s.resubmit_needed, 1, 'but it must be signed again');
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='timesheet' AND entity_id=? AND action='reopened_by_change'").get(s.id);
+  assert.ok(ev, 'and the reason is on the record');
+  assert.match(ev.reason || '', /correction/i, 'naming what moved the hours');
+  const html = await text('/portal/timesheet', { cookie: await signIn('3333') });
+  assert.match(html, /Something changed after you submitted/, 'the employee is told');
+});
+
+test('a viewer cannot return a timesheet', async () => {
+  // Viewers are blocked by the write guard; with auth off every account is an
+  // editor, so this asserts the guard exists rather than simulating a login.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const route = src.slice(src.indexOf("app.post('/payroll/timesheets/:empId/return'"));
+  assert.match(route.slice(0, 400), /canWrite\(\)/, 'the return route checks canWrite');
+});
+
+test('the manager ledger lists the period and its variance', async () => {
+  const html = await text('/payroll/timesheets');
+  assert.match(html, /Timesheets/);
+  assert.match(html, /Needs attention|Submitted/, 'statuses show');
+  assert.match(html, /entered/, 'manager-entered hours are shown beside the clocked ones');
+  assert.match(html, /nothing is sent to payroll|not sent to payroll|still runs on the hours/i, 'and it says payroll is untouched');
+});
+
+test('timesheets never write into work.hours or payroll', () => {
+  const rows = db.prepare('SELECT hours FROM work').all();
+  assert.ok(rows.every((r) => Number(r.hours) === 0), 'work.hours untouched by the whole timesheet flow');
+  const sends = db.prepare('SELECT COUNT(*) n FROM period_sends').get().n;
+  assert.strictEqual(sends, 0, 'and nothing was sent to payroll');
+});
+
+test('a decided correction cannot be applied twice', async () => {
+  const T = require('../src/timeclock');
+  const id = seedEntry(EMP.multi, '2026-05-20', '09:00', '17:00');
+  const cid = request(id, EMP.multi, 'missing_break',
+    { start: T.localInputToUtc('2026-05-20T12:00'), end: T.localInputToUtc('2026-05-20T12:30'), paid: false });
+  await decide(cid, 'approved');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(id).n, 1, 'one break');
+  // The same POST again — a double tap, or a back button.
+  await decide(cid, 'approved');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(id).n, 1,
+    'still one break — a decided request is never applied twice');
+  assert.strictEqual(entry(id).payable_minutes, 450);
+});
+
+test('a manager edit to a SUBMITTED timesheet forces resubmission', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3222');
+  // Give this person a clean period and sign it off.
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND business_date >= ? AND business_date <= ?")
+    .run(EMP.multi, per.start, per.end);
+  const eid = seedInPeriod(EMP.multi, 3, '09:00', '15:00');
+  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3222' }, { cookie });
+  assert.strictEqual(sheetOf(EMP.multi, per.start).status, 'submitted', 'signed off');
+  assert.strictEqual(sheetOf(EMP.multi, per.start).resubmit_needed, 0);
+
+  // A manager moves the hours afterwards.
+  const T = require('../src/timeclock');
+  const day = require('../src/dates').addDays(per.start, 3);
+  await post(`/timeclock/${eid}/edit`, { in: `${day}T09:00`, out: `${day}T16:00`,
+    position: 'server', daypart: 'cafe', reason: 'stayed an hour later' });
+  const s = sheetOf(EMP.multi, per.start);
+  assert.strictEqual(s.resubmit_needed, 1, 'the signature no longer covers these hours');
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='timesheet' AND entity_id=? AND action='reopened_by_change'").get(s.id);
+  assert.ok(ev, 'and the record says why');
+});
+
+test('a manager break change also forces resubmission', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3222');
+  await post('/portal/timesheet/submit', { period: per.start, confirm: '1', pin: '3222' }, { cookie });
+  assert.strictEqual(sheetOf(EMP.multi, per.start).resubmit_needed, 0, 'signed again');
+  const day = require('../src/dates').addDays(per.start, 3);
+  const eid = db.prepare('SELECT id FROM time_entries WHERE employee_id = ? AND business_date = ?').get(EMP.multi, day).id;
+  await post(`/timeclock/${eid}/break`, { start: `${day}T12:00`, end: `${day}T12:30`, paid: '0', reason: 'took a break' });
+  assert.strictEqual(sheetOf(EMP.multi, per.start).resubmit_needed, 1, 'adding a break unsettles it too');
 });

@@ -833,3 +833,47 @@ body.bare {
    pt-row-do belongs to the submission row alone. */
 .pt-row-clock .pt-tag { background: var(--pt-green); color: #fff; border-color: var(--pt-green); }
 .pt-row-clock .pt-tag.done { background: transparent; color: var(--pt-muted); border-color: var(--pt-line); }
+
+/* --- Timesheet: the pay period read back to the person who worked it ----- */
+.ts-head { margin-bottom: 16px; }
+.ts-head .tc-h { margin: 2px 0 8px; }
+.ts-status { display: inline-block; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px;
+  letter-spacing: .08em; text-transform: uppercase; padding: 3px 9px; border: 1px solid var(--pt-line); color: var(--pt-muted); }
+.ts-status.ts-open { color: var(--pt-body); }
+.ts-status.ts-needs_attention { color: var(--pt-amber); border-color: var(--pt-amber); }
+.ts-status.ts-submitted { color: var(--pt-green); border-color: var(--pt-green); }
+.ts-status.ts-returned { color: var(--pt-red); border-color: var(--pt-red); }
+.ts-total { border: 1px solid var(--pt-line); background: var(--pt-field); padding: 20px 18px; margin-bottom: 14px; }
+.ts-total-v { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 40px; line-height: 1; color: var(--pt-ink);
+  font-variant-numeric: tabular-nums; }
+.ts-total-l { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--pt-muted); margin-top: 8px; }
+.ts-returned { border-left: 3px solid var(--pt-red); background: var(--pt-field); padding: 14px; margin: 16px 0; }
+.ts-returned b { color: var(--pt-ink); font-size: 15px; }
+.ts-returned p { color: var(--pt-body); font-size: 13.5px; margin: 6px 0; line-height: 1.5; }
+.ts-returned i { font-style: normal; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; color: var(--pt-muted); }
+.ts-issues { display: grid; gap: 8px; }
+.ts-issue { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 11px 12px;
+  border: 1px solid var(--pt-line); background: var(--pt-field); text-decoration: none; color: var(--pt-ink); font-size: 13.5px; }
+.ts-issue.bad { border-left: 3px solid var(--pt-red); }
+.ts-issue i { font-style: normal; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 10.5px;
+  color: var(--pt-muted); white-space: nowrap; }
+.ts-day { border-bottom: 1px solid var(--pt-hair); }
+.ts-day-h { display: flex; align-items: baseline; gap: 12px; padding: 13px 2px; cursor: pointer; list-style: none; }
+.ts-day-h::-webkit-details-marker { display: none; }
+.ts-day-d { font-size: 14px; color: var(--pt-ink); font-weight: 600; }
+.ts-day-m { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; color: var(--pt-muted); }
+.ts-day-t { margin-left: auto; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 14px; color: var(--pt-ink); }
+.ts-entry { display: flex; justify-content: space-between; gap: 12px; padding: 10px 2px 10px 14px;
+  text-decoration: none; color: inherit; border-top: 1px dotted var(--pt-hair); }
+.ts-e-l { display: grid; gap: 2px; min-width: 0; }
+.ts-e-l b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 13px; color: var(--pt-ink); }
+.ts-e-l i { font-style: normal; font-size: 11.5px; color: var(--pt-muted); }
+.ts-e-r { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 13px; color: var(--pt-ink); white-space: nowrap; }
+.ts-submit { margin-top: 22px; display: grid; gap: 14px; }
+.ts-confirm { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--pt-ink); line-height: 1.45; }
+.ts-confirm input { width: 20px; height: 20px; flex: none; margin-top: 1px; }
+.ts-done { border-left: 3px solid var(--pt-green); background: var(--pt-field); padding: 14px; margin-top: 22px; }
+.ts-done b { color: var(--pt-ink); font-size: 15px; }
+.ts-done p { color: var(--pt-body); font-size: 13.5px; margin: 6px 0; }
+.ts-done i { font-style: normal; font-size: 12px; color: var(--pt-muted); }
