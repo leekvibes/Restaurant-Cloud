@@ -1038,3 +1038,121 @@ test('the time clock page still opens with everything wired', async () => {
   assert.match(html, /Settings/, 'so are settings');
   assert.match(html, /Timesheets/, 'and the timesheet ledger');
 });
+
+// ===========================================================================
+// THE COMBINED WORKSPACE — one page for clocking and for hours.
+// ===========================================================================
+
+test('the portal hub offers one time-clock entry, not two', async () => {
+  const cookie = await signIn('3111');
+  const hub = await text('/portal', { cookie });
+  assert.match(hub, /Time clock/, 'the clock is on the hub');
+  assert.ok(!/href="\/portal\/timesheet"/.test(hub), 'and the timesheet is not a second destination');
+});
+
+test('the hub tile says where the person stands', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
+  const on = await text('/portal', { cookie });
+  assert.match(on, /On the clock|Working/, 'it reads as working');
+  await post('/portal/clock/out', { pin: '3111' }, { cookie });
+  const off = await text('/portal', { cookie });
+  assert.match(off, /Clocked out/, 'and as clocked out afterwards');
+});
+
+test('the clock page carries today, the action, and both shortcuts', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /Worked today/, "today's total leads");
+  assert.match(html, /Clock in/, 'the primary action is there');
+  assert.match(html, /href="\/portal\/timesheet"/, 'the timesheet is one tap away');
+  assert.match(html, /href="\/portal\/requests"/, 'and so are their requests');
+});
+
+test('only the actions valid for the state are shown', async () => {
+  const cookie = await signIn('3111');
+  const off = await text('/portal/clock', { cookie });
+  assert.ok(!/Start break/.test(off), 'no break button while clocked out');
+  assert.ok(!/Clock out/.test(off), 'and nothing to clock out of');
+
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const on = await text('/portal/clock', { cookie });
+  assert.match(on, /Start break/, 'working offers a break');
+  assert.match(on, /Clock out/, 'and clocking out');
+  assert.ok(!/>Clock in</.test(on), 'but not clocking in again');
+
+  await post('/portal/clock/break/start', {}, { cookie });
+  const brk = await text('/portal/clock', { cookie });
+  assert.match(brk, /End break/, 'on break offers only the end');
+  assert.ok(!/Start break/.test(brk), 'not another break');
+  await post('/portal/clock/break/end', {}, { cookie });
+  await post('/portal/clock/out', { pin: '3111' }, { cookie });
+});
+
+test('clocking out lands on a receipt, not a question', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
+  const e = activeOf(EMP.solo);
+  const res = await post('/portal/clock/out', { pin: '3111' }, { cookie });
+  const loc = res.headers.get('location') || '';
+  assert.match(loc, new RegExp(`done=${e.id}`), 'it comes back carrying what was recorded');
+  const html = await text(`/portal/clock?done=${e.id}`, { cookie });
+  assert.match(html, /Clocked out/, 'the receipt names the state');
+  assert.match(html, /payable/, 'shows what it is worth');
+  assert.match(html, /Position/, 'and the position');
+  assert.match(html, /Something's wrong/, 'with one way to query it');
+  assert.match(html, /Done/, 'and one way to close it');
+  assert.ok(!/different position\?|need correction\?/i.test(html), 'and asks nothing');
+});
+
+test("a receipt belongs only to the person who earned it", async () => {
+  const mine = TC_ENTRY_OF_SOLO();
+  const cookie = await signIn('3222');                       // a different person
+  const html = await text(`/portal/clock?done=${mine}`, { cookie });
+  assert.ok(!/Clocked out<\/div>[\s\S]{0,200}payable/.test(html),
+    "somebody else's entry never renders as your receipt");
+});
+function TC_ENTRY_OF_SOLO() {
+  return db.prepare('SELECT id FROM time_entries WHERE employee_id = ? ORDER BY id DESC LIMIT 1').get(EMP.solo).id;
+}
+
+test('the timesheet badge is quiet during a normal shift and speaks when it should', async () => {
+  // A person with nothing else outstanding, so the only thing that could raise
+  // a badge is the shift they are standing in.
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (95,'Badge Tester','server','3555',1500,1)").run();
+  const cookie = await signIn('3555');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const on = await text('/portal/clock', { cookie });
+  assert.ok(!/Needs a fix/.test(on), 'being on the clock is not a timesheet problem');
+  await post('/portal/clock/out', { pin: '3555' }, { cookie });
+  assert.ok(!activeOf(95), 'they really did clock out');
+  const off = await text('/portal/clock', { cookie });
+  assert.match(off, /tc-badge/, 'once off, the timesheet asks for something');
+  assert.match(off, /Ready to submit|Needs a fix/, 'and names what');
+});
+
+test('my requests gathers every kind of fix, with the answer', async () => {
+  const cookie = await signIn('3111');
+  const e = db.prepare('SELECT * FROM time_entries WHERE employee_id = ? AND clock_out_at IS NOT NULL ORDER BY id DESC LIMIT 1').get(EMP.solo);
+  const at = require('../src/timeclock').utcToLocalInput(e.clock_out_at);
+  await post('/portal/clock/fix', { entry_id: e.id, kind: 'wrong_out', at_out: at, reason: 'left later than that', pin: '3111' }, { cookie });
+  const html = await text('/portal/requests', { cookie });
+  assert.match(html, /My requests/);
+  assert.match(html, /Clock-out time/, 'the kind is in plain words');
+  assert.match(html, /left later than that/, 'their reason is shown back');
+  assert.match(html, /Waiting on your manager/, 'and where it stands');
+});
+
+test('my requests says so plainly when there is nothing', async () => {
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (96,'No Requests','server','3666',1500,1)").run();
+  const cookie = await signIn('3666');
+  const html = await text('/portal/requests', { cookie });
+  assert.match(html, /Nothing to show/, 'an intentional empty state');
+});
+
+test('the timesheet still works, and comes back to the clock', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal/timesheet', { cookie });
+  assert.match(html, /Pay period/, 'the full timesheet is intact');
+  assert.match(html, /href="\/portal\/clock"/, 'and its way back is the clock');
+});

@@ -3313,18 +3313,18 @@ app.get('/portal', (req, res) => {
   // them — a staff member could not find it when it read like a section title.
   // It is the first row, and it carries a tag so it still stands out: the one
   // thing on this screen with something to do tonight.
-  // On the clock or off it — the one thing a person checks before anything
-  // else, so it sits above everything with the live state on it.
-  const tcActive = TC.q.active.get(emp.id);
-  // Its own class, not pt-row-do: that one means "you owe the office something
-  // tonight" and belongs to the submission row alone. Clocking in is a state,
-  // not a debt.
+  // On the clock or off it, and what their timesheet still needs — one row,
+  // because a person should not have to learn which of two pages holds their
+  // hours. Timesheets live inside the clock page now.
+  const tcSt = clockStatus(emp);
   const clockRow = `
     <a class="pt-row pt-row-clock" href="/portal/clock">
       <span class="pt-ico">◷</span>
       <span class="pt-row-t"><b>Time clock</b>
-        <i class="pt-tag${tcActive ? '' : ' done'}">${tcActive ? (tcActive.status === 'on_break' ? 'On break' : 'On the clock') : 'Clocked out'}</i>
-        <span>${tcActive ? `In at ${esc(TC.clockFace(tcActive.clock_in_at))} — tap to clock out` : 'Clock in when you start your shift'}</span></span>
+        <i class="pt-tag${tcSt.active ? '' : (tcSt.sheetBadge ? '' : ' done')}">${esc(tcSt.active
+          ? (tcSt.active.status === 'on_break' ? 'On break' : 'On the clock')
+          : (tcSt.sheetBadge || 'Clocked out'))}</i>
+        <span>${esc(tcSt.label)}${tcSt.active ? '' : (tcSt.todayMin ? ` · ${TC.hm(tcSt.todayMin)} today` : '')}</span></span>
       <span class="pt-chev">›</span>
     </a>`;
 
@@ -3350,7 +3350,6 @@ app.get('/portal', (req, res) => {
       <div class="pt-kick"><span>What you can do</span></div>
       <div class="pt-rows">
         ${clockRow}
-        ${row('/portal/timesheet', '▤', 'Your timesheet', 'Check and sign off your pay period')}
         ${submitRow}
         ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
           hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
@@ -3837,15 +3836,70 @@ function clockPositionsFor(emp) {
 const STALE_HOURS = 16;
 const looksStale = (entry) => entry && TC.elapsedMinutes(entry) > STALE_HOURS * 60;
 
-function clockPage(req, who, opts = {}) {
-  const { emp } = who;
+/**
+ * Where somebody stands right now, in the words the portal uses everywhere.
+ *
+ * One place works this out so the hub tile, the clock page and the page title
+ * can never disagree about whether a person is on the clock.
+ */
+function clockStatus(emp) {
   const cfg = TC.settings();
   const active = TC.q.active.get(emp.id) || null;
   const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const todays = TC.q.forEmployeeSince.all(emp.id, today);
+  const doneToday = todays.filter((e) => !TC.isOpen(e));
+  // Today's worked total: what is finished, plus what is running right now.
+  let todayMin = doneToday.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+  if (active) {
+    const bt = TC.breakTotals(active.id);
+    todayMin += Math.max(0, TC.elapsedMinutes(active) - bt.unpaid);
+  }
+  const period = currentPeriod();
+  const sheet = TC.sheetFor(emp.id, period);
+  const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
+  const pending = TC.q.pendingForEmployee.all(emp.id);
+  const issues = TC.issuesFor(entries, pending);
+  const sheetState = TC.sheetStatus(sheet, issues);
+
+  // What the timesheet needs from THEM — not every state, only the ones that
+  // are their move to make.
+  const canSubmit = sheetState !== 'submitted' && !['approved', 'locked'].includes(sheet.status)
+    && entries.length > 0 && !issues.some((i) => i.blocking);
+  // Being on the clock right now is not a problem with the timesheet, it is
+  // just today. Only issues that are genuinely theirs to fix earn a badge —
+  // otherwise the thing is always shouting during a normal shift.
+  const realIssues = issues.filter((i) => i.blocking && !(active && i.entryId === active.id));
+  const sheetBadge = sheet.status === 'returned' ? 'Sent back'
+    : (sheet.status === 'submitted' && sheet.resubmit_needed) ? 'Submit again'
+    : realIssues.length ? 'Needs a fix'
+    : canSubmit ? 'Ready to submit'
+    : null;
+
+  const decided = pending.length ? [] : db.prepare(`SELECT * FROM time_corrections
+    WHERE employee_id = ? AND decision <> 'pending' AND decided_at >= datetime('now','-14 days')`).all(emp.id);
+  const reqBadge = pending.length ? `${pending.length} pending`
+    : decided.length ? `${decided.length} answered` : null;
+
+  const label = active
+    ? (active.status === 'on_break'
+      ? `On break · ${TC.hm(TC.minutesBetween((TC.q.openBreak.get(active.id) || {}).start_at, TC.nowUtc()))}`
+      : `Working · ${TC.hm(TC.elapsedMinutes(active))}`)
+    : (sheetBadge ? `Clocked out · ${sheetBadge.toLowerCase()}` : 'Clocked out');
+
+  return { active, today, todays, doneToday, todayMin, period, sheet, entries, pending,
+    issues, sheetState, sheetBadge, reqBadge, label, canSubmit };
+}
+
+function clockPage(req, who, opts = {}) {
+  const { emp } = who;
+  const cfg = TC.settings();
+  const st = clockStatus(emp);
+  const active = st.active;
+  const today = st.today;
   const allowed = clockPositionsFor(emp);
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
 
-  const todays = TC.q.forEmployeeSince.all(emp.id, today).filter((e) => !TC.isOpen(e));
+  const todays = st.doneToday;
   const err = opts.err ? `<div class="tc-err">${esc(opts.err)}</div>` : '';
   const ok = opts.ok ? `<div class="tc-ok">${esc(opts.ok)}</div>` : '';
 
@@ -3937,11 +3991,59 @@ function clockPage(req, who, opts = {}) {
     </a>`;
   };
 
+  // The clock-out receipt: what was just recorded, and the one way to query it.
+  // Shown instead of asking questions nobody wants at the end of a shift.
+  const justOut = opts.doneEntry;
+  const receipt = !justOut ? '' : (() => {
+    const bt = TC.breakTotals(justOut.id);
+    const line = (k, v) => `<div class="tc-rc-r"><span>${k}</span><b>${v}</b></div>`;
+    return `<div class="tc-receipt">
+      <div class="tc-kick">Clocked out</div>
+      <div class="tc-rc-h">${esc(TC.hm(justOut.payable_minutes))}</div>
+      <div class="tc-rc-s">payable · ${esc(new Date(justOut.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+      <div class="tc-rc-g">
+        ${line('In', esc(TC.clockFace(justOut.clock_in_at)))}
+        ${line('Out', esc(TC.clockFace(justOut.clock_out_at)))}
+        ${line('Break', bt.unpaid || bt.paid ? esc(TC.hm(bt.unpaid + bt.paid)) : 'none')}
+        ${line('Position', esc(posName(justOut.position)))}
+        ${line('Service', justOut.daypart ? esc(dp(justOut.daypart)) : '—')}
+      </div>
+      <div class="tc-actions">
+        <a class="tc-btn tc-btn-quiet" href="/portal/clock/entry/${justOut.id}">Something's wrong</a>
+        <a class="tc-btn tc-btn-go" href="/portal/clock">Done</a>
+      </div>
+    </div>`;
+  })();
+
+  // Today's total sits above everything: the number a person opens this for.
+  const summary = `
+    <div class="tc-today">
+      <div class="tc-today-l">Worked today</div>
+      <div class="tc-today-v"${active ? ` data-total="${st.todayMin}" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}" data-mode="total"` : ''}>${esc(TC.hm(st.todayMin))}</div>
+      <div class="tc-today-s">${esc(st.label)}</div>
+    </div>`;
+
+  const shortcut = (href, title, sub, badge) => `
+    <a class="tc-short" href="${href}">
+      <span class="tc-short-t"><b>${title}</b><i>${esc(sub)}</i></span>
+      ${badge ? `<span class="tc-badge">${esc(badge)}</span>` : ''}
+      <span class="tc-short-go">›</span>
+    </a>`;
+
   return portalPage('Time clock', `
     ${portalSub('<a class="pt-back2" href="/portal">Portal</a>')}
     <div class="pt-body tc-body">
       ${err}${ok}
-      ${card}
+      ${receipt}
+      ${justOut ? '' : summary}
+      ${justOut ? '' : card}
+
+      <div class="tc-shorts">
+        ${shortcut('/portal/timesheet', 'Timesheet',
+          `${esc(labelFor(st.period))} · ${TC.hm(TC.totalsFor(st.entries).payable)}`, st.sheetBadge)}
+        ${shortcut('/portal/requests', 'My requests', 'Fixes you have asked for', st.reqBadge)}
+      </div>
+
       ${todays.length ? `<div class="tc-kick tc-kick-sec">Earlier today</div>
         <div class="tc-rows">${todays.map(entryRow).join('')}</div>` : ''}
       <a class="tc-more" href="/portal/clock/history">Your time history ›</a>
@@ -3963,10 +4065,25 @@ function clockPage(req, who, opts = {}) {
         function tick() {
           var t = Date.now() - skew;
           document.querySelectorAll('[data-since]').forEach(function (el) {
+            if (el.getAttribute('data-mode') === 'total') {
+              // Today's total: what the server already counted, plus the time
+              // running since this punch. Minutes, because a day is not a
+              // stopwatch and a ticking seconds figure here reads as noise.
+              var mins = Number(el.getAttribute('data-total')) || 0;
+              var h = Math.floor(mins / 60), m = mins % 60;
+              el.textContent = h ? h + 'h ' + m + 'm' : m + 'm';
+              return;
+            }
             var txt = fmt(t - Number(el.getAttribute('data-since')));
             el.textContent = (el.getAttribute('data-prefix') || '') + txt;
           });
         }
+        // The total only needs re-reading about once a minute.
+        setInterval(function () {
+          document.querySelectorAll('[data-mode="total"]').forEach(function (el) {
+            el.setAttribute('data-total', String((Number(el.getAttribute('data-total')) || 0) + 1));
+          });
+        }, 60000);
         tick(); setInterval(tick, 1000);
 
         // While somebody is on the clock, keep their session alive and re-sync
@@ -4001,7 +4118,14 @@ app.get('/portal/clock', (req, res) => {
   if (!who) return;
   // On the clock? Keep the session alive so a shift never signs itself out.
   if (TC.q.active.get(who.emp.id)) setPortalCookie(req, res, who.emp.id);
-  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok }));
+  // Straight after a clock-out, show what was recorded rather than the empty
+  // clocked-out screen — the receipt is the answer to "did that go through?".
+  let doneEntry = null;
+  if (req.query.done) {
+    const e = TC.q.byId.get(Number(req.query.done));
+    if (e && e.employee_id === who.emp.id && e.clock_out_at) doneEntry = e;
+  }
+  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok, doneEntry }));
 });
 
 /**
@@ -4129,7 +4253,7 @@ app.post('/portal/clock/out', (req, res) => {
     TC.logEvent('entry', active.id, 'clock_out', emp.name, { after: out });
     tcTouchDates(emp.id, [active.business_date], emp.name, 'a shift was clocked out');
   })();
-  back('ok=' + encodeURIComponent('Clocked out. Check the time and tell your manager if anything looks wrong.'));
+  back('done=' + active.id);
 });
 
 /** One finished entry, and the place to ask for a fix. */
@@ -4289,6 +4413,67 @@ app.post('/portal/clock/fix', (req, res) => {
   res.redirect('/portal/clock?ok=' + encodeURIComponent('Sent to your manager.'));
 });
 
+/**
+ * Everything this person has asked to be put right, in one place.
+ *
+ * Corrections used to be readable only by opening the entry they belonged to,
+ * which meant "did my manager ever answer that?" had no single answer.
+ */
+app.get('/portal/requests', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const rows = db.prepare(`SELECT c.*, e.business_date, e.position, e.daypart
+    FROM time_corrections c LEFT JOIN time_entries e ON e.id = c.time_entry_id
+    WHERE c.employee_id = ? ORDER BY c.id DESC LIMIT 60`).all(emp.id);
+  const period = currentPeriod();
+  const sheet = TC.sheetFor(emp.id, period);
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+
+  const KIND = { missing_in: 'Forgotten clock-in', wrong_in: 'Clock-in time', missing_out: 'Forgotten clock-out',
+    wrong_out: 'Clock-out time', break: 'Break time', missing_break: 'Missing break',
+    wrong_position: 'Position', wrong_service: 'Service', other: 'Something else' };
+  const STATE = { pending: 'Waiting on your manager', approved: 'Approved', rejected: 'Not approved' };
+
+  const row = (c) => {
+    const state = c.decision === 'approved' ? (c.applied_at ? 'approved' : 'approved') : c.decision;
+    const cls = state === 'approved' ? 'ok' : state === 'rejected' ? 'no' : 'wait';
+    return `<a class="tc-req ${cls}" href="${c.time_entry_id ? '/portal/clock/entry/' + c.time_entry_id : '/portal/clock'}">
+      <div class="tc-req-h">
+        <b>${esc(KIND[c.kind] || c.kind)}</b>
+        <i class="tc-req-s">${esc(STATE[state] || state)}${c.decision === 'approved' && c.applied_at ? ' · applied' : ''}</i>
+      </div>
+      <div class="tc-req-m">${c.business_date
+        ? esc(new Date(c.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))
+        : '—'}${c.proposed_value ? ` · asked for ${esc(c.proposed_value)}` : ''}</div>
+      <div class="tc-req-r">“${esc(c.reason)}”</div>
+      <div class="tc-req-f">Sent ${esc(TC.stamp(c.requested_at))}${c.decided_by ? ` · answered by ${esc(c.decided_by)}` : ''}${c.decision_note ? ` — ${esc(c.decision_note)}` : ''}</div>
+      ${c.apply_error && c.decision === 'pending' ? `<div class="tc-req-e">Could not be applied: ${esc(c.apply_error)}</div>` : ''}
+    </a>`;
+  };
+
+  const returned = sheet.status === 'returned' ? `<div class="ts-returned">
+      <b>Your timesheet was sent back</b>
+      <p>${esc(sheet.returned_reason || '')}</p>
+      <i>${esc(sheet.returned_by || 'Your manager')} · ${esc(TC.stamp(sheet.returned_at))}</i>
+      <a class="tc-more" href="/portal/timesheet">Open your timesheet ›</a>
+    </div>` : '';
+
+  res.send(portalPage('My requests', `
+    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">My requests</h1>
+      ${returned}
+      ${rows.length ? `<div class="tc-reqs">${rows.map(row).join('')}</div>`
+        : `<div class="tc-empty">
+             <b>Nothing to show</b>
+             <span>When you ask for a time to be fixed, it will appear here with your manager's answer.</span>
+           </div>`}
+      <p class="tc-note">Open a day from your time history to ask for a fix.</p>
+      <a class="tc-more" href="/portal/clock/history">Your time history ›</a>
+    </div>`));
+});
+
 /** Today, this week, and what came before. */
 app.get('/portal/clock/history', (req, res) => {
   const who = requirePortal(req, res);
@@ -4385,7 +4570,7 @@ app.get('/portal/timesheet', (req, res) => {
   const submitted = v.sheet.status === 'submitted' && !v.sheet.resubmit_needed;
 
   res.send(portalPage('Your timesheet', `
-    ${portalSub('<a class="pt-back2" href="/portal">Portal</a>')}
+    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
     <div class="pt-body tc-body">
       ${req.query.err ? `<div class="tc-err">${esc(req.query.err)}</div>` : ''}
       ${req.query.ok ? `<div class="tc-ok">${esc(req.query.ok)}</div>` : ''}
