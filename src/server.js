@@ -15243,6 +15243,14 @@ app.get('/payroll/timesheets', (req, res) => {
     && (!fTrans || r.transferState === fTrans)
     && (!fIssues || r.issues.some((i) => i.blocking) || r.blockers.length));
   const filtering = !!(fSheet || fTrans || fIssues);
+  // Everything needed to come back to this exact view. Both row links carried
+  // only ?p= before, so the detail page's carefully-built keepQ arrived empty
+  // and the back link and the walker both silently dropped the filter.
+  const rowQ = `?p=${encodeURIComponent(period.start)}`
+    + (custom ? `&from=${encodeURIComponent(period.start)}&to=${encodeURIComponent(period.end)}` : '')
+    + (fSheet ? `&st=${encodeURIComponent(fSheet)}` : '')
+    + (fTrans ? `&tr=${encodeURIComponent(fTrans)}` : '')
+    + (fIssues ? '&iss=1' : '');
 
   // --- hours by day ---------------------------------------------------------
   // The spine is every date in the period, built here rather than read from the
@@ -15273,7 +15281,7 @@ app.get('/payroll/timesheets', (req, res) => {
         data-t="${esc(TC.hm(c.payable_min))}${c.entries > 1 ? ` · ${c.entries} punches` : ''}${c.positions > 1 ? ' · 2 positions' : ''}${c.edited ? ' · edited' : ''}">${hrs}</span>`;
     }).join('');
     const running = days.some((d) => (cells.get(`${r.emp.id}|${d}`) || {}).open_entries);
-    return `<a class="tsg-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
+    return `<a class="tsg-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
       <span class="tsg-emp"><b>${esc(r.emp.name)}</b><i>${esc(TC.SHEET_LABEL[r.status] || r.status)}${r.emp.active ? '' : ' · left'}</i></span>
       ${dayCells}
       <span class="tsg-tot"><b>${TC.toHours(r.totals.payable) || 0}</b><i>${r.totals.overtime
@@ -15437,7 +15445,7 @@ app.get('/payroll/timesheets', (req, res) => {
       </form>` : ''}
 
       ${filtered.length ? `<div class="bs-lrows tcm-rows">
-        ${filtered.map((r) => `<a class="bs-lr tcm-row ts-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
+        ${filtered.map((r) => `<a class="bs-lr tcm-row ts-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
           <span class="tcm-who"><b>${esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
           <span class="tcm-times">${r.sheet.submitted_at ? `sent ${esc(TC.stamp(r.sheet.submitted_at))}` : 'not submitted'}${
@@ -15502,22 +15510,51 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
          ${next ? `title="${esc(next.name)}"` : 'aria-disabled="true"'}>→</a>
     </nav>` : '';
 
+  // THE ONE VALID ACTION.
+  //
+  // Read the raw column, not the derived status: the chip used to come from
+  // sheetStatus() while every gate read sheet.status, so the header could show
+  // a state its own button disagreed with the moment resubmit_needed was set.
+  //
+  // Only one primary action is offered. An approved sheet used to render Lock
+  // and Transfer and Reopen at once, which is three answers to "what now" and
+  // makes the reviewer decide something the app already knows.
+  const raw = v.sheet.status || 'open';
+  const stale = v.approval && TC.approvalStale(v.approval, v.entries);
+  const primary = raw === 'finalized' ? null
+    : raw === 'locked' ? 'reopen'
+    : raw === 'approved' && (v.transfer || stale) ? 'reopen'
+    : raw === 'approved' ? 'transfer'
+    : raw === 'submitted' && !v.blockers.length ? 'approve'
+    : raw === 'submitted' ? 'return'
+    : null;
+  const PRIMARY_LABEL = { approve: 'Approve', return: 'Return to employee', reopen: 'Reopen', transfer: 'Send to payroll' };
+  const backTo = `/payroll/timesheets?p=${period.start}${keepQ}`;
+
   res.send(layout(`${emp.name} · timesheet`, `
     ${flash(req)}
     <div class="bs-page tcm-page inc-detail">
-      <div class="tsw-top">
-        <a class="bs-back" href="/payroll/timesheets?p=${period.start}${keepQ}">← Timesheets</a>
-        ${walker}
+      <!-- Stays put while the ledger scrolls. Who, which period, where it
+           stands, the one thing to do about it, and the way to the next person
+           are the whole job — losing them at the bottom of a long timesheet is
+           how a reviewer ends up scrolling back to remember whose hours these
+           are. -->
+      <div class="ts-rhead">
+        <a class="bs-back" href="${backTo}">← Timesheets</a>
+        <span class="ts-rh-name">${esc(emp.name)}</span>
+        <span class="ts-rh-per">${esc(labelFor(period))}</span>
+        <span class="inc-st inc-st-${esc(raw.replace(/_/g, '-'))}">${esc(TC.SHEET_LABEL[raw] || raw)}</span>
+        ${v.transferState !== 'not_ready' ? `<span class="inc-st inc-st-${esc(v.transferState.replace(/_/g, '-'))}">${esc(TC.TRANSFER_LABEL[v.transferState])}</span>` : ''}
+        ${v.issues.filter((i) => i.blocking).length
+          ? `<a class="ts-rh-iss" href="#issues">${v.issues.filter((i) => i.blocking).length} to fix</a>` : ''}
+        <span class="ts-rh-act">
+          ${primary && canWrite() ? `<a class="bs-btn" href="#act-${primary}">${PRIMARY_LABEL[primary]}</a>` : ''}
+          ${walker}
+        </span>
       </div>
       <div class="inc-rec-head">
         <div class="inc-rec-title">
-          <div class="inc-rec-line">${esc(labelFor(period))}</div>
-          <h1 class="bs-headline">${esc(emp.name)}</h1>
-          <p class="bs-subline">${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'} · clocked hours only, nothing sent to payroll</p>
-        </div>
-        <div class="inc-rec-status">
-          <span class="inc-st inc-st-${esc(v.status.replace(/_/g, '-'))}">${esc(TC.SHEET_LABEL[v.status] || v.status)}</span>
-          <span class="inc-st inc-st-${esc(v.transferState.replace(/_/g, '-'))}">${esc(TC.TRANSFER_LABEL[v.transferState])}</span>
+          <p class="bs-subline">${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'} · ${esc(labelFor(period))}</p>
         </div>
       </div>
 
@@ -15538,19 +15575,54 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
 
           <section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">Days</span></div>
-            ${v.entries.length ? TC.byDay(v.entries).map(([date, list]) => `
-              <div class="ts-mday"><div class="ts-mday-h">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</div>
-                <!-- A link only for somebody who can open the other side. A
-                     payroll-only account reading a timesheet was being offered
-                     a route into the staff area that answers 403. -->
-                ${list.map((e) => {
-                  const inner = `<span>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'} · ${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
-                  <b>${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>`;
-                  return navAllowed('/timeclock')
-                    ? `<a class="ts-mrow" href="/timeclock/${e.id}">${inner}</a>`
-                    : `<div class="ts-mrow">${inner}</div>`;
-                }).join('')}
-              </div>`).join('')
+            ${v.entries.length ? (() => {
+              // Grouped into weeks when the period spans more than one, with a
+              // weekly total — the figure a reviewer checks against overtime,
+              // and the reason the boundary has to be the same one the overtime
+              // calculation uses. Period-offset weeks, matching totalsFor.
+              // Oldest first. byDay hands back newest-first, which suits a
+              // history feed and not a payroll ledger: reviewing a period runs
+              // forward through it, and reversed the week headings read
+              // "Week 2" above "Week 1".
+              const days = TC.byDay(v.entries).slice().reverse();
+              const weekOf = (d) => Math.floor(
+                (Date.parse(d + 'T00:00:00Z') - Date.parse(period.start + 'T00:00:00Z')) / 864e5 / 7);
+              const weeks = [];
+              for (const [date, list] of days) {
+                const w = weekOf(date);
+                const last = weeks[weeks.length - 1];
+                if (last && last.w === w) last.days.push([date, list]);
+                else weeks.push({ w, days: [[date, list]] });
+              }
+              const dayMin = (list) => list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+              const brk = (e) => {
+                const b = TC.breaksOn(e);
+                return b.unpaid || b.paid
+                  ? `${TC.hm(b.unpaid)}${b.paid ? ` +${TC.hm(b.paid)} paid` : ''}` : '—';
+              };
+              return weeks.map((wk) => `
+                ${weeks.length > 1 ? `<div class="ts-wk-h"><span>Week ${wk.w + 1}</span>
+                  <b>${esc(TC.hm(wk.days.reduce((a, [, l]) => a + dayMin(l), 0)))}</b></div>` : ''}
+                ${wk.days.map(([date, list]) => `
+                <div class="ts-mday" id="d-${date}">
+                  <div class="ts-mday-h">${esc(TC.dayLabel(date))}
+                    <b>${esc(TC.hm(dayMin(list)))}</b></div>
+                  ${list.map((e) => {
+                    const iss = v.issues.filter((i) => i.entryId === e.id);
+                    const blocking = iss.some((i) => i.blocking);
+                    const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
+                    const inner = `<span class="ts-er-t">${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'}</span>
+                      <span class="ts-er-w">${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
+                      <span class="ts-er-b">${brk(e)}</span>
+                      <span class="ts-er-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? `<i class="tcm-tag warn">${corr} fix</i>` : ''}${blocking ? '<i class="tcm-tag warn">issue</i>' : ''}</span>
+                      <b class="ts-er-h">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>`;
+                    // A link only for somebody who can open the other side.
+                    return punchReadable()
+                      ? `<a class="ts-mrow${blocking ? ' warn' : ''}" id="e-${e.id}" href="/timeclock/${e.id}">${inner}</a>`
+                      : `<div class="ts-mrow${blocking ? ' warn' : ''}" id="e-${e.id}">${inner}</div>`;
+                  }).join('')}
+                </div>`).join('')}`).join('');
+            })()
               : '<p class="inc-hint">Nothing recorded.</p>'}
           </section>
 
@@ -15565,13 +15637,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
           ${canWrite() ? `<section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">What you can do</span></div>
 
-            ${v.blockers.length && v.sheet.status === 'submitted' ? `<div class="ts-blockers">
+            ${v.blockers.length && v.sheet.status === 'submitted' ? `<div class="ts-blockers" id="issues">
               <b>Cannot approve yet</b>
               <ul>${v.blockers.slice(0, 6).map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
             </div>` : ''}
 
             ${v.sheet.status === 'submitted' && !v.blockers.length ? `
-              <form method="post" action="/payroll/timesheets/${emp.id}/approve" class="tcm-form tcm-act">
+              <form id="act-approve" method="post" action="/payroll/timesheets/${emp.id}/approve" class="tcm-form tcm-act">
                 <input type="hidden" name="period" value="${period.start}">
                 <label class="tcm-f wide"><span>Note <i>optional</i></span><input name="note" maxlength="300"></label>
                 <button class="bs-btn" type="submit">Approve ${esc(TC.hm(v.totals.payable))}</button>
@@ -15589,7 +15661,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               </details>` : ''}
 
             ${v.sheet.status === 'submitted' ? `
-              <form method="post" action="/payroll/timesheets/${emp.id}/return" class="tcm-form tcm-act">
+              <form id="act-return" method="post" action="/payroll/timesheets/${emp.id}/return" class="tcm-form tcm-act">
                 <input type="hidden" name="period" value="${period.start}">
                 <label class="tcm-f wide"><span>Send back — reason <i>required</i></span>
                   <input name="reason" required maxlength="300" placeholder="What needs correcting"></label>
@@ -15602,13 +15674,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 <button class="bs-btn-sm" type="submit">Lock it</button></form>` : ''}
 
             ${['ready', 'needs_recalculation', 'changed_after_transfer'].includes(v.transferState) && v.approval ? `
-              <form method="post" action="/payroll/timesheets/${emp.id}/transfer" class="tcm-act">
+              <form id="act-transfer" method="post" action="/payroll/timesheets/${emp.id}/transfer" class="tcm-act">
                 <input type="hidden" name="period" value="${period.start}">
                 <button class="bs-btn" type="submit">${v.transfer ? 'Re-transfer' : 'Transfer'} approved hours</button></form>
               ${v.transferState !== 'ready' ? '<p class="inc-hint">The hours moved since they were sent — transferring again replaces the figure payroll holds, and keeps the old one on the record.</p>' : ''}` : ''}
 
             ${['approved', 'locked'].includes(v.sheet.status) ? `
-              <form method="post" action="/payroll/timesheets/${emp.id}/reopen" class="tcm-form tcm-act">
+              <form id="act-reopen" method="post" action="/payroll/timesheets/${emp.id}/reopen" class="tcm-form tcm-act">
                 <input type="hidden" name="period" value="${period.start}">
                 <label class="tcm-f wide"><span>Reopen — reason <i>required</i></span>
                   <input name="reason" required maxlength="300" placeholder="Why this needs changing"></label>
@@ -15633,7 +15705,9 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               <b>${esc(TC.hm(t.payable_min))}</b> · reg ${esc(TC.hm(t.regular_min))} / ot ${esc(TC.hm(t.overtime_min))}
               ${t.ot_enabled ? '· overtime on' : '· overtime off'}
               <i>${esc(t.transferred_by)} · ${esc(TC.stamp(t.transferred_at))}${t.state === 'superseded' ? ' · superseded' : ''}</i>
-              ${t.est_gross_cents ? `<i>estimate ${money(t.est_gross_cents)} — payroll computes its own</i>` : ''}
+              <!-- No money. The time-clock wage lookup ignores employee_roles, so a
+                   busser shift bills at the server rate — a figure that reads as
+                   authoritative and is not. Payroll computes its own. -->
             </div>`).join('')}
           </section>` : ''}
 
