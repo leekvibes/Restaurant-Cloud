@@ -4074,7 +4074,7 @@ function clockPage(req, who, opts = {}) {
   }
 
   const entryRow = (e) => {
-    const bt = TC.breakTotals(e.id);
+    const bt = TC.breaksOn(e);
     return `<a class="tc-row" href="/portal/clock/entry/${e.id}">
       <span class="tc-row-l"><b>${esc(TC.clockFace(e.clock_in_at))} – ${esc(TC.clockFace(e.clock_out_at))}</b>
         <i>${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}${e.edited ? ' · edited' : ''}</i></span>
@@ -14037,9 +14037,9 @@ app.get('/timeclock', (req, res) => {
   </a>`;
 
   const row = (e) => {
-    const bt = TC.breakTotals(e.id);
+    const bt = TC.breaksOn(e);
     return `<a class="bs-lr tcm-row" href="/timeclock/${e.id}">
-      <span class="tcm-when"><b>${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))}</b>
+      <span class="tcm-when"><b>${esc(TC.dayLabel(e.business_date).replace(/^\w+, /, ''))}</b>
         <i>${e.daypart ? esc(dp(e.daypart)) : '—'}</i></span>
       <span class="tcm-who"><b>${esc(tcEmpName(e.employee_id))}</b><i>${esc(tcPosName(e.position))}</i></span>
       <span class="tcm-times">${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i class="tcm-open">open</i>'}
@@ -14391,7 +14391,7 @@ app.get('/timeclock/:id', (req, res) => {
   const brs = TC.q.breaks.all(e.id);
   const events = TC.q.eventsFor.all('entry', e.id);
   const corrs = TC.q.correctionsFor.all(e.id);
-  const bt = TC.breakTotals(e.id);
+  const bt = TC.breaksOn(e);
   const sh = e.shift_id ? s.shiftById.get(e.shift_id) : null;
   // What the shift is carrying for this person, and where it came from.
   const workRow = sh ? w.workRow.get(sh.id, e.employee_id) : null;
@@ -14735,9 +14735,22 @@ app.post('/timeclock/correction/:id', (req, res) => {
 
 // ===========================================================================
 // TIMESHEETS — the manager's ledger, sitting with Payroll because that is what
-// it prepares. Review and return only: approving, locking and transferring
-// hours belong to the next phase and are deliberately absent.
+// it prepares.
 // ===========================================================================
+
+// What the shifts in a span are carrying, per person. Both of these were
+// db.prepare() calls written INSIDE the per-employee loop, so SQLite recompiled
+// the identical statement once per employee per request, and the detail page
+// compiled it a third time. Hoisted, and the ledger's version groups so one
+// call answers for the whole roster.
+const qEnteredByEmp = db.prepare(`SELECT w.employee_id, COALESCE(SUM(w.hours), 0) h
+    FROM work w JOIN shifts sh ON sh.id = w.shift_id
+   WHERE sh.date >= ? AND sh.date <= ?
+   GROUP BY w.employee_id`);
+const qEnteredForEmp = db.prepare(`SELECT COALESCE(SUM(w.hours), 0) h
+    FROM work w JOIN shifts sh ON sh.id = w.shift_id
+   WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`);
+
 app.get('/payroll/timesheets', (req, res) => {
   if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   const periods = recentPeriods(8);
@@ -14745,6 +14758,9 @@ app.get('/payroll/timesheets', (req, res) => {
   const period = periods[pIdx] || currentPeriod();
   const otRule = OT.rule();
   const staff = q.allEmployees.all();
+
+  // One call for the whole roster, before the loop rather than inside it.
+  const enteredBy = new Map(qEnteredByEmp.all(period.start, period.end).map((r) => [r.employee_id, r.h]));
 
   const rows = staff.map((emp) => {
     const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
@@ -14754,9 +14770,8 @@ app.get('/payroll/timesheets', (req, res) => {
     const issues = TC.issuesFor(entries, corrections);
     const totals = TC.totalsFor(entries, { otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
       otThreshold: otRule.threshold, periodStart: period.start });
-    // The hours a manager typed on the shifts in this period, for comparison.
-    const entered = db.prepare(`SELECT COALESCE(SUM(w.hours),0) h FROM work w JOIN shifts sh ON sh.id = w.shift_id
-      WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`).get(emp.id, period.start, period.end).h;
+    // What the shifts in this period are carrying for them, for comparison.
+    const entered = enteredBy.get(emp.id) || 0;
     const clocked = TC.toHours(totals.payable) || 0;
     const approval = sheet.id ? TC.q.currentApproval.get(sheet.id) : null;
     const transfer = sheet.id ? TC.q.currentTransfer.get(sheet.id) : null;
@@ -14851,8 +14866,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   const transfers = v.sheet.id ? TC.q.transfersFor.all(v.sheet.id) : [];
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   const fact = (k, val) => `<div class="inc-fact"><span>${k}</span><b>${val}</b></div>`;
-  const entered = db.prepare(`SELECT COALESCE(SUM(w.hours),0) h FROM work w JOIN shifts sh ON sh.id = w.shift_id
-    WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`).get(emp.id, period.start, period.end).h;
+  const entered = qEnteredForEmp.get(emp.id, period.start, period.end).h;
   const clocked = TC.toHours(v.totals.payable) || 0;
   const variance = Math.round((clocked - Number(entered)) * 100) / 100;
 
