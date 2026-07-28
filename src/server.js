@@ -753,6 +753,26 @@ app.get('/', (req, res) => {
       'Lines have been read but the product costs have not been updated.',
       'Review lines', waiting.length === 1 ? `/c/invoices/${waiting[0].id}/import` : '/c/invoices');
   }
+  if (may('trackers')) {
+    // Only the incidents that still need a person's hands: a follow-up owed, a
+    // high-impact one still open, a follow-up date that has passed. Resolved and
+    // closed incidents are the record, not the to-do list, so they stay off Home.
+    const incs = incQ.all.all();
+    const openInc = incs.filter(incOpen);
+    const fuDue = openInc.filter((r) => r.status === 'Follow-up due' || r.follow_up_due);
+    const overdueInc = fuDue.filter((r) => r.follow_up_due && r.follow_up_due < isoDate(today));
+    const seriousOpen = openInc.filter(incSerious);
+    if (overdueInc.length) {
+      notice('todo', 'incidents', `${overdueInc.length} incident follow-up${overdueInc.length === 1 ? '' : 's'} overdue`,
+        'Someone was assigned and the due date has passed.', 'Open the log', '/c/incidents');
+    } else if (seriousOpen.length) {
+      notice('todo', 'incidents', `${seriousOpen.length} serious incident${seriousOpen.length === 1 ? '' : 's'} still open`,
+        'A high-impact incident has not been resolved or closed.', 'Review', '/c/incidents');
+    } else if (fuDue.length) {
+      notice('todo', 'incidents', `${fuDue.length} incident${fuDue.length === 1 ? '' : 's'} need follow-up`,
+        'Action is still owed on the incident log.', 'Open the log', '/c/incidents');
+    }
+  }
 
 
   // --- rendering: the shift KPI band ---------------------------------------
@@ -12486,6 +12506,582 @@ app.get('/search', (req, res) => {
   res.json(out);
 });
 
+
+// ===========================================================================
+// INCIDENT LOG — a structured, append-only incident record.
+//
+// It began as a five-field generic tracker (date, type, people, what happened,
+// logged by). Those five are all still here and every old row keeps its exact
+// values; what is added around them is structure — how serious it was (impact),
+// where it is in review (status), how it ended (outcome), and an append-only
+// follow-up timeline — so an incident can be documented, reviewed, followed up
+// and understood later rather than being a note in a box.
+//
+// Impact, status and outcome are four different questions on purpose:
+//   type    = what kind of thing happened
+//   impact  = how serious it was
+//   outcome = how it ended
+//   status  = where it is in the review process
+// A minor incident can still need follow-up; a serious one can be resolved. The
+// original report is locked — a status change, an assignment or a note is a new
+// row in incident_events, never an edit of what was first written down.
+// ===========================================================================
+
+// --- schema (idempotent; only ever adds to the five original columns) ------
+(function migrateIncidents() {
+  const have = db.prepare('PRAGMA table_info(m_incidents)').all().map((c) => c.name);
+  const add = (name, type = 'TEXT') => { if (!have.includes(name)) db.exec(`ALTER TABLE m_incidents ADD COLUMN ${name} ${type}`); };
+  add('occurred_time'); add('location'); add('service'); add('related_shift_id');
+  add('impact'); add('status'); add('outcome'); add('outcome_note');
+  add('witnesses'); add('action_taken'); add('actions');
+  add('financial_cents', 'INTEGER'); add('financial_kind'); add('financial_note');
+  add('assigned_to'); add('follow_up_due');
+  db.exec(`CREATE TABLE IF NOT EXISTS incident_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    actor TEXT, note TEXT, new_status TEXT, new_assigned TEXT, new_due TEXT
+  )`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_incident_events ON incident_events (incident_id, id)');
+  // Records filed before the workflow existed predate impact and status. Do NOT
+  // invent a severity for them — leave impact NULL so they read "Not assessed",
+  // and mark status 'Imported' so they are visibly awaiting review rather than
+  // silently "Open". Only untouched rows are affected, so this settles once.
+  db.prepare("UPDATE m_incidents SET status = 'Imported' WHERE status IS NULL OR status = ''").run();
+})();
+
+// --- vocabulary ------------------------------------------------------------
+const INC_TYPE_GROUPS = [
+  { group: 'Guest', types: ['Guest injury', 'Guest complaint', 'Guest disturbance or security', 'Alcohol refusal', 'Payment dispute or chargeback'] },
+  { group: 'Employee', types: ['Employee injury', 'Employee conduct or write-up', 'Harassment or discrimination', 'Attendance or policy violation'] },
+  { group: 'Safety & operations', types: ['Food safety or allergen', 'Equipment or workplace safety', 'Property damage', 'Theft or loss', 'Other'] },
+];
+const INC_TYPES = INC_TYPE_GROUPS.flatMap((g) => g.types);
+const INC_IMPACTS = ['Minor', 'Moderate', 'Serious', 'Critical'];
+const INC_IMPACT_DESC = {
+  Minor: 'Resolved quickly · no injury or meaningful loss · no follow-up.',
+  Moderate: 'Needed a manager, compensation, corrective action or follow-up.',
+  Serious: 'Injury, real loss, a safety concern, or an external escalation.',
+  Critical: 'An emergency — hospitalization, danger, or major legal exposure.',
+};
+const INC_STATUSES = ['Open', 'Under review', 'Follow-up due', 'Resolved', 'Closed'];
+const INC_OUTCOMES = ['Resolved on site', 'Guest or employee satisfied', 'Follow-up required', 'Awaiting manager review', 'Escalated externally', 'Unresolved'];
+const INC_LOCATIONS = ['Dining room', 'Kitchen', 'Bar', 'Restroom', 'Entrance', 'Storage', 'Office', 'Parking area', 'Off-site', 'Other'];
+const INC_ACTIONS = ['Manager spoke with guest', 'Manager spoke with employee', 'Guest moved or assisted', 'Item removed from bill', 'Refund provided', 'Discount provided', 'Employee sent home', 'Area cleaned', 'Area closed or blocked', 'Product removed from service', 'Alcohol service refused', 'Medical assistance offered', 'Emergency services contacted', 'Police or security contacted', 'Insurance notified'];
+const INC_FIN_KINDS = ['Refund', 'Discount', 'Comp', 'Property loss', 'Product loss', 'Estimated damage', 'Other'];
+const INC_SERVICES = ['Café', 'Dinner', 'Both', 'Overnight / after hours', 'Not during service'];
+
+const incImpactKey = (v) => (v || '').toLowerCase();
+const incStatusKey = (v) => (v || 'Open').toLowerCase().replace(/[^a-z]+/g, '-');
+const incImpactBadge = (v) => (v
+  ? `<span class="inc-imp inc-imp-${incImpactKey(v)}">${esc(v)}</span>`
+  : '<span class="inc-imp inc-imp-none">Not assessed</span>');
+const incStatusBadge = (v) => `<span class="inc-st inc-st-${incStatusKey(v)}">${esc(v || 'Open')}</span>`;
+const incActionsOf = (row) => { try { const a = JSON.parse(row.actions || 'null'); return Array.isArray(a) ? a : []; } catch { return []; } };
+const incOpen = (r) => !['Resolved', 'Closed'].includes(r.status);
+const incNeedsFollowUp = (r) => incOpen(r) && (r.status === 'Follow-up due' || !!r.follow_up_due);
+const incSerious = (r) => ['Serious', 'Critical'].includes(r.impact);
+// Parse the whole number, don't sieve it: stripping everything but digits and
+// dots turned "1e3" (which a number input treats as 1000) into "13" and stored
+// $13. Drop only the currency dressing and let parseFloat read the value.
+const incDollars = (v) => {
+  if (v === '' || v == null) return null;
+  const n = parseFloat(String(v).replace(/[$,\s]/g, ''));
+  return isFinite(n) ? Math.round(n * 100) : null;
+};
+
+const incQ = {
+  all: db.prepare('SELECT * FROM m_incidents ORDER BY COALESCE(occurred_at, created_at) DESC, id DESC'),
+  one: db.prepare('SELECT * FROM m_incidents WHERE id = ?'),
+  events: db.prepare('SELECT * FROM incident_events WHERE incident_id = ? ORDER BY id ASC'),
+  addEvent: db.prepare(`INSERT INTO incident_events (incident_id, actor, note, new_status, new_assigned, new_due)
+    VALUES (@incident_id, @actor, @note, @new_status, @new_assigned, @new_due)`),
+};
+
+const incWho = (req) => (req.user && req.user.name) || 'Owner';
+const incNiceDT = (r) => `${niceDate(r.occurred_at)}${r.occurred_time ? ' at ' + esc(r.occurred_time) : ''}`;
+// created_at is SQLite's UTC datetime('now'); show it in the restaurant's own
+// time so a timeline entry reads as the hour it actually happened, not UTC.
+const incWhen = (utc) => {
+  if (!utc) return '';
+  const d = new Date(String(utc).replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? String(utc).slice(0, 16)
+    : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+};
+
+// --- LIST ------------------------------------------------------------------
+app.get('/c/incidents', (req, res) => {
+  const all = incQ.all.all();
+  const today = isoDate(startOfToday());
+  const openList = all.filter(incOpen);
+  const followUps = all.filter(incNeedsFollowUp);
+  const seriousOpen = all.filter((r) => incSerious(r) && incOpen(r));
+  const overdue = followUps.filter((r) => r.follow_up_due && r.follow_up_due < today);
+  const resolved = all.filter((r) => !incOpen(r));
+
+  const statCell = (label, value, sub, tone) =>
+    `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
+  const strip = all.length ? `<section class="bs-panel bs-strip">
+    ${statCell('Open', String(openList.length), openList.length ? 'still being handled' : 'nothing open', openList.length ? '' : 'ok')}
+    ${statCell('Need follow-up', String(followUps.length), overdue.length ? `${overdue.length} overdue` : 'action still owed', followUps.length ? 'warn' : 'ok')}
+    ${statCell('Serious / critical', String(seriousOpen.length), seriousOpen.length ? 'open and high-impact' : 'none open', seriousOpen.length ? 'bad' : 'ok')}
+    ${statCell('Logged', String(all.length), resolved.length ? `${resolved.length} resolved or closed` : 'this restaurant')}
+  </section>` : '';
+
+  const staffNames = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
+  const usedTypes = [...new Set(all.map((r) => r.type).filter(Boolean))];
+  const usedLocs = [...new Set(all.map((r) => r.location).filter(Boolean))];
+  const usedAssignees = [...new Set(all.map((r) => r.assigned_to).filter(Boolean))];
+
+  const row = (r) => {
+    const flags = [incOpen(r) ? 'open' : 'closed', incNeedsFollowUp(r) ? 'followup' : '',
+      incSerious(r) ? 'serious' : '', !incOpen(r) ? 'resolved' : ''].filter(Boolean).join(' ');
+    const search = [r.type, r.people, r.location, r.description, r.assigned_to, r.logged_by, r.impact, r.status]
+      .filter(Boolean).join(' ').toLowerCase();
+    const overdueTag = r.follow_up_due && r.follow_up_due < today && incOpen(r);
+    return `<a class="bs-lr inc-row" href="/c/incidents/${r.id}"
+      data-inc data-status="${esc(r.status || 'Open')}" data-impact="${esc(r.impact || '')}"
+      data-type="${esc(r.type || '')}" data-loc="${esc(r.location || '')}" data-assigned="${esc(r.assigned_to || '')}"
+      data-flags="${flags}" data-search="${esc(search)}">
+      <span class="inc-row-when"><b>${incNiceDT(r)}</b><i>#${r.id}</i></span>
+      <span class="inc-row-main">
+        <span class="inc-row-type">${esc(r.type || 'Incident')}</span>
+        <span class="inc-row-sum">${esc((r.description || '').replace(/\s+/g, ' ').trim().slice(0, 90) || '—')}</span>
+        <span class="inc-row-meta">${[r.location, r.people].filter(Boolean).map(esc).join(' · ') || '<i class="inc-unset">no location or people recorded</i>'}</span>
+      </span>
+      <span class="inc-row-tags">
+        ${incImpactBadge(r.impact)}
+        ${incStatusBadge(r.status)}
+        ${r.assigned_to ? `<span class="inc-assigned">→ ${esc(r.assigned_to)}</span>` : ''}
+        ${r.follow_up_due && incOpen(r) ? `<span class="inc-due${overdueTag ? ' over' : ''}">due ${niceDate(r.follow_up_due)}</span>` : ''}
+      </span>
+      <span class="bs-lr-go">›</span>
+    </a>`;
+  };
+
+  const views = [
+    ['all', 'All', all.length], ['open', 'Open', openList.length],
+    ['followup', 'Needs follow-up', followUps.length], ['serious', 'Serious & critical', seriousOpen.length],
+    ['resolved', 'Resolved', resolved.length],
+  ];
+  const chips = views.map(([v, label, n]) =>
+    `<button class="fchip${v === 'all' ? ' on' : ''}" data-view="${v}">${label}${n ? ` <b>${n}</b>` : ''}</button>`).join('');
+
+  const toolbar = all.length ? `
+    <div class="bs-tools">
+      <div class="bs-isearch">${icon('search')}
+        <input id="inc-search" type="search" placeholder="Type, people, location, who…" autocomplete="off"></div>
+      <div class="bs-quick">${chips}</div>
+      <details class="fsheet" id="incfilter">
+        <summary class="fs-btn">Filter <span class="fs-caret">▾</span></summary>
+        <div class="fs-body"><div class="fs-scrim" aria-hidden="true"></div>
+          <div class="fs-panel">
+            <div class="fs-h">Status</div>
+            <select id="inc-f-status" class="bs-sel"><option value="">Any status</option>
+              ${[...INC_STATUSES, 'Imported'].map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>
+            <div class="fs-h">Impact</div>
+            <select id="inc-f-impact" class="bs-sel"><option value="">Any impact</option>
+              ${INC_IMPACTS.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}
+              <option value="__none">Not assessed</option></select>
+            ${usedTypes.length ? `<div class="fs-h">Type</div><select id="inc-f-type" class="bs-sel"><option value="">Any type</option>
+              ${usedTypes.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>` : ''}
+            ${usedLocs.length ? `<div class="fs-h">Location</div><select id="inc-f-loc" class="bs-sel"><option value="">Anywhere</option>
+              ${usedLocs.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>` : ''}
+            ${usedAssignees.length ? `<div class="fs-h">Assigned to</div><select id="inc-f-assigned" class="bs-sel"><option value="">Anyone</option>
+              ${usedAssignees.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>` : ''}
+          </div>
+        </div>
+      </details>
+    </div>` : '';
+
+  const body = all.length
+    ? `<div class="bs-lrows inc-rows" id="inc-rows">${all.map(row).join('')}</div>
+       <div class="bs-blank" id="inc-none" style="display:none"><b>Nothing matches</b><span>Try another view or filter.</span></div>`
+    : `<div class="bs-hero">
+        <div class="bs-hero-k">Nothing logged yet</div>
+        <h2 class="bs-hero-t">Write it down while it is fresh.</h2>
+        <p class="bs-hero-s">${canWrite()
+          ? 'An injury, a refusal, a write-up, a complaint. Logging it takes a minute now and answers questions weeks later — who, when, how serious, and what was done about it.'
+          : 'Once a manager files an incident, it shows up here.'}</p>
+        ${canWrite() ? '<a class="bs-btn" href="/c/incidents/new">Log the first incident</a>' : ''}
+      </div>`;
+
+  const headline = all.length
+    ? `Incidents — ${all.length} logged${followUps.length ? `, <span class="warn">${followUps.length} need follow-up</span>.`
+        : seriousOpen.length ? `, <span class="warn">${seriousOpen.length} serious open</span>.` : ', all handled.'}`
+    : 'Incident log — nothing on file yet.';
+
+  res.send(layout('Incident log', `
+    ${flash(req)}
+    <div class="bs-page inc-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">${headline}</h1>
+          <p class="bs-subline">Append-only: entries are never edited or deleted, so the log stays trustworthy if it is ever needed. Follow-ups add to the record; they do not change what was first written.</p>
+        </div>
+        ${canWrite() ? '<a class="bs-btn" href="/c/incidents/new">+ Log incident</a>' : ''}
+      </div>
+      ${strip}
+      ${toolbar}
+      ${body}
+    </div>
+    <script>
+      (function () {
+        var view = 'all', q = '', st = '', imp = '', ty = '', loc = '', asg = '';
+        function pass(el) {
+          if (view !== 'all' && (el.getAttribute('data-flags') || '').split(' ').indexOf(view) === -1) return false;
+          if (st && el.getAttribute('data-status') !== st) return false;
+          if (imp === '__none') { if (el.getAttribute('data-impact')) return false; }
+          else if (imp && el.getAttribute('data-impact') !== imp) return false;
+          if (ty && el.getAttribute('data-type') !== ty) return false;
+          if (loc && el.getAttribute('data-loc') !== loc) return false;
+          if (asg && el.getAttribute('data-assigned') !== asg) return false;
+          if (q && (el.getAttribute('data-search') || '').indexOf(q) === -1) return false;
+          return true;
+        }
+        function apply() {
+          var shown = 0;
+          document.querySelectorAll('[data-inc]').forEach(function (el) {
+            var ok = pass(el); el.style.display = ok ? '' : 'none'; if (ok) shown++;
+          });
+          var none = document.getElementById('inc-none'); if (none) none.style.display = shown ? 'none' : '';
+        }
+        var si = document.getElementById('inc-search');
+        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
+        [['inc-f-status', function (v) { st = v; }], ['inc-f-impact', function (v) { imp = v; }],
+         ['inc-f-type', function (v) { ty = v; }], ['inc-f-loc', function (v) { loc = v; }],
+         ['inc-f-assigned', function (v) { asg = v; }]].forEach(function (p) {
+          var el = document.getElementById(p[0]);
+          if (el) el.addEventListener('change', function () { p[1](this.value); apply(); });
+        });
+        document.querySelectorAll('.fchip[data-view]').forEach(function (b) {
+          b.addEventListener('click', function () {
+            document.querySelectorAll('.fchip[data-view]').forEach(function (x) { x.classList.remove('on'); });
+            b.classList.add('on'); view = b.getAttribute('data-view'); apply();
+          });
+        });
+      })();
+    </script>`));
+});
+
+// --- CREATE (multi-step; works as one scroll without JS) -------------------
+app.get('/c/incidents/new', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1><a class="bs-back" href="/c/incidents">← Incident log</a></div>'));
+  const today = isoDate(startOfToday());
+  const me = incWho(req);
+  const staffNames = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
+  const typeOpts = INC_TYPE_GROUPS.map((g) =>
+    `<optgroup label="${esc(g.group)}">${g.types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}</optgroup>`).join('');
+  const sel = (name, opts, opt = {}) => `<select name="${name}"${opt.required ? ' required' : ''} class="inc-in">
+    <option value="">${esc(opt.blank || '—')}</option>${opts}</select>`;
+  const list = (arr) => arr.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+  const impactField = INC_IMPACTS.map((i) => `<label class="inc-imp-opt">
+      <input type="radio" name="impact" value="${esc(i)}" required>
+      <span class="inc-imp-badge inc-imp-${incImpactKey(i)}">${esc(i)}</span>
+      <span class="inc-imp-help">${esc(INC_IMPACT_DESC[i])}</span></label>`).join('');
+  const actionChips = INC_ACTIONS.map((a, i) => `<label class="inc-chip"><input type="checkbox" name="actions" value="${esc(a)}"><span>${esc(a)}</span></label>`).join('');
+
+  res.send(layout('Log an incident', `
+    ${flash(req)}
+    <div class="bs-page inc-page inc-new">
+      <a class="bs-back" href="/c/incidents">← Incident log</a>
+      <form method="post" action="/c/incidents" id="inc-form" class="inc-form">
+        <div class="inc-new-head">
+          <h1 class="bs-headline">Log an incident</h1>
+          <ol class="inc-steps" id="inc-steps">
+            <li data-go="1" class="on">What happened</li><li data-go="2">What you did</li>
+            <li data-go="3">What's next</li><li data-go="4">Review</li>
+          </ol>
+        </div>
+
+        <section class="inc-step on" data-step="1">
+          <div class="inc-kick">1 · What happened</div>
+          <div class="inc-grid">
+            <label class="inc-f wide"><span class="inc-lab">Type</span>${sel('type', typeOpts, { required: true, blank: 'Pick a type' })}</label>
+            <label class="inc-f"><span class="inc-lab">Date</span><input class="inc-in" type="date" name="occurred_at" value="${today}" required></label>
+            <label class="inc-f"><span class="inc-lab">Time</span><input class="inc-in" type="time" name="occurred_time"></label>
+            <label class="inc-f"><span class="inc-lab">Location</span>${sel('location', list(INC_LOCATIONS), { blank: 'Where' })}</label>
+            <label class="inc-f"><span class="inc-lab">Service</span>${sel('service', list(INC_SERVICES), { blank: '—' })}</label>
+          </div>
+          <div class="inc-fieldset">
+            <span class="inc-lab">Impact level <i class="inc-req">required</i></span>
+            <div class="inc-impacts">${impactField}</div>
+          </div>
+          <div class="inc-grid">
+            <label class="inc-f wide"><span class="inc-lab">People involved</span>
+              <input class="inc-in" name="people" list="inc-staff" placeholder="Staff, a guest (Table 2), a vendor…"></label>
+            <label class="inc-f wide"><span class="inc-lab">Witnesses <i class="inc-opt">optional</i></span>
+              <input class="inc-in" name="witnesses" placeholder="Anyone who saw it"></label>
+          </div>
+          <label class="inc-f wide"><span class="inc-lab">What happened <i class="inc-req">required</i></span>
+            <textarea class="inc-in" name="description" rows="4" required placeholder="Plainly, in order: what happened, to whom, and what you saw."></textarea></label>
+          <div class="inc-nav"><span></span><button type="button" class="bs-btn inc-next" data-next="2">Next: what you did →</button></div>
+        </section>
+
+        <section class="inc-step" data-step="2">
+          <div class="inc-kick">2 · What you did</div>
+          <label class="inc-f wide"><span class="inc-lab">Action taken</span>
+            <textarea class="inc-in" name="action_taken" rows="3" placeholder="What staff or management did right away."></textarea></label>
+          <div class="inc-fieldset">
+            <span class="inc-lab">Common actions <i class="inc-opt">tap any that apply</i></span>
+            <div class="inc-chips">${actionChips}</div>
+          </div>
+          <div class="inc-fieldset">
+            <span class="inc-lab">Financial impact <i class="inc-opt">only if there was one</i></span>
+            <div class="inc-grid">
+              <label class="inc-f"><span class="inc-lab">Kind</span>${sel('financial_kind', list(INC_FIN_KINDS), { blank: 'None' })}</label>
+              <label class="inc-f"><span class="inc-lab">Amount</span><div class="inc-money"><input class="inc-in" type="number" step="0.01" min="0" name="financial_amount" placeholder="0.00"></div></label>
+              <label class="inc-f wide"><span class="inc-lab">Note</span><input class="inc-in" name="financial_note" placeholder="e.g. 50% discount, comped entrée"></label>
+            </div>
+          </div>
+          <div class="inc-nav"><button type="button" class="bs-btn-quiet inc-back" data-back="1">← Back</button><button type="button" class="bs-btn inc-next" data-next="3">Next: what's next →</button></div>
+        </section>
+
+        <section class="inc-step" data-step="3">
+          <div class="inc-kick">3 · What happens next</div>
+          <div class="inc-grid">
+            <label class="inc-f wide"><span class="inc-lab">Current outcome</span>${sel('outcome', list(INC_OUTCOMES), { blank: '—' })}</label>
+            <label class="inc-f wide"><span class="inc-lab">Outcome note</span><input class="inc-in" name="outcome_note" placeholder="e.g. Guest received a 50% discount and appeared satisfied."></label>
+            <label class="inc-f"><span class="inc-lab">Status</span>${sel('status', list(INC_STATUSES), { blank: 'Open' })}</label>
+            <label class="inc-f"><span class="inc-lab">Follow-up due</span><input class="inc-in" type="date" name="follow_up_due"></label>
+            <label class="inc-f wide"><span class="inc-lab">Assigned to</span><input class="inc-in" name="assigned_to" list="inc-staff" placeholder="Who owns the follow-up"></label>
+            <label class="inc-f wide"><span class="inc-lab">Logged by</span><input class="inc-in" name="logged_by" value="${esc(me)}"><i class="inc-hint">You, unless you're filing this for someone else.</i></label>
+          </div>
+          <div class="inc-nav"><button type="button" class="bs-btn-quiet inc-back" data-back="2">← Back</button><button type="button" class="bs-btn inc-next" data-next="4">Review →</button></div>
+        </section>
+
+        <section class="inc-step" data-step="4">
+          <div class="inc-kick">4 · Review &amp; submit</div>
+          <div class="inc-review" id="inc-review"><p class="inc-hint">Check it over, then file it. Once filed the report is locked — you follow up on it, you don't rewrite it.</p></div>
+          <div class="inc-nav"><button type="button" class="bs-btn-quiet inc-back" data-back="3">← Back</button><button type="submit" class="bs-btn inc-submit">Submit incident</button></div>
+        </section>
+      </form>
+      <datalist id="inc-staff">${staffNames.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+    </div>
+    <script>
+      (function () {
+        var form = document.getElementById('inc-form');
+        if (!form) return;
+        var steps = [].slice.call(form.querySelectorAll('.inc-step'));
+        var tabs = [].slice.call(document.querySelectorAll('#inc-steps li'));
+        // Progressive enhancement: without this script every step is visible and
+        // the form submits as one page. With it, one step at a time.
+        form.classList.add('inc-wizard');
+        var at = 1;
+        function show(n) {
+          at = n;
+          steps.forEach(function (s) { s.classList.toggle('on', s.getAttribute('data-step') == n); });
+          tabs.forEach(function (t) { t.classList.toggle('on', t.getAttribute('data-go') == n); t.classList.toggle('done', Number(t.getAttribute('data-go')) < n); });
+          window.scrollTo(0, 0);
+          if (n == 4) review();
+        }
+        function validStep(n) {
+          var s = steps[n - 1], ok = true;
+          s.querySelectorAll('input,select,textarea').forEach(function (f) {
+            if (ok && f.required && !f.value && f.type !== 'radio') { f.reportValidity(); ok = false; }
+          });
+          if (ok && n == 1) {
+            var imp = form.querySelector('[name=impact]:checked');
+            if (!imp) { ok = false; alert('Pick an impact level — how serious it was.'); }
+          }
+          return ok;
+        }
+        form.querySelectorAll('.inc-next').forEach(function (b) {
+          b.addEventListener('click', function () { if (validStep(at)) show(Number(b.getAttribute('data-next'))); });
+        });
+        form.querySelectorAll('.inc-back').forEach(function (b) {
+          b.addEventListener('click', function () { show(Number(b.getAttribute('data-back'))); });
+        });
+        tabs.forEach(function (t) {
+          t.addEventListener('click', function () { var n = Number(t.getAttribute('data-go')); if (n < at || validStep(at)) show(n); });
+        });
+        function val(name) { var f = form.querySelector('[name="' + name + '"]'); if (!f) return ''; if (f.type === 'radio') { var c = form.querySelector('[name="' + name + '"]:checked'); return c ? c.value : ''; } return f.value; }
+        function review() {
+          var acts = [].slice.call(form.querySelectorAll('[name=actions]:checked')).map(function (c) { return c.value; });
+          var rows = [
+            ['Type', val('type')], ['Impact', val('impact')], ['When', val('occurred_at') + (val('occurred_time') ? ' ' + val('occurred_time') : '')],
+            ['Location', val('location')], ['Service', val('service')], ['People', val('people')], ['Witnesses', val('witnesses')],
+            ['What happened', val('description')], ['Action taken', val('action_taken')], ['Actions', acts.join(', ')],
+            ['Financial', [val('financial_kind'), val('financial_amount') ? '$' + val('financial_amount') : '', val('financial_note')].filter(Boolean).join(' · ')],
+            ['Outcome', [val('outcome'), val('outcome_note')].filter(Boolean).join(' — ')],
+            ['Status', val('status') || 'Open'], ['Follow-up due', val('follow_up_due')], ['Assigned to', val('assigned_to')], ['Logged by', val('logged_by')],
+          ].filter(function (r) { return r[1]; });
+          document.getElementById('inc-review').innerHTML =
+            '<div class="inc-rev-grid">' + rows.map(function (r) {
+              return '<div class="inc-rev-r"><span>' + r[0] + '</span><b>' + String(r[1]).replace(/[<>&]/g, '') + '</b></div>';
+            }).join('') + '</div><p class="inc-hint">Once filed the report is locked.</p>';
+        }
+        show(1);
+      })();
+    </script>`));
+});
+
+app.post('/c/incidents', (req, res) => {
+  if (!canWrite()) return res.status(403).end();
+  const b = req.body;
+  const clean = (v) => (String(v == null ? '' : v).trim() || null);
+  const inList = (v, arr) => (arr.includes(v) ? v : null);
+  const picked = [].concat(b.actions || []).filter((a) => INC_ACTIONS.includes(a));
+  const data = {
+    occurred_at: clean(b.occurred_at) || isoDate(startOfToday()),
+    occurred_time: clean(b.occurred_time),
+    type: clean(b.type),
+    location: inList(b.location, INC_LOCATIONS),
+    service: inList(b.service, INC_SERVICES),
+    related_shift_id: clean(b.related_shift_id),
+    impact: inList(b.impact, INC_IMPACTS),
+    status: inList(b.status, INC_STATUSES) || 'Open',
+    outcome: inList(b.outcome, INC_OUTCOMES),
+    outcome_note: clean(b.outcome_note),
+    people: clean(b.people),
+    witnesses: clean(b.witnesses),
+    description: clean(b.description),
+    action_taken: clean(b.action_taken),
+    actions: picked.length ? JSON.stringify(picked) : null,
+    financial_cents: incDollars(b.financial_amount),
+    financial_kind: inList(b.financial_kind, INC_FIN_KINDS),
+    financial_note: clean(b.financial_note),
+    assigned_to: clean(b.assigned_to),
+    follow_up_due: clean(b.follow_up_due),
+    logged_by: clean(b.logged_by) || incWho(req),
+  };
+  const cols = Object.keys(data);
+  const info = db.prepare(`INSERT INTO m_incidents (${cols.join(',')}) VALUES (${cols.map((c) => '@' + c).join(',')})`).run(data);
+  const id = info.lastInsertRowid;
+  incQ.addEvent.run({ incident_id: id, actor: data.logged_by, note: 'Incident filed.',
+    new_status: data.status, new_assigned: data.assigned_to, new_due: data.follow_up_due });
+  try {
+    const who = data.logged_by ? ` by ${data.logged_by}` : '';
+    PORTAL.adminNotify('incident', `Incident logged: ${data.type || 'Incident'}${who}`,
+      { body: (data.description || '').replace(/\s+/g, ' ').trim().slice(0, 140) || null, href: `/c/incidents/${id}` });
+  } catch { /* the row is saved regardless */ }
+  res.redirect(`/c/incidents/${id}?msg=` + encodeURIComponent('Incident filed.'));
+});
+
+// --- DETAIL ----------------------------------------------------------------
+app.get('/c/incidents/:id', (req, res) => {
+  const r = incQ.one.get(Number(req.params.id));
+  if (!r) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>That incident no longer exists</h1><a class="bs-back" href="/c/incidents">← Incident log</a></div>'));
+  const events = incQ.events.all(r.id);
+  const staffNames = [...new Set(q.allEmployees.all().map((e) => e.name).filter(Boolean))];
+  const acts = incActionsOf(r);
+  const w = canWrite();
+
+  const fact = (label, value) => `<div class="inc-fact"><span>${label}</span><b>${value || '<i class="inc-unset">—</i>'}</b></div>`;
+  const section = (title, inner) => `<section class="bs-panel inc-sec"><div class="bs-sec-h"><span class="bs-kicker">${title}</span></div>${inner}</section>`;
+  const fin = r.financial_cents || r.financial_kind || r.financial_note
+    ? [r.financial_kind, r.financial_cents ? money(r.financial_cents) : '', r.financial_note].filter(Boolean).join(' · ')
+    : '';
+
+  const timeline = events.length ? events.map((e) => {
+    const bits = [];
+    if (e.new_status) bits.push(`status → <b>${esc(e.new_status)}</b>`);
+    if (e.new_assigned) bits.push(`assigned → <b>${esc(e.new_assigned)}</b>`);
+    if (e.new_due) bits.push(`follow-up due <b>${niceDate(e.new_due)}</b>`);
+    return `<li class="inc-ev">
+      <span class="inc-ev-dot"></span>
+      <div class="inc-ev-body">
+        <div class="inc-ev-head"><b>${esc(e.actor || 'Someone')}</b><span>${esc(incWhen(e.created_at))}</span></div>
+        ${e.note ? `<div class="inc-ev-note">${esc(e.note)}</div>` : ''}
+        ${bits.length ? `<div class="inc-ev-change">${bits.join(' · ')}</div>` : ''}
+      </div></li>`;
+  }).join('') : '<li class="inc-hint">No follow-ups yet.</li>';
+
+  const quick = (label, status, cls) => `<form method="post" action="/c/incidents/${r.id}/followup" style="margin:0">
+    <input type="hidden" name="new_status" value="${status}"><button class="bs-btn-sm${cls ? ' ' + cls : ''}" type="submit">${label}</button></form>`;
+
+  res.send(layout(`Incident #${r.id}`, `
+    ${flash(req)}
+    <div class="bs-page inc-page inc-detail">
+      <a class="bs-back" href="/c/incidents">← Incident log</a>
+      <div class="inc-rec-head">
+        <div class="inc-rec-title">
+          <div class="inc-rec-line">${esc(r.type || 'Incident')} · ${incImpactBadge(r.impact)}</div>
+          <h1 class="bs-headline">${incNiceDT(r)}</h1>
+          <p class="bs-subline">${[r.location, r.service].filter(Boolean).map(esc).join(' · ') || 'Location not recorded'} · Incident #${r.id}</p>
+        </div>
+        <div class="inc-rec-status">
+          ${incStatusBadge(r.status)}
+          ${r.assigned_to ? `<span class="inc-rec-assign">Assigned to <b>${esc(r.assigned_to)}</b></span>` : ''}
+          ${r.follow_up_due && incOpen(r) ? `<span class="inc-rec-due${r.follow_up_due < isoDate(startOfToday()) ? ' over' : ''}">Follow-up due ${niceDate(r.follow_up_due)}</span>` : ''}
+        </div>
+      </div>
+
+      <div class="inc-cols">
+        <div class="inc-main">
+          ${section('What happened', `<div class="inc-locked"><div class="detail-long">${esc(r.description || '—')}</div><span class="inc-lock">🔒 Original report — locked</span></div>`)}
+          ${section('People &amp; witnesses', `<div class="inc-facts">
+            ${fact('People involved', esc(r.people || ''))}
+            ${fact('Witnesses', esc(r.witnesses || ''))}
+          </div>`)}
+          ${section('Immediate action', `
+            ${r.action_taken ? `<div class="detail-long">${esc(r.action_taken)}</div>` : '<p class="inc-hint">No action described.</p>'}
+            ${acts.length ? `<div class="inc-taglist">${acts.map((a) => `<span class="inc-tag">${esc(a)}</span>`).join('')}</div>` : ''}`)}
+          ${(r.outcome || r.outcome_note) ? section('Outcome', `<div class="inc-facts">
+            ${fact('Current outcome', esc(r.outcome || ''))}
+            ${r.outcome_note ? `<div class="inc-fact wide"><span>Note</span><b>${esc(r.outcome_note)}</b></div>` : ''}</div>`) : ''}
+          ${fin ? section('Financial impact', `<div class="inc-money-line">${esc(fin)}</div>`) : ''}
+
+          ${section('Follow-up timeline', `<ul class="inc-timeline">${timeline}</ul>
+            ${w ? `<form method="post" action="/c/incidents/${r.id}/followup" class="inc-fu">
+              <div class="inc-kick">Add follow-up</div>
+              <textarea class="inc-in" name="note" rows="2" placeholder="What happened since — a call made, a meeting held, a refund confirmed."></textarea>
+              <div class="inc-grid">
+                <label class="inc-f"><span class="inc-lab">Change status</span><select class="inc-in" name="new_status"><option value="">Keep ${esc(r.status || 'Open')}</option>${INC_STATUSES.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select></label>
+                <label class="inc-f"><span class="inc-lab">Assign to</span><input class="inc-in" name="new_assigned" list="inc-staff" placeholder="${esc(r.assigned_to || 'Who owns it')}"></label>
+                <label class="inc-f"><span class="inc-lab">Follow-up due</span><input class="inc-in" type="date" name="new_due" value="${esc(r.follow_up_due || '')}"></label>
+              </div>
+              <button class="bs-btn" type="submit">Add follow-up</button>
+            </form>` : ''}`)}
+        </div>
+
+        <aside class="inc-side">
+          ${section('At a glance', `<div class="inc-facts">
+            ${fact('Type', esc(r.type || ''))}
+            ${fact('Impact', incImpactBadge(r.impact))}
+            ${fact('Status', incStatusBadge(r.status))}
+            ${fact('When', incNiceDT(r))}
+            ${fact('Location', esc(r.location || ''))}
+            ${fact('Service', esc(r.service || ''))}
+            ${fact('Assigned to', esc(r.assigned_to || ''))}
+            ${fact('Follow-up due', r.follow_up_due ? niceDate(r.follow_up_due) : '')}
+          </div>`)}
+          ${w ? section('Actions', `<div class="inc-quick">
+            ${r.status !== 'Under review' ? quick('Mark under review', 'Under review') : ''}
+            ${incOpen(r) ? quick('Mark resolved', 'Resolved', 'ok') : ''}
+            ${r.status !== 'Closed' ? quick('Close incident', 'Closed') : ''}
+            ${!incOpen(r) ? quick('Reopen', 'Open') : ''}
+          </div><p class="inc-hint">Every action is added to the timeline with your name — the original report is never touched.</p>`) : ''}
+          ${section('Audit', `<div class="inc-facts">
+            ${fact('Reported by', esc(r.logged_by || ''))}
+            ${fact('Filed', esc(incWhen(r.created_at)))}
+            ${fact('Follow-ups', String(events.length))}
+          </div>`)}
+        </aside>
+      </div>
+      <datalist id="inc-staff">${staffNames.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+    </div>`));
+});
+
+app.post('/c/incidents/:id/followup', (req, res) => {
+  if (!canWrite()) return res.status(403).end();
+  const id = Number(req.params.id);
+  const inc = incQ.one.get(id);
+  if (!inc) return res.status(404).end();
+  const clean = (v) => (String(v == null ? '' : v).trim() || null);
+  const newStatus = INC_STATUSES.includes(req.body.new_status) ? req.body.new_status : null;
+  const newAssigned = clean(req.body.new_assigned);
+  const newDue = clean(req.body.new_due);
+  const note = clean(req.body.note);
+  if (!note && !newStatus && !newAssigned && !newDue) return res.redirect(`/c/incidents/${id}`);
+  incQ.addEvent.run({ incident_id: id, actor: incWho(req), note, new_status: newStatus, new_assigned: newAssigned, new_due: newDue });
+  const sets = [], vals = { id };
+  if (newStatus) { sets.push('status=@status'); vals.status = newStatus; }
+  if (newAssigned) { sets.push('assigned_to=@assigned'); vals.assigned = newAssigned; }
+  if (newDue) { sets.push('follow_up_due=@due'); vals.due = newDue; }
+  if (sets.length) db.prepare(`UPDATE m_incidents SET ${sets.join(', ')} WHERE id=@id`).run(vals);
+  res.redirect(`/c/incidents/${id}?msg=` + encodeURIComponent('Follow-up added.'));
+});
 
 mountModules(app);
 
