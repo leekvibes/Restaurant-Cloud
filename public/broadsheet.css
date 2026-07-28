@@ -4176,3 +4176,81 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   text-decoration: none; font-size: 13px; }
 .tsm-per .tsx-today.on { border-color: var(--ink); }
 .tsm-counts { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin: 0 0 14px; }
+
+/* --- hours by day ---------------------------------------------------------
+   The first sticky-column grid in the app, so it is written to be copied.
+
+   Two constraints shape it. Shadows are unavailable — .bs sets box-shadow:none
+   on every descendant — so the frozen columns separate themselves with an
+   opaque background and a rule, not a soft edge. And the grid must own its own
+   scroll container: above 900px nothing on the page contains overflow, so a
+   wide grid would scroll the DOCUMENT and slide the sticky masthead and sidebar
+   away with it; at and below 900px .bs-main clips instead, which would hide the
+   later dates with no scrollbar and no gesture to find them.
+
+   A phone scrolls this sideways rather than reflowing it into cards. That is
+   deliberate: the ::before label trick every other dense table here uses needs
+   the labels to be constants, and these labels are dates — data, not CSS. Name
+   and period total stay frozen at both edges so the two figures that matter are
+   never off-screen. */
+.tsg-panel { padding-bottom: 6px; }
+.tsg-scroll { overflow-x: auto; max-width: 100%; min-width: 0; }
+.tsg {
+  display: grid;
+  grid-template-columns: 132px repeat(var(--tsg-cols), minmax(46px, 1fr)) 96px;
+  width: max-content; min-width: 100%;
+}
+.tsg-head, .tsg-row { display: contents; }
+
+.tsg-dh, .tsg-c, .tsg-emp, .tsg-tot {
+  padding: 7px 8px; border-bottom: 1px solid var(--rule-light);
+  font-size: 12.5px; line-height: 1.25;
+}
+.tsg-dh {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--panel); text-align: center;
+  border-bottom: 1px solid var(--rule);
+}
+.tsg-dh b { display: block; font-family: var(--mono); font-size: 12px; color: var(--ink); font-weight: 600; }
+.tsg-dh i { display: block; font-style: normal; font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); }
+
+/* Frozen at both edges. z-index stays at or below 20 so the grid never draws
+   over the sidebar (40), the nav (55) or the masthead (60). */
+.tsg-emp { position: sticky; left: 0; z-index: 3; background: var(--panel);
+  border-right: 1px solid var(--rule); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tsg-tot { position: sticky; right: 0; z-index: 3; background: var(--panel);
+  border-left: 1px solid var(--rule); text-align: right; }
+.tsg-corner { z-index: 4; }
+.tsg-emp b { display: block; font-size: 13px; color: var(--ink); }
+.tsg-emp i { display: block; font-style: normal; font-size: 10.5px; color: var(--muted); }
+.tsg-tot b { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+.tsg-tot i { display: block; font-style: normal; font-size: 10px; color: var(--muted); }
+
+.tsg-c { font-family: var(--mono); text-align: center; color: var(--ink); }
+.tsg-c.tsg-none { color: var(--faint); }
+.tsg-c.tsg-none::after { content: '·'; }
+.tsg-c.tsg-open { color: var(--positive); font-weight: 600; }
+/* A week boundary is a heavier rule on the cell's leading edge — not a nested
+   frame, because panels may not nest. */
+.tsg-c.tsg-wk, .tsg-dh.tsg-wk { border-left: 1px solid var(--rule-heavy); }
+
+.tsg-row { color: inherit; text-decoration: none; }
+.tsg-row:hover .tsg-c, .tsg-row:hover .tsg-emp, .tsg-row:hover .tsg-tot { background: var(--row-hover); }
+.tsg-c.on { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+.tsg-pop {
+  position: fixed; z-index: 20; max-width: 260px;
+  background: var(--panel); border: 1px solid var(--rule);
+  padding: 9px 11px; font-size: 12px; color: var(--ink); line-height: 1.45;
+}
+.tsg-pop b { font-family: var(--mono); }
+.tsg-pop i { display: block; font-style: normal; color: var(--muted); font-size: 11px; }
+.tsg-foot { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; padding: 0 2px; }
+
+@media (max-width: 760px) {
+  .tsg { grid-template-columns: 108px repeat(var(--tsg-cols), minmax(40px, 1fr)) 84px; }
+  .tsg-dh, .tsg-c, .tsg-emp, .tsg-tot { padding: 6px 5px; font-size: 12px; }
+  .tsg-emp b { font-size: 12px; }
+}
+.tsg-pop a { display: inline-block; margin-top: 6px; color: var(--accent); font-size: 11.5px; }

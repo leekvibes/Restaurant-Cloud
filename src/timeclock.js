@@ -823,6 +823,40 @@ function sheetFor(employeeId, period, opts = {}) {
  * refusing over.
  */
 /**
+ * Every populated cell of the employee-by-day grid, in one query.
+ *
+ * Grouped on business_date, never on the date part of clock_in_at: those two
+ * genuinely diverge, because a punch at 1am belongs to the night before under
+ * the cutoff hour. Grouping on the wrong one puts a bartender's Friday shift in
+ * Saturday's column.
+ *
+ * Returns only the days somebody actually worked. The grid draws its own spine
+ * of dates and looks each one up, so an empty day costs nothing and a wide
+ * range costs what the entries cost rather than employees × days.
+ */
+const gridCellsQ = db.prepare(`
+  SELECT employee_id, business_date,
+         COALESCE(SUM(payable_minutes), 0)      AS payable_min,
+         COUNT(*)                               AS entries,
+         COALESCE(SUM(clock_out_at IS NULL), 0) AS open_entries,
+         COUNT(DISTINCT position)               AS positions,
+         COALESCE(MAX(edited), 0)               AS edited
+    FROM time_entries
+   WHERE business_date >= ? AND business_date <= ?
+   GROUP BY employee_id, business_date`);
+
+function gridCells(from, to) {
+  const map = new Map();
+  for (const r of gridCellsQ.all(from, to)) map.set(`${r.employee_id}|${r.business_date}`, r);
+  return map;
+}
+
+/** Everyone who belongs in the grid for a span, not just everyone still employed. */
+const gridPeopleQ = db.prepare(`
+  SELECT DISTINCT employee_id FROM time_entries WHERE business_date >= ? AND business_date <= ?`);
+const sheetPeopleQ = db.prepare('SELECT employee_id FROM timesheets WHERE period_start = ?');
+
+/**
  * Every break on every entry in a span, in one query.
  *
  * issuesFor and fingerprintOf each want a per-entry break list, and the ledger
@@ -1160,5 +1194,7 @@ module.exports = {
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
   syncShiftHours, hasPunch, shiftHasPunches, anchorEntryFor, clockedMinutesOn,
-  backfillShiftHours,
+  backfillShiftHours, gridCells, breaksInSpan,
+  gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
+  sheetPeople: (start) => sheetPeopleQ.all(start).map((r) => r.employee_id),
 };

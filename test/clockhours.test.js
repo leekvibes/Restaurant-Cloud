@@ -472,6 +472,120 @@ test('a range typed backwards is read the way it was meant', async () => {
   assert.match(html, /name="to" value="2026-07-01"/, 'and the later one is the end');
 });
 
+// ===========================================================================
+// The employee-by-day grid.
+// ===========================================================================
+
+/** The most recent FINISHED period. */
+const gridPeriod = () => require('../src/periods').recentPeriods(2)[1];
+const plusDays = (iso, n) => new Date(Date.parse(iso) + n * 864e5).toISOString().slice(0, 10);
+
+// The grid only draws when the period has somebody in it, so these tests put
+// punches there themselves rather than depending on another test's leftovers.
+let gridReady = false;
+async function seedGridPeriod() {
+  if (gridReady) return;
+  const per = gridPeriod();
+  await punch(E.split, per.start, '09:00', '16:30');            // 7.5h, first day
+  await punch(E.split, plusDays(per.start, 3), '10:00', '15:00');  // 5h, a gap either side
+  await punch(E.both, per.end, '12:00', '20:00');               // the LAST day
+  gridReady = true;
+}
+
+test('the grid draws every date in the period, including the ones nobody worked', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  assert.match(html, /Hours by day/, 'the grid is on the page');
+
+  const heads = html.match(/class="tsg-dh/g) || [];
+  const days = Math.round((Date.parse(per.end) - Date.parse(per.start)) / 864e5) + 1;
+  assert.strictEqual(heads.length, days, `one column per date (${days})`);
+  // The last date is the off-by-one this will actually get wrong.
+  assert.match(html, new RegExp(`data-d="${per.end}"`), 'the final day of the period is drawn');
+  assert.match(html, new RegExp(`data-d="${per.start}"`), 'and the first');
+});
+
+test('the column count follows the period rather than a hardcoded fortnight', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  const cols = (html.match(/--tsg-cols:(\d+)/) || [])[1];
+  const days = Math.round((Date.parse(per.end) - Date.parse(per.start)) / 864e5) + 1;
+  assert.strictEqual(Number(cols), days, 'the CSS column count is derived from the period');
+});
+
+test('week separators fall on real Mondays, not every seventh cell', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  // Count the Mondays in the period, excluding the first day — the spine starts
+  // there, so it needs no separator before it.
+  let mondays = 0;
+  for (let i = 1; ; i++) {
+    const d = new Date(Date.parse(per.start) + i * 864e5);
+    if (d.toISOString().slice(0, 10) > per.end) break;
+    if (d.getUTCDay() === 1) mondays++;
+  }
+  const heads = (html.match(/class="tsg-dh tsg-wk"/g) || []).length;
+  assert.strictEqual(heads, mondays, `${mondays} separator(s) in the header, on the Mondays`);
+});
+
+test('a day off, a day worked and a day still running all look different', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  assert.match(html, /class="tsg-c tsg-none/, 'a day with nothing on it is drawn quiet');
+  assert.match(html, /data-h="/, 'a worked day carries its hours');
+  // An open punch must never render as a number, and never as the same nothing
+  // an empty day gets — otherwise somebody on shift right now reads as absent.
+  const open = html.match(/class="tsg-c tsg-open[^"]*"[^>]*>/);
+  if (open) assert.ok(!/data-h=/.test(open[0]), 'a running punch shows no total yet');
+});
+
+test('the row total is the sum of its own cells', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  const row = (html.match(/<a class="tsg-row"[\s\S]*?<\/a>/) || [])[0];
+  assert.ok(row, 'there is at least one row');
+  const cells = [...row.matchAll(/data-h="([\d.]+)"/g)].map((m) => Number(m[1]));
+  const shown = Number((row.match(/class="tsg-tot"><b>([\d.]+)</) || [])[1]);
+  const summed = Math.round(cells.reduce((a, b) => a + b, 0) * 100) / 100;
+  assert.ok(Math.abs(summed - shown) < 0.05, `total ${shown} matches the cells ${summed}`);
+});
+
+test('the frozen columns are actually frozen', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  // The selector must be the WHOLE selector. A plain indexOf finds '.tsg-tot {'
+  // inside the grouped rule '.tsg-emp, .tsg-tot {' and reads the wrong
+  // declarations — which is exactly what this test caught on its first run.
+  const rule = (sel) => {
+    const m = css.match(new RegExp('(?:^|\\})\\s*' + sel.replace('.', '\\.') + '\\s*\\{([^}]*)\\}', 'm'));
+    assert.ok(m, `${sel} has a rule of its own`);
+    return m[1];
+  };
+  assert.match(rule('.tsg-scroll'), /overflow-x:\s*auto/, 'the grid owns its scroll container');
+  assert.match(rule('.tsg-emp'), /position:\s*sticky/);
+  assert.match(rule('.tsg-emp'), /left:\s*0/, 'the name stays put');
+  assert.match(rule('.tsg-tot'), /right:\s*0/, 'and so does the period total');
+  assert.match(rule('.tsg-dh'), /top:\s*0/, 'the dates stay put vertically');
+});
+
+test('somebody who left mid-period is still in the grid', async () => {
+  const per = gridPeriod();
+  const gone = 140;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,?,?,?,0)")
+    .run(gone, 'Departed Soul', 'server', '4999', 1500);
+  db.prepare("UPDATE employees SET active = 0 WHERE id = ?").run(gone);
+  await punch(gone, per.start, '09:00', '17:00');
+  // Deactivating somebody does not un-work their shifts. Dropping them here is
+  // how hours end up never approved and never transferred, with nothing saying so.
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  assert.match(html, /Departed Soul/, 'they still have a row');
+  assert.match(html, /· left/, 'marked as gone rather than silently dropped');
+});
+
 test('the migration stamps existing hours as legacy and leaves never-set rows to the clock', () => {
   // The rule that protects the owner's live database: anything already carrying
   // a figure was typed, pushed by the POS or imported, and none of them can be

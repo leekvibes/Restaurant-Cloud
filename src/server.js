@@ -14879,7 +14879,18 @@ app.get('/payroll/timesheets', (req, res) => {
   const pIdx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
   const period = periods[pIdx] || currentPeriod();
   const otRule = OT.rule();
-  const staff = q.allEmployees.all();
+  // Everyone who belongs in this period, not merely everyone still employed.
+  // Deactivating somebody does not un-work their shifts. A person who submitted
+  // a timesheet and then left kept a 'submitted' row that the ledger, the
+  // counts, the readiness verdict and approve-all all read past — so their hours
+  // sat there forever, never approved and never transferred, and nothing said so.
+  const staffIds = new Set([
+    ...q.allEmployees.all().map((e) => e.id),
+    ...TC.gridPeople(period.start, period.end),
+    ...TC.sheetPeople(period.start),
+  ]);
+  const staff = [...staffIds].map((id) => q.employee.get(id)).filter(Boolean)
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
   // One call for the whole roster, before the loop rather than inside it.
   const enteredBy = new Map(qEnteredByEmp.all(period.start, period.end).map((r) => [r.employee_id, r]));
@@ -14905,6 +14916,43 @@ app.get('/payroll/timesheets', (req, res) => {
       blockers: TC.approvalBlockers(sheet, issues),
       transferState: TC.transferStateOf(sheet, approval, transfer, entries) };
   }).filter(Boolean);
+
+  // --- hours by day ---------------------------------------------------------
+  // The spine is every date in the period, built here rather than read from the
+  // data: a day nobody worked is a column too, and TC.byDay omits it. Column
+  // count is derived from the period, never a hardcoded fortnight.
+  const days = [];
+  for (let d = period.start; d <= period.end; d = addDays(d, 1)) days.push(d);
+  const cells = TC.gridCells(period.start, period.end);
+  // Real Monday boundaries. start + 7 is the exact bug periods.js was written
+  // to kill, so it is not repeated here.
+  const isMonday = (d) => new Date(d + 'T00:00:00Z').getUTCDay() === 1;
+
+  const gridRow = (r) => {
+    const dayCells = days.map((d) => {
+      const c = cells.get(`${r.emp.id}|${d}`);
+      if (!c || !c.entries) return `<span class="tsg-c tsg-none${isMonday(d) && d !== days[0] ? ' tsg-wk' : ''}" data-d="${d}"></span>`;
+      const wk = isMonday(d) && d !== days[0] ? ' tsg-wk' : '';
+      // An open punch is NOT the same as a day off, and must never render as
+      // one. A running entry has no payable minutes yet, so it would otherwise
+      // be indistinguishable from an empty cell — somebody on shift right now
+      // reading as though they had not come in.
+      if (c.open_entries) {
+        return `<span class="tsg-c tsg-open${wk}" data-d="${d}" data-n="${c.entries}"
+          data-t="on the clock now">on</span>`;
+      }
+      const hrs = TC.toHours(c.payable_min);
+      return `<span class="tsg-c${wk}" data-d="${d}" data-h="${hrs}" data-n="${c.entries}"
+        data-t="${esc(TC.hm(c.payable_min))}${c.entries > 1 ? ` · ${c.entries} punches` : ''}${c.positions > 1 ? ' · 2 positions' : ''}${c.edited ? ' · edited' : ''}">${hrs}</span>`;
+    }).join('');
+    const running = days.some((d) => (cells.get(`${r.emp.id}|${d}`) || {}).open_entries);
+    return `<a class="tsg-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
+      <span class="tsg-emp"><b>${esc(r.emp.name)}</b><i>${esc(TC.SHEET_LABEL[r.status] || r.status)}${r.emp.active ? '' : ' · left'}</i></span>
+      ${dayCells}
+      <span class="tsg-tot"><b>${TC.toHours(r.totals.payable) || 0}</b><i>${r.totals.overtime
+        ? `+${TC.toHours(r.totals.overtime)} OT` : running ? 'so far' : 'hours'}</i></span>
+    </a>`;
+  };
 
   const statCell = (l, v, s, tone) => `<div class="bs-strip-c"><span class="bs-strip-l">${l}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${v}</span><span class="bs-strip-s">${s}</span></div>`;
   const submitted = rows.filter((r) => r.status === 'submitted').length;
@@ -14952,6 +15000,60 @@ app.get('/payroll/timesheets', (req, res) => {
         <a class="tsx-today${pIdx === 0 ? ' on' : ''}" href="/payroll/timesheets">Today</a>
       </nav>
       <p class="tsm-counts">${submitted} submitted · ${notIn} not submitted · ${attention} need attention · ${approved} approved</p>
+
+      ${rows.length ? `<section class="bs-panel tsg-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">Hours by day</span></div>
+        <div class="tsg-scroll">
+          <div class="tsg" style="--tsg-cols:${days.length}">
+            <div class="tsg-head">
+              <span class="tsg-emp tsg-corner">Who</span>
+              ${days.map((d, i) => `<span class="tsg-dh${isMonday(d) && i ? ' tsg-wk' : ''}"
+                ><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></span>`).join('')}
+              <span class="tsg-tot tsg-corner">Period</span>
+            </div>
+            ${rows.map(gridRow).join('')}
+          </div>
+        </div>
+        <div class="tsg-pop" hidden></div>
+        <!-- One popover, filled from the cell's own data attributes. The
+             alternative — a preview element inside every cell — measured 3.7x
+             the DOM nodes at a wide range, parsed and laid out on a phone
+             whether or not anybody ever opens one. With scripting off, a cell
+             is still part of the row link and lands on the day it names. -->
+        <script>
+        (function () {
+          var pop = document.querySelector('.tsg-pop');
+          var grid = document.querySelector('.tsg');
+          if (!pop || !grid) return;
+          var open = null;
+          function hide() { pop.hidden = true; if (open) open.classList.remove('on'); open = null; }
+          grid.addEventListener('click', function (ev) {
+            var c = ev.target.closest ? ev.target.closest('.tsg-c') : null;
+            if (!c || !c.getAttribute('data-t')) return;   // an empty day just follows the row
+            ev.preventDefault();
+            if (c === open) { hide(); return; }
+            hide();
+            open = c; c.classList.add('on');
+            var row = c.closest('.tsg-row');
+            var day = c.getAttribute('data-d') || '';
+            pop.innerHTML = '<b>' + day + '</b><i>' + (c.getAttribute('data-t') || '') + '</i>'
+              + (row ? '<a href="' + row.getAttribute('href') + '#d-' + day + '">Open the day</a>' : '');
+            pop.hidden = false;
+            var r = c.getBoundingClientRect();
+            var w = pop.offsetWidth;
+            pop.style.left = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), window.innerWidth - w - 8) + 'px';
+            pop.style.top = (r.bottom + 6) + 'px';
+          });
+          document.addEventListener('click', function (ev) {
+            if (!ev.target.closest || !ev.target.closest('.tsg')) hide();
+          });
+          window.addEventListener('scroll', hide, true);
+          window.addEventListener('resize', hide);
+        })();
+        </script>
+        <p class="tsg-foot">${esc(TC.dayLabel(days[0]).replace(/^\w+, /, ''))} – ${esc(TC.dayLabel(days[days.length - 1]).replace(/^\w+, /, ''))}
+          · scroll sideways for the rest of the period · tap a day for what is behind it</p>
+      </section>` : ''}
       ${canWrite() && readyToApprove ? `<form method="post" action="/payroll/timesheets/approve-all" class="ts-bulk">
         <input type="hidden" name="period" value="${esc(period.start)}">
         <div class="ts-bulk-t"><b>${readyToApprove} timesheet${readyToApprove === 1 ? '' : 's'} ready to approve</b>
