@@ -4146,3 +4146,14 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .tcr-row > :nth-child(2) { grid-column: 2; }
   .tcr-row > :nth-child(n+3) { grid-column: 1 / -1; text-align: left; font-size: 11.5px; color: var(--muted); }
 }
+/* Manager timesheet period navigation */
+.tsm-per { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
+.tsm-per .tsx-arrow { width: 34px; height: 34px; flex: none; display: grid; place-items: center;
+  border: 1px solid var(--rule); color: var(--ink); text-decoration: none; border-radius: 50%; font-size: 14px; }
+.tsm-per .tsx-arrow.off { opacity: .3; pointer-events: none; }
+.tsm-range { font-family: var(--mono); font-size: 13.5px; color: var(--headline);
+  border: 1px solid var(--rule); background: var(--panel); padding: 8px 14px; }
+.tsm-per .tsx-today { padding: 8px 13px; border: 1px solid var(--rule); color: var(--ink);
+  text-decoration: none; font-size: 13px; }
+.tsm-per .tsx-today.on { border-color: var(--ink); }
+.tsm-counts { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin: 0 0 14px; }

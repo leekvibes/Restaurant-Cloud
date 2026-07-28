@@ -4548,111 +4548,202 @@ app.get('/portal/timesheet', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const { emp } = who;
-  const periods = tsPeriodsFor();
-  const period = tsFindPeriod(req.query.p);
+  const periods = tsPeriodsFor();                 // newest first
+  const idx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
+  const period = periods[idx] || currentPeriod();
   const v = tsView(emp, period);
+  const cfg = TC.settings();
+  const todayIso = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
-  const hrs = (m) => (m ? (Math.round((m / 60) * 100) / 100) + 'h' : '0h');
-
-  const dayBlock = ([date, list]) => {
-    const dayMin = list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
-    return `<details class="ts-day">
-      <summary class="ts-day-h">
-        <span class="ts-day-d">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</span>
-        <span class="ts-day-m">${list.length} ${list.length === 1 ? 'session' : 'sessions'}</span>
-        <span class="ts-day-t">${esc(TC.hm(dayMin))}</span>
-      </summary>
-      ${list.map((e) => {
-        const bt = TC.breakTotals(e.id);
-        return `<a class="ts-entry" href="/portal/clock/entry/${e.id}">
-          <span class="ts-e-l"><b>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'}</b>
-            <i>${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}${bt.unpaid ? ' · ' + TC.hm(bt.unpaid) + ' break' : ''}${e.edited ? ' · edited' : ''}</i></span>
-          <span class="ts-e-r">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</span>
-        </a>`;
-      }).join('')}
-    </details>`;
+  const hm = (m) => {
+    if (!m) return '--';
+    const h = Math.floor(m / 60), mm = m % 60;
+    return `${h}:${String(mm).padStart(2, '0')}`;
   };
 
+  // A period is submittable once it has finished. Signing for hours you are
+  // still working is a signature that will be wrong by the end of the night.
+  const ended = todayIso >= period.end;
   const blocking = v.issues.filter((i) => i.blocking);
-  const statusLabel = TC.SHEET_LABEL[v.status] || v.status;
   const submitted = v.sheet.status === 'submitted' && !v.sheet.resubmit_needed;
+  const canSubmit = ended && v.entries.length > 0 && !blocking.length
+    && !submitted && !['approved', 'locked'].includes(v.sheet.status);
 
-  res.send(portalPage('Your timesheet', `
-    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
-    <div class="pt-body tc-body">
-      ${req.query.err ? `<div class="tc-err">${esc(req.query.err)}</div>` : ''}
-      ${req.query.ok ? `<div class="tc-ok">${esc(req.query.ok)}</div>` : ''}
-      <div class="ts-head">
-        <div class="tc-kick">Pay period</div>
-        <h1 class="tc-h">${esc(labelFor(period))}</h1>
-        <span class="ts-status ts-${esc(v.status)}">${esc(statusLabel)}</span>
-      </div>
+  // --- every day of the period, grouped into weeks -------------------------
+  const byDate = new Map();
+  for (const e of v.entries) {
+    if (!byDate.has(e.business_date)) byDate.set(e.business_date, []);
+    byDate.get(e.business_date).push(e);
+  }
+  const days = [];
+  for (let d = period.end; d >= period.start; d = addDays(d, -1)) days.push(d);
+  const weeks = [];
+  for (const d of days) {
+    const monday = addDays(d, -((new Date(d + 'T00:00:00').getDay() + 6) % 7));
+    if (!weeks.length || weeks[weeks.length - 1].wk !== monday) weeks.push({ wk: monday, days: [] });
+    weeks[weeks.length - 1].days.push(d);
+  }
 
-      <div class="ts-total">
-        <div class="ts-total-v">${esc(TC.hm(v.totals.payable))}</div>
-        <div class="ts-total-l">payable this period</div>
-      </div>
-      <div class="tc-facts">
-        <div class="tc-fact"><span>Worked</span><b>${hrs(v.totals.raw)}</b></div>
-        <div class="tc-fact"><span>Unpaid break</span><b>−${hrs(v.totals.unpaid)}</b></div>
-        ${v.totals.paid ? `<div class="tc-fact"><span>Paid break</span><b>${hrs(v.totals.paid)}</b></div>` : ''}
-        ${v.otRule.enabled && !emp.ot_exempt ? `<div class="tc-fact"><span>Regular</span><b>${hrs(v.totals.regular)}</b></div>
-          <div class="tc-fact"><span>Overtime</span><b>${hrs(v.totals.overtime)}</b></div>` : ''}
-      </div>
-      ${v.otRule.enabled && !emp.ot_exempt ? '<p class="tc-note">Overtime is shown for your information. Your manager works out final pay.</p>' : ''}
+  const otOn = v.otRule.enabled && !emp.ot_exempt;
+  const dayRow = (d) => {
+    const list = byDate.get(d) || [];
+    const mins = list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+    const paidBrk = list.reduce((a, e) => a + (e.paid_break_min || 0), 0);
+    const dt = new Date(d + 'T00:00:00');
+    const bad = v.issues.some((i) => list.some((e) => e.id === i.entryId) && i.blocking);
+    const isToday = d === todayIso;
+    return `<a class="tsd${list.length ? '' : ' tsd-none'}${isToday ? ' tsd-today' : ''}${bad ? ' tsd-bad' : ''}"
+      href="${list.length ? `/portal/timesheet/day/${d}` : '#'}"${list.length ? '' : ' aria-disabled="true"'}>
+      <span class="tsd-d"><b>${dt.getDate()}</b><i>${dt.toLocaleDateString('en-US', { weekday: 'short' })}</i></span>
+      <span class="tsd-c"><i>Paid breaks</i><b>${paidBrk ? hm(paidBrk) : '--'}</b></span>
+      <span class="tsd-c"><i>Regular</i><b>${mins ? hm(otOn ? Math.max(0, mins) : mins) : '--'}</b></span>
+      <span class="tsd-c"><i>OT</i><b>--</b></span>
+      <span class="tsd-c tsd-tot"><i>Total</i><b>${mins ? hm(mins) : '--'}</b></span>
+      ${bad ? '<span class="tsd-flag">!</span>' : ''}
+    </a>`;
+  };
 
-      ${v.sheet.status === 'returned' ? `<div class="ts-returned">
-        <b>Sent back for a correction</b>
-        <p>${esc(v.sheet.returned_reason || '')}</p>
-        <i>${esc(v.sheet.returned_by || 'Your manager')} · ${esc(TC.stamp(v.sheet.returned_at))}</i>
-      </div>` : ''}
-      ${v.sheet.resubmit_needed && v.sheet.status === 'submitted' ? `<div class="ts-returned">
-        <b>Something changed after you submitted</b>
-        <p>Have another look and submit it again.</p></div>` : ''}
+  const statusLabel = TC.SHEET_LABEL[v.status] || v.status;
+  const menuItems = [];
+  if (canSubmit) menuItems.push(['submit', 'Submit timesheet', 'primary']);
+  if (!ended) menuItems.push(['open', 'Timesheet still open', 'quiet']);
+  if (blocking.length) menuItems.push(['issues', `Review ${blocking.length} issue${blocking.length === 1 ? '' : 's'}`, 'warn']);
+  if (submitted) menuItems.push(['view', 'View submission', 'quiet']);
+  if (v.sheet.status === 'returned') menuItems.push(['issues', 'Review what came back', 'warn']);
+  menuItems.push(['history', 'Your time history', 'quiet']);
+  menuItems.push(['requests', 'My requests', 'quiet']);
 
-      ${v.issues.length ? `<div class="tc-kick tc-kick-sec">Needs a look</div>
-        <div class="ts-issues">${v.issues.map((i) => `
-          <a class="ts-issue${i.blocking ? ' bad' : ''}" href="${i.entryId ? '/portal/clock/entry/' + i.entryId : '/portal/clock'}">
-            <span>${esc(i.text)}</span><i>${i.blocking ? 'must be fixed' : 'worth checking'}</i></a>`).join('')}</div>` : ''}
+  const HREF = { history: '/portal/clock/history', requests: '/portal/requests',
+    issues: '#ts-issues', view: '#ts-state', open: '#ts-sum' };
 
-      <div class="tc-kick tc-kick-sec">Your days<b>${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'}</b></div>
-      ${v.entries.length ? TC.byDay(v.entries).map(dayBlock).join('')
-        : '<p class="tc-note">Nothing recorded in this period yet.</p>'}
+  res.send(portalPage('Timesheet', `
+    <div class="tsx">
+      <header class="tsx-top">
+        <a class="tsx-back" href="/portal/clock" aria-label="Back">‹</a>
+        <h1 class="tsx-title">Timesheet</h1>
+        <details class="tsx-menu">
+          <summary aria-label="Actions">•••</summary>
+          <div class="tsx-menu-p">
+            ${menuItems.map(([k, label, tone]) => (k === 'submit'
+              ? `<button class="tsx-mi primary" type="button" onclick="document.getElementById('ts-sheet').hidden=false;this.closest('details').open=false">${esc(label)}</button>`
+              : `<a class="tsx-mi ${tone}" href="${HREF[k] || '#'}">${esc(label)}</a>`)).join('')}
+          </div>
+        </details>
+      </header>
 
-      ${submitted ? `<div class="ts-done">
-          <b>Submitted ${esc(TC.stamp(v.sheet.submitted_at))}</b>
-          <p>${esc(v.sheet.submitted_note || 'You confirmed these hours are right.')}</p>
-          <i>Need a change? Open the day and ask for a correction.</i>
-        </div>`
-        : `<form method="post" action="/portal/timesheet/submit" class="ts-submit">
-            <input type="hidden" name="period" value="${esc(period.start)}">
-            <input type="hidden" name="seen" value="${v.totals.payable}">
-            ${blocking.length
-              ? `<p class="tc-note">You cannot submit yet — ${blocking.length} thing${blocking.length === 1 ? '' : 's'} above ${blocking.length === 1 ? 'needs' : 'need'} fixing first.</p>`
-              : `<label class="ts-confirm"><input type="checkbox" name="confirm" value="1" required>
-                   <span>These hours are right, as far as I know.</span></label>
-                 <label class="tc-field"><span>Anything to add? <i>optional</i></span>
-                   <input name="note" maxlength="300" placeholder="Only if something needs saying"></label>
-                 <label class="tc-field"><span>Your PIN</span>
-                   <input class="tc-pin" name="pin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••" required></label>
-                 <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Submit timesheet</button>`}
-          </form>`}
+      <nav class="tsx-per">
+        <a class="tsx-arrow${idx + 1 < periods.length ? '' : ' off'}"
+           href="${idx + 1 < periods.length ? `/portal/timesheet?p=${periods[idx + 1].start}` : '#'}" aria-label="Earlier period">←</a>
+        <span class="tsx-range">${esc(period.start.slice(5).replace('-', '/'))} – ${esc(period.end.slice(5).replace('-', '/'))}</span>
+        <a class="tsx-arrow${idx > 0 ? '' : ' off'}"
+           href="${idx > 0 ? `/portal/timesheet?p=${periods[idx - 1].start}` : '#'}" aria-label="Later period">→</a>
+        <a class="tsx-today${idx === 0 ? ' on' : ''}" href="/portal/timesheet">Today</a>
+      </nav>
 
-      <div class="tc-kick tc-kick-sec">Earlier periods</div>
-      <div class="tc-rows">
-        ${periods.slice(1).map((p) => {
-          const s2 = TC.q.sheet.get(emp.id, p.start);
-          const st = s2 ? (s2.resubmit_needed && s2.status === 'submitted' ? 'needs_attention' : s2.status) : 'open';
-          return `<a class="tc-row" href="/portal/timesheet?p=${p.start}">
-            <span class="tc-row-l"><b>${esc(labelFor(p))}</b><i>${esc(TC.SHEET_LABEL[st] || st)}</i></span>
-            <span class="tc-row-r"><b>${esc(TC.hm(TC.totalsFor(TC.q.entriesInPeriod.all(emp.id, p.start, p.end)).payable))}</b></span>
-          </a>`;
-        }).join('')}
+      <div class="tsx-body">
+        ${req.query.err ? `<div class="tc-err">${esc(req.query.err)}</div>` : ''}
+        ${req.query.ok ? `<div class="tc-ok">${esc(req.query.ok)}</div>` : ''}
+
+        <section class="tsx-sum" id="ts-sum">
+          <div class="tsx-sum-g">
+            <div><i>Regular</i><b>${hm(v.totals.regular)}</b></div>
+            <div><i>OT</i><b>${otOn ? hm(v.totals.overtime) : '--'}</b></div>
+            <div><i>Total</i><b class="tsx-big">${hm(v.totals.payable)}</b></div>
+            ${v.totals.paid ? `<div><i>Paid breaks</i><b>${hm(v.totals.paid)}</b></div>` : ''}
+          </div>
+          <div class="tsx-status ts-${esc(v.status)}" id="ts-state">${esc(statusLabel)}${
+            submitted && v.sheet.submitted_at ? ` · ${esc(TC.stamp(v.sheet.submitted_at))}` : ''}</div>
+        </section>
+
+        ${v.sheet.status === 'returned' ? `<section class="ts-returned" id="ts-issues">
+          <b>Returned for correction</b>
+          <p>${esc(v.sheet.returned_reason || '')}</p>
+          <i>${esc(v.sheet.returned_by || 'Your manager')} · ${esc(TC.stamp(v.sheet.returned_at))}</i>
+        </section>` : ''}
+        ${v.sheet.resubmit_needed && v.sheet.status === 'submitted' ? `<section class="ts-returned">
+          <b>Your hours changed after you submitted</b>
+          <p>Check them and submit again.</p></section>` : ''}
+
+        ${blocking.length ? `<section class="tsx-issues" id="ts-issues">
+          <div class="tsx-issues-h">${blocking.length} item${blocking.length === 1 ? '' : 's'} need attention</div>
+          ${blocking.map((i) => `<a class="ts-issue bad" href="${i.entryId ? '/portal/clock/entry/' + i.entryId : '/portal/clock'}">
+            <span>${esc(i.text)}</span><i>fix</i></a>`).join('')}
+        </section>` : ''}
+
+        ${weeks.map((w) => `
+          <div class="tsx-week">${w.days.map(dayRow).join('')}</div>
+          <div class="tsx-wtot">Week total ${hm(w.days.reduce((a, d) => a
+            + (byDate.get(d) || []).reduce((x, e) => x + (e.payable_minutes || 0), 0), 0))}</div>`).join('')}
+
+        ${!v.entries.length ? '<p class="tc-note">No time recorded in this period.</p>' : ''}
+        ${canSubmit ? `<button class="tc-btn tc-btn-go tc-btn-big tsx-submit" type="button"
+          onclick="document.getElementById('ts-sheet').hidden=false">Submit timesheet</button>` : ''}
+        ${!ended ? '<p class="tc-note">This period is still running. You can submit it once it ends on '
+          + esc(new Date(period.end + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric' })) + '.</p>' : ''}
       </div>
     </div>
+
+    ${canSubmit ? `<div class="tsx-sheet" id="ts-sheet" hidden>
+      <div class="tsx-sheet-c">
+        <div class="tc-kick">Submit for approval</div>
+        <p class="tsx-sheet-n">${esc(emp.name)}</p>
+        <p class="tsx-sheet-r">${esc(labelFor(period))}</p>
+        <div class="tsx-sheet-g">
+          <div><i>Regular</i><b>${hm(v.totals.regular)}</b></div>
+          <div><i>OT</i><b>${otOn ? hm(v.totals.overtime) : '--'}</b></div>
+          <div><i>Total</i><b>${hm(v.totals.payable)}</b></div>
+          <div><i>Days worked</i><b>${byDate.size}</b></div>
+        </div>
+        <form method="post" action="/portal/timesheet/submit">
+          <input type="hidden" name="period" value="${esc(period.start)}">
+          <input type="hidden" name="seen" value="${v.totals.payable}">
+          <label class="ts-confirm"><input type="checkbox" name="confirm" value="1" required>
+            <span>I confirm these hours are complete and accurate.</span></label>
+          <label class="tc-field"><span>Anything to add? <i>optional</i></span>
+            <input name="note" maxlength="300"></label>
+          <div class="tc-actions">
+            <button class="tc-btn tc-btn-quiet" type="button" onclick="document.getElementById('ts-sheet').hidden=true">Cancel</button>
+            <button class="tc-btn tc-btn-go" type="submit" data-once>Submit timesheet</button>
+          </div>
+        </form>
+      </div>
+    </div>` : ''}
     <script>document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});</script>`));
 });
 
+/** One day's punches, reached by tapping a row on the timesheet. */
+app.get('/portal/timesheet/day/:date', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const date = MX.isDate(req.params.date) ? req.params.date : null;
+  if (!date) return res.redirect('/portal/timesheet');
+  const list = TC.q.forEmployeeSince.all(emp.id, date).filter((e) => e.business_date === date);
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  const per = tsPeriodsFor().find((p) => date >= p.start && date <= p.end) || currentPeriod();
+
+  res.send(portalPage('Your day', `
+    ${portalSub(`<a class="pt-back2" href="/portal/timesheet?p=${per.start}">Timesheet</a>`)}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
+      ${list.length ? list.map((e) => {
+        const brs = TC.q.breaks.all(e.id);
+        const fact = (k, val) => `<div class="tc-fact"><span>${k}</span><b>${val}</b></div>`;
+        return `<section class="tsx-daycard">
+          <div class="tc-facts">
+            ${fact('Clocked in', esc(TC.clockFace(e.clock_in_at)))}
+            ${fact('Clocked out', e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>still open</i>')}
+            ${fact('Position', esc(posName(e.position)))}
+            ${fact('Service', e.daypart ? esc(dp(e.daypart)) : '—')}
+            ${fact('Breaks', brs.length ? brs.map((b) => `${TC.clockFace(b.start_at)}–${b.end_at ? TC.clockFace(b.end_at) : '…'}${b.paid ? ' paid' : ''}`).join(', ') : 'none')}
+            ${fact('Payable', esc(TC.hm(e.payable_minutes)))}
+            ${e.edited ? fact('Edited', 'yes') : ''}
+          </div>
+          <a class="tc-more" href="/portal/clock/entry/${e.id}">Open or request a fix ›</a>
+        </section>`;
+      }).join('') : '<p class="tc-note">Nothing recorded on this day.</p>'}
+    </div>`));
+});
 app.post('/portal/timesheet/submit', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -4666,6 +4757,15 @@ app.post('/portal/timesheet/submit', (req, res) => {
   // Validated again on the server: the page may have been open while something
   // changed, and a signature on stale hours is worth nothing.
   const v = tsView(emp, period, { create: true });
+  // The page hides the action before a period ends; the route refuses it too,
+  // so a stale form or a hand-made POST cannot sign for hours still being worked.
+  const todayIso = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  if (todayIso < period.end) {
+    return back('err=' + encodeURIComponent('This period is still running — you can submit it once it ends.'));
+  }
+  if (v.sheet.status === 'submitted' && !v.sheet.resubmit_needed) {
+    return back('err=' + encodeURIComponent('You already submitted this one.'));
+  }
   if (v.issues.some((i) => i.blocking)) {
     return back('err=' + encodeURIComponent('Something still needs fixing — have another look.'));
   }
@@ -14487,7 +14587,8 @@ app.post('/timeclock/correction/:id', (req, res) => {
 app.get('/payroll/timesheets', (req, res) => {
   if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   const periods = recentPeriods(8);
-  const period = periods.find((p) => p.start === req.query.p) || currentPeriod();
+  const pIdx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
+  const period = periods[pIdx] || currentPeriod();
   const otRule = OT.rule();
   const staff = q.allEmployees.all();
 
@@ -14548,11 +14649,15 @@ app.get('/payroll/timesheets', (req, res) => {
         ${statCell('Where it stands', esc(readiness), stale ? `${stale} changed after transfer` : esc(labelFor(period)), stale ? 'bad' : readiness === 'Ready to finalize' ? 'ok' : readiness === 'Ready to transfer' ? 'ok' : 'warn')}
       </section>
 
-      <form class="tcm-filters" method="get" action="/payroll/timesheets">
-        <label><span>Pay period</span><select name="p" onchange="this.form.submit()">
-          ${periods.map((p) => `<option value="${p.start}"${p.start === period.start ? ' selected' : ''}>${esc(labelFor(p))}</option>`).join('')}
-        </select></label>
-      </form>
+      <nav class="tsm-per">
+        <a class="tsx-arrow${pIdx + 1 < periods.length ? '' : ' off'}"
+           href="${pIdx + 1 < periods.length ? `/payroll/timesheets?p=${periods[pIdx + 1].start}` : '#'}" aria-label="Earlier period">←</a>
+        <span class="tsm-range">${esc(labelFor(period))}</span>
+        <a class="tsx-arrow${pIdx > 0 ? '' : ' off'}"
+           href="${pIdx > 0 ? `/payroll/timesheets?p=${periods[pIdx - 1].start}` : '#'}" aria-label="Later period">→</a>
+        <a class="tsx-today${pIdx === 0 ? ' on' : ''}" href="/payroll/timesheets">Today</a>
+      </nav>
+      <p class="tsm-counts">${submitted} submitted · ${notIn} not submitted · ${attention} need attention · ${approved} approved</p>
       ${canWrite() && readyToApprove ? `<form method="post" action="/payroll/timesheets/approve-all" class="ts-bulk">
         <input type="hidden" name="period" value="${esc(period.start)}">
         <div class="ts-bulk-t"><b>${readyToApprove} timesheet${readyToApprove === 1 ? '' : 's'} ready to approve</b>
@@ -14566,7 +14671,8 @@ app.get('/payroll/timesheets', (req, res) => {
         ${rows.map((r) => `<a class="bs-lr tcm-row ts-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
           <span class="tcm-who"><b>${esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
-          <span class="tcm-times">entered ${r.entered}h${Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h</i>` : ''}</span>
+          <span class="tcm-times">${r.sheet.submitted_at ? `sent ${esc(TC.stamp(r.sheet.submitted_at))}` : 'not submitted'}${
+            Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h vs entered</i>` : ''}</span>
           <span class="tcm-tags">
             <i class="tcm-tag ${['approved', 'locked'].includes(r.status) ? 'on' : r.status === 'submitted' ? 'ed' : r.status === 'needs_attention' ? 'warn' : ''}">${esc(TC.SHEET_LABEL[r.status])}</i>
             ${r.transferState === 'transferred' ? '<i class="tcm-tag on">sent</i>' : ''}

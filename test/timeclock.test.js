@@ -544,7 +544,15 @@ async function submitSheet(empId, pin, per, extra = {}, cookie) {
   return post('/portal/timesheet/submit',
     { period: per.start, confirm: '1', pin, seen: String(seen), ...extra }, { cookie });
 }
-const curPeriod = () => P.currentPeriod();
+/**
+ * The period these tests work in: the most recent one that has FINISHED.
+ *
+ * A timesheet can only be submitted once its period ends — signing for hours
+ * you are still working is a signature that will be wrong by closing time — so
+ * the whole submit/approve/transfer chain is exercised on a completed period,
+ * which is also how it happens in a real fortnight.
+ */
+const curPeriod = () => P.recentPeriods(2)[1];
 
 /**
  * A clean, complete entry on a definite day INSIDE the current pay period.
@@ -565,9 +573,9 @@ test('the timesheet totals a period from its entries', async () => {
   const per = curPeriod();
   const eid = seedInPeriod(EMP.none, 1);               // an 8-hour day inside the period
   const cookie = await signIn('3333');
-  const html = await text('/portal/timesheet', { cookie });
-  assert.match(html, /Pay period/, 'the page renders');
-  assert.match(html, /payable this period/, 'with a headline total');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  assert.match(html, /Timesheet/, 'the page renders');
+  assert.match(html, /Regular/, 'with the period summary');
   // Reading a period must NOT write to the database — a view-only account
   // opening this page creates nothing. The row appears when something is
   // actually recorded against it, which is the submission.
@@ -579,13 +587,13 @@ test('the timesheet totals a period from its entries', async () => {
 
 test('a still-running entry blocks submission', async () => {
   const cookie = await signIn('3333');
+  const nowPer = P.currentPeriod();
   const open = db.prepare(`INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, status, source)
     VALUES (?, ?, 'cafe', 'server', datetime('now','-2 hours'), 'active', 'manager')`)
     .run(EMP.none, T2.businessDateOf(T2.nowUtc(), T2.settings().cutoffHour)).lastInsertRowid;
-  const per = curPeriod();
-  await submitSheet(EMP.none, '3333', per, {}, cookie);
-  assert.notStrictEqual((sheetOf(EMP.none, per.start) || {}).status, 'submitted', 'refused while they are still on the clock');
-  const html = await text('/portal/timesheet', { cookie });
+  await submitSheet(EMP.none, '3333', nowPer, {}, cookie);
+  assert.notStrictEqual((sheetOf(EMP.none, nowPer.start) || {}).status, 'submitted', 'refused while they are still on the clock');
+  const html = await text(`/portal/timesheet?p=${nowPer.start}`, { cookie });
   assert.match(html, /Still on the clock/, 'and it says why');
   db.prepare('DELETE FROM time_entries WHERE id = ?').run(open);
 });
@@ -627,8 +635,8 @@ test('a manager can return a submitted timesheet, with a reason', async () => {
 test('the employee sees why it came back, and can submit again', async () => {
   const per = curPeriod();
   const cookie = await signIn('3333');
-  const html = await text('/portal/timesheet', { cookie });
-  assert.match(html, /Sent back for a correction/, 'they are told');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  assert.match(html, /Returned for correction/, 'they are told');
   assert.match(html, /Tuesday looks short/, 'and why');
   await submitSheet(EMP.none, '3333', per, {}, cookie);
   const s = sheetOf(EMP.none, per.start);
@@ -651,8 +659,8 @@ test('an approved correction after submission forces a resubmission', async () =
   const ev = db.prepare("SELECT * FROM time_events WHERE entity='timesheet' AND entity_id=? AND action='reopened_by_change'").get(s.id);
   assert.ok(ev, 'and the reason is on the record');
   assert.match(ev.reason || '', /correction/i, 'naming what moved the hours');
-  const html = await text('/portal/timesheet', { cookie: await signIn('3333') });
-  assert.match(html, /Something changed after you submitted/, 'the employee is told');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie: await signIn('3333') });
+  assert.match(html, /changed after you submitted/, 'the employee is told');
 });
 
 test('a viewer cannot return a timesheet', async () => {
@@ -977,7 +985,7 @@ test('alerts report only what needs doing, and carry a link to it', async () => 
   db.prepare(`INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, status, source)
     VALUES (?,?,'cafe','server', datetime('now','-30 hours'), 'active','manager')`)
     .run(EMP.none, T.businessDateOf(T.nowUtc(), T.settings().cutoffHour));
-  const list = T.alerts({ periods: [curPeriod()], employees: [], otRule: { enabled: false } });
+  const list = T.alerts({ periods: [P.currentPeriod()], employees: [], otRule: { enabled: false } });
   const long = list.find((a) => /still clocked in/.test(a.text));
   assert.ok(long, 'the long open shift is raised');
   assert.ok(long.href, 'with somewhere to go');
@@ -1176,6 +1184,110 @@ test('my requests says so plainly when there is nothing', async () => {
 test('the timesheet still works, and comes back to the clock', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal/timesheet', { cookie });
-  assert.match(html, /Pay period/, 'the full timesheet is intact');
+  assert.match(html, /Timesheet/, 'the full timesheet is intact');
+  assert.match(html, /Regular/, 'with its totals');
   assert.match(html, /href="\/portal\/clock"/, 'and its way back is the clock');
+});
+
+// ===========================================================================
+// THE FULL-SCREEN TIMESHEET — moving between periods, and signing one off.
+// ===========================================================================
+
+test('the timesheet moves between pay periods with the arrows', async () => {
+  const cookie = await signIn('3333');
+  const now = P.currentPeriod();
+  const prev = P.recentPeriods(2)[1];
+
+  const cur = await text('/portal/timesheet', { cookie });
+  assert.match(cur, new RegExp(`p=${prev.start}`), 'the back arrow points at the period before');
+  assert.match(cur, /tsx-arrow off/, 'and there is nothing later to go to');
+
+  const earlier = await text(`/portal/timesheet?p=${prev.start}`, { cookie });
+  assert.match(earlier, new RegExp(`p=${now.start}`), 'from there the forward arrow returns');
+  assert.match(earlier, /Today/, 'and Today is offered');
+});
+
+test('the period shown is the one asked for, and Today comes back', async () => {
+  const cookie = await signIn('3333');
+  const prev = P.recentPeriods(2)[1];
+  const html = await text(`/portal/timesheet?p=${prev.start}`, { cookie });
+  assert.match(html, new RegExp(prev.start.slice(5).replace('-', '/')), 'the range names that period');
+  const back = await text('/portal/timesheet', { cookie });
+  assert.match(back, new RegExp(P.currentPeriod().start.slice(5).replace('-', '/')), 'and no argument means now');
+});
+
+test('every day of the period is listed, grouped into weeks', async () => {
+  const cookie = await signIn('3333');
+  const per = curPeriod();
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  const rows = (html.match(/class="tsd[ "]/g) || []).length;
+  assert.ok(rows >= 14, `a fortnight shows all its days, saw ${rows}`);
+  assert.match(html, /Week total/, 'and they are grouped by week');
+  assert.match(html, /tsd-none/, 'days with no work are present but quiet');
+});
+
+test('a period still being worked cannot be signed off', async () => {
+  const cookie = await signIn('3333');
+  const now = P.currentPeriod();
+  const html = await text(`/portal/timesheet?p=${now.start}`, { cookie });
+  assert.match(html, /still running/, 'the page says why not');
+  assert.ok(!/Submit timesheet<\/button>/.test(html), 'and offers no submit button');
+  // The route refuses it too, so a stale form cannot get around the screen.
+  const res = await post('/portal/timesheet/submit',
+    { period: now.start, confirm: '1', pin: '3333', seen: '0' }, { cookie });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /still running/,
+    'the route refuses it as well');
+});
+
+test('a finished period offers submission from the menu and the page', async () => {
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (97,'Period Tester','server','3777',1500,1)").run();
+  const per = curPeriod();
+  seedInPeriod(97, 2, '09:00', '17:00');
+  const cookie = await signIn('3777');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  assert.match(html, /Submit timesheet/, 'the action is offered');
+  assert.match(html, /tsx-menu/, 'from the three-dot menu');
+  assert.match(html, /I confirm these hours are complete and accurate/, 'with a confirmation to tick');
+});
+
+test('the same period cannot be submitted twice', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3777');
+  await submitSheet(97, '3777', per, {}, cookie);
+  assert.strictEqual(sheetOf(97, per.start).status, 'submitted');
+  const again = await post('/portal/timesheet/submit',
+    { period: per.start, confirm: '1', pin: '3777', seen: String(T2.totalsFor(T2.q.entriesInPeriod.all(97, per.start, per.end)).payable) },
+    { cookie });
+  assert.match(decodeURIComponent(again.headers.get('location') || ''), /already submitted/, 'the second is refused');
+  const subs = db.prepare("SELECT COUNT(*) n FROM time_events WHERE entity='timesheet' AND action='submitted' AND entity_id=?")
+    .get(sheetOf(97, per.start).id).n;
+  assert.strictEqual(subs, 1, 'and only one submission is on the record');
+});
+
+test('once submitted the page says so and stops offering it', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3777');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  assert.match(html, /Submitted/, 'the state is shown');
+  assert.ok(!/Submit timesheet<\/button>/.test(html), 'and the action is gone');
+  assert.match(html, /View submission/, 'the menu offers to look at it instead');
+});
+
+test('tapping a worked day opens its punches', async () => {
+  const per = curPeriod();
+  const cookie = await signIn('3777');
+  const day = require('../src/dates').addDays(per.start, 2);
+  const html = await text(`/portal/timesheet/day/${day}`, { cookie });
+  assert.match(html, /Clocked in/, 'the punches are there');
+  assert.match(html, /Position/, 'with the position');
+  assert.match(html, /request a fix/, 'and a way to query it');
+});
+
+test('a day belongs to the person who worked it', async () => {
+  const per = curPeriod();
+  const day = require('../src/dates').addDays(per.start, 2);
+  const cookie = await signIn('3111');                 // somebody else
+  const html = await text(`/portal/timesheet/day/${day}`, { cookie });
+  assert.ok(!/Position/.test(html) || /Nothing recorded/.test(html),
+    "another person's punches are not shown");
 });
