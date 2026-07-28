@@ -149,6 +149,69 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ts_emp ON timesheets (employee_id, period_start);
 `);
 
+// Approval and transfer are two different facts and get two different tables.
+// A sheet can be approved and not yet transferred; a transfer can go stale
+// while the approval behind it still stands. Neither record is ever deleted —
+// a later approval SUPERSEDES an earlier one, so "what did we approve, and what
+// did we send" stays answerable months afterwards.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS timesheet_approvals (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timesheet_id  INTEGER NOT NULL REFERENCES timesheets(id) ON DELETE CASCADE,
+    employee_id   INTEGER NOT NULL,
+    period_start  TEXT NOT NULL, period_end TEXT NOT NULL,
+    approved_by   TEXT NOT NULL,
+    approved_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    note          TEXT,
+    regular_min   INTEGER NOT NULL DEFAULT 0,
+    overtime_min  INTEGER NOT NULL DEFAULT 0,
+    payable_min   INTEGER NOT NULL DEFAULT 0,
+    paid_break_min INTEGER NOT NULL DEFAULT 0,
+    unpaid_break_min INTEGER NOT NULL DEFAULT 0,
+    ot_enabled    INTEGER NOT NULL DEFAULT 0,
+    ot_exempt     INTEGER NOT NULL DEFAULT 0,
+    -- What the hours were made of when they were approved. If this changes, the
+    -- approval no longer describes the time it was given for.
+    fingerprint   TEXT,
+    override_reason TEXT,
+    state         TEXT NOT NULL DEFAULT 'current',   -- current | superseded
+    superseded_at TEXT, superseded_by TEXT, superseded_reason TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ta_sheet ON timesheet_approvals (timesheet_id, id);
+  CREATE INDEX IF NOT EXISTS idx_ta_period ON timesheet_approvals (period_start, state);
+
+  CREATE TABLE IF NOT EXISTS payroll_transfers (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_id   INTEGER REFERENCES timesheet_approvals(id) ON DELETE SET NULL,
+    timesheet_id  INTEGER NOT NULL,
+    employee_id   INTEGER NOT NULL,
+    period_start  TEXT NOT NULL, period_end TEXT NOT NULL,
+    regular_min   INTEGER NOT NULL DEFAULT 0,
+    overtime_min  INTEGER NOT NULL DEFAULT 0,
+    payable_min   INTEGER NOT NULL DEFAULT 0,
+    ot_enabled    INTEGER NOT NULL DEFAULT 0,
+    wage_rate_cents INTEGER,
+    est_gross_cents INTEGER,
+    fingerprint   TEXT,
+    transferred_by TEXT NOT NULL,
+    transferred_at TEXT NOT NULL DEFAULT (datetime('now')),
+    state         TEXT NOT NULL DEFAULT 'current',   -- current | superseded
+    superseded_at TEXT, superseded_by TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_pt_sheet ON payroll_transfers (timesheet_id, id);
+  CREATE INDEX IF NOT EXISTS idx_pt_period ON payroll_transfers (period_start, state);
+`);
+(function addSheetCols() {
+  const cols = db.prepare('PRAGMA table_info(timesheets)').all().map((c) => c.name);
+  const add = (n, t) => { if (!cols.includes(n)) db.exec(`ALTER TABLE timesheets ADD COLUMN ${n} ${t}`); };
+  add('approved_at', 'TEXT'); add('approved_by', 'TEXT');
+  add('locked_at', 'TEXT'); add('locked_by', 'TEXT');
+  add('reopened_at', 'TEXT'); add('reopened_by', 'TEXT'); add('reopen_reason', 'TEXT');
+  // Transfer is tracked apart from approval on purpose.
+  add('transfer_state', "TEXT NOT NULL DEFAULT 'not_ready'");
+  add('transferred_at', 'TEXT'); add('transferred_by', 'TEXT');
+})();
+
 // --- settings --------------------------------------------------------------
 db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
 const sq = {
@@ -165,18 +228,34 @@ const DEFAULTS = {
   // against the wrong service.
   tc_dinner_from: '16',
   tc_break_paid: '0',        // breaks unpaid by default
+  tc_long_shift: '16',       // hours before an open shift is worth flagging
+  tc_pin_out: '1',           // ask for the PIN at clock-out
+  tc_pin_fix: '1',           // and for a correction request
+  tc_require_service: '1',   // must choose café or dinner at clock-in
+  tc_alerts: '1',            // surface time-clock items on the dashboard
 };
 const setting = (k) => { const r = sq.get.get(k); return r === undefined ? DEFAULTS[k] : r.value; };
 const settings = () => ({
   cutoffHour: Number(setting('tc_day_cutoff')) || 0,
   dinnerFrom: Number(setting('tc_dinner_from')) || 16,
   breaksPaid: setting('tc_break_paid') === '1',
+  longShift: Number(setting('tc_long_shift')) || 16,
+  pinAtOut: setting('tc_pin_out') === '1',
+  pinForFix: setting('tc_pin_fix') === '1',
+  requireService: setting('tc_require_service') === '1',
+  alertsOn: setting('tc_alerts') === '1',
 });
-const saveSettings = ({ cutoffHour, dinnerFrom, breaksPaid }) => {
-  const clamp = (v, lo, hi, d) => { const n = Math.round(Number(v)); return isFinite(n) && n >= lo && n <= hi ? n : d; };
-  sq.set.run({ key: 'tc_day_cutoff', value: String(clamp(cutoffHour, 0, 12, 4)) });
-  sq.set.run({ key: 'tc_dinner_from', value: String(clamp(dinnerFrom, 0, 23, 16)) });
-  sq.set.run({ key: 'tc_break_paid', value: breaksPaid ? '1' : '0' });
+const saveSettings = (v) => {
+  const clamp = (x, lo, hi, d) => { const n = Math.round(Number(x)); return isFinite(n) && n >= lo && n <= hi ? n : d; };
+  const flag = (x) => (x ? '1' : '0');
+  sq.set.run({ key: 'tc_day_cutoff', value: String(clamp(v.cutoffHour, 0, 12, 4)) });
+  sq.set.run({ key: 'tc_dinner_from', value: String(clamp(v.dinnerFrom, 0, 23, 16)) });
+  sq.set.run({ key: 'tc_long_shift', value: String(clamp(v.longShift, 4, 24, 16)) });
+  sq.set.run({ key: 'tc_break_paid', value: flag(v.breaksPaid) });
+  sq.set.run({ key: 'tc_pin_out', value: flag(v.pinAtOut) });
+  sq.set.run({ key: 'tc_pin_fix', value: flag(v.pinForFix) });
+  sq.set.run({ key: 'tc_require_service', value: flag(v.requireService) });
+  sq.set.run({ key: 'tc_alerts', value: flag(v.alertsOn) });
 };
 
 // --- time helpers ----------------------------------------------------------
@@ -645,6 +724,9 @@ function byDay(entries) {
 
 /** What a timesheet's status should read as right now. */
 function sheetStatus(sheet, issues) {
+  // Approved and locked are decisions, not derivations — they stand until
+  // somebody reopens them.
+  if (sheet.status === 'approved' || sheet.status === 'locked' || sheet.status === 'finalized') return sheet.status;
   if (sheet.status === 'returned') return 'returned';
   if (sheet.status === 'submitted') return sheet.resubmit_needed ? 'needs_attention' : 'submitted';
   return issues.some((i) => i.blocking) ? 'needs_attention' : 'open';
@@ -652,10 +734,163 @@ function sheetStatus(sheet, issues) {
 const SHEET_LABEL = {
   open: 'Open', needs_attention: 'Needs attention', submitted: 'Submitted',
   returned: 'Returned', approved: 'Approved', locked: 'Locked', transferred: 'Transferred',
+  finalized: 'Finalized',
 };
 
+// --- approval and transfer -------------------------------------------------
+q.addApproval = db.prepare(`INSERT INTO timesheet_approvals
+  (timesheet_id, employee_id, period_start, period_end, approved_by, note,
+   regular_min, overtime_min, payable_min, paid_break_min, unpaid_break_min,
+   ot_enabled, ot_exempt, fingerprint, override_reason)
+  VALUES (@timesheet_id, @employee_id, @period_start, @period_end, @approved_by, @note,
+   @regular_min, @overtime_min, @payable_min, @paid_break_min, @unpaid_break_min,
+   @ot_enabled, @ot_exempt, @fingerprint, @override_reason)`);
+q.approvalsFor = db.prepare('SELECT * FROM timesheet_approvals WHERE timesheet_id = ? ORDER BY id DESC');
+q.currentApproval = db.prepare("SELECT * FROM timesheet_approvals WHERE timesheet_id = ? AND state = 'current' ORDER BY id DESC LIMIT 1");
+q.supersedeApprovals = db.prepare(`UPDATE timesheet_approvals SET state = 'superseded',
+  superseded_at = datetime('now'), superseded_by = @by, superseded_reason = @reason
+  WHERE timesheet_id = @timesheet_id AND state = 'current'`);
+q.addTransfer = db.prepare(`INSERT INTO payroll_transfers
+  (approval_id, timesheet_id, employee_id, period_start, period_end, regular_min, overtime_min,
+   payable_min, ot_enabled, wage_rate_cents, est_gross_cents, fingerprint, transferred_by)
+  VALUES (@approval_id, @timesheet_id, @employee_id, @period_start, @period_end, @regular_min,
+   @overtime_min, @payable_min, @ot_enabled, @wage_rate_cents, @est_gross_cents, @fingerprint, @transferred_by)`);
+q.transfersFor = db.prepare('SELECT * FROM payroll_transfers WHERE timesheet_id = ? ORDER BY id DESC');
+q.currentTransfer = db.prepare("SELECT * FROM payroll_transfers WHERE timesheet_id = ? AND state = 'current' ORDER BY id DESC LIMIT 1");
+q.supersedeTransfers = db.prepare(`UPDATE payroll_transfers SET state = 'superseded',
+  superseded_at = datetime('now'), superseded_by = @by WHERE timesheet_id = @timesheet_id AND state = 'current'`);
+q.transfersInPeriod = db.prepare("SELECT * FROM payroll_transfers WHERE period_start = ? AND state = 'current'");
+q.setSheetApproved = db.prepare(`UPDATE timesheets SET status = 'approved', approved_at = datetime('now'),
+  approved_by = @by, resubmit_needed = 0 WHERE id = @id`);
+q.setSheetLocked = db.prepare("UPDATE timesheets SET status = 'locked', locked_at = datetime('now'), locked_by = @by WHERE id = @id");
+q.reopenSheet = db.prepare(`UPDATE timesheets SET status = @status, reopened_at = datetime('now'),
+  reopened_by = @by, reopen_reason = @reason, approved_at = NULL, approved_by = NULL,
+  locked_at = NULL, locked_by = NULL WHERE id = @id`);
+q.setTransferState = db.prepare('UPDATE timesheets SET transfer_state = @state WHERE id = @id');
+q.markTransferred = db.prepare(`UPDATE timesheets SET transfer_state = 'transferred',
+  transferred_at = datetime('now'), transferred_by = @by WHERE id = @id`);
+
+/**
+ * What the approved hours are MADE OF, as one short string.
+ *
+ * Comparing this to the value stored on an approval answers "has anything moved
+ * since?" exactly — a punch edited, a break added, an entry deleted — without
+ * having to diff the whole period. It is the mechanism behind
+ * "changed after transfer".
+ */
+function fingerprintOf(entries) {
+  const parts = entries.slice().sort((a, b) => a.id - b.id).map((e) => {
+    const brs = q.breaks.all(e.id).map((b) => `${b.start_at}~${b.end_at || ''}~${b.paid}`).join(',');
+    return `${e.id}:${e.clock_in_at}:${e.clock_out_at || ''}:${e.position}:${e.daypart || ''}:${brs}`;
+  });
+  return require('crypto').createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 16);
+}
+
+/**
+ * Why a timesheet cannot be approved yet. Empty means it can.
+ *
+ * Approval is a statement that these hours are right, so it is refused while
+ * anything is still moving or contradicts itself. An editor may push past a
+ * non-structural objection, but only by naming a reason that is recorded.
+ */
+function approvalBlockers(sheet, issues) {
+  const out = [];
+  if (!sheet || sheet.id == null) out.push('The employee has not submitted this timesheet.');
+  else if (sheet.status === 'approved') out.push('Already approved.');
+  else if (sheet.status === 'locked') out.push('Locked — reopen it first.');
+  else if (sheet.status !== 'submitted') out.push('The employee has not submitted this timesheet.');
+  else if (sheet.resubmit_needed) out.push('The hours changed after it was submitted — it needs signing again.');
+  for (const i of issues) if (i.blocking) out.push(i.text);
+  return out;
+}
+
+/** Has anything moved since this approval was given? */
+const approvalStale = (approval, entries) => !!approval && approval.fingerprint !== fingerprintOf(entries);
+
+/** The transfer state a sheet should be showing, given what has happened. */
+function transferStateOf(sheet, approval, transfer, entries) {
+  if (!sheet || sheet.id == null) return 'not_ready';
+  if (sheet.status === 'finalized') return 'finalized';
+  if (!transfer) return (sheet.status === 'approved' || sheet.status === 'locked') ? 'ready' : 'not_ready';
+  // Transferred, then something moved: payroll is working from stale hours.
+  if (transfer.fingerprint !== fingerprintOf(entries)) return 'changed_after_transfer';
+  if (approval && transfer.approval_id !== approval.id) return 'needs_recalculation';
+  return 'transferred';
+}
+const TRANSFER_LABEL = {
+  not_ready: 'Not ready', ready: 'Ready to transfer', transferred: 'Transferred',
+  changed_after_transfer: 'Changed after transfer', needs_recalculation: 'Needs recalculation',
+  finalized: 'Finalized',
+};
+
+/**
+ * What needs a person's hands right now, and nothing else.
+ *
+ * Deliberately not a feed of everything that happened: a clock-in is not news,
+ * and a dashboard that reports normal work teaches people to ignore it. Only
+ * states somebody has to DO something about appear here, each already carrying
+ * the link to the thing that fixes it.
+ */
+function alerts({ periods, employees, otRule } = {}) {
+  const out = [];
+  const cfg = settings();
+  const now = nowUtc();
+  const push = (severity, text, href, detail) => out.push({ severity, text, href, detail });
+
+  // Still on the clock long past any believable shift.
+  const open = q.allActive.all();
+  const longHours = Number(setting('tc_long_shift')) || 16;
+  const stale = open.filter((e) => minutesBetween(e.clock_in_at, now) > longHours * 60);
+  if (stale.length) {
+    push('bad', `${stale.length} ${stale.length === 1 ? 'person is' : 'people are'} still clocked in past ${longHours} hours`,
+      '/timeclock', stale.map((e) => e.id).join(','));
+  }
+  const onBreak = open.filter((e) => e.status === 'on_break'
+    && (q.openBreak.get(e.id) ? minutesBetween(q.openBreak.get(e.id).start_at, now) > 90 : false));
+  if (onBreak.length) push('warn', `${onBreak.length} break${onBreak.length === 1 ? '' : 's'} left running over 90 minutes`, '/timeclock');
+
+  // Punches that cannot be paid as they stand.
+  const missing = db.prepare(`SELECT COUNT(*) n FROM time_entries
+    WHERE status = 'missing_punch' OR (clock_out_at IS NULL AND status NOT IN ('active','on_break'))`).get().n;
+  if (missing) push('warn', `${missing} time ${missing === 1 ? 'entry is' : 'entries are'} missing a punch`, '/timeclock?st=missing_punch');
+
+  const pending = q.pendingCorrections.all();
+  if (pending.length) push('warn', `${pending.length} correction request${pending.length === 1 ? '' : 's'} to review`,
+    pending.length === 1 ? `/timeclock/${pending[0].time_entry_id}` : '/timeclock');
+
+  // The pay-period picture: only the parts waiting on somebody.
+  const per = (periods && periods[0]) || null;
+  if (per) {
+    const sheets = q.sheetsForPeriod.all(per.start);
+    const submitted = sheets.filter((s) => s.status === 'submitted' && !s.resubmit_needed).length;
+    const returned = sheets.filter((s) => s.status === 'returned').length;
+    const readyToSend = sheets.filter((s) => ['approved', 'locked'].includes(s.status) && s.transfer_state === 'ready').length;
+    const stale2 = sheets.filter((s) => ['changed_after_transfer', 'needs_recalculation'].includes(s.transfer_state)).length;
+    if (stale2) push('bad', `${stale2} payroll ${stale2 === 1 ? 'record needs' : 'records need'} recalculating`, `/payroll/timesheets?p=${per.start}`);
+    if (submitted) push('warn', `${submitted} timesheet${submitted === 1 ? '' : 's'} awaiting approval`, `/payroll/timesheets?p=${per.start}`);
+    if (readyToSend) push('info', `${readyToSend} approved timesheet${readyToSend === 1 ? '' : 's'} ready for payroll`, `/payroll/timesheets?p=${per.start}`);
+    if (returned) push('info', `${returned} timesheet${returned === 1 ? '' : 's'} sent back and not yet resubmitted`, `/payroll/timesheets?p=${per.start}`);
+
+    // Approaching overtime, but only when overtime is actually switched on —
+    // a warning about a rule you do not use is noise.
+    if (otRule && otRule.enabled) {
+      const near = [];
+      for (const emp of employees || []) {
+        if (emp.ot_exempt) continue;
+        const t = totalsFor(q.entriesInPeriod.all(emp.id, per.start, per.end), {});
+        const weekMin = t.payable;                       // period-to-date
+        const threshold = (otRule.threshold || 40) * 60;
+        if (weekMin >= threshold * 0.9 && weekMin < threshold * 2) near.push(`${emp.name} ${toHours(weekMin)}h`);
+      }
+      if (near.length) push('warn', `${near.length} approaching overtime`, '/payroll/timesheets', near.join(' · '));
+    }
+  }
+  return out;
+}
+
 module.exports = {
-  sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL,
+  sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
+  fingerprintOf, approvalBlockers, approvalStale, transferStateOf, TRANSFER_LABEL,
   q, settings, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
   clockFace, stamp, hm, toHours, breakTotals, recompute, elapsedMinutes, logEvent,
   localInputToUtc, utcToLocalInput,

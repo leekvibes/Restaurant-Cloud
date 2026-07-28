@@ -768,3 +768,273 @@ test('one pending correction is one issue, not two', () => {
   const about = issues.filter((i) => /correction/i.test(i.text));
   assert.strictEqual(about.length, 1, 'a single request produces a single line');
 });
+
+// ===========================================================================
+// PHASE 4 — approval, locking, and the transfer to payroll.
+//
+// The two things these guard: an approval describes the hours it was given for
+// (change them and it says so), and payroll is never quietly left holding a
+// figure that has moved.
+// ===========================================================================
+const sheetRow = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(empId, start);
+const approvalsOf = (sid) => db.prepare('SELECT * FROM timesheet_approvals WHERE timesheet_id = ? ORDER BY id').all(sid);
+const transfersOf = (sid) => db.prepare('SELECT * FROM payroll_transfers WHERE timesheet_id = ? ORDER BY id').all(sid);
+const EMP4 = 94;
+
+/** A clean, submitted period for the approval employee. */
+async function readyToApprove(dayOffset = 6) {
+  // Created on first use: node:test honours only one top-level before hook, and
+  // that one belongs to the server.
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,?,?,?,1)")
+    .run(EMP4, 'Approval Tester', 'server', '3444', 2000);
+  const per = curPeriod();
+  db.prepare('DELETE FROM time_entries WHERE employee_id = ?').run(EMP4);
+  db.prepare('DELETE FROM timesheets WHERE employee_id = ?').run(EMP4);
+  const eid = seedInPeriod(EMP4, dayOffset, '09:00', '17:00');
+  const cookie = await signIn('3444');
+  await submitSheet(EMP4, '3444', per, {}, cookie);
+  return { per, eid, sheet: sheetRow(EMP4, per.start) };
+}
+
+test('a clean submitted timesheet approves, and the approval records what it approved', async () => {
+  const { per, sheet } = await readyToApprove();
+  assert.strictEqual(sheet.status, 'submitted');
+  await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start, note: 'looks right' });
+  const s = sheetRow(EMP4, per.start);
+  assert.strictEqual(s.status, 'approved');
+  assert.ok(s.approved_at && s.approved_by, 'stamped with who and when');
+  assert.strictEqual(s.transfer_state, 'ready', 'and ready for payroll, not yet sent');
+  const a = approvalsOf(s.id);
+  assert.strictEqual(a.length, 1);
+  assert.strictEqual(a[0].payable_min, 480, 'the hours it approved');
+  assert.ok(a[0].fingerprint, 'and what they were made of');
+  assert.strictEqual(a[0].state, 'current');
+});
+
+test('approval is refused while a punch is missing, and says why', async () => {
+  const per = curPeriod();
+  const { sheet } = await readyToApprove(7);
+  // Open a punch after submission — now it cannot be approved.
+  const day = require('../src/dates').addDays(per.start, 8);
+  db.prepare(`INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, status, source)
+    VALUES (?,?,'cafe','server',?, 'missing_punch','manager')`).run(EMP4, day, T2.localInputToUtc(`${day}T09:00`));
+  const res = await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /Not approved/, 'refused with a reason');
+  assert.notStrictEqual(sheetRow(EMP4, per.start).status, 'approved');
+  assert.strictEqual(approvalsOf(sheet.id).length, 0, 'and no approval record was written');
+});
+
+test('an override approves anyway, and the reason is kept forever', async () => {
+  const per = curPeriod();
+  const s0 = sheetRow(EMP4, per.start);
+  await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start, override_reason: 'confirmed with the closing manager' });
+  const s = sheetRow(EMP4, per.start);
+  assert.strictEqual(s.status, 'approved', 'it went through');
+  const a = approvalsOf(s.id).pop();
+  assert.strictEqual(a.override_reason, 'confirmed with the closing manager');
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='timesheet' AND entity_id=? AND action='approved_with_override'").get(s.id);
+  assert.ok(ev, 'and it is on the record as an override, not a clean approval');
+});
+
+test('locking, then reopening, keeps the original approval as history', async () => {
+  const { per, sheet } = await readyToApprove(9);
+  await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start });
+  await post(`/payroll/timesheets/${EMP4}/lock`, { period: per.start });
+  assert.strictEqual(sheetRow(EMP4, per.start).status, 'locked');
+
+  await post(`/payroll/timesheets/${EMP4}/reopen`, { period: per.start, reason: '' });
+  assert.strictEqual(sheetRow(EMP4, per.start).status, 'locked', 'no reason, no reopen');
+
+  await post(`/payroll/timesheets/${EMP4}/reopen`, { period: per.start, reason: 'missed an hour' });
+  const s = sheetRow(EMP4, per.start);
+  assert.strictEqual(s.status, 'submitted', 'back with the manager, not thrown to the employee');
+  assert.strictEqual(s.reopen_reason, 'missed an hour');
+  const a = approvalsOf(s.id);
+  assert.strictEqual(a.length, 1, 'the approval is still there');
+  assert.strictEqual(a[0].state, 'superseded', 'marked superseded, not deleted');
+  assert.ok(a[0].superseded_reason);
+});
+
+test('approved hours transfer, and the snapshot keeps the overtime state', async () => {
+  const { per, sheet } = await readyToApprove(10);
+  await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start });
+  await post(`/payroll/timesheets/${EMP4}/transfer`, { period: per.start });
+  const s = sheetRow(EMP4, per.start);
+  assert.strictEqual(s.transfer_state, 'transferred');
+  assert.ok(s.transferred_at && s.transferred_by);
+  const t = transfersOf(s.id);
+  assert.strictEqual(t.length, 1);
+  assert.strictEqual(t[0].payable_min, 480);
+  assert.strictEqual(t[0].regular_min, 480, 'all regular with overtime off');
+  assert.strictEqual(t[0].overtime_min, 0);
+  assert.strictEqual(t[0].ot_enabled, 0, 'the toggle state is part of the record');
+  assert.ok(t[0].fingerprint, 'and what the hours were made of');
+});
+
+test('changing hours after transfer marks payroll as out of date — it is not updated silently', async () => {
+  const per = curPeriod();
+  const s0 = sheetRow(EMP4, per.start);
+  const before = transfersOf(s0.id)[0];
+  const eid = db.prepare('SELECT id FROM time_entries WHERE employee_id = ? ORDER BY id DESC LIMIT 1').get(EMP4).id;
+  const day = db.prepare('SELECT business_date FROM time_entries WHERE id = ?').get(eid).business_date;
+
+  await post(`/payroll/timesheets/${EMP4}/reopen`, { period: per.start, reason: 'they worked later' });
+  await post(`/timeclock/${eid}/edit`, { in: `${day}T09:00`, out: `${day}T18:00`, position: 'server', daypart: 'cafe', reason: 'stayed an extra hour' });
+  const s = sheetRow(EMP4, per.start);
+  assert.strictEqual(s.transfer_state, 'needs_recalculation', 'payroll is told the figure it holds is stale');
+  const t = transfersOf(s.id);
+  assert.strictEqual(t.length, 1, 'the old transfer is still on file');
+  assert.strictEqual(t[0].payable_min, before.payable_min, 'holding the value it actually sent');
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='timesheet' AND entity_id=? AND action='payroll_marked_outdated'").get(s.id);
+  assert.ok(ev, 'and the moment it went stale is on the record');
+});
+
+test('re-transferring supersedes the old snapshot rather than replacing it', async () => {
+  const per = curPeriod();
+  const s0 = sheetRow(EMP4, per.start);
+  // The manager corrected the hours, so the employee has to sign the new ones
+  // before they can be approved again — the real loop, not a shortcut.
+  const blocked = await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start });
+  assert.match(decodeURIComponent(blocked.headers.get('location') || ''), /signing again/i,
+    'approval waits for the employee to re-sign hours that moved');
+  await submitSheet(EMP4, '3444', per, {}, await signIn('3444'));
+  await post(`/payroll/timesheets/${EMP4}/approve`, { period: per.start });
+  await post(`/payroll/timesheets/${EMP4}/transfer`, { period: per.start });
+  const t = transfersOf(s0.id);
+  assert.strictEqual(t.length, 2, 'both transfers are kept');
+  assert.strictEqual(t[0].state, 'superseded', 'the first is marked superseded');
+  assert.strictEqual(t[1].state, 'current');
+  assert.strictEqual(t[1].payable_min, 540, 'and the new one carries the corrected hours');
+  const a = approvalsOf(s0.id).filter((x) => x.state === 'current');
+  assert.strictEqual(a.length, 1, 'exactly one approval speaks for now');
+});
+
+test('bulk approval writes one approval record per person, and skips the blocked', async () => {
+  const per = curPeriod();
+  // A clean one and a blocked one.
+  const clean = EMP4;
+  db.prepare('DELETE FROM time_entries WHERE employee_id = ?').run(clean);
+  db.prepare('DELETE FROM timesheets WHERE employee_id = ?').run(clean);
+  seedInPeriod(clean, 11, '09:00', '13:00');
+  await submitSheet(clean, '3444', per, {}, await signIn('3444'));
+
+  const before = db.prepare('SELECT COUNT(*) n FROM timesheet_approvals').get().n;
+  const res = await post('/payroll/timesheets/approve-all', { period: per.start });
+  const msg = decodeURIComponent(res.headers.get('location') || '');
+  assert.match(msg, /approved/, 'it reports what it did');
+  const after = db.prepare('SELECT COUNT(*) n FROM timesheet_approvals').get().n;
+  assert.ok(after > before, 'individual approval records were written');
+  assert.strictEqual(sheetRow(clean, per.start).status, 'approved');
+});
+
+test('a viewer cannot approve, transfer, lock or reopen', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  for (const route of ['/approve', '/transfer', '/lock', '/reopen']) {
+    const at = src.indexOf(`app.post('/payroll/timesheets/:empId${route}'`);
+    assert.ok(at > 0, `${route} exists`);
+    assert.match(src.slice(at, at + 260), /canWrite\(\)/, `${route} is gated on canWrite`);
+  }
+  const bulk = src.indexOf("app.post('/payroll/timesheets/approve-all'");
+  assert.match(src.slice(bulk, bulk + 260), /canWrite\(\)/, 'bulk approve too');
+});
+
+test('none of this writes work.hours or sends payroll', () => {
+  const rows = db.prepare('SELECT hours FROM work').all();
+  assert.ok(rows.every((r) => Number(r.hours) === 0), 'manager-entered hours untouched');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM period_sends').get().n, 0, 'payroll never sent');
+});
+
+// ===========================================================================
+// PHASE 5 — alerts, settings, reports and exports.
+// ===========================================================================
+
+test('alerts report only what needs doing, and carry a link to it', async () => {
+  const T = require('../src/timeclock');
+  // A shift left open far too long is the classic missed clock-out.
+  db.prepare(`INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, status, source)
+    VALUES (?,?,'cafe','server', datetime('now','-30 hours'), 'active','manager')`)
+    .run(EMP.none, T.businessDateOf(T.nowUtc(), T.settings().cutoffHour));
+  const list = T.alerts({ periods: [curPeriod()], employees: [], otRule: { enabled: false } });
+  const long = list.find((a) => /still clocked in/.test(a.text));
+  assert.ok(long, 'the long open shift is raised');
+  assert.ok(long.href, 'with somewhere to go');
+  assert.ok(list.every((a) => a.href), 'every alert is actionable');
+  db.prepare("DELETE FROM time_entries WHERE status = 'active' AND employee_id = ?").run(EMP.none);
+});
+
+test('a quiet clock raises nothing', () => {
+  const T = require('../src/timeclock');
+  const list = T.alerts({ periods: [{ start: '2020-01-01', end: '2020-01-14' }], employees: [], otRule: { enabled: false } });
+  assert.ok(!list.some((a) => /still clocked in|approaching overtime/.test(a.text)),
+    'an empty period is not news');
+});
+
+test('settings save and take effect', async () => {
+  await post('/timeclock/settings', { cutoff: '5', dinner: '17', long: '12', breaks_paid: '1', pin_out: '1', alerts: '1' });
+  const T = require('../src/timeclock');
+  const c = T.settings();
+  assert.strictEqual(c.cutoffHour, 5);
+  assert.strictEqual(c.dinnerFrom, 17);
+  assert.strictEqual(c.longShift, 12);
+  assert.strictEqual(c.breaksPaid, true, 'breaks now default to paid');
+  assert.strictEqual(c.requireService, false, 'an unticked box is off');
+  // Put it back so later assertions read the documented defaults.
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_out: '1', pin_fix: '1', require_service: '1', alerts: '1' });
+  assert.strictEqual(T.settings().breaksPaid, false);
+});
+
+test('settings are refused for a view-only account', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf("app.post('/timeclock/settings'");
+  assert.match(src.slice(at, at + 200), /tcCanEdit/, 'the save is gated');
+});
+
+test('the reports render every grouping', async () => {
+  for (const v of ['employee', 'position', 'service', 'day', 'corrections', 'quality']) {
+    const html = await text(`/timeclock/reports?v=${v}&from=2026-01-01&to=2026-12-31`);
+    assert.match(html, /Time reports/, `${v} renders`);
+    assert.match(html, /Clocked hours only/, 'and says which hours it is quoting');
+  }
+});
+
+test('a report with no data says so rather than showing an empty table', async () => {
+  const html = await text('/timeclock/reports?v=employee&from=2019-01-01&to=2019-01-02');
+  assert.match(html, /Nothing in this range|No corrections/, 'an intentional empty state');
+});
+
+test('CSV exports carry the rows behind the report', async () => {
+  const res = await fetch(`${BASE}/timeclock/export?kind=punches&from=2026-01-01&to=2026-12-31`);
+  assert.strictEqual(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /csv/);
+  assert.match(res.headers.get('content-disposition') || '', /attachment; filename=/);
+  const body = await res.text();
+  const [head, ...lines] = body.split('\n');
+  assert.match(head, /Employee,Business date,Service,Position,Clock in,Clock out/, 'the columns asked for');
+  assert.ok(lines.length > 0, 'and real rows');
+
+  const emp = await (await fetch(`${BASE}/timeclock/export?kind=employees&from=2026-01-01&to=2026-12-31`)).text();
+  assert.match(emp.split('\n')[0], /Employee,Payable h/);
+  const corr = await (await fetch(`${BASE}/timeclock/export?kind=corrections&from=2026-01-01&to=2026-12-31`)).text();
+  assert.match(corr.split('\n')[0], /Employee,Kind,Original,Requested,Reason/);
+  const tr = await (await fetch(`${BASE}/timeclock/export?kind=transfers&from=2026-01-01&to=2026-12-31`)).text();
+  assert.match(tr.split('\n')[0], /Employee,Period start/);
+});
+
+test('a CSV field containing a comma or quote is escaped, not left to corrupt the row', async () => {
+  const T = require('../src/timeclock');
+  const day = '2026-03-03';
+  const id = db.prepare(`INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'cafe','server',?,?,'complete','manager',60,60)`)
+    .run(EMP.solo, day, T.localInputToUtc(`${day}T09:00`), T.localInputToUtc(`${day}T10:00`)).lastInsertRowid;
+  db.prepare(`INSERT INTO time_corrections (time_entry_id, employee_id, kind, original_value, proposed_value, reason, requested_by)
+    VALUES (?,?,'other','a','b','He said "I left at 9, not 10"','Tester')`).run(id, EMP.solo);
+  const csv = await (await fetch(`${BASE}/timeclock/export?kind=corrections&from=2026-01-01&to=2026-12-31`)).text();
+  assert.match(csv, /"He said ""I left at 9, not 10"""/, 'quoted and doubled, so the row still parses');
+});
+
+test('the time clock page still opens with everything wired', async () => {
+  const html = await text('/timeclock');
+  assert.match(html, /Reports/, 'reports are reachable');
+  assert.match(html, /Settings/, 'so are settings');
+  assert.match(html, /Timesheets/, 'and the timesheet ledger');
+});

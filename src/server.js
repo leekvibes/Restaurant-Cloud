@@ -754,6 +754,17 @@ app.get('/', (req, res) => {
       'Lines have been read but the product costs have not been updated.',
       'Review lines', waiting.length === 1 ? `/c/invoices/${waiting[0].id}/import` : '/c/invoices');
   }
+  if (may('staff') || may('payroll')) {
+    // Time clock and timesheets, but only what somebody has to act on.
+    try {
+      if (TC.settings().alertsOn) {
+        for (const a of TC.alerts({ periods: recentPeriods(2), employees: q.allEmployees.all(), otRule: OT.rule() })) {
+          notice(a.severity === 'bad' ? 'todo' : a.severity === 'warn' ? 'todo' : 'idle',
+            'shifts', a.text, a.detail || 'Time clock', 'Open', a.href);
+        }
+      }
+    } catch (e) { /* the dashboard must render even if the clock cannot answer */ }
+  }
   if (may('trackers')) {
     // Only the incidents that still need a person's hands: a follow-up owed, a
     // high-impact one still open, a follow-up date that has passed. Resolved and
@@ -13677,11 +13688,217 @@ app.get('/timeclock', (req, res) => {
         </details>
         <button class="bs-btn-sm" type="submit">Go</button>
         ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
+        <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
+        <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
+        <a class="bs-btn-sm" href="/payroll/timesheets">Timesheets</a>
       </form>
 
       ${rows.length ? `<div class="bs-lrows tcm-rows">${rows.map(row).join('')}</div>`
         : '<div class="bs-blank"><b>No time entries</b><span>Nothing in this range yet.</span></div>'}
     </div>`));
+});
+
+// --- reports ---------------------------------------------------------------
+// Read from the entries, grouped four ways plus a corrections log. Every figure
+// says which hours it is made of, because "hours" means three different things
+// once a clock and a manager both have an opinion.
+function tcReportData(from, to) {
+  const rows = TC.q.inRange.all(from, to).filter((e) => e.clock_out_at);
+  const staff = new Map(q.allEmployees.all().map((e) => [e.id, e]));
+  const bucket = (keyOf, labelOf) => {
+    const m = new Map();
+    for (const e of rows) {
+      const k = keyOf(e); if (k == null) continue;
+      const b = m.get(k) || { key: k, label: labelOf(e, k), payable: 0, paid: 0, unpaid: 0, raw: 0, n: 0, people: new Set(), wage: 0 };
+      b.payable += e.payable_minutes || 0; b.paid += e.paid_break_min || 0;
+      b.unpaid += e.unpaid_break_min || 0; b.raw += e.raw_minutes || 0; b.n++;
+      b.people.add(e.employee_id);
+      const emp = staff.get(e.employee_id);
+      if (emp) b.wage += Math.round(((e.payable_minutes || 0) / 60) * (Number(emp.hourly_rate_cents) || 0));
+      m.set(k, b);
+    }
+    return [...m.values()].sort((a, b) => b.payable - a.payable);
+  };
+  return {
+    rows,
+    byEmployee: bucket((e) => e.employee_id, (e, k) => (staff.get(k) || {}).name || `#${k}`),
+    byPosition: bucket((e) => e.position, (e, k) => (positions.bySlug.get(k) || {}).name || k),
+    byService: bucket((e) => e.daypart, (e, k) => dp(k)),
+    byDay: bucket((e) => e.business_date, (e, k) => k),
+  };
+}
+
+app.get('/timeclock/reports', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const per = currentPeriod();
+  const from = MX.isDate(req.query.from) ? req.query.from : per.start;
+  const to = MX.isDate(req.query.to) ? req.query.to : (per.end > today ? today : per.end);
+  const d = tcReportData(from, to);
+  const view = ['employee', 'position', 'service', 'day', 'corrections', 'quality'].includes(req.query.v) ? req.query.v : 'employee';
+  const qs = `from=${from}&to=${to}`;
+
+  const hrs = (m) => (Math.round((m / 60) * 100) / 100).toFixed(2);
+  const table = (list, headLabel, opts = {}) => (list.length ? `
+    <div class="bs-lrows tcr-rows">
+      <div class="tcr-head"><span>${headLabel}</span><span>Payable</span><span>Unpaid break</span>
+        <span>${opts.people ? 'People' : 'Sessions'}</span><span>${opts.cost ? 'Wage cost' : 'Avg session'}</span></div>
+      ${list.map((b) => `<div class="tcr-row">
+        <span class="tcr-n">${esc(b.label)}</span>
+        <span class="tcr-v"><b>${hrs(b.payable)}h</b></span>
+        <span class="tcr-v">${b.unpaid ? hrs(b.unpaid) + 'h' : '—'}</span>
+        <span class="tcr-v">${opts.people ? b.people.size : b.n}</span>
+        <span class="tcr-v">${opts.cost ? money(b.wage) : hrs(b.payable / Math.max(1, b.n)) + 'h'}</span>
+      </div>`).join('')}
+    </div>` : '<div class="bs-blank"><b>Nothing in this range</b><span>Try a wider set of dates.</span></div>');
+
+  let body = '';
+  if (view === 'employee') body = table(d.byEmployee, 'Employee', { cost: true });
+  else if (view === 'position') body = table(d.byPosition, 'Position', { people: true, cost: true });
+  else if (view === 'service') body = table(d.byService, 'Service', { people: true, cost: true });
+  else if (view === 'day') body = table(d.byDay, 'Day', { people: true, cost: true });
+  else if (view === 'corrections') {
+    const cs = db.prepare(`SELECT c.*, e.business_date FROM time_corrections c
+      LEFT JOIN time_entries e ON e.id = c.time_entry_id
+      WHERE date(c.requested_at) >= ? AND date(c.requested_at) <= ? ORDER BY c.id DESC`).all(from, to);
+    body = cs.length ? `<div class="bs-lrows tcr-rows">
+      ${cs.map((c) => `<div class="tcr-corr">
+        <div class="tcr-corr-h"><b>${esc(tcEmpName(c.employee_id))}</b>
+          <span>${esc(String(c.kind).replace(/_/g, ' '))}</span>
+          <i class="tcm-tag ${c.decision === 'approved' ? 'on' : c.decision === 'rejected' ? '' : 'warn'}">${esc(c.decision)}</i></div>
+        <div class="tcr-corr-b">was <b>${esc(c.original_value || '—')}</b> → asked <b>${esc(c.proposed_value || '—')}</b></div>
+        <div class="tcr-corr-m">“${esc(c.reason)}” · ${esc(c.requested_by)} ${esc(TC.stamp(c.requested_at))}${c.decided_by ? ` · decided by ${esc(c.decided_by)}` : ''}</div>
+      </div>`).join('')}</div>`
+      : '<div class="bs-blank"><b>No corrections</b><span>Nothing was queried in this range.</span></div>';
+  } else {
+    const missing = d.rows.filter((e) => !e.clock_out_at).length
+      + TC.q.inRange.all(from, to).filter((e) => !e.clock_out_at).length;
+    const longOnes = d.rows.filter((e) => (e.raw_minutes || 0) > TC.settings().longShift * 60).length;
+    const edited = d.rows.filter((e) => e.edited).length;
+    const openBreaks = db.prepare(`SELECT COUNT(*) n FROM time_breaks b JOIN time_entries e ON e.id = b.time_entry_id
+      WHERE b.end_at IS NULL AND e.business_date >= ? AND e.business_date <= ?`).get(from, to).n;
+    const corr = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE date(requested_at) >= ? AND date(requested_at) <= ?').get(from, to).n;
+    const fact = (k, v, s) => `<div class="inc-fact"><span>${k}</span><b>${v}${s ? ` <i class="inc-unset">${s}</i>` : ''}</b></div>`;
+    body = `<section class="bs-panel"><div class="inc-facts">
+      ${fact('Sessions recorded', String(d.rows.length))}
+      ${fact('Missing a punch', String(missing), missing ? 'need fixing' : '')}
+      ${fact('Breaks left open', String(openBreaks))}
+      ${fact('Shifts over ' + TC.settings().longShift + 'h', String(longOnes))}
+      ${fact('Entries corrected', String(edited), d.rows.length ? Math.round((edited / d.rows.length) * 100) + '% of sessions' : '')}
+      ${fact('Correction requests', String(corr))}
+    </div></section>`;
+  }
+
+  const tab = (k, label) => `<a class="fchip${view === k ? ' on' : ''}" href="/timeclock/reports?${qs}&v=${k}">${label}</a>`;
+  res.send(layout('Time reports', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">Time reports</h1>
+        <p class="bs-subline">Clocked hours only — what the clock recorded, not what payroll paid. Wage cost is an estimate at each person's default rate.</p>
+      </div></div>
+      <form class="tcm-filters" method="get" action="/timeclock/reports">
+        <input type="hidden" name="v" value="${esc(view)}">
+        <label><span>From</span><input type="date" name="from" value="${esc(from)}"></label>
+        <label><span>To</span><input type="date" name="to" value="${esc(to)}"></label>
+        <button class="bs-btn-sm" type="submit">Go</button>
+        <a class="bs-btn-sm" href="/timeclock/export?${qs}&kind=${view === 'corrections' ? 'corrections' : 'punches'}">Download CSV</a>
+      </form>
+      <div class="bs-quick tcr-tabs">${tab('employee', 'By employee')}${tab('position', 'By position')}${tab('service', 'By service')}${tab('day', 'By day')}${tab('corrections', 'Corrections')}${tab('quality', 'Attendance quality')}</div>
+      ${body}
+    </div>`));
+});
+
+/** CSV of exactly what the filters describe. */
+app.get('/timeclock/export', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).end();
+  const per = currentPeriod();
+  const from = MX.isDate(req.query.from) ? req.query.from : per.start;
+  const to = MX.isDate(req.query.to) ? req.query.to : per.end;
+  const kind = ['punches', 'employees', 'corrections', 'transfers'].includes(req.query.kind) ? req.query.kind : 'punches';
+  const cell = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const send = (name, head, rows) => {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}-${from}-to-${to}.csv"`);
+    res.send([head, ...rows].map((r) => r.map(cell).join(',')).join('\n'));
+  };
+  const hrs = (m) => (m == null ? '' : (Math.round((m / 60) * 100) / 100).toFixed(2));
+
+  if (kind === 'corrections') {
+    const cs = db.prepare(`SELECT * FROM time_corrections WHERE date(requested_at) >= ? AND date(requested_at) <= ? ORDER BY id`).all(from, to);
+    return send('corrections', ['Employee', 'Kind', 'Original', 'Requested', 'Reason', 'Requested by', 'Requested at', 'Decision', 'Decided by', 'Applied'],
+      cs.map((c) => [tcEmpName(c.employee_id), c.kind, c.original_value, c.proposed_value, c.reason,
+        c.requested_by, c.requested_at, c.decision, c.decided_by || '', c.applied_at || '']));
+  }
+  if (kind === 'transfers') {
+    const ts = db.prepare('SELECT * FROM payroll_transfers WHERE period_start >= ? AND period_start <= ? ORDER BY id').all(from, to);
+    return send('payroll-transfers', ['Employee', 'Period start', 'Period end', 'Regular h', 'Overtime h', 'Payable h', 'Overtime on', 'Transferred by', 'Transferred at', 'State'],
+      ts.map((t) => [tcEmpName(t.employee_id), t.period_start, t.period_end, hrs(t.regular_min), hrs(t.overtime_min),
+        hrs(t.payable_min), t.ot_enabled ? 'yes' : 'no', t.transferred_by, t.transferred_at, t.state]));
+  }
+  if (kind === 'employees') {
+    const d = tcReportData(from, to);
+    return send('employee-hours', ['Employee', 'Payable h', 'Raw h', 'Paid break h', 'Unpaid break h', 'Sessions', 'Est. wage cost'],
+      d.byEmployee.map((b) => [b.label, hrs(b.payable), hrs(b.raw), hrs(b.paid), hrs(b.unpaid), b.n, (b.wage / 100).toFixed(2)]));
+  }
+  const rows = TC.q.inRange.all(from, to);
+  return send('punches', ['Employee', 'Business date', 'Service', 'Position', 'Clock in', 'Clock out', 'Breaks', 'Raw h', 'Unpaid break h', 'Payable h', 'Status', 'Edited', 'Shift'],
+    rows.map((e) => {
+      const brs = TC.q.breaks.all(e.id).map((b) => `${TC.clockFace(b.start_at)}-${b.end_at ? TC.clockFace(b.end_at) : 'open'}${b.paid ? ' paid' : ''}`).join('; ');
+      return [tcEmpName(e.employee_id), e.business_date, e.daypart ? dp(e.daypart) : '', tcPosName(e.position),
+        TC.clockFace(e.clock_in_at), e.clock_out_at ? TC.clockFace(e.clock_out_at) : '', brs,
+        hrs(e.raw_minutes), hrs(e.unpaid_break_min), hrs(e.payable_minutes), e.status, e.edited ? 'yes' : '', e.shift_id || ''];
+    }));
+});
+
+// --- settings --------------------------------------------------------------
+app.get('/timeclock/settings', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const c = TC.settings();
+  const w2 = canWrite();
+  const row = (label, control, hint) => `<div class="tcs-row"><div class="tcs-l"><b>${label}</b>${hint ? `<i>${hint}</i>` : ''}</div><div class="tcs-c">${control}</div></div>`;
+  const check = (name, on, label) => `<label class="tcs-check"><input type="checkbox" name="${name}" value="1"${on ? ' checked' : ''}${w2 ? '' : ' disabled'}><span>${label}</span></label>`;
+  res.send(layout('Time clock settings', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">Time clock settings</h1>
+        <p class="bs-subline">How the clock behaves for everyone. Changing these does not alter time already recorded.</p>
+      </div></div>
+      <form method="post" action="/timeclock/settings" class="bs-panel tcs">
+        ${row('The trading day starts at',
+          `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
+          'Work before this hour counts as the night before, so an overnight shift stays on one day.')}
+        ${row('Dinner service starts at',
+          `<select name="dinner" ${w2 ? '' : 'disabled'}>${Array.from({ length: 24 }, (_, h) => `<option value="${h}"${h === c.dinnerFrom ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
+          'Only used to suggest the service at clock-in. Staff always confirm it.')}
+        ${row('Flag a shift left open past',
+          `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === c.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
+          'Almost always a missed clock-out rather than a very long day.')}
+        ${row('Breaks', check('breaks_paid', c.breaksPaid, 'Count breaks as paid by default'),
+          'Either way a manager can change any single break.')}
+        ${row('Ask for the PIN', `${check('pin_out', c.pinAtOut, 'at clock-out')}${check('pin_fix', c.pinForFix, 'when asking for a correction')}`,
+          'The PIN is the signature on a punch.')}
+        ${row('At clock-in', check('require_service', c.requireService, 'Staff must choose the service'),
+          'Off, the clock uses the suggestion above without asking.')}
+        ${row('Dashboard', check('alerts', c.alertsOn, 'Show time-clock items that need attention'),
+          'Only things somebody has to act on ever appear.')}
+        ${w2 ? '<button class="bs-btn" type="submit">Save settings</button>' : '<p class="inc-hint">Your account is view-only.</p>'}
+      </form>
+    </div>`));
+});
+
+app.post('/timeclock/settings', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  TC.saveSettings({
+    cutoffHour: req.body.cutoff, dinnerFrom: req.body.dinner, longShift: req.body.long,
+    breaksPaid: req.body.breaks_paid === '1', pinAtOut: req.body.pin_out === '1',
+    pinForFix: req.body.pin_fix === '1', requireService: req.body.require_service === '1',
+    alertsOn: req.body.alerts === '1',
+  });
+  res.redirect('/timeclock/settings?msg=' + encodeURIComponent('Saved.'));
 });
 
 /** Add a punch a manager is entering on someone's behalf. */
@@ -14093,15 +14310,34 @@ app.get('/payroll/timesheets', (req, res) => {
     const entered = db.prepare(`SELECT COALESCE(SUM(w.hours),0) h FROM work w JOIN shifts sh ON sh.id = w.shift_id
       WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`).get(emp.id, period.start, period.end).h;
     const clocked = TC.toHours(totals.payable) || 0;
+    const approval = sheet.id ? TC.q.currentApproval.get(sheet.id) : null;
+    const transfer = sheet.id ? TC.q.currentTransfer.get(sheet.id) : null;
     return { emp, sheet, entries, corrections, issues, totals, entered: Number(entered),
       clocked, variance: Math.round((clocked - Number(entered)) * 100) / 100,
-      status: TC.sheetStatus(sheet, issues) };
+      status: TC.sheetStatus(sheet, issues), approval, transfer,
+      blockers: TC.approvalBlockers(sheet, issues),
+      transferState: TC.transferStateOf(sheet, approval, transfer, entries) };
   }).filter(Boolean);
 
   const statCell = (l, v, s, tone) => `<div class="bs-strip-c"><span class="bs-strip-l">${l}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${v}</span><span class="bs-strip-s">${s}</span></div>`;
   const submitted = rows.filter((r) => r.status === 'submitted').length;
   const attention = rows.filter((r) => r.status === 'needs_attention').length;
+  const approved = rows.filter((r) => ['approved', 'locked'].includes(r.status)).length;
+  const transferred = rows.filter((r) => r.transferState === 'transferred').length;
+  const stale = rows.filter((r) => ['changed_after_transfer', 'needs_recalculation'].includes(r.transferState)).length;
+  const notIn = rows.filter((r) => ['open', 'needs_attention', 'returned'].includes(r.status)).length;
+  const readyToApprove = rows.filter((r) => r.status === 'submitted' && !r.blockers.length).length;
   const totalMin = rows.reduce((a, r) => a + r.totals.payable, 0);
+  const totalOt = rows.reduce((a, r) => a + r.totals.overtime, 0);
+  // One sentence for where the period stands, rather than making somebody read
+  // a table to work it out.
+  const readiness = !rows.length ? 'Not ready'
+    : stale ? 'Needs attention'
+    : notIn ? 'Not ready'
+    : approved < rows.length ? 'Needs attention'
+    : transferred === 0 ? 'Ready to transfer'
+    : transferred < rows.length ? 'Partially transferred'
+    : 'Ready to finalize';
 
   res.send(layout('Timesheets', `
     ${flash(req)}
@@ -14113,10 +14349,10 @@ app.get('/payroll/timesheets', (req, res) => {
         </div>
       </div>
       <section class="bs-panel bs-strip">
-        ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}`)}
-        ${statCell('Submitted', String(submitted), submitted === rows.length && rows.length ? 'everyone' : 'signed off', submitted ? 'ok' : '')}
-        ${statCell('Needs attention', String(attention), attention ? 'issues to clear' : 'nothing outstanding', attention ? 'warn' : 'ok')}
-        ${statCell('Period', esc(period.start.slice(5)), esc(labelFor(period)))}
+        ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}${totalOt ? ` · ${TC.hm(totalOt)} OT` : ''}`)}
+        ${statCell('Awaiting approval', String(submitted), readyToApprove ? `${readyToApprove} clean` : submitted ? 'all blocked' : 'none waiting', submitted ? 'warn' : 'ok')}
+        ${statCell('Approved', String(approved), transferred ? `${transferred} transferred` : approved ? 'not transferred yet' : 'none yet', approved ? 'ok' : '')}
+        ${statCell('Where it stands', esc(readiness), stale ? `${stale} changed after transfer` : esc(labelFor(period)), stale ? 'bad' : readiness === 'Ready to finalize' ? 'ok' : readiness === 'Ready to transfer' ? 'ok' : 'warn')}
       </section>
 
       <form class="tcm-filters" method="get" action="/payroll/timesheets">
@@ -14124,6 +14360,14 @@ app.get('/payroll/timesheets', (req, res) => {
           ${periods.map((p) => `<option value="${p.start}"${p.start === period.start ? ' selected' : ''}>${esc(labelFor(p))}</option>`).join('')}
         </select></label>
       </form>
+      ${canWrite() && readyToApprove ? `<form method="post" action="/payroll/timesheets/approve-all" class="ts-bulk">
+        <input type="hidden" name="period" value="${esc(period.start)}">
+        <div class="ts-bulk-t"><b>${readyToApprove} timesheet${readyToApprove === 1 ? '' : 's'} ready to approve</b>
+          <i>${esc(rows.filter((r) => r.status === 'submitted' && !r.blockers.length).map((r) => r.emp.name).join(', ').slice(0, 90))}
+          · ${TC.hm(rows.filter((r) => r.status === 'submitted' && !r.blockers.length).reduce((a, r) => a + r.totals.payable, 0))}</i>
+          ${submitted > readyToApprove ? `<i class="ts-bulk-skip">${submitted - readyToApprove} will be skipped — they still have issues</i>` : ''}</div>
+        <button class="bs-btn" type="submit">Approve the clean ones</button>
+      </form>` : ''}
 
       ${rows.length ? `<div class="bs-lrows tcm-rows">
         ${rows.map((r) => `<a class="bs-lr tcm-row ts-row" href="/payroll/timesheets/${r.emp.id}?p=${period.start}">
@@ -14131,7 +14375,9 @@ app.get('/payroll/timesheets', (req, res) => {
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
           <span class="tcm-times">entered ${r.entered}h${Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h</i>` : ''}</span>
           <span class="tcm-tags">
-            <i class="tcm-tag ${r.status === 'submitted' ? 'on' : r.status === 'needs_attention' ? 'warn' : ''}">${esc(TC.SHEET_LABEL[r.status])}</i>
+            <i class="tcm-tag ${['approved', 'locked'].includes(r.status) ? 'on' : r.status === 'submitted' ? 'ed' : r.status === 'needs_attention' ? 'warn' : ''}">${esc(TC.SHEET_LABEL[r.status])}</i>
+            ${r.transferState === 'transferred' ? '<i class="tcm-tag on">sent</i>' : ''}
+            ${['changed_after_transfer', 'needs_recalculation'].includes(r.transferState) ? `<i class="tcm-tag warn">${esc(TC.TRANSFER_LABEL[r.transferState])}</i>` : ''}
             ${r.corrections.length ? `<i class="tcm-tag warn">${r.corrections.length} fix</i>` : ''}
           </span>
           <span class="bs-lr-go">›</span>
@@ -14146,8 +14392,10 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   if (!emp) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such employee</h1></div>'));
   const periods = recentPeriods(8);
   const period = periods.find((p) => p.start === req.query.p) || currentPeriod();
-  const v = tsView(emp, period);
-  const events = TC.q.eventsFor.all('timesheet', v.sheet.id);
+  const v = tsDecision(emp, period);
+  const events = v.sheet.id ? TC.q.eventsFor.all('timesheet', v.sheet.id) : [];
+  const approvals = v.sheet.id ? TC.q.approvalsFor.all(v.sheet.id) : [];
+  const transfers = v.sheet.id ? TC.q.transfersFor.all(v.sheet.id) : [];
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   const fact = (k, val) => `<div class="inc-fact"><span>${k}</span><b>${val}</b></div>`;
   const entered = db.prepare(`SELECT COALESCE(SUM(w.hours),0) h FROM work w JOIN shifts sh ON sh.id = w.shift_id
@@ -14165,7 +14413,10 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
           <h1 class="bs-headline">${esc(emp.name)}</h1>
           <p class="bs-subline">${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'} · clocked hours only, nothing sent to payroll</p>
         </div>
-        <div class="inc-rec-status"><span class="inc-st inc-st-${esc(v.status.replace(/_/g, '-'))}">${esc(TC.SHEET_LABEL[v.status])}</span></div>
+        <div class="inc-rec-status">
+          <span class="inc-st inc-st-${esc(v.status.replace(/_/g, '-'))}">${esc(TC.SHEET_LABEL[v.status] || v.status)}</span>
+          <span class="inc-st inc-st-${esc(v.transferState.replace(/_/g, '-'))}">${esc(TC.TRANSFER_LABEL[v.transferState])}</span>
+        </div>
       </div>
 
       <div class="inc-cols">
@@ -14202,15 +14453,79 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
         </div>
 
         <aside class="inc-side">
-          ${canWrite() && v.sheet.status === 'submitted' ? `<section class="bs-panel inc-sec">
-            <div class="bs-sec-h"><span class="bs-kicker">Send it back</span></div>
-            <form method="post" action="/payroll/timesheets/${emp.id}/return" class="tcm-form">
-              <input type="hidden" name="period" value="${period.start}">
-              <label class="tcm-f wide"><span>Reason <i>required</i></span>
-                <input name="reason" required maxlength="300" placeholder="What needs correcting"></label>
-              <button class="bs-btn-sm" type="submit">Return to ${esc(firstName(emp.name))}</button>
-            </form>
-            <p class="inc-hint">Approving and locking come in the next phase.</p>
+          ${canWrite() ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">What you can do</span></div>
+
+            ${v.blockers.length && v.sheet.status === 'submitted' ? `<div class="ts-blockers">
+              <b>Cannot approve yet</b>
+              <ul>${v.blockers.slice(0, 6).map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+            </div>` : ''}
+
+            ${v.sheet.status === 'submitted' && !v.blockers.length ? `
+              <form method="post" action="/payroll/timesheets/${emp.id}/approve" class="tcm-form tcm-act">
+                <input type="hidden" name="period" value="${period.start}">
+                <label class="tcm-f wide"><span>Note <i>optional</i></span><input name="note" maxlength="300"></label>
+                <button class="bs-btn" type="submit">Approve ${esc(TC.hm(v.totals.payable))}</button>
+              </form>` : ''}
+
+            ${v.sheet.status === 'submitted' && v.blockers.length ? `
+              <details class="ts-override"><summary>Approve anyway</summary>
+                <form method="post" action="/payroll/timesheets/${emp.id}/approve" class="tcm-form">
+                  <input type="hidden" name="period" value="${period.start}">
+                  <label class="tcm-f wide"><span>Why, despite the above <i>required</i></span>
+                    <input name="override_reason" required maxlength="300"></label>
+                  <button class="bs-btn-sm" type="submit">Approve with a reason</button>
+                </form>
+                <p class="inc-hint">Recorded on the approval, and visible forever.</p>
+              </details>` : ''}
+
+            ${v.sheet.status === 'submitted' ? `
+              <form method="post" action="/payroll/timesheets/${emp.id}/return" class="tcm-form tcm-act">
+                <input type="hidden" name="period" value="${period.start}">
+                <label class="tcm-f wide"><span>Send back — reason <i>required</i></span>
+                  <input name="reason" required maxlength="300" placeholder="What needs correcting"></label>
+                <button class="bs-btn-sm" type="submit">Return to ${esc(firstName(emp.name))}</button>
+              </form>` : ''}
+
+            ${v.sheet.status === 'approved' ? `
+              <form method="post" action="/payroll/timesheets/${emp.id}/lock" class="tcm-act">
+                <input type="hidden" name="period" value="${period.start}">
+                <button class="bs-btn-sm" type="submit">Lock it</button></form>` : ''}
+
+            ${['ready', 'needs_recalculation', 'changed_after_transfer'].includes(v.transferState) && v.approval ? `
+              <form method="post" action="/payroll/timesheets/${emp.id}/transfer" class="tcm-act">
+                <input type="hidden" name="period" value="${period.start}">
+                <button class="bs-btn" type="submit">${v.transfer ? 'Re-transfer' : 'Transfer'} approved hours</button></form>
+              ${v.transferState !== 'ready' ? '<p class="inc-hint">The hours moved since they were sent — transferring again replaces the figure payroll holds, and keeps the old one on the record.</p>' : ''}` : ''}
+
+            ${['approved', 'locked'].includes(v.sheet.status) ? `
+              <form method="post" action="/payroll/timesheets/${emp.id}/reopen" class="tcm-form tcm-act">
+                <input type="hidden" name="period" value="${period.start}">
+                <label class="tcm-f wide"><span>Reopen — reason <i>required</i></span>
+                  <input name="reason" required maxlength="300" placeholder="Why this needs changing"></label>
+                <button class="bs-btn-sm" type="submit">Reopen</button>
+              </form>
+              ${v.transfer ? '<p class="inc-hint">Reopening marks this person\'s payroll hours as needing recalculation.</p>' : ''}` : ''}
+          </section>` : ''}
+
+          ${approvals.length ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Approvals</span></div>
+            ${approvals.map((a) => `<div class="ts-rec${a.state === 'superseded' ? ' old' : ''}">
+              <b>${esc(TC.hm(a.payable_min))}</b> · reg ${esc(TC.hm(a.regular_min))} / ot ${esc(TC.hm(a.overtime_min))}
+              <i>${esc(a.approved_by)} · ${esc(TC.stamp(a.approved_at))}${a.state === 'superseded' ? ' · superseded' : ''}</i>
+              ${a.override_reason ? `<i class="ts-rec-o">override: ${esc(a.override_reason)}</i>` : ''}
+              ${a.note ? `<i>“${esc(a.note)}”</i>` : ''}
+            </div>`).join('')}
+          </section>` : ''}
+
+          ${transfers.length ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Sent to payroll</span></div>
+            ${transfers.map((t) => `<div class="ts-rec${t.state === 'superseded' ? ' old' : ''}">
+              <b>${esc(TC.hm(t.payable_min))}</b> · reg ${esc(TC.hm(t.regular_min))} / ot ${esc(TC.hm(t.overtime_min))}
+              ${t.ot_enabled ? '· overtime on' : '· overtime off'}
+              <i>${esc(t.transferred_by)} · ${esc(TC.stamp(t.transferred_at))}${t.state === 'superseded' ? ' · superseded' : ''}</i>
+              ${t.est_gross_cents ? `<i>estimate ${money(t.est_gross_cents)} — payroll computes its own</i>` : ''}
+            </div>`).join('')}
           </section>` : ''}
 
           <section class="bs-panel inc-sec">
@@ -14239,6 +14554,154 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
         </aside>
       </div>
     </div>`));
+});
+
+// --- approval, locking, reopening -----------------------------------------
+/** Gather everything an approval decision needs, once. */
+function tsDecision(emp, period) {
+  const v = tsView(emp, period);
+  const approval = v.sheet.id ? TC.q.currentApproval.get(v.sheet.id) : null;
+  const transfer = v.sheet.id ? TC.q.currentTransfer.get(v.sheet.id) : null;
+  return { ...v, approval, transfer,
+    blockers: TC.approvalBlockers(v.sheet, v.issues),
+    transferState: TC.transferStateOf(v.sheet, approval, transfer, v.entries) };
+}
+
+/** Record an approval. Any earlier one is superseded, never deleted. */
+function tsApprove(emp, period, actor, note, override) {
+  const d = tsDecision(emp, period);
+  const sheet = TC.sheetFor(emp.id, period, { create: true });
+  const blockers = TC.approvalBlockers(sheet, d.issues);
+  // Structural objections cannot be overridden — an unfinished punch is not a
+  // judgement call. Only an override reason lets the rest through.
+  if (blockers.length && !override) return { ok: false, blockers };
+  db.transaction(() => {
+    TC.q.supersedeApprovals.run({ timesheet_id: sheet.id, by: actor, reason: 'a newer approval replaced it' });
+    const info = TC.q.addApproval.run({
+      timesheet_id: sheet.id, employee_id: emp.id, period_start: period.start, period_end: period.end,
+      approved_by: actor, note: note || null,
+      regular_min: d.totals.regular, overtime_min: d.totals.overtime, payable_min: d.totals.payable,
+      paid_break_min: d.totals.paid, unpaid_break_min: d.totals.unpaid,
+      ot_enabled: d.otRule.enabled ? 1 : 0, ot_exempt: emp.ot_exempt ? 1 : 0,
+      fingerprint: TC.fingerprintOf(d.entries), override_reason: override || null,
+    });
+    TC.q.setSheetApproved.run({ id: sheet.id, by: actor });
+    TC.q.setTransferState.run({ id: sheet.id, state: 'ready' });
+    TC.logEvent('timesheet', sheet.id, override ? 'approved_with_override' : 'approved', actor,
+      { before: 'submitted', after: `approved · ${TC.hm(d.totals.payable)}`, reason: override || note || null });
+    TC.logEvent('approval', info.lastInsertRowid, 'created', actor, { after: `${TC.hm(d.totals.payable)}` });
+  })();
+  return { ok: true, totals: d.totals };
+}
+
+app.post('/payroll/timesheets/:empId/approve', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p></div>'));
+  const emp = q.employee.get(Number(req.params.empId));
+  if (!emp) return res.status(404).end();
+  const period = recentPeriods(12).find((p) => p.start === req.body.period);
+  if (!period) return res.redirect('/payroll/timesheets');
+  const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
+  const override = String(req.body.override_reason || '').trim().slice(0, 300) || null;
+  const r = tsApprove(emp, period, tcActor(req), String(req.body.note || '').trim().slice(0, 300) || null, override);
+  if (!r.ok) return back(`Not approved — ${r.blockers[0]}`);
+  back(`Approved · ${TC.hm(r.totals.payable)}.`);
+});
+
+app.post('/payroll/timesheets/approve-all', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
+  const period = recentPeriods(12).find((p) => p.start === req.body.period);
+  if (!period) return res.redirect('/payroll/timesheets');
+  const actor = tcActor(req);
+  let done = 0; const skipped = [];
+  // Each sheet gets its own approval record and its own audit line — a bulk
+  // action is a convenience, not a single unauditable event.
+  for (const emp of q.allEmployees.all()) {
+    const d = tsDecision(emp, period);
+    if (!d.sheet.id || d.sheet.status !== 'submitted') continue;
+    if (d.blockers.length) { skipped.push(`${emp.name}: ${d.blockers[0]}`); continue; }
+    const r = tsApprove(emp, period, actor, 'approved in bulk', null);
+    if (r.ok) done++; else skipped.push(`${emp.name}: ${r.blockers[0]}`);
+  }
+  res.redirect(`/payroll/timesheets?p=${period.start}&msg=`
+    + encodeURIComponent(`${done} approved${skipped.length ? ` · ${skipped.length} skipped (${skipped[0]})` : ''}.`));
+});
+
+app.post('/payroll/timesheets/:empId/lock', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
+  const emp = q.employee.get(Number(req.params.empId));
+  const period = recentPeriods(12).find((p) => p.start === req.body.period);
+  if (!emp || !period) return res.redirect('/payroll/timesheets');
+  const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
+  const sheet = TC.sheetFor(emp.id, period, { create: true });
+  if (sheet.status !== 'approved') return back('Only an approved timesheet can be locked.');
+  const actor = tcActor(req);
+  db.transaction(() => {
+    TC.q.setSheetLocked.run({ id: sheet.id, by: actor });
+    TC.logEvent('timesheet', sheet.id, 'locked', actor, { before: 'approved', after: 'locked' });
+  })();
+  back('Locked.');
+});
+
+app.post('/payroll/timesheets/:empId/reopen', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
+  const emp = q.employee.get(Number(req.params.empId));
+  const period = recentPeriods(12).find((p) => p.start === req.body.period);
+  if (!emp || !period) return res.redirect('/payroll/timesheets');
+  const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  if (!reason) return back('A reason is required to reopen.');
+  const sheet = TC.sheetFor(emp.id, period, { create: true });
+  if (!['approved', 'locked'].includes(sheet.status)) return back('That timesheet is not approved.');
+  const actor = tcActor(req);
+  const transfer = TC.q.currentTransfer.get(sheet.id);
+  db.transaction(() => {
+    // The approval stands as history; it just no longer speaks for now.
+    TC.q.supersedeApprovals.run({ timesheet_id: sheet.id, by: actor, reason });
+    // Back to submitted, not to open: the employee already signed these hours,
+    // and asking them to sign again for a manager's correction is noise.
+    TC.q.reopenSheet.run({ id: sheet.id, status: 'submitted', by: actor, reason });
+    // Hours already sent to payroll are now out of date, and payroll has to be
+    // told rather than quietly left holding the old figure.
+    TC.q.setTransferState.run({ id: sheet.id, state: transfer ? 'needs_recalculation' : 'not_ready' });
+    TC.logEvent('timesheet', sheet.id, 'reopened', actor,
+      { before: sheet.status, after: 'submitted', reason });
+    if (transfer) TC.logEvent('timesheet', sheet.id, 'payroll_marked_outdated', actor, { reason });
+  })();
+  back(transfer ? 'Reopened — payroll for this person needs recalculating.' : 'Reopened.');
+});
+
+// --- payroll transfer ------------------------------------------------------
+app.post('/payroll/timesheets/:empId/transfer', (req, res) => {
+  if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
+  const emp = q.employee.get(Number(req.params.empId));
+  const period = recentPeriods(12).find((p) => p.start === req.body.period);
+  if (!emp || !period) return res.redirect('/payroll/timesheets');
+  const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
+  const d = tsDecision(emp, period);
+  if (!d.approval) return back('Approve the timesheet first.');
+  const actor = tcActor(req);
+  const rate = Number(emp.hourly_rate_cents) || 0;
+  const otRule = OT.rule();
+  // An estimate for the record, not a payroll figure: payroll still computes
+  // pay its own way from the hours you enter on a shift.
+  const est = Math.round((d.approval.regular_min / 60) * rate
+    + (d.approval.ot_enabled && !emp.ot_exempt ? (d.approval.overtime_min / 60) * rate * otRule.multiplier : (d.approval.overtime_min / 60) * rate));
+  db.transaction(() => {
+    TC.q.supersedeTransfers.run({ timesheet_id: d.sheet.id, by: actor });
+    const info = TC.q.addTransfer.run({
+      approval_id: d.approval.id, timesheet_id: d.sheet.id, employee_id: emp.id,
+      period_start: period.start, period_end: period.end,
+      regular_min: d.approval.regular_min, overtime_min: d.approval.overtime_min,
+      payable_min: d.approval.payable_min, ot_enabled: d.approval.ot_enabled,
+      wage_rate_cents: rate, est_gross_cents: est,
+      fingerprint: TC.fingerprintOf(d.entries), transferred_by: actor,
+    });
+    TC.q.markTransferred.run({ id: d.sheet.id, by: actor });
+    TC.logEvent('timesheet', d.sheet.id, 'transferred_to_payroll', actor,
+      { after: `${TC.hm(d.approval.payable_min)} · reg ${TC.hm(d.approval.regular_min)} / ot ${TC.hm(d.approval.overtime_min)}` });
+    TC.logEvent('transfer', info.lastInsertRowid, 'created', actor);
+  })();
+  back(`Transferred ${TC.hm(d.approval.payable_min)} to payroll.`);
 });
 
 app.post('/payroll/timesheets/:empId/return', (req, res) => {
