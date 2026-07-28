@@ -366,7 +366,12 @@ test('a manager edit still cannot mint a duplicate shift', () => {
 test('the manager list and detail render', async () => {
   const list = await text('/timeclock');
   assert.match(list, /Time clock/);
-  assert.match(list, /Clocked hours/, 'the strip is there');
+  // The Today tab answers "what is happening now". A period's clocked-hours
+  // total is a Timesheets question and moved there — this strip counts people,
+  // not hours.
+  assert.match(list, /Working/, 'the strip is there');
+  assert.match(list, /On break/);
+  assert.match(list, /Missing a punch/, 'and names the thing that actually needs somebody');
   const e = db.prepare("SELECT * FROM time_entries WHERE business_date = '2026-07-20'").get();
   const detail = await text(`/timeclock/${e.id}`);
   assert.match(detail, /The punches/, 'the record renders');

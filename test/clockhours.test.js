@@ -526,6 +526,59 @@ test('a range typed backwards is read the way it was meant', async () => {
 });
 
 // ===========================================================================
+// The Today tab.
+// ===========================================================================
+
+test('Today shows today, and says so when it is showing something else', async () => {
+  const T = require('../src/timeclock');
+  const today = T.businessDateOf(T.nowUtc(), T.settings().cutoffHour);
+  const html = await text('/timeclock');
+  assert.match(html, new RegExp(`name="from" value="${today}"`), 'it opens on today, not a trailing fortnight');
+  assert.doesNotMatch(html, /Back to today/, 'and does not offer a way back it does not need');
+
+  const wider = await text('/timeclock?from=2026-03-01&to=2026-03-31');
+  assert.match(wider, /Showing 2026-03-01 to 2026-03-31/, 'a wider range says what it is showing');
+  assert.match(wider, /Back to today/, 'with the way back');
+});
+
+test('a punch nobody closed is counted and listed however old it is', async () => {
+  // Scoped to the visible range, this count read zero for the one case it
+  // exists to catch: somebody who forgot to clock out on a day that is no
+  // longer on screen.
+  const old = await punch(E.long, '2026-02-10', '09:00', null, 'dinner');
+  db.prepare("UPDATE time_entries SET status = 'complete' WHERE id = ?").run(old.id);
+
+  const html = await text('/timeclock');            // today, which 2026-02-10 is not
+  assert.match(html, /Never clocked out/, 'the panel is there');
+  assert.match(html, new RegExp(`/timeclock/${old.id}"`), 'and the punch is in it');
+  const strip = (html.match(/Missing a punch<\/span><span class="bs-stat[^>]*>(\d+)/) || [])[1];
+  assert.ok(Number(strip) >= 1, 'and the count sees it too');
+});
+
+test('payable-so-far deducts a running unpaid break as it runs', () => {
+  const T = require('../src/timeclock');
+  const e = db.prepare('SELECT * FROM time_entries WHERE clock_out_at IS NOT NULL LIMIT 1').get();
+  assert.strictEqual(T.payableSoFar(e), e.payable_minutes, 'a finished punch is just its payable minutes');
+
+  // The naive version — elapsed minus breakTotals().unpaid — climbs through an
+  // unpaid break, because breakTotals counts an OPEN break as zero on purpose,
+  // and then drops the moment they clock back on. A figure that goes backwards
+  // is one nobody trusts again.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'timeclock.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function payableSoFar'), src.indexOf('function payableSoFar') + 600);
+  assert.match(fn, /openBreak/, 'it looks at the break that is running');
+  assert.match(fn, /!open\.paid/, 'and only deducts it when it is unpaid');
+});
+
+test('the live panel obeys the same filter as the ledger', async () => {
+  const all = await text('/timeclock');
+  const onlyOne = await text('/timeclock?emp=999999');   // nobody
+  assert.match(onlyOne, /Nobody on the clock matches that filter|Nobody is clocked in right now/,
+    'narrowing to one person does not leave the whole floor showing above the results');
+  assert.ok(all.length > 0);
+});
+
+// ===========================================================================
 // The employee-by-day grid.
 // ===========================================================================
 

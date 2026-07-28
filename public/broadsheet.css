@@ -4254,3 +4254,52 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .tsg-emp b { font-size: 12px; }
 }
 .tsg-pop a { display: inline-block; margin-top: 6px; color: var(--accent); font-size: 11.5px; }
+
+/* --- who is on right now --------------------------------------------------
+   A ledger rather than a set of cards: the question is "is anything wrong on
+   the floor", and that is answered by scanning a column, not by reading nine
+   boxes. Reflows to labelled rows on a phone the way every other dense table
+   here does — the labels are constants, so ::before can carry them. */
+.tcl { display: block; }
+.tcl-r {
+  display: grid; align-items: baseline;
+  grid-template-columns: minmax(150px, 1.4fr) 80px 74px 84px 110px 84px 104px minmax(90px, 1fr) 64px;
+  gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--rule-light);
+  font-size: 13px;
+}
+.tcl-r.tcl-h {
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); border-bottom: 1px solid var(--rule); padding-bottom: 6px;
+}
+.tcl-r.warn { background: var(--row-hover); }
+.tcl-who a { color: var(--ink); text-decoration: none; }
+.tcl-who a:hover { text-decoration: underline; }
+.tcl-who b { font-weight: 600; }
+.tcl-who i { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+.tcl-in, .tcl-el, .tcl-pay { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.tcl-pay { font-weight: 600; }
+.tcl-brk { font-size: 12px; color: var(--muted); }
+.tcl-brk i { display: block; font-style: normal; font-family: var(--mono); color: var(--warning); }
+.tcl-do { text-align: right; }
+.tcl-range { font-size: 12px; color: var(--muted); margin: 0 0 14px; }
+
+@media (max-width: 900px) {
+  .tcl-r { grid-template-columns: minmax(130px, 1.4fr) 70px 78px 78px 92px 60px; }
+  .tcl-r > .tcl-brk, .tcl-r > .tcl-iss, .tcl-r > .tcl-do { display: none; }
+  .tcl-r.tcl-h > .tcl-brk, .tcl-r.tcl-h > .tcl-iss, .tcl-r.tcl-h > .tcl-do { display: none; }
+}
+@media (max-width: 760px) {
+  .tcl-r.tcl-h { display: none; }
+  .tcl-r { grid-template-columns: 1fr 1fr; gap: 4px 12px; padding: 12px 2px; }
+  .tcl-r > .tcl-who { grid-column: 1 / -1; }
+  .tcl-r > span:not(.tcl-who)::before {
+    content: attr(data-l); display: block;
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .tcl-r > .tcl-svc::before { content: 'Service'; }
+  .tcl-r > .tcl-in::before { content: 'In'; }
+  .tcl-r > .tcl-st::before { content: 'Status'; }
+  .tcl-r > .tcl-el::before { content: 'Elapsed'; }
+  .tcl-r > .tcl-pay::before { content: 'Payable so far'; }
+}

@@ -14060,9 +14060,17 @@ app.get('/timeclock', (req, res) => {
     return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   }
   const cfg = TC.settings();
+  // The cutoff-hour business date, never the calendar one, or a bartender who
+  // clocked in at 6pm falls off this page the moment the clock passes midnight.
   const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
-  const from = MX.isDate(req.query.from) ? req.query.from : addDays(today, -13);
+  // TODAY, not a trailing fortnight. The page used to mix two timescales: the
+  // live panel and "needs a look" described this minute while the ledger and its
+  // stats described two weeks, so the numbers at the top and the rows underneath
+  // were answering different questions. A wider range is still one click away in
+  // the filter, and the whole period lives on the Timesheets tab.
+  const from = MX.isDate(req.query.from) ? req.query.from : today;
   const to = MX.isDate(req.query.to) ? req.query.to : today;
+  const isToday = from === today && to === today;
   const fEmp = String(req.query.emp || '');
   const fSvc = DAYPARTS.includes(req.query.svc) ? req.query.svc : '';
   const fPos = String(req.query.pos || '');
@@ -14083,9 +14091,13 @@ app.get('/timeclock', (req, res) => {
   const missingPunch = (e) => !e.clock_out_at && e.status !== 'active' && e.status !== 'on_break';
   const matchStatus = (e) => (fStatus === 'missing_punch' ? missingPunch(e) : e.status === fStatus);
 
-  const rows = all.filter((e) => (!fEmp || String(e.employee_id) === fEmp)
+  const keep = (e) => (!fEmp || String(e.employee_id) === fEmp)
     && (!fSvc || e.daypart === fSvc) && (!fPos || e.position === fPos)
-    && (!fStatus || matchStatus(e)));
+    && (!fStatus || matchStatus(e));
+  const rows = all.filter(keep);
+  // The live panel runs through the SAME filter as the ledger. It did not, so
+  // narrowing to one person still showed the whole floor above the results.
+  const live = onNow.filter(keep);
 
   const staff = q.allEmployees.all();
   const usedPos = [...new Set(all.map((e) => e.position).filter(Boolean))];
@@ -14098,23 +14110,60 @@ app.get('/timeclock', (req, res) => {
   const statCell = (label, value, sub, tone) =>
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat${tone ? ' ' + tone : ''}">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
+  const serverNow = Date.now();
   const totalMin = rows.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+  const working = live.filter((e) => e.status !== 'on_break').length;
+  const onBreak = live.filter((e) => e.status === 'on_break').length;
+  // Punches that ended without a clock-out — counted across ALL time, not just
+  // the range on screen. Somebody who forgot to clock out on Friday is still a
+  // problem on Monday, and scoping this to today hid the one case it exists to
+  // catch. The ledger below still shows only the range; this is a standing count.
+  const openEnded = TC.openEnded();
+  const missing = openEnded.length;
+  const attention = stale.length + pending.length + missing;
   const strip = `<section class="bs-panel bs-strip">
-    ${statCell('On the clock', String(onNow.length), onNow.filter((e) => e.status === 'on_break').length
-      ? `${onNow.filter((e) => e.status === 'on_break').length} on break` : 'right now', onNow.length ? '' : 'ok')}
-    ${statCell('Needs a look', String(stale.length + pending.length),
-      stale.length ? `${stale.length} still open past ${staleHours()}h` : pending.length ? `${pending.length} correction${pending.length === 1 ? '' : 's'}` : 'nothing waiting',
-      (stale.length + pending.length) ? 'warn' : 'ok')}
-    ${statCell('Entries', String(rows.length), `${esc(from)} → ${esc(to)}`)}
-    ${statCell('Clocked hours', TC.hm(totalMin), 'what the shifts are paying on', '')}
+    ${statCell('Working', String(working), working ? 'clocked in right now' : 'nobody on', working ? '' : 'ok')}
+    ${statCell('On break', String(onBreak), onBreak ? 'back shortly' : 'none', onBreak ? 'warn' : 'ok')}
+    ${statCell('Missing a punch', String(missing), missing ? 'never clocked out' : 'none', missing ? 'warn' : 'ok')}
+    ${statCell('Needs a look', String(attention),
+      stale.length ? `${stale.length} still open past ${staleHours()}h`
+        : pending.length ? `${pending.length} correction${pending.length === 1 ? '' : 's'}`
+        : missing ? 'a punch to close' : 'nothing waiting',
+      attention ? 'warn' : 'ok')}
   </section>`;
 
-  const liveRow = (e) => `<a class="tcm-live-r" href="/timeclock/${e.id}">
-    <span class="tcm-dot ${e.status === 'on_break' ? 'brk' : 'on'}"></span>
-    <b>${esc(tcEmpName(e.employee_id))}</b>
-    <span>${esc(tcPosName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''} · in ${esc(TC.clockFace(e.clock_in_at))}</span>
-    <i>${e.status === 'on_break' ? 'on break' : TC.hm(TC.elapsedMinutes(e))}${looksStale(e) ? ' · check' : ''}</i>
-  </a>`;
+  // What is wrong with a punch RIGHT NOW, derived from its own state. Never from
+  // the status enum: 'missing_punch' is declared there and written by nothing.
+  const issueOf = (e) => {
+    const br = TC.q.openBreak.get(e.id);
+    if (looksStale(e)) return { tone: 'bad', text: `open past ${staleHours()}h` };
+    if (br && TC.minutesBetween(br.start_at, TC.nowUtc()) > 90) return { tone: 'warn', text: 'break over 90m' };
+    if (e.status === 'correction_pending') return { tone: 'warn', text: 'fix asked' };
+    if (!e.position) return { tone: 'warn', text: 'no position' };
+    return null;
+  };
+
+  const liveRow = (e) => {
+    const br = e.status === 'on_break' ? TC.q.openBreak.get(e.id) : null;
+    const issue = issueOf(e);
+    const payable = TC.payableSoFar(e);
+    return `<div class="tcl-r${issue ? ' warn' : ''}">
+      <span class="tcl-who"><span class="tcm-dot ${e.status === 'on_break' ? 'brk' : 'on'}"></span>
+        <a href="/timeclock/${e.id}"><b>${esc(tcEmpName(e.employee_id))}</b></a>
+        <i>${esc(tcPosName(e.position))}</i></span>
+      <span class="tcl-svc">${e.daypart ? esc(dp(e.daypart)) : '—'}</span>
+      <span class="tcl-in">${esc(TC.clockFace(e.clock_in_at))}</span>
+      <span class="tcl-st">${e.status === 'on_break' ? 'On break' : 'Working'}</span>
+      <span class="tcl-brk">${br
+        ? `since ${esc(TC.clockFace(br.start_at))}<i data-since="${TC.toDate(br.start_at).getTime()}" data-now="${serverNow}"></i>`
+        : '<span class="bs-em">—</span>'}</span>
+      <span class="tcl-el" data-since="${TC.toDate(e.clock_in_at).getTime()}" data-now="${serverNow}">${TC.hm(TC.elapsedMinutes(e))}</span>
+      <span class="tcl-pay">${TC.hm(payable)}</span>
+      <span class="tcl-iss">${issue ? `<i class="tcm-tag ${issue.tone === 'bad' ? 'warn' : 'ed'}">${esc(issue.text)}</i>` : ''}</span>
+      <span class="tcl-do">${canWrite()
+        ? `<a class="bs-btn-sm" href="/timeclock/${e.id}">Fix</a>` : `<a class="bs-btn-sm" href="/timeclock/${e.id}">Open</a>`}</span>
+    </div>`;
+  };
 
   const row = (e) => {
     const bt = TC.breaksOn(e);
@@ -14147,16 +14196,42 @@ app.get('/timeclock', (req, res) => {
         on the server, including staff trying to clock in.</p></div>` : ''}
       ${strip}
 
-      ${onNow.length ? `<section class="bs-panel tcm-live">
+      <section class="bs-panel tcm-live">
         <div class="bs-sec-h"><span class="bs-kicker">On the clock</span></div>
-        ${onNow.map(liveRow).join('')}
+        ${live.length ? `<div class="tcl">
+          <div class="tcl-r tcl-h">
+            <span class="tcl-who">Who</span><span class="tcl-svc">Service</span><span class="tcl-in">In</span>
+            <span class="tcl-st">Status</span><span class="tcl-brk">Break</span><span class="tcl-el">Elapsed</span>
+            <span class="tcl-pay">Payable so far</span><span class="tcl-iss">Issue</span><span class="tcl-do"></span>
+          </div>
+          ${live.map(liveRow).join('')}
+        </div>` : `<p class="inc-hint">${onNow.length
+          ? 'Nobody on the clock matches that filter.' : 'Nobody is clocked in right now.'}</p>`}
+      </section>
+
+      ${openEnded.length ? `<section class="bs-panel tcm-pending">
+        <div class="bs-sec-h"><span class="bs-kicker">Never clocked out</span>
+          <span class="bs-sec-note">${openEnded.length} to close</span></div>
+        <!-- Shown regardless of the range on screen. These sit outside today by
+             definition — that is what makes them a problem — so scoping them to
+             the visible range would hide every one of them. -->
+        ${openEnded.slice(0, 10).map((e) => `<a class="tcm-live-r" href="/timeclock/${e.id}">
+          <span class="tcm-dot warn"></span><b>${esc(tcEmpName(e.employee_id))}</b>
+          <span>${esc(TC.dayLabel(e.business_date))} · in ${esc(TC.clockFace(e.clock_in_at))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
+          <i>no clock-out</i></a>`).join('')}
+        ${openEnded.length > 10 ? `<p class="inc-hint">${openEnded.length - 10} more.</p>` : ''}
       </section>` : ''}
 
       ${pending.length ? `<section class="bs-panel tcm-pending">
-        <div class="bs-sec-h"><span class="bs-kicker">Correction requests</span></div>
-        ${pending.map((c) => `<a class="tcm-live-r" href="/timeclock/${c.time_entry_id}">
+        <div class="bs-sec-h"><span class="bs-kicker">Correction requests</span>
+          <span class="bs-sec-note">${pending.length} waiting</span></div>
+        <!-- Newest ten. Nothing expires a request and they are decided one at a
+             time, so an unbounded list grows forever; the count above is the
+             real total, read from the whole set rather than this slice. -->
+        ${pending.slice(0, 10).map((c) => `<a class="tcm-live-r" href="/timeclock/${c.time_entry_id}">
           <span class="tcm-dot warn"></span><b>${esc(tcEmpName(c.employee_id))}</b>
           <span>${esc(c.kind.replace(/_/g, ' '))} — ${esc(String(c.reason).slice(0, 80))}</span><i>open</i></a>`).join('')}
+        ${pending.length > 10 ? `<p class="inc-hint">${pending.length - 10} more waiting.</p>` : ''}
       </section>` : ''}
 
       <form class="tcm-filters" method="get" action="/timeclock">
@@ -14187,10 +14262,36 @@ app.get('/timeclock', (req, res) => {
              anybody without the payroll area. The tab strip above carries that
              link now, and filters it by what the account can actually open. -->
       </form>
+      ${isToday ? '' : `<p class="tcl-range">Showing ${esc(span.from)} to ${esc(span.to)}.
+        <a class="bs-act" href="/timeclock">Back to today</a></p>`}
 
       ${rows.length ? `<div class="bs-lrows tcm-rows">${rows.map(row).join('')}</div>`
         : '<div class="bs-blank"><b>No time entries</b><span>Nothing in this range yet.</span></div>'}
-    </div>`));
+    </div>
+    <script>
+      // The elapsed and break figures tick, so a manager watching the floor sees
+      // time move rather than a number frozen at whenever the page loaded.
+      // Anchored to the SERVER's clock — a back-office laptop with the wrong
+      // time still reads true, which matters because these are payroll figures.
+      (function () {
+        var el0 = document.querySelector('[data-now]');
+        if (!el0) return;
+        var skew = Date.now() - Number(el0.getAttribute('data-now'));
+        function hm(ms) {
+          var m = Math.max(0, Math.floor(ms / 60000));
+          var h = Math.floor(m / 60);
+          return h ? h + 'h ' + (m % 60) + 'm' : m + 'm';
+        }
+        function tick() {
+          var now = Date.now() - skew;
+          document.querySelectorAll('[data-since]').forEach(function (el) {
+            el.textContent = hm(now - Number(el.getAttribute('data-since')));
+          });
+        }
+        tick();
+        setInterval(tick, 30000);   // minutes, so a second-by-second redraw is waste
+      })();
+    </script>`));
 });
 
 // --- reports ---------------------------------------------------------------

@@ -474,6 +474,28 @@ function recompute(entry) {
 /** Live minutes for an entry still running, so the page can show elapsed time. */
 const elapsedMinutes = (entry) => minutesBetween(entry.clock_in_at, nowUtc());
 
+/**
+ * What a punch is worth so far — payable, not merely elapsed.
+ *
+ * The obvious version (elapsed minus breakTotals().unpaid) is wrong while a
+ * break is running, and wrong in the direction that flatters: breakTotals counts
+ * an OPEN break as zero on purpose, so somebody forty minutes into their lunch
+ * has a figure that has been climbing through forty minutes of not working, and
+ * that will drop by forty the instant they clock back on. A number that goes
+ * backwards is a number nobody trusts again.
+ *
+ * So the running break is deducted as it runs, and only when it is unpaid —
+ * which the app knows, because `paid` is written when the break starts.
+ */
+function payableSoFar(entry) {
+  if (!entry) return null;
+  if (entry.clock_out_at) return entry.payable_minutes;
+  const closed = breakTotals(entry.id);            // open breaks count as 0 here
+  const open = q.openBreak.get(entry.id);
+  const running = open && !open.paid ? minutesBetween(open.start_at, nowUtc()) : 0;
+  return Math.max(0, elapsedMinutes(entry) - closed.unpaid - running);
+}
+
 // --- the shift's hours -----------------------------------------------------
 // Clocked minutes ARE the shift's hours. syncShiftHours is the only thing that
 // writes them, and every path that can change a punch calls it — not just
@@ -553,6 +575,19 @@ function punchesOnShift(shiftId) {
   for (const r of punchesOnShiftQ.all(shiftId)) map.set(r.employee_id, r);
   return map;
 }
+
+/**
+ * Punches that ended without a clock-out, wherever they are in time.
+ *
+ * Deliberately NOT bounded by whatever range a page is showing: somebody who
+ * forgot to clock out on Friday is still a problem on Monday, and scoping this
+ * to "today" hides the single case it exists to surface. The status enum has a
+ * 'missing_punch' value that nothing writes, so the condition is derived.
+ */
+const openEndedQ = db.prepare(`SELECT * FROM time_entries
+   WHERE clock_out_at IS NULL AND status NOT IN ('active', 'on_break')
+   ORDER BY business_date DESC, id DESC`);
+const openEnded = () => openEndedQ.all();
 
 /** Has this person any punch at all on this shift? Guards the destructive routes. */
 const hasPunch = (shiftId, employeeId) => countPunches.get(shiftId, employeeId).n > 0;
@@ -1201,11 +1236,12 @@ module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
   fingerprintOf, approvalBlockers, approvalStale, transferStateOf, TRANSFER_LABEL,
   q, settings, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
-  clockFace, stamp, dayLabel, hm, toHours, breakTotals, breaksOn, recompute, elapsedMinutes, logEvent,
+  clockFace, stamp, dayLabel, hm, toHours, breakTotals, breaksOn, recompute, elapsedMinutes,
+  payableSoFar, logEvent,
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
-  syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn,
+  syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan,
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
   sheetPeople: (start) => sheetPeopleQ.all(start).map((r) => r.employee_id),
