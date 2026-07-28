@@ -303,6 +303,38 @@ test('somebody who clocked in cannot be quietly taken off the shift', async () =
   assert.ok(workOf(sh.id, E.broken), 'and the row is still there');
 });
 
+test('the refusal points at a door that actually opens', async () => {
+  // The first version of the guard told the manager to "delete the punch first"
+  // when no route existed to delete one. Somebody who clocked into the wrong
+  // service could not be taken off it at all — a guard with no way through is
+  // not a guard, it is a wall.
+  const emp = E.corrected;
+  const e = await punch(emp, '2026-05-06', '09:00', '13:00');
+  const sh = shiftOn('2026-05-06', 'dinner');
+  assert.ok(workOf(sh.id, emp), 'they are on the shift');
+
+  const refused = await post(`/shifts/${sh.id}/remove`, { employee_id: String(emp) });
+  const msg = decodeURIComponent(refused.headers.get('location') || '');
+  assert.match(msg, /clocked time/, 'removal is refused');
+  assert.match(msg, new RegExp(`/timeclock/${e.id}`), 'and names the punch to open');
+
+  // A reason is required — a punch is a payroll record, not a stray row.
+  await post(`/timeclock/${e.id}/delete`, { reason: '' });
+  assert.ok(db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(e.id), 'no reason, no deletion');
+
+  await post(`/timeclock/${e.id}/delete`, { reason: 'clocked in on the wrong service' });
+  assert.ok(!db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(e.id), 'the punch is gone');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 0, 'and its hours came off the shift with it');
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='entry' AND entity_id=? AND action='deleted'").get(e.id);
+  assert.ok(ev, 'the deletion is on the record even though the punch is not');
+  assert.match(ev.before_val || '', /09:00|13:00|2026-05-06/, 'with what it destroyed');
+
+  // And now the original action works.
+  const ok = await post(`/shifts/${sh.id}/remove`, { employee_id: String(emp) });
+  assert.strictEqual(ok.status, 302);
+  assert.ok(!workOf(sh.id, emp), 'they come off the shift');
+});
+
 test('a shift with punches on it cannot be deleted out from under them', async () => {
   const sh = shiftOn('2026-03-05', 'dinner');
   const res = await post(`/shifts/${sh.id}/delete`, {});

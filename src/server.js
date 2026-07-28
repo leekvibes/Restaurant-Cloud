@@ -2233,8 +2233,14 @@ app.post('/shifts/:id/remove', (req, res) => {
   // The punch is the record; move or delete that instead.
   if (TC.hasPunch(shiftId, empId)) {
     const who = (q.employee.get(empId) || {}).name || 'That person';
+    // Point at the actual punch, not at "the time clock" in general. The first
+    // version of this message sent people looking for a delete action that did
+    // not exist yet, which made removal impossible rather than merely guarded.
+    const one = db.prepare('SELECT id FROM time_entries WHERE shift_id = ? AND employee_id = ? ORDER BY id LIMIT 1')
+      .get(shiftId, empId);
     return res.redirect(`/shifts/${shiftId}?err=1&msg=` + encodeURIComponent(
-      `${who} has clocked time on this shift. Delete or move the punch on the time clock first — taking them off here would drop the hours without a trace.`));
+      `${who} clocked time on this shift, so taking them off here would drop the hours without a trace. `
+      + `Open their punch${one ? ` at /timeclock/${one.id}` : ''} and correct it to the right service, or delete it — then they come off this shift on their own.`));
   }
   w.deleteWork.run(shiftId, empId);
   res.redirect(`/shifts/${shiftId}?msg=` + encodeURIComponent('Removed.'));
@@ -14520,6 +14526,18 @@ app.get('/timeclock/:id', (req, res) => {
                 <input name="reason" required maxlength="300" placeholder="Why the change — this is kept forever."></label>
               <button class="bs-btn" type="submit">Save the correction</button>
             </form>
+            <!-- The way out of a punch that should never have existed — clocked
+                 into the wrong service, or somebody else's PIN. Without this,
+                 taking that person off the shift is refused and there is nothing
+                 they can do about it. -->
+            <form method="post" action="/timeclock/${e.id}/delete" class="tcm-form tcm-sub"
+                  onsubmit="return confirm('Delete this punch for good? The hours come off the shift. The record that it existed, and who deleted it, is kept.')">
+              <div class="inc-kick">Delete this punch</div>
+              <p class="inc-hint">For a punch that should not exist at all. To fix the times, correct it above instead.</p>
+              <label class="tcm-f wide"><span>Reason <i>required</i></span>
+                <input name="reason" required maxlength="300" placeholder="Why it should not be there — this is kept forever."></label>
+              <button class="bs-btn-sm" type="submit">Delete the punch</button>
+            </form>
           </section>` : ''}
 
           ${corrs.length ? `<section class="bs-panel inc-sec">
@@ -14660,6 +14678,45 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
     if (e) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
   })();
   res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('Break removed.'));
+});
+
+/**
+ * Delete a punch outright.
+ *
+ * This did not exist, and its absence was a trap: taking somebody off a shift is
+ * refused while they have clocked time there, and the refusal told the manager
+ * to delete the punch first — pointing at a door that was not built. Anybody who
+ * clocked into the wrong service could not be removed from it at all.
+ *
+ * A punch is a payroll record, so this is not a quiet tidy-up: it needs a
+ * reason, it is logged with the times it destroyed, and the shift's hours are
+ * re-derived without it in the same transaction. What survives is the event —
+ * the entry is gone but the fact that it existed, and who removed it, is not.
+ */
+app.post('/timeclock/:id/delete', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).end();
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  if (!reason) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Deleting a punch needs a reason.'));
+  if (e.status === 'locked') return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('That punch is locked.'));
+  const actor = tcActor(req);
+  // Read before the row is gone: the timesheet still has to be told which day
+  // moved, and there will be nothing left to ask.
+  const { shift_id: shiftId, employee_id: empId, business_date: day } = e;
+  const was = `${e.clock_in_at} → ${e.clock_out_at || 'open'} · ${e.position}${e.daypart ? '/' + e.daypart : ''}`;
+
+  db.transaction(() => {
+    // The event first, while there is still an entry id worth recording.
+    TC.logEvent('entry', e.id, 'deleted', actor, { before: was, reason });
+    db.prepare('DELETE FROM time_breaks WHERE time_entry_id = ?').run(e.id);
+    db.prepare('DELETE FROM time_corrections WHERE time_entry_id = ?').run(e.id);
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(e.id);
+    tcTouchDates(empId, [day], actor, 'a manager deleted a punch');
+    // The hours this punch put on the shift go with it.
+    TC.syncShiftHours(shiftId, empId, actor);
+  })();
+  res.redirect(`/timeclock?msg=` + encodeURIComponent(`Punch deleted — ${was}.`));
 });
 
 /**
