@@ -18,15 +18,17 @@
 //   with: one active entry per person, one open break per entry. A double tap,
 //   two phones, or two racing requests hit a constraint, not a second punch.
 //
-//   Clocked hours run PARALLEL to work.hours. The manager's number stays the
-//   manager's number (see insertWorkIfAbsent, "manager's numbers win"); clocking
-//   in only links the person to the shift. Nothing here writes payroll hours.
+//   Clocked hours ARE the shift's hours. syncShiftHours writes work.hours from
+//   the punches, and every path that can change a punch calls it — clock-out is
+//   only the most obvious one. A number a manager typed still outranks the
+//   clock, and that rule lives in the SQL (work.hours_source) rather than in
+//   each caller's memory, so it cannot be forgotten at a new call site.
 //
 // Minutes are integers throughout, the way money is cents. Hours are derived at
 // the display edge, never stored as a float that drifts.
 // ---------------------------------------------------------------------------
 
-const { db } = require('./db');
+const { db, w } = require('./db');
 const { isoDate, addDays } = require('./dates');
 
 // --- schema ----------------------------------------------------------------
@@ -434,6 +436,128 @@ function recompute(entry) {
 
 /** Live minutes for an entry still running, so the page can show elapsed time. */
 const elapsedMinutes = (entry) => minutesBetween(entry.clock_in_at, nowUtc());
+
+// --- the shift's hours -----------------------------------------------------
+// Clocked minutes ARE the shift's hours. syncShiftHours is the only thing that
+// writes them, and every path that can change a punch calls it — not just
+// clock-out. A missed punch fixed the next morning has to reach payroll too,
+// and hooking only the one obvious place is how somebody gets paid nothing.
+//
+// It SUMS rather than taking one entry's figure. The unique index covers only
+// OPEN entries, so nothing stops a person having several finished ones on a
+// single service, and a split shift is exactly that.
+//
+// A punch longer than the long-shift threshold is left OUT of the sum. Somebody
+// who forgot to clock out and was fixed a day later reads as 23 hours, and
+// paying that silently is far worse than paying nothing: zero plus a red flag
+// gets noticed and corrected, a wrong number does not.
+const sumForShift = db.prepare(`
+  SELECT COALESCE(SUM(CASE WHEN COALESCE(raw_minutes, 0) <= @long_min
+                           THEN payable_minutes ELSE 0 END), 0) AS payable_min,
+         COUNT(*)                                               AS entries,
+         COALESCE(SUM(CASE WHEN COALESCE(raw_minutes, 0) > @long_min
+                           THEN 1 ELSE 0 END), 0)               AS implausible,
+         COUNT(DISTINCT position)                               AS positions,
+         MAX(position)                                          AS a_position
+    FROM time_entries
+   WHERE shift_id        = @shift_id
+     AND employee_id     = @employee_id
+     AND clock_out_at    IS NOT NULL
+     AND payable_minutes IS NOT NULL
+     AND status NOT IN ('active', 'on_break')`);
+
+const shiftRow = db.prepare('SELECT id, status FROM shifts WHERE id = ?');
+const countPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ? AND employee_id = ?');
+const countShiftPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ?');
+
+/**
+ * What the clock says this person worked on this shift, in minutes. Read-only,
+ * and the same sum syncShiftHours writes — so any page comparing "clocked" with
+ * "on the shift" compares like with like. Comparing ONE entry against work.hours
+ * invented a difference for everybody who clocked out and back in.
+ */
+function clockedMinutesOn(shiftId, employeeId) {
+  if (!shiftId || !employeeId) return null;
+  const longMin = (Number(setting('tc_long_shift')) || 16) * 60;
+  return sumForShift.get({ shift_id: shiftId, employee_id: employeeId, long_min: longMin }).payable_min;
+}
+
+const lastClosedFor = db.prepare(`
+  SELECT * FROM time_entries
+   WHERE employee_id = ? AND clock_out_at IS NOT NULL AND shift_id IS NOT NULL
+   ORDER BY clock_out_at DESC LIMIT 1`);
+
+/**
+ * The punch a tip submission belongs to — the one they are still on, or the one
+ * they have just come off.
+ *
+ * Tips are filed at the end of the shift just worked, so a punch inside the
+ * window is the same night by definition. Anything older is somebody filing a
+ * missed report days later, and there the date they picked is the better
+ * answer than a punch that has nothing to do with it.
+ */
+function anchorEntryFor(employeeId, withinHours = 8) {
+  const open = q.active.get(employeeId);
+  if (open && open.shift_id) return open;
+  const last = lastClosedFor.get(employeeId);
+  if (!last) return null;
+  const age = minutesBetween(last.clock_out_at, nowUtc());
+  return age != null && age <= withinHours * 60 ? last : null;
+}
+
+/** Has this person any punch at all on this shift? Guards the destructive routes. */
+const hasPunch = (shiftId, employeeId) => countPunches.get(shiftId, employeeId).n > 0;
+/** Has anybody? Guards deleting the shift out from under its own time entries. */
+const shiftHasPunches = (shiftId) => countShiftPunches.get(shiftId).n > 0;
+
+/**
+ * Re-derive one person's hours on one shift from their punches.
+ *
+ * Call it inside the caller's transaction — it never opens its own, so an
+ * approved correction and the hours it implies land together or not at all.
+ *
+ * Returns { written, hours, entries, implausible, positions }. `written: false`
+ * with no reason means a manager's number is sitting in that row and outranks
+ * the clock; that is the override rule, and it is enforced in the SQL rather
+ * than here so no caller can forget it.
+ */
+function syncShiftHours(shiftId, employeeId, by, opts = {}) {
+  if (!shiftId || !employeeId) return { written: false, reason: 'no_shift' };
+  const sh = shiftRow.get(shiftId);
+  if (!sh) return { written: false, reason: 'no_shift' };
+
+  const longMin = (Number(setting('tc_long_shift')) || 16) * 60;
+  const r = sumForShift.get({ shift_id: shiftId, employee_id: employeeId, long_min: longMin });
+  // Sum integer minutes, divide once. Rounding each entry and then adding drifts
+  // — 211 + 241 minutes comes to 7.54h that way and 7.533h this way, and the
+  // difference is multiplied by a wage. Three decimals, not two, so the figure
+  // can still round-trip against the minutes the timesheet shows.
+  const hours = Math.round((r.payable_min / 60) * 1000) / 1000;
+
+  // A shift that has been emailed had its money worked out and handed over on
+  // the numbers it had at the time. Nothing is snapshotted — every view
+  // recomputes live — so rewriting one now would make the app quietly disagree
+  // with mail already in people's inboxes. Hold, and leave a note saying so.
+  if (sh.status === 'emailed') {
+    logEvent('shift', shiftId, 'hours_held_sent', by, {
+      after: `${hours}h clocked`,
+      reason: 'shift already emailed — the hours it was sent with stand',
+    });
+    return { written: false, reason: 'shift_sent', hours, ...r };
+  }
+
+  if (r.entries === 0) {
+    // The last punch left this shift. The hours it put here go with it.
+    const gone = w.clearClockHours.run({ shift_id: shiftId, employee_id: employeeId, by });
+    return { written: gone.changes > 0, hours: 0, ...r };
+  }
+
+  const info = w.setClockHours.run({
+    shift_id: shiftId, employee_id: employeeId,
+    role: opts.role || r.a_position || 'server', hours, by,
+  });
+  return { written: info.changes > 0, hours, ...r };
+}
 
 // --- the state machine -----------------------------------------------------
 // Valid transitions, stated once so a route cannot invent a new one:
@@ -891,6 +1015,44 @@ function alerts({ periods, employees, otRule } = {}) {
   return out;
 }
 
+// --- one-shot backfill -----------------------------------------------------
+// Rows nobody ever set, on shifts not yet sent, where the clock does have a
+// finished punch. These are precisely the case this change exists to remove:
+// the clock recorded the hours, no one typed them, and the person is being paid
+// $0 and carrying no weight in any tip pool.
+//
+// It goes through syncShiftHours rather than one bulk UPDATE, so the two rules
+// that matter apply here as everywhere else — a number somebody typed is never
+// touched, and a shift already emailed is left exactly as it was sent.
+//
+// The `hours_source IS NULL` join is the whole safety rule: the migration
+// stamped every pre-existing figure 'legacy', so only genuinely-unset rows are
+// even considered.
+function backfillShiftHours() {
+  if (setting('tc_hours_backfilled') === '1') return { pairs: 0, done: 0, held: 0 };
+  const pairs = db.prepare(`
+    SELECT DISTINCT te.shift_id, te.employee_id
+      FROM time_entries te
+      JOIN work wk ON wk.shift_id = te.shift_id AND wk.employee_id = te.employee_id
+     WHERE te.shift_id     IS NOT NULL
+       AND te.clock_out_at IS NOT NULL
+       AND wk.hours_source IS NULL`).all();
+  let done = 0, held = 0;
+  db.transaction(() => {
+    for (const p of pairs) {
+      if (syncShiftHours(p.shift_id, p.employee_id, 'backfill').written) done++; else held++;
+    }
+    sq.set.run({ key: 'tc_hours_backfilled', value: '1' });
+  })();
+  return { pairs: pairs.length, done, held };
+}
+
+const backfilled = backfillShiftHours();
+if (backfilled.done) {
+  console.log(`[timeclock] filled hours on ${backfilled.done} shift row${backfilled.done === 1 ? '' : 's'} from existing punches`
+    + (backfilled.held ? `; ${backfilled.held} left alone (already sent, or set by hand)` : ''));
+}
+
 module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
   fingerprintOf, approvalBlockers, approvalStale, transferStateOf, TRANSFER_LABEL,
@@ -899,4 +1061,6 @@ module.exports = {
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
+  syncShiftHours, hasPunch, shiftHasPunches, anchorEntryFor, clockedMinutesOn,
+  backfillShiftHours,
 };

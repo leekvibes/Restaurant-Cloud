@@ -59,6 +59,25 @@ const workCols = db.prepare('PRAGMA table_info(work)').all().map((c) => c.name);
 if (!workCols.includes('hourly_rate_cents')) {
   db.exec('ALTER TABLE work ADD COLUMN hourly_rate_cents INTEGER DEFAULT 0');
 }
+// Migration: where this number came from. The time clock writes hours now, so
+// "who set this" has to be answerable before "what is it" — this column is the
+// whole override rule. NULL means nobody has set it and the clock may claim it;
+// anything else means a human, the POS or the old importer put it there, and an
+// automatic recompute must leave it alone.
+//
+// hours = 0 could not carry that meaning: insertWorkIfAbsent writes a literal 0
+// when someone is merely registered on a shift, so zero is indistinguishable
+// from a deliberate zero. NULL is the honest third state.
+if (!workCols.includes('hours_source')) {
+  db.exec('ALTER TABLE work ADD COLUMN hours_source TEXT');   // clock | manager | pos | legacy
+  // One-shot stamp for databases that predate the clock. Every row already
+  // carrying a figure was typed, pushed by the POS, or imported — all of them
+  // outrank the clock, and none of them can be told apart after the fact, so
+  // they are marked 'legacy' rather than dressed up as any one of the three.
+  db.exec("UPDATE work SET hours_source = 'legacy' WHERE hours > 0");
+}
+if (!workCols.includes('hours_set_by')) db.exec('ALTER TABLE work ADD COLUMN hours_set_by TEXT');
+if (!workCols.includes('hours_set_at')) db.exec('ALTER TABLE work ADD COLUMN hours_set_at TEXT');
 // Per-employee role+wage pairs — a person can be e.g. server @ $11 AND busser @ $13.
 db.exec(`CREATE TABLE IF NOT EXISTS employee_roles (
   employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
@@ -251,7 +270,10 @@ const q = {
     `INSERT INTO employees (name, role, email, pin, hourly_rate_cents, pos_id, pay_type, salary_cents)
      VALUES (@name, @role, @email, @pin, @hourly_rate_cents, @pos_id, @pay_type, @salary_cents)`
   ),
-  employeeByPosId: db.prepare('SELECT * FROM employees WHERE pos_id = ?'),
+  // active = 1 to match the name fallback beside it. Without it a POS id left
+  // on somebody who has since left matches, and their batch lands on a person
+  // who is not there.
+  employeeByPosId: db.prepare('SELECT * FROM employees WHERE pos_id = ? AND active = 1'),
   // The PIN is how staff identify themselves on the tips page, so it has to
   // point at exactly one active person. Second arg excludes the person being
   // edited (pass 0 when adding).
@@ -308,24 +330,81 @@ s.deleteShift = deleteShiftTx;
 
 // ---- Work / sales -------------------------------------------------------
 const w = {
+  // The manager's own hand. @hours may be NULL, meaning "the hours field was
+  // left blank, so leave the figure alone" — somebody correcting a server's
+  // sales must not silently zero hours the clock derived, which is what an
+  // unconditional write does now that parseHours('') returns 0.
+  //
+  // Passing a number is a deliberate override, and it stamps the row so no
+  // later recompute can quietly undo it. Same shape as writeTipsIfGiven, whose
+  // comment already reads "blank means leave it alone".
   upsertWork: db.prepare(
-    `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
-     VALUES (@shift_id, @employee_id, @role, @hours, @hourly_rate_cents)
+    `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents,
+                       hours_source, hours_set_by, hours_set_at)
+     VALUES (@shift_id, @employee_id, @role, COALESCE(@hours, 0), @hourly_rate_cents,
+             CASE WHEN @hours IS NULL THEN NULL ELSE 'manager' END,
+             CASE WHEN @hours IS NULL THEN NULL ELSE @by END,
+             CASE WHEN @hours IS NULL THEN NULL ELSE datetime('now') END)
      ON CONFLICT(shift_id, employee_id) DO UPDATE SET
-       role = excluded.role, hours = excluded.hours, hourly_rate_cents = excluded.hourly_rate_cents`
+       role = excluded.role,
+       hourly_rate_cents = excluded.hourly_rate_cents,
+       hours        = COALESCE(@hours, work.hours),
+       hours_source = CASE WHEN @hours IS NULL THEN work.hours_source ELSE 'manager' END,
+       hours_set_by = CASE WHEN @hours IS NULL THEN work.hours_set_by ELSE @by END,
+       hours_set_at = CASE WHEN @hours IS NULL THEN work.hours_set_at ELSE datetime('now') END`
   ),
   // Register someone on a shift WITHOUT touching hours/role if they're already
-  // there — used by the cash-tip page and POS webhook so they can't clobber
-  // hours the manager already entered.
+  // there — used by the cash-tip page, the time clock and the POS webhook.
+  // hours_source is left NULL, which is what frees the clock to fill the figure
+  // in when they punch out.
   insertWorkIfAbsent: db.prepare(
     `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
      VALUES (@shift_id, @employee_id, @role, 0, 0)
      ON CONFLICT(shift_id, employee_id) DO NOTHING`
   ),
-  setHours: db.prepare('UPDATE work SET hours = @hours WHERE shift_id = @shift_id AND employee_id = @employee_id'),
+  // The clock's write. The WHERE on the conflict branch IS the override rule,
+  // held in the database rather than in every caller's memory: a row somebody
+  // stamped by hand is never rewritten by an automatic recompute. When it does
+  // not fire, `changes` comes back 0 — that is how the caller learns a manager
+  // owns this number.
+  setClockHours: db.prepare(
+    `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents,
+                       hours_source, hours_set_by, hours_set_at)
+     VALUES (@shift_id, @employee_id, @role, @hours, 0, 'clock', @by, datetime('now'))
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+       hours        = excluded.hours,
+       hours_source = 'clock',
+       hours_set_by = excluded.hours_set_by,
+       hours_set_at = excluded.hours_set_at
+     WHERE work.hours_source IS NULL OR work.hours_source = 'clock'`
+  ),
+  // Same rule, but never creates a row: for when the last punch leaves a shift
+  // and the hours it put there have to go with it.
+  clearClockHours: db.prepare(
+    `UPDATE work SET hours = 0, hours_set_by = @by, hours_set_at = datetime('now')
+      WHERE shift_id = @shift_id AND employee_id = @employee_id
+        AND (hours_source IS NULL OR hours_source = 'clock')`
+  ),
+  // Hand a row back to the clock after an override. Without this, one mistyped
+  // number is permanent.
+  releaseHours: db.prepare(
+    `UPDATE work SET hours_source = NULL, hours_set_by = NULL, hours_set_at = NULL
+      WHERE shift_id = @shift_id AND employee_id = @employee_id`
+  ),
+  // The POS reports service, not attendance. It defers to a manager and to the
+  // clock — the caller additionally skips anyone who actually punched, which
+  // cannot be expressed here because time_entries does not exist yet when this
+  // file loads.
+  setPosHours: db.prepare(
+    `UPDATE work SET hours = @hours, hours_source = 'pos', hours_set_by = 'pos',
+                     hours_set_at = datetime('now')
+      WHERE shift_id = @shift_id AND employee_id = @employee_id
+        AND (hours_source IS NULL OR hours_source = 'pos')`
+  ),
   deleteWork: db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?'),
+  workRow: db.prepare('SELECT * FROM work WHERE shift_id = ? AND employee_id = ?'),
   workForShift: db.prepare(
-    `SELECT w.role, w.hours, w.employee_id,
+    `SELECT w.role, w.hours, w.employee_id, w.hours_source,
             w.hourly_rate_cents AS shift_rate_cents,
             e.name, e.email, e.hourly_rate_cents AS default_rate_cents, e.pay_type
      FROM work w JOIN employees e ON e.id = w.employee_id WHERE w.shift_id = ?`
@@ -417,6 +496,7 @@ function shiftInputs(shiftId) {
         cardTips: (sr.card_tips_cents || 0) / 100,
         cashTips: (sr.cash_tips_cents || 0) / 100,
         cashEnteredBy: sr.cash_entered_by || null,
+        hoursSource: row.hours_source || null,
       });
     } else {
       // Support staff can report tips too (a barista ringing people up, a
@@ -435,6 +515,7 @@ function shiftInputs(shiftId) {
         // A trainee is on the clock but out of every pool — their hours must
         // not dilute the split for the people actually earning tips.
         tipEligible: kinds[row.role] !== 'non_tipped',
+        hoursSource: row.hours_source || null,
       });
     }
   }

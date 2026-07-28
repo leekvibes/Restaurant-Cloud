@@ -250,10 +250,48 @@ test('a tip submission after a clock-in joins the same shift, and does not make 
   await post('/portal/clock/out', { pin: '3111' }, { cookie });
 });
 
-test('clocking in never writes hours onto the shift — the manager\'s number wins', () => {
-  const rows = db.prepare('SELECT hours FROM work WHERE employee_id = ?').all(EMP.solo);
+/**
+ * Every row the clock owns must equal the punches behind it. This is the
+ * invariant the whole feature rests on, so it is asserted from several angles
+ * rather than once — a correction, an edit, a break and a re-parent all have to
+ * arrive here, and any one of them missing its call would show up as drift.
+ */
+function assertClockRowsAgree(where = 'the clock-owned rows agree with the punches') {
+  const T = require('../src/timeclock');
+  const rows = db.prepare('SELECT shift_id, employee_id, hours, hours_source FROM work').all();
+  let checked = 0;
+  for (const r of rows) {
+    if (r.hours_source !== 'clock') continue;   // a typed number is nobody else's business
+    const ent = db.prepare('SELECT id, status, clock_out_at, raw_minutes, payable_minutes FROM time_entries WHERE shift_id = ? AND employee_id = ?')
+      .all(r.shift_id, r.employee_id);
+    // Rows whose punches are simply gone are skipped, and only here: no route
+    // in the app deletes a time entry (grep src/ for DELETE FROM time_entries —
+    // there is none), so this state exists only where a fixture below reaches
+    // into the database to reset itself. The case that MATTERS — a punch that
+    // moved to another shift, leaving the old one holding its hours — is not
+    // this, and is covered head-on in test/clockhours.test.js.
+    if (!ent.length) continue;
+    const min = T.clockedMinutesOn(r.shift_id, r.employee_id);
+    assert.strictEqual(Number(r.hours), Math.round((min / 60) * 1000) / 1000,
+      `${where} — shift ${r.shift_id}, employee ${r.employee_id}; entries ${JSON.stringify(ent)}`);
+    checked++;
+  }
+  return checked;
+}
+
+test('clocking out writes the hours onto the shift; an open punch does not', () => {
+  const rows = db.prepare('SELECT shift_id, hours, hours_source FROM work WHERE employee_id = ?').all(EMP.solo);
   assert.ok(rows.length, 'the person is linked to the shift');
-  assert.ok(rows.every((r) => Number(r.hours) === 0), 'but hours stay 0 until a manager enters them');
+  // insertWorkIfAbsent still runs at clock-in, so the row exists before there
+  // are any hours to put in it — that link is what the tips page joins onto.
+  for (const r of rows) {
+    const closed = db.prepare(`SELECT COALESCE(SUM(payable_minutes), 0) m FROM time_entries
+      WHERE shift_id = ? AND employee_id = ? AND clock_out_at IS NOT NULL`).get(r.shift_id, EMP.solo).m;
+    assert.strictEqual(Number(r.hours), Math.round((closed / 60) * 1000) / 1000,
+      'the shift carries exactly what the closed punches measured');
+    if (closed > 0) assert.strictEqual(r.hours_source, 'clock', 'and is marked as the clock\'s work');
+  }
+  assertClockRowsAgree();
 });
 
 // --- corrections and audit -------------------------------------------------
@@ -333,7 +371,7 @@ test('the manager list and detail render', async () => {
   const detail = await text(`/timeclock/${e.id}`);
   assert.match(detail, /The punches/, 'the record renders');
   assert.match(detail, /History/, 'with its audit history');
-  assert.match(detail, /Entered on the shift/, 'and the manager-entered hours beside the clocked ones');
+  assert.match(detail, /On the shift|Entered on the shift/, 'and what the shift is carrying, beside the clocked figure');
 });
 
 test('payroll and the overtime toggle are untouched by any of this', async () => {
@@ -527,9 +565,12 @@ test('an "other" request is marked handled, not applied — and stops blocking',
   assert.ok(ev, 'recorded as handled by hand');
 });
 
-test('applying a correction never touches manager-entered work.hours', async () => {
-  const rows = db.prepare('SELECT hours FROM work').all();
-  assert.ok(rows.every((r) => Number(r.hours) === 0), 'still zero everywhere the clock touched');
+test('an approved correction carries all the way through to the shift hours', () => {
+  // The old rule was the opposite: corrections stopped at the time entry and
+  // work.hours stayed 0. That meant an approved fix never reached payroll —
+  // the employee was paid nothing for a shift the clock had a record of.
+  assert.ok(assertClockRowsAgree('a correction left the shift disagreeing with its punches') > 0,
+    'and at least one row is actually clock-owned, so this asserts something');
 });
 
 // ===========================================================================
@@ -671,17 +712,22 @@ test('a viewer cannot return a timesheet', async () => {
   assert.match(route.slice(0, 400), /canWrite\(\)/, 'the return route checks canWrite');
 });
 
-test('the manager ledger lists the period and its variance', async () => {
+test('the manager ledger lists the period and says these are payroll\'s hours', async () => {
   const html = await text('/payroll/timesheets');
   assert.match(html, /Timesheets/);
   assert.match(html, /Needs attention|Submitted/, 'statuses show');
-  assert.match(html, /entered/, 'manager-entered hours are shown beside the clocked ones');
-  assert.match(html, /nothing is sent to payroll|not sent to payroll|still runs on the hours/i, 'and it says payroll is untouched');
+  assert.match(html, /runs on/i, 'and it says these are the hours payroll runs on');
+  // The "vs entered" difference is deliberately absent here. It means the size
+  // of a manager's override, and nobody has overridden anything — so a number
+  // in that column would be a difference nobody caused. The override case is
+  // asserted head-on in test/clockhours.test.js.
+  assert.doesNotMatch(html, /vs entered/, 'and shows no phantom difference when nothing was typed over');
 });
 
-test('timesheets never write into work.hours or payroll', () => {
-  const rows = db.prepare('SELECT hours FROM work').all();
-  assert.ok(rows.every((r) => Number(r.hours) === 0), 'work.hours untouched by the whole timesheet flow');
+test('the timesheet flow leaves the shift hours agreeing with the punches, and sends nothing', () => {
+  assertClockRowsAgree('the timesheet flow moved a figure it should not have');
+  // Signing a timesheet is a record that the hours are right. It must still
+  // never reach for the payroll send button on its own.
   const sends = db.prepare('SELECT COUNT(*) n FROM period_sends').get().n;
   assert.strictEqual(sends, 0, 'and nothing was sent to payroll');
 });
@@ -969,9 +1015,8 @@ test('a viewer cannot approve, transfer, lock or reopen', () => {
   assert.match(src.slice(bulk, bulk + 260), /canWrite\(\)/, 'bulk approve too');
 });
 
-test('none of this writes work.hours or sends payroll', () => {
-  const rows = db.prepare('SELECT hours FROM work').all();
-  assert.ok(rows.every((r) => Number(r.hours) === 0), 'manager-entered hours untouched');
+test('approval and transfer move no hours of their own, and never send payroll', () => {
+  assertClockRowsAgree('approval or transfer changed a figure behind the clock\'s back');
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM period_sends').get().n, 0, 'payroll never sent');
 });
 
@@ -1024,7 +1069,7 @@ test('the reports render every grouping', async () => {
   for (const v of ['employee', 'position', 'service', 'day', 'corrections', 'quality']) {
     const html = await text(`/timeclock/reports?v=${v}&from=2026-01-01&to=2026-12-31`);
     assert.match(html, /Time reports/, `${v} renders`);
-    assert.match(html, /Clocked hours only/, 'and says which hours it is quoting');
+    assert.match(html, /What the clock recorded/, 'and says which hours it is quoting');
   }
 });
 

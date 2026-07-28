@@ -598,7 +598,7 @@ app.get('/', (req, res) => {
       if (x.status === 'emailed' || x.date === toStr) continue;
       const when = whenOf(x.date, x.daypart);
       if (x.no_hours) push('red', 'shifts', `${when} — hours missing`,
-        `${x.no_hours} ${x.no_hours === 1 ? 'person has' : 'people have'} no hours entered`, `/shifts/${x.id}`);
+        `${x.no_hours} ${x.no_hours === 1 ? 'person has' : 'people have'} no hours — check whether they clocked out`, `/shifts/${x.id}`);
       else if (x.people) push('blue', 'shifts', `${when} — ready to send`, 'Everything is in; staff are waiting on it', `/shifts/${x.id}`);
       if (x.notes) push('blue', 'notes', `${when} — ${x.notes === 1 ? 'a note' : x.notes + ' notes'} from staff`, 'Read it before you close the shift', `/shifts/${x.id}`);
     }
@@ -1808,7 +1808,9 @@ app.get('/shifts/:id', (req, res) => {
         ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
         <span class="bs-sr-f">${money0(toCents(p.cardTips))}</span>
         <span class="bs-sr-f">${money0(toCents(p.cashTips))}</span>
-        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours) ? fmtHours(p.hours) : 'missing'}</span>
+        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours)
+          ? `${fmtHours(p.hours)}${p.hoursSource === 'clock' ? '<i class="bs-sr-src" title="Derived from their punches">clock</i>' : ''}`
+          : 'missing'}</span>
         <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
         ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
       </summary>
@@ -1827,13 +1829,28 @@ app.get('/shifts/:id', (req, res) => {
              got wrong could be seen and never corrected. -->
         <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
         <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>
-        <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="text" value="${e.hours ? fmtHours(e.hours) : ''}" placeholder="${hoursPlaceholder()}"></label>
+        <!-- Left EMPTY when the clock owns this figure, and that is deliberate.
+             A pre-filled value would be posted back on every save — including a
+             save that was only fixing somebody's sales — and each one would
+             stamp the row as hand-typed, locking the clock out of it forever.
+             Blank here means "leave the clocked number alone"; typing means an
+             override, and it sticks. -->
+        <label class="bs-pill"><span>Hours</span><input name="hours" type="text" inputmode="text"
+          value="${p.hoursSource === 'clock' ? '' : (e.hours ? fmtHours(e.hours) : '')}"
+          placeholder="${p.hoursSource === 'clock' && Number(p.hours)
+            ? esc(`${fmtHours(p.hours)} — from the clock`) : hoursPlaceholder()}"></label>
         <label class="bs-pill"><span>Wage/hr</span><input name="wage" type="text" inputmode="decimal" value="${e.wage || ''}" placeholder="default"></label>
         <button class="bs-btn" type="submit">Save</button>
         <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
       </form>
       ${isServer ? '' : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
         across support by hours — they are not kept by ${esc(p.name.split(' ')[0])}.</p>`}
+      ${p.hoursSource && p.hoursSource !== 'clock' && TC.hasPunch(sh.id, p.employeeId) ? `
+      <form class="bs-hours-reset" method="post" action="/shifts/${sh.id}/hours-reset">
+        <input type="hidden" name="employee_id" value="${p.employeeId}">
+        <span>These hours were typed over the clock's.</span>
+        <button type="submit">Use the clocked hours</button>
+      </form>` : ''}
       <form class="bs-inline-rm" method="post" action="/shifts/${sh.id}/remove"
             onsubmit="return confirm('Take ${esc(p.name).replace(/'/g, "\\'")} off this shift?')">
         <input type="hidden" name="employee_id" value="${p.employeeId}">
@@ -2108,6 +2125,15 @@ app.get('/shifts/:id', (req, res) => {
 app.post('/shifts/:id/delete', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
+  // Deleting a shift out from under its own punches is invisible damage:
+  // deleteShiftTx never mentions time_entries, and the foreign key quietly
+  // NULLs their shift_id instead. The punches survive with nothing to belong
+  // to, and recreating the same date and service mints a new id they never
+  // re-attach to. Refuse, and say where to look.
+  if (TC.shiftHasPunches(sh.id)) {
+    return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent(
+      'People clocked time on this shift. Delete their punches on the time clock first — deleting the shift would leave the hours with nowhere to go.'));
+  }
   s.deleteShift(sh.id);
   res.redirect('/shifts?msg=' + encodeURIComponent(`Deleted the ${sh.date} ${dp(sh.daypart)} shift and everything on it.`));
 });
@@ -2115,6 +2141,19 @@ app.post('/shifts/:id/delete', (req, res) => {
 // Blank means "leave it alone", so the add-a-server form (which has no cash
 // field) can't wipe what staff already reported. An explicit 0 still writes —
 // that's how you record someone who genuinely took nothing home.
+/**
+ * The same rule, for hours. The clock fills these in now, so a blank field has
+ * to mean "leave it alone" — a manager fixing somebody's SALES would otherwise
+ * post an empty hours input, parseHours('') would return 0, and the clocked
+ * figure would be wiped by a save that never mentioned hours. Returning null
+ * tells upsertWork to keep what is there; a number is a deliberate override and
+ * stamps the row against further recomputes.
+ */
+function hoursIfGiven(body) {
+  return (body.hours !== undefined && String(body.hours).trim() !== '')
+    ? parseHours(body.hours) : null;
+}
+
 function writeTipsIfGiven(shiftId, empId, body) {
   const given = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
   if (given('cash_tips')) {
@@ -2156,7 +2195,10 @@ app.post('/shifts/:id/server', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const empId = Number(req.body.employee_id);
-  w.upsertWork.run({ shift_id: sh.id, employee_id: empId, role: 'server', hours: parseHours(req.body.hours), hourly_rate_cents: toCents(req.body.wage) });
+  w.upsertWork.run({
+    shift_id: sh.id, employee_id: empId, role: 'server',
+    hours: hoursIfGiven(req.body), hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
+  });
   w.upsertSales.run({
     shift_id: sh.id, employee_id: empId,
     food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee),
@@ -2172,8 +2214,8 @@ app.post('/shifts/:id/support', (req, res) => {
   if (!sh) return res.status(404).end();
   const empId = Number(req.body.employee_id);
   w.upsertWork.run({
-    shift_id: sh.id, employee_id: empId,
-    role: req.body.role, hours: parseHours(req.body.hours), hourly_rate_cents: toCents(req.body.wage),
+    shift_id: sh.id, employee_id: empId, role: req.body.role,
+    hours: hoursIfGiven(req.body), hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, req.body.role, req.body);
@@ -2181,8 +2223,34 @@ app.post('/shifts/:id/support', (req, res) => {
 });
 
 app.post('/shifts/:id/remove', (req, res) => {
-  w.deleteWork.run(req.params.id, Number(req.body.employee_id));
-  res.redirect(`/shifts/${req.params.id}?msg=` + encodeURIComponent('Removed.'));
+  const shiftId = Number(req.params.id);
+  const empId = Number(req.body.employee_id);
+  // Removing somebody who clocked in is worse than it looks: no_hours counts
+  // ROWS whose hours are zero, so deleting the row does not raise a flag — it
+  // silences one, and the shift flips to "Ready to send" with their pay gone.
+  // The punch is the record; move or delete that instead.
+  if (TC.hasPunch(shiftId, empId)) {
+    const who = (q.employee.get(empId) || {}).name || 'That person';
+    return res.redirect(`/shifts/${shiftId}?err=1&msg=` + encodeURIComponent(
+      `${who} has clocked time on this shift. Delete or move the punch on the time clock first — taking them off here would drop the hours without a trace.`));
+  }
+  w.deleteWork.run(shiftId, empId);
+  res.redirect(`/shifts/${shiftId}?msg=` + encodeURIComponent('Removed.'));
+});
+
+// Hand a row back to the clock. Once a number is typed the clock stops touching
+// it, which is the point — but without a way back, one mistyped figure would be
+// permanent and no later correction could ever reach it.
+app.post('/shifts/:id/hours-reset', (req, res) => {
+  const shiftId = Number(req.params.id);
+  const empId = Number(req.body.employee_id);
+  if (!s.shiftById.get(shiftId)) return res.status(404).end();
+  const actor = tcActor(req);
+  db.transaction(() => {
+    w.releaseHours.run({ shift_id: shiftId, employee_id: empId });
+    TC.syncShiftHours(shiftId, empId, actor);
+  })();
+  res.redirect(`/shifts/${shiftId}?msg=` + encodeURIComponent('Back to the hours from the clock.') + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/pool', (req, res) => {
@@ -2261,21 +2329,32 @@ function shiftWarnings(sh, inp, r) {
     if (sk.role === 'busser') notes.push(line);
     else warn.push(line + ` If ${sk.role} was actually working, add them below and the tip-out will apply.`);
   }
-  // Staff who report on the tips page land on the shift with 0 hours until you
-  // enter them. Everything is split by hours, so leaving it at 0 pays them
-  // nothing — including their own share of tips they reported.
+  // Zero hours used to mean "nobody has typed them yet". Now the clock fills
+  // them in at punch-out, so a zero means something narrower and more useful:
+  // this person never clocked out, or their punch is sitting on another
+  // service. Either way the fix is a punch, not a number, and the wording says
+  // so — the pool is split by hours, so zero still pays them nothing.
   const noHours = inp.support.filter((p) => !Number(p.hours)).map((p) => p.name);
   if (noHours.length) {
-    warn.push('No hours entered for: ' + noHours.join(', ')
-      + ' — the pool is split by hours, so they get $0 until you add them.');
+    warn.push('No hours on this shift for: ' + noHours.join(', ')
+      + ' — they never clocked out, or their punch is on another service. The pool is split by hours, so they get $0 until it is sorted.');
   }
   // Servers land here too — from the tips page, the photo reader, or the POS
   // feed, none of which know hours. Their tip-out is sales-based so it stays
   // right, but the wage on their email and in payroll would read $0.
   const noHoursServers = inp.servers.filter((p) => !Number(p.hours) && !p.salaried).map((p) => p.name);
   if (noHoursServers.length) {
-    warn.push('No hours entered for: ' + noHoursServers.join(', ')
-      + ' — their tips are correct, but their wage and payroll hours will be $0.');
+    warn.push('No hours on this shift for: ' + noHoursServers.join(', ')
+      + ' — check the time clock. Their tips are right, but their wage and payroll hours read $0.');
+  }
+  // A figure without a punch behind it is the other half of the same problem:
+  // the money arrived on this service and the hours went somewhere else.
+  const tipsNoPunch = [...inp.servers, ...inp.support]
+    .filter((p) => (p.cashTips || p.cardTips || p.food || p.coffee || p.alcohol) && !TC.hasPunch(sh.id, p.employeeId))
+    .map((p) => p.name);
+  if (tipsNoPunch.length) {
+    warn.push('Reported here but never clocked in on this service: ' + tipsNoPunch.join(', ')
+      + '. If they clocked in elsewhere, their hours are on that shift instead.');
   }
   const missingEmail = [...inp.servers, ...inp.support].filter((p) => !p.email).map((p) => p.name);
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
@@ -2587,6 +2666,9 @@ app.get('/tips', (req, res) => {
           <div class="tp-receipt">
             <div class="tp-tot-h">What you sent</div>
             ${row('Date', esc(req.query.date || '') + (req.query.shift ? ' &middot; ' + esc(req.query.shift) : ''))}
+            ${req.query.moved === '1'
+              ? '<p class="tp-anchor">Filed to the shift you clocked in for, so your hours and your tips stay together.</p>'
+              : ''}
             ${req.query.position ? row('Worked as', esc(String(req.query.position).replace(/^./, (c) => c.toUpperCase()))) : ''}
             ${req.query.sales ? row('Sales rung', esc(usd(req.query.sales))) : ''}
             ${row('Cash tips', esc(usd(cash)))}
@@ -2740,7 +2822,12 @@ function pinScript() {
  * until they have seen it.
  */
 function tipsFormPage(emp, opts = {}) {
-  const today = isoDate();
+  // The SAME answer to "which day is it" that the clock uses. Plain calendar
+  // date was wrong for exactly the shifts that matter most: somebody filing at
+  // 1:15am on Saturday worked Friday night, the clock files their punch under
+  // Friday, and the tips were landing on Saturday — two shifts, hours on one
+  // and money on the other, for a person who did nothing unusual.
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
   const err = opts.err ? `<div class="tp-err">${esc(opts.err)}</div>` : '';
   const token = tipsToken(emp.id);
   const first = emp.name.split(' ')[0];
@@ -4260,6 +4347,13 @@ app.post('/portal/clock/out', (req, res) => {
       payable: Math.max(0, raw - bt.unpaid), by: emp.name });
     TC.logEvent('entry', active.id, 'clock_out', emp.name, { after: out });
     tcTouchDates(emp.id, [active.business_date], emp.name, 'a shift was clocked out');
+    // The punch IS the hours. This is the line that ends manual entry — and it
+    // sits inside the same transaction as the punch, so the shift can never be
+    // left holding hours for a clock-out that did not commit.
+    const synced = TC.syncShiftHours(active.shift_id, emp.id, emp.name, { role: active.position });
+    if (synced.written) {
+      TC.logEvent('entry', active.id, 'hours_written', emp.name, { after: `${synced.hours}h on the shift` });
+    }
   })();
   back('done=' + active.id);
 });
@@ -4903,10 +4997,22 @@ app.post('/tips', (req, res) => {
     return res.send(tipsFormPage(emp, { err: 'Please choose the date and which shift you worked.' }));
   }
 
-  // Find the shift — or start it. Staff often report before the manager has
-  // opened the close, which is what used to leave the picker empty.
-  s.getOrIgnore.run(date, daypart);
-  const sh = s.findShift.get(date, daypart);
+  // Anchor to their punch when there is one, and only then fall back to the
+  // form. The date and service on the form are what somebody tapped on a phone
+  // at the end of a long night; the punch is what the clock actually recorded.
+  // When the two disagree the punch wins — otherwise the hours land on one
+  // shift and the money on another, and neither page can show the whole night.
+  //
+  // This is not a guess about what they meant. It is what they did.
+  const anchor = TC.anchorEntryFor(emp.id);
+  let sh = anchor && anchor.shift_id ? s.shiftById.get(anchor.shift_id) : null;
+  const moved = sh && (sh.date !== date || sh.daypart !== daypart);
+  if (!sh) {
+    // Find the shift — or start it. Staff often report before the manager has
+    // opened the close, which is what used to leave the picker empty.
+    s.getOrIgnore.run(date, daypart);
+    sh = s.findShift.get(date, daypart);
+  }
   policyForShift(sh); // lock in the tip-out policy version that's current now
 
   // What they say they worked drives whether their tips are kept (server) or
@@ -4954,8 +5060,8 @@ app.post('/tips', (req, res) => {
   // Tell the back office someone handed in their shift — who, and for which
   // service — so a manager knows submissions are coming in. Links to the shift
   // so they can review it. Best effort; a notification must not fail the report.
-  PORTAL.adminNotify('shift', `${emp.name.split(' ')[0]} submitted for ${dp(daypart)}`,
-    { body: `${dp(daypart)} · ${date}${salesNote !== '' ? ` · $${Number(salesNote).toFixed(2)} sales` : ''}`,
+  PORTAL.adminNotify('shift', `${emp.name.split(' ')[0]} submitted for ${dp(sh.daypart)}`,
+    { body: `${dp(sh.daypart)} · ${sh.date}${salesNote !== '' ? ` · $${Number(salesNote).toFixed(2)} sales` : ''}`,
       href: `/shifts/${sh.id}` });
 
   // If that was the last person outstanding, the shift is fully in and ready to
@@ -4972,8 +5078,10 @@ app.post('/tips', (req, res) => {
   const p = new URLSearchParams({
     done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
     card: cardRaw === '' ? '' : (toCents(cardRaw) / 100).toFixed(2),
-    shift: dp(daypart), date, position,
+    // The shift it actually landed on, which is the punch's when there was one.
+    shift: dp(sh.daypart), date: sh.date, position,
     sales: salesNote === '' ? '' : Number(salesNote).toFixed(2),
+    ...(moved ? { moved: '1' } : {}),
   });
   res.redirect('/tips?' + p.toString());
 });
@@ -8264,8 +8372,10 @@ app.post('/webhook/benugin', (req, res) => {
     return res.status(401).json({ ok: false, error: 'bad or missing secret' });
   }
   const { date, daypart, servers } = req.body || {};
-  if (!date || !DAYPARTS.includes(daypart) || !Array.isArray(servers)) {
-    return res.status(400).json({ ok: false, error: 'need { date, daypart: cafe|dinner, servers: [...] }' });
+  // The date is checked properly, the way the tips page checks it. A truthy
+  // test alone let a malformed batch date mint a junk shift nobody could find.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !DAYPARTS.includes(daypart) || !Array.isArray(servers)) {
+    return res.status(400).json({ ok: false, error: 'need { date: YYYY-MM-DD, daypart: cafe|dinner, servers: [...] }' });
   }
   s.getOrIgnore.run(date, daypart);
   const sh = s.findShift.get(date, daypart);
@@ -8278,10 +8388,15 @@ app.post('/webhook/benugin', (req, res) => {
     if (!emp && row.name) emp = q.allEmployees.all().find((e) => e.name.toLowerCase() === String(row.name).toLowerCase());
     if (!emp) { unmatched.push(row.name || row.pos_id || 'unknown'); continue; }
 
-    // Register the server on the shift; only set hours if the POS actually sent them.
+    // Register the server on the shift; only set hours if the POS actually sent
+    // them — and only for somebody who did not punch. The POS reports service,
+    // not attendance: its hours are a fallback for a person with no punch, and
+    // they lose to both the clock and a manager. The batch usually lands after
+    // close, so without this it would arrive last and overwrite everything.
+    // Same deference this route already shows card tips a few lines down.
     w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: 'server' });
-    if (row.hours != null && parseHours(row.hours) > 0) {
-      w.setHours.run({ shift_id: sh.id, employee_id: emp.id, hours: parseHours(row.hours) });
+    if (row.hours != null && parseHours(row.hours) > 0 && !TC.hasPunch(sh.id, emp.id)) {
+      w.setPosHours.run({ shift_id: sh.id, employee_id: emp.id, hours: parseHours(row.hours) });
     }
     w.upsertSales.run({
       shift_id: sh.id, employee_id: emp.id,
@@ -13911,7 +14026,7 @@ app.get('/timeclock', (req, res) => {
       stale.length ? `${stale.length} still open past ${STALE_HOURS}h` : pending.length ? `${pending.length} correction${pending.length === 1 ? '' : 's'}` : 'nothing waiting',
       (stale.length + pending.length) ? 'warn' : 'ok')}
     ${statCell('Entries', String(rows.length), `${esc(from)} → ${esc(to)}`)}
-    ${statCell('Clocked hours', TC.hm(totalMin), 'not sent to payroll', '')}
+    ${statCell('Clocked hours', TC.hm(totalMin), 'what the shifts are paying on', '')}
   </section>`;
 
   const liveRow = (e) => `<a class="tcm-live-r" href="/timeclock/${e.id}">
@@ -13942,7 +14057,7 @@ app.get('/timeclock', (req, res) => {
       <div class="bs-head">
         <div class="bs-headwrap">
           <h1 class="bs-headline">Time clock</h1>
-          <p class="bs-subline">Who is on now, and which punches need fixing. Clocked hours sit alongside the hours you enter on a shift — they are not sent to payroll.</p>
+          <p class="bs-subline">Who is on now, and which punches need fixing. Clocking out sets the hours on the shift, so there is nothing to type — unless you type over it, and then the clock leaves it alone.</p>
         </div>
       </div>
       ${strip}
@@ -14089,7 +14204,7 @@ app.get('/timeclock/reports', (req, res) => {
       <a class="bs-back" href="/timeclock">← Time clock</a>
       <div class="bs-head"><div class="bs-headwrap">
         <h1 class="bs-headline">Time reports</h1>
-        <p class="bs-subline">Clocked hours only — what the clock recorded, not what payroll paid. Wage cost is an estimate at each person's default rate.</p>
+        <p class="bs-subline">What the clock recorded. Wage cost is an estimate at each person's default rate — the paid figure comes from Payroll, where tip-outs and overtime are worked out.</p>
       </div></div>
       <form class="tcm-filters" method="get" action="/timeclock/reports">
         <input type="hidden" name="v" value="${esc(view)}">
@@ -14258,6 +14373,7 @@ app.post('/timeclock/new', (req, res) => {
       TC.logEvent('entry', id, 'manager_added', actor, { after: `${inAt} → ${outAt || 'open'}`, reason });
       // A new punch changes the period's total just as surely as moving one.
       tcTouchDates(emp.id, [bdate], actor, 'a manager added a punch');
+      TC.syncShiftHours(sh.id, emp.id, actor, { role: position });
     })();
   } catch (e) {
     if (/UNIQUE/i.test(e.message)) {
@@ -14277,10 +14393,13 @@ app.get('/timeclock/:id', (req, res) => {
   const corrs = TC.q.correctionsFor.all(e.id);
   const bt = TC.breakTotals(e.id);
   const sh = e.shift_id ? s.shiftById.get(e.shift_id) : null;
-  // The manager's number for the same person on the same shift, so the two can
-  // be read side by side. Neither overwrites the other.
-  const workRow = sh ? db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, e.employee_id) : null;
-  const clocked = TC.toHours(e.payable_minutes);
+  // What the shift is carrying for this person, and where it came from.
+  const workRow = sh ? w.workRow.get(sh.id, e.employee_id) : null;
+  // The shift's whole clocked total, not this single punch. work.hours is a SUM
+  // across every entry on the service, so comparing one entry against it
+  // reported a difference for anyone who clocked out and back in.
+  const clocked = sh ? TC.toHours(TC.clockedMinutesOn(sh.id, e.employee_id)) : TC.toHours(e.payable_minutes);
+  const hoursSource = workRow ? workRow.hours_source : null;
   const entered = workRow ? Number(workRow.hours) : null;
   const variance = (clocked != null && entered != null) ? Math.round((clocked - entered) * 100) / 100 : null;
   const w2 = canWrite();
@@ -14312,11 +14431,17 @@ app.get('/timeclock/:id', (req, res) => {
               ${fact('Raw', e.raw_minutes != null ? esc(TC.hm(e.raw_minutes)) : '—')}
               ${fact('Break', `${esc(TC.hm(bt.unpaid))} unpaid${bt.paid ? ` · ${TC.hm(bt.paid)} paid` : ''}`)}
               ${fact('Payable (clocked)', e.payable_minutes != null ? `<b>${esc(TC.hm(e.payable_minutes))}</b>` : '—')}
-              ${fact('Entered on the shift', entered != null ? `${entered}h` : '<i class="inc-unset">none yet</i>')}
-              ${variance != null && Math.abs(variance) >= 0.01
-                ? fact('Difference', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
+              ${hoursSource === 'clock'
+                ? fact('On the shift', `<b>${entered}h</b> <span class="tcm-tag">from the clock</span>`)
+                : fact('Entered on the shift', entered != null ? `${entered}h` : '<i class="inc-unset">none yet</i>')}
+              ${hoursSource !== 'clock' && variance != null && Math.abs(variance) >= 0.01
+                ? fact('Override', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
             </div>
-            <p class="perf-foot">Clocked hours never overwrite the hours entered on the shift — the manager's number stays the manager's number.</p>
+            <p class="perf-foot">${hoursSource === 'clock'
+              ? 'The clock sets the hours on this shift. Type a number on the shift sheet to override it — if you have, the size of that override shows above.'
+              : hoursSource
+                ? `These hours were set by hand${workRow && workRow.hours_set_by ? ` (${esc(workRow.hours_set_by)})` : ''} and the clock leaves them alone. The shift sheet has a link to hand them back.`
+                : 'Nothing is on the shift yet. Hours land here when this punch is closed.'}</p>
           </section>
 
           <section class="bs-panel inc-sec">
@@ -14414,6 +14539,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
   const actor = tcActor(req);
   const before = `${e.clock_in_at} → ${e.clock_out_at || 'open'} · ${e.position}${e.daypart ? '/' + e.daypart : ''}`;
   const wasDate = e.business_date;   // the sheet losing these hours, if it moves
+  const wasShiftId = e.shift_id;     // and the shift losing them, which is not the same thing
 
   db.transaction(() => {
     TC.q.editEntry.run({ id: e.id, in: inAt, out: outAt, daypart, position, by: actor });
@@ -14436,6 +14562,14 @@ app.post('/timeclock/:id/edit', (req, res) => {
     TC.logEvent('entry', e.id, 'manager_edit', actor,
       { before, after: `${inAt} → ${outAt || 'open'} · ${position}${daypart ? '/' + daypart : ''}`, reason });
     tcTouchTimesheet(e.id, actor, 'a manager corrected the times', [wasDate]);
+    // Both ends, always. Syncing only the destination leaves the shift this
+    // punch just left still holding its hours, and the same eight hours get
+    // paid twice — payroll adds up every shift in the period.
+    const moved = TC.q.byId.get(e.id);
+    TC.syncShiftHours(moved.shift_id, e.employee_id, actor, { role: position });
+    if (wasShiftId && wasShiftId !== moved.shift_id) {
+      TC.syncShiftHours(wasShiftId, e.employee_id, actor);
+    }
   })();
   res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Correction saved.'));
 });
@@ -14458,6 +14592,9 @@ app.post('/timeclock/:id/break', (req, res) => {
     TC.logEvent('break', info.lastInsertRowid, 'manager_added', actor, { after: `${start} → ${end}`, reason });
     TC.logEvent('entry', e.id, 'break_added', actor, { after: `${start} → ${end}`, reason });
     tcTouchTimesheet(e.id, actor, 'a manager added a break');
+    // An unpaid break comes straight off the payable minutes, so it comes off
+    // the shift's hours too.
+    TC.syncShiftHours(e.shift_id, e.employee_id, actor);
   })();
   res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Break added.'));
 });
@@ -14478,6 +14615,7 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
     // Removing the break somebody was on leaves them working, not stranded.
     if (e && e.status === 'on_break') TC.q.setStatus.run({ id: e.id, status: 'active', by: actor });
     tcTouchTimesheet(b.time_entry_id, actor, 'a manager removed a break');
+    if (e) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
   })();
   res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('Break removed.'));
 });
@@ -14541,6 +14679,13 @@ app.post('/timeclock/correction/:id', (req, res) => {
     return done('Marked handled. Make any change on the entry itself so the reason travels with it.');
   }
 
+  // Captured BEFORE the correction runs. Three kinds re-parent the entry —
+  // a wrong clock-in that crosses the cutoff, a wrong service, a wrong position
+  // — and once it has moved there is no way left to ask where it came from.
+  const entryBefore = TC.q.byId.get(c.time_entry_id);
+  const wasShiftId = entryBefore ? entryBefore.shift_id : null;
+  const wasDate = entryBefore ? entryBefore.business_date : null;
+
   try {
     let summary = '';
     db.transaction(() => {
@@ -14566,7 +14711,16 @@ app.post('/timeclock/correction/:id', (req, res) => {
       // Hours that changed after somebody signed for them are no longer the
       // hours they signed for. The submission stands as a record, but it has to
       // be made again against the new figures.
-      tcTouchTimesheet(c.time_entry_id, actor, `a correction changed the hours — ${summary}`);
+      tcTouchTimesheet(c.time_entry_id, actor, `a correction changed the hours — ${summary}`, wasDate ? [wasDate] : []);
+      // An approved correction that never reaches the shift is a correction the
+      // employee is not paid for. Both ends again — see the edit route.
+      const moved = TC.q.byId.get(c.time_entry_id);
+      if (moved) {
+        TC.syncShiftHours(moved.shift_id, moved.employee_id, actor, { role: moved.position });
+        if (wasShiftId && wasShiftId !== moved.shift_id) {
+          TC.syncShiftHours(wasShiftId, moved.employee_id, actor);
+        }
+      }
       settle();
     })();
     return done(`Approved and applied — ${summary}.`);
@@ -14639,7 +14793,7 @@ app.get('/payroll/timesheets', (req, res) => {
       <div class="bs-head">
         <div class="bs-headwrap">
           <h1 class="bs-headline">Timesheets</h1>
-          <p class="bs-subline">What the clock recorded this period, and who has signed it off. Nothing here is sent to payroll — <a class="bs-act" href="/payroll">Payroll</a> still runs on the hours you enter on a shift.</p>
+          <p class="bs-subline">What the clock recorded this period, and who has signed it off. These are the hours <a class="bs-act" href="/payroll">Payroll</a> runs on — the clock writes them onto each shift as people punch out, and anything typed over is marked.</p>
         </div>
       </div>
       <section class="bs-panel bs-strip">
@@ -14727,10 +14881,10 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               ${fact('Worked', esc(TC.hm(v.totals.raw)))}
               ${fact('Unpaid break', esc(TC.hm(v.totals.unpaid)))}
               ${v.otRule.enabled && !emp.ot_exempt ? fact('Regular / overtime', `${esc(TC.hm(v.totals.regular))} / ${esc(TC.hm(v.totals.overtime))}`) : ''}
-              ${fact('Entered on shifts', `${entered}h`)}
-              ${Math.abs(variance) >= 0.01 ? fact('Difference', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
+              ${fact('On the shifts', `${entered}h`)}
+              ${Math.abs(variance) >= 0.01 ? fact('Override', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
             </div>
-            <p class="perf-foot">Payroll still runs on the hours entered on each shift. These are the clock's figures, side by side.</p>
+            <p class="perf-foot">These are the clock's figures beside what each shift is carrying. They agree unless somebody typed over them, and a difference here is the size of that override.</p>
           </section>
 
           <section class="bs-panel inc-sec">

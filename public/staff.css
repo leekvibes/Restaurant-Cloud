@@ -106,6 +106,13 @@ body.bare {
   letter-spacing: -.01em; color: var(--headline); margin: 0;
 }
 .tp-lead { font-size: 15px; line-height: 1.5; color: var(--body); margin: 10px 0 0; }
+/* Shown only when the date on the form and the date on their punch disagreed —
+   a shift that ran past midnight, usually. Says where it went, so nobody thinks
+   their report vanished. */
+.tp-anchor {
+  margin: 6px 0 2px; font-size: 12px; line-height: 1.5;
+  color: var(--muted);
+}
 .tp-lead + .tp-sec, .tp-lead + form .tp-sec:first-child { margin-top: 24px; }
 
 /* --- progress ------------------------------------------------------------- */

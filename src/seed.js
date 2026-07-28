@@ -36,7 +36,7 @@ s.getOrIgnore.run(date, 'dinner');
 const sh = s.findShift.get(date, 'dinner');
 
 function server(name, hours, food, coffee, card, cash) {
-  w.upsertWork.run({ shift_id: sh.id, employee_id: ids[name], role: 'server', hours });
+  w.upsertWork.run({ shift_id: sh.id, employee_id: ids[name], role: 'server', hours, hourly_rate_cents: 0, by: 'seed' });
   w.upsertSales.run({
     shift_id: sh.id, employee_id: ids[name],
     food_cents: toCents(food), coffee_cents: toCents(coffee), alcohol_cents: 0,
@@ -45,7 +45,7 @@ function server(name, hours, food, coffee, card, cash) {
   w.setCashTips.run({ shift_id: sh.id, employee_id: ids[name], cash_tips_cents: toCents(cash), by: 'staff' });
 }
 function support(name, role, hours) {
-  w.upsertWork.run({ shift_id: sh.id, employee_id: ids[name], role, hours });
+  w.upsertWork.run({ shift_id: sh.id, employee_id: ids[name], role, hours, hourly_rate_cents: 0, by: 'seed' });
 }
 
 server('Ana Reyes', 6, 2100, 180, 320, 140);
