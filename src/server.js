@@ -3938,10 +3938,14 @@ function clockPage(req, who, opts = {}) {
           <form method="post" action="/portal/clock/break/start">
             <button class="tc-btn tc-btn-quiet" type="submit" data-once>Start break</button>
           </form>
-          <button class="tc-btn tc-btn-go" type="button" onclick="document.getElementById('tc-outsheet').hidden=false">Clock out</button>
+          ${cfg.pinAtOut
+            ? `<button class="tc-btn tc-btn-go" type="button" onclick="document.getElementById('tc-outsheet').hidden=false">Clock out</button>`
+            : `<form method="post" action="/portal/clock/out">
+                 <button class="tc-btn tc-btn-go" type="submit" data-once>Clock out</button>
+               </form>`}
         </div>
       </div>
-      <div class="tc-sheet" id="tc-outsheet" hidden>
+      ${cfg.pinAtOut ? `<div class="tc-sheet" id="tc-outsheet" hidden>
         <form method="post" action="/portal/clock/out">
           <div class="tc-kick">Enter your PIN to clock out</div>
           <input class="tc-pin" name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required>
@@ -3950,7 +3954,7 @@ function clockPage(req, who, opts = {}) {
             <button class="tc-btn tc-btn-go" type="submit" data-once>Clock out</button>
           </div>
         </form>
-      </div>`;
+      </div>` : ''}`;
   } else if (!allowed.length) {
     card = `<div class="tc-state tc-blocked">
       <div class="tc-kick">Cannot clock in</div>
@@ -4239,8 +4243,12 @@ app.post('/portal/clock/out', (req, res) => {
   const back = (p) => res.redirect('/portal/clock?' + p);
   const active = TC.q.active.get(emp.id);
   if (!active) return back('ok=' + encodeURIComponent('You are already clocked out.'));
-  // The PIN is the signature on the punch.
-  if (!pinOk(emp, req.body.pin)) return back('err=' + encodeURIComponent('That PIN did not match. Nothing was changed.'));
+  // Off by default: they are holding the phone they signed in on, so a second
+  // PIN confirms nothing the session has not already established. Restaurants
+  // that want the extra step can switch it back on in the time-clock settings.
+  if (TC.settings().pinAtOut && !pinOk(emp, req.body.pin)) {
+    return back('err=' + encodeURIComponent('That PIN did not match. Nothing was changed.'));
+  }
   if (active.status === 'on_break' || TC.q.openBreak.get(active.id)) {
     return back('err=' + encodeURIComponent('End your break first, then clock out.'));
   }
@@ -14064,8 +14072,8 @@ app.get('/timeclock/settings', (req, res) => {
           'Almost always a missed clock-out rather than a very long day.')}
         ${row('Breaks', check('breaks_paid', c.breaksPaid, 'Count breaks as paid by default'),
           'Either way a manager can change any single break.')}
-        ${row('Ask for the PIN', `${check('pin_out', c.pinAtOut, 'at clock-out')}${check('pin_fix', c.pinForFix, 'when asking for a correction')}`,
-          'The PIN is the signature on a punch.')}
+        ${row('Ask for the PIN again', `${check('pin_out', c.pinAtOut, 'at clock-out')}${check('pin_fix', c.pinForFix, 'when asking for a correction')}`,
+          'Clocking out is one tap by default — they are already signed in. A correction still asks, because it is a claim about a time that has passed.')}
         ${row('At clock-in', check('require_service', c.requireService, 'Staff must choose the service'),
           'Off, the clock uses the suggestion above without asking.')}
         ${row('Dashboard', check('alerts', c.alertsOn, 'Show time-clock items that need attention'),

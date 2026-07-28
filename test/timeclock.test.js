@@ -113,20 +113,43 @@ test('a break starts, ends, and is subtracted from payable time', async () => {
   assert.strictEqual(b.paid, 0, 'unpaid by default');
 });
 
-test('clocking out needs the PIN, and a wrong one changes nothing', async () => {
+test('clocking out is one tap — no PIN to type', async () => {
   const cookie = await signIn('3111');
   const before = activeOf(EMP.solo);
-  await post('/portal/clock/out', { pin: '0000' }, { cookie });
-  assert.ok(activeOf(EMP.solo), 'a wrong PIN leaves them on the clock');
-  assert.strictEqual(activeOf(EMP.solo).id, before.id);
-
-  await post('/portal/clock/out', { pin: '3111' }, { cookie });
-  assert.ok(!activeOf(EMP.solo), 'the right PIN closes it');
+  await post('/portal/clock/out', {}, { cookie });
+  assert.ok(!activeOf(EMP.solo), 'the punch went through with nothing to type');
   const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(before.id);
   assert.strictEqual(e.status, 'complete');
   assert.ok(e.clock_out_at, 'with a server clock-out');
   assert.strictEqual(typeof e.payable_minutes, 'number', 'and payable minutes worked out');
   assert.strictEqual(e.payable_minutes, e.raw_minutes - e.unpaid_break_min, 'payable = raw minus unpaid break');
+});
+
+test('the clocked-in screen offers no PIN box by default', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /Clock out/, 'the action is there');
+  assert.ok(!/Enter your PIN to clock out/.test(html), 'and nothing asks for a code');
+  await post('/portal/clock/out', {}, { cookie });
+});
+
+test('a restaurant that wants the PIN back can still have it', async () => {
+  // The step is gone, not deleted — switched on, it guards the punch again.
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
+    pin_out: '1', pin_fix: '1', require_service: '1', alerts: '1' });
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  await post('/portal/clock/out', { pin: '0000' }, { cookie });
+  assert.ok(activeOf(EMP.solo), 'a wrong PIN leaves them on the clock');
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /Enter your PIN to clock out/, 'and the prompt is back on screen');
+  await post('/portal/clock/out', { pin: '3111' }, { cookie });
+  assert.ok(!activeOf(EMP.solo), 'the right one closes it');
+  // Back to the default for everything after this.
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
+    pin_fix: '1', require_service: '1', alerts: '1' });
+  assert.strictEqual(require('../src/timeclock').settings().pinAtOut, false);
 });
 
 test('an open break blocks clock-out until it is ended', async () => {

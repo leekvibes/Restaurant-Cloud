@@ -229,7 +229,10 @@ const DEFAULTS = {
   tc_dinner_from: '16',
   tc_break_paid: '0',        // breaks unpaid by default
   tc_long_shift: '16',       // hours before an open shift is worth flagging
-  tc_pin_out: '1',           // ask for the PIN at clock-out
+  // Off. Somebody clocking out is holding the phone they just signed into, and
+  // asking them to type the PIN again buys nothing — the punch is already
+  // theirs. Available for anybody who wants a second confirmation.
+  tc_pin_out: '0',
   tc_pin_fix: '1',           // and for a correction request
   tc_require_service: '1',   // must choose café or dinner at clock-in
   tc_alerts: '1',            // surface time-clock items on the dashboard
