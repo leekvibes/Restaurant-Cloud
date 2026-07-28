@@ -14012,7 +14012,8 @@ app.get('/timeclock', (req, res) => {
   const fPos = String(req.query.pos || '');
   const fStatus = String(req.query.st || '');
 
-  const all = TC.q.inRange.all(from, to);
+  const span = clampRange(from, to);
+  const all = TC.q.inRange.all(span.from, span.to);
   const onNow = TC.q.allActive.all();
   const pending = TC.q.pendingCorrections.all();
   const stale = onNow.filter(looksStale);
@@ -14084,6 +14085,10 @@ app.get('/timeclock', (req, res) => {
         </div>
       </div>
       ${tcTabs('/timeclock')}
+      ${span.clamped ? `<div class="bs-notice"><span class="bs-notice-k">Shortened</span>
+        <p>That range was wider than ${RANGE_MAX_DAYS} days, so this is the last ${RANGE_MAX_DAYS}
+        (${esc(span.from)} to ${esc(span.to)}). Building a year in one page holds up everything else
+        on the server, including staff trying to clock in.</p></div>` : ''}
       ${strip}
 
       ${onNow.length ? `<section class="bs-panel tcm-live">
@@ -14099,8 +14104,8 @@ app.get('/timeclock', (req, res) => {
       </section>` : ''}
 
       <form class="tcm-filters" method="get" action="/timeclock">
-        <label><span>From</span><input type="date" name="from" value="${esc(from)}"></label>
-        <label><span>To</span><input type="date" name="to" value="${esc(to)}"></label>
+        <label><span>From</span><input type="date" name="from" value="${esc(span.from)}"></label>
+        <label><span>To</span><input type="date" name="to" value="${esc(span.to)}"></label>
         <details class="fsheet"><summary class="fs-btn">Filter <span class="fs-caret">▾</span></summary>
           <div class="fs-body"><div class="fs-scrim" aria-hidden="true"></div><div class="fs-panel">
             <div class="fs-h">Employee</div>
@@ -14248,8 +14253,11 @@ app.get('/timeclock/reports', (req, res) => {
 app.get('/timeclock/export', (req, res) => {
   if (!navAllowed('/timeclock')) return res.status(403).end();
   const per = currentPeriod();
-  const from = MX.isDate(req.query.from) ? req.query.from : per.start;
-  const to = MX.isDate(req.query.to) ? req.query.to : per.end;
+  // Bounded, but generously: a year for the accountant is a real request, and a
+  // CSV row costs a fraction of a rendered one. This only stops the decade.
+  const asked = clampRange(MX.isDate(req.query.from) ? req.query.from : per.start,
+    MX.isDate(req.query.to) ? req.query.to : per.end, EXPORT_MAX_DAYS);
+  const from = asked.from, to = asked.to;
   const kind = ['punches', 'employees', 'corrections', 'transfers'].includes(req.query.kind) ? req.query.kind : 'punches';
   const cell = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const send = (name, head, rows) => {
@@ -14800,6 +14808,37 @@ app.post('/timeclock/correction/:id', (req, res) => {
  * the one subNav() in views.js already reasons about, though that function is
  * dead code and has never run.
  */
+/**
+ * A date range somebody can actually be served.
+ *
+ * from/to were validated for SHAPE only, and no query behind them carries a
+ * LIMIT — so `?from=1900-01-01&to=2099-12-31` built the whole page synchronously
+ * into one string and blocked for about two seconds. Node is single-threaded:
+ * measured against a booted server, a request landing during that render waited
+ * 600ms for /version. A manager fat-fingering a year on the time-clock page
+ * stalls every staff phone trying to clock in.
+ *
+ * Sixty-two days for a PAGE — two pay periods plus slack, wide enough for any
+ * real question, and it bounds the grid, whose column count IS the range length.
+ * A shortened range says so on the page rather than silently returning less than
+ * was asked for.
+ *
+ * An export gets a much longer leash, because the two are not the same shape of
+ * work. A page builds per-row markup into one HTML document; a CSV row is a
+ * handful of commas, and pulling a year for the accountant is a thing people
+ * legitimately do once a year. The cap there exists only to stop the absurd
+ * case, not to have an opinion about how much data somebody may take.
+ */
+const RANGE_MAX_DAYS = 62;
+const EXPORT_MAX_DAYS = 400;
+function clampRange(from, to, maxDays = RANGE_MAX_DAYS) {
+  let a = from, b = to;
+  if (a > b) { const t = a; a = b; b = t; }          // typed backwards
+  const days = Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5);
+  if (days <= maxDays) return { from: a, to: b, clamped: false, days };
+  return { from: addDays(b, -maxDays), to: b, clamped: true, days: maxDays };
+}
+
 function tcTabs(active) {
   const links = [['/timeclock', 'Today'], ['/payroll/timesheets', 'Timesheets']]
     .filter(([href]) => navAllowed(href));

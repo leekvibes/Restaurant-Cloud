@@ -457,6 +457,21 @@ test('the long-shift threshold on the page is the one in settings', async () => 
   await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_fix: '1', require_service: '1', alerts: '1' });
 });
 
+test('an absurd date range is shortened rather than served', async () => {
+  // Node is single-threaded and the page is built synchronously into one
+  // string, so a range nobody meant to ask for used to block every other
+  // request for about two seconds — including a staff phone trying to clock in.
+  const html = await text('/timeclock?from=1900-01-01&to=2099-12-31');
+  assert.match(html, /Shortened/, 'it says the range was cut, rather than quietly returning less');
+  assert.match(html, /name="from" value="2099-/, 'and the form shows the span actually used');
+});
+
+test('a range typed backwards is read the way it was meant', async () => {
+  const html = await text('/timeclock?from=2026-07-01&to=2026-06-01');
+  assert.match(html, /name="from" value="2026-06-01"/, 'the earlier date is the start');
+  assert.match(html, /name="to" value="2026-07-01"/, 'and the later one is the end');
+});
+
 test('the migration stamps existing hours as legacy and leaves never-set rows to the clock', () => {
   // The rule that protects the owner's live database: anything already carrying
   // a figure was typed, pushed by the POS or imported, and none of them can be
