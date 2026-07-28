@@ -14257,6 +14257,8 @@ app.get('/timeclock', (req, res) => {
         <button class="bs-btn-sm" type="submit">Go</button>
         ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
         <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
+        <!-- Carries the filters, so the spreadsheet is what is on the screen. -->
+        <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
         <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
         <!-- The Timesheets button used to sit here, unguarded, and 403'd for
              anybody without the payroll area. The tab strip above carries that
@@ -14441,7 +14443,18 @@ app.get('/timeclock/export', (req, res) => {
     return send('employee-hours', ['Employee', 'Payable h', 'Raw h', 'Paid break h', 'Unpaid break h', 'Sessions', 'Est. wage cost'],
       d.byEmployee.map((b) => [b.label, hrs(b.payable), hrs(b.raw), hrs(b.paid), hrs(b.unpaid), b.n, (b.wage / 100).toFixed(2)]));
   }
-  const rows = TC.q.inRange.all(from, to);
+  // The export answers the SAME question the page is showing. It took only the
+  // dates before, so narrowing to one person or one service and then exporting
+  // handed back the whole floor — a spreadsheet that quietly disagreed with the
+  // screen it came from.
+  const xEmp = String(req.query.emp || '');
+  const xSvc = DAYPARTS.includes(req.query.svc) ? req.query.svc : '';
+  const xPos = String(req.query.pos || '');
+  const xSt = String(req.query.st || '');
+  const xMissing = (e) => !e.clock_out_at && e.status !== 'active' && e.status !== 'on_break';
+  const rows = TC.q.inRange.all(from, to).filter((e) => (!xEmp || String(e.employee_id) === xEmp)
+    && (!xSvc || e.daypart === xSvc) && (!xPos || e.position === xPos)
+    && (!xSt || (xSt === 'missing_punch' ? xMissing(e) : e.status === xSt)));
   return send('punches', ['Employee', 'Business date', 'Service', 'Position', 'Clock in', 'Clock out', 'Breaks', 'Raw h', 'Unpaid break h', 'Payable h', 'Status', 'Edited', 'Shift'],
     rows.map((e) => {
       const brs = TC.q.breaks.all(e.id).map((b) => `${TC.clockFace(b.start_at)}-${b.end_at ? TC.clockFace(b.end_at) : 'open'}${b.paid ? ' paid' : ''}`).join('; ');
@@ -15224,11 +15237,21 @@ app.get('/payroll/timesheets', (req, res) => {
         </div>
       </div>
       ${tcTabs('/payroll/timesheets')}
+      ${custom ? `<div class="bs-notice"><span class="bs-notice-k">Read-only report</span>
+        <p>${esc(period.start)} to ${esc(period.end)} is not one of your pay periods, so there is no timesheet
+        to sign for it. Hours are shown; approval, payroll and overtime belong to a period and are not.
+        <a class="bs-act" href="/payroll/timesheets">Back to the current period</a></p></div>` : ''}
       <section class="bs-panel bs-strip">
-        ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}${totalOt ? ` · ${TC.hm(totalOt)} OT` : ''}`)}
+        ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}${totalOt && !custom ? ` · ${TC.hm(totalOt)} OT` : ''}`)}
+        ${custom ? `
+        ${statCell('Days', String(days.length), `${esc(period.start)} → ${esc(period.end)}`)}
+        ${statCell('Punches', String(rows.reduce((a, r) => a + r.entries.length, 0)), 'in this range')}
+        ${statCell('Overtime', '—', 'only for a pay period')}
+        ` : `
         ${statCell('Awaiting approval', String(submitted), readyToApprove ? `${readyToApprove} clean` : submitted ? 'all blocked' : 'none waiting', submitted ? 'warn' : 'ok')}
         ${statCell('Approved', String(approved), transferred ? `${transferred} transferred` : approved ? 'not transferred yet' : 'none yet', approved ? 'ok' : '')}
         ${statCell('Where it stands', esc(readiness), stale ? `${stale} changed after transfer` : esc(labelFor(period)), stale ? 'bad' : readiness === 'Ready to finalize' ? 'ok' : readiness === 'Ready to transfer' ? 'ok' : 'warn')}
+        `}
       </section>
 
       <nav class="tsm-per">
@@ -15246,12 +15269,16 @@ app.get('/payroll/timesheets', (req, res) => {
           <button class="bs-btn-sm" type="submit">Show</button>
         </form>
       </nav>
-      ${custom ? `<p class="tsm-counts">Hours only. A range that is not a pay period has no timesheet to sign,
-        so status, approval and payroll are not shown — and overtime is left out because its weeks are only
-        right across a real period. <a class="bs-act" href="/payroll/timesheets">Back to the current period</a>.</p>`
-        : `<p class="tsm-counts">${submitted} submitted · ${notIn} not submitted · ${attention} need attention · ${approved} approved</p>`}
+      ${custom
+        ? '<p class="tsm-counts">Overtime is only calculated for official pay periods.</p>'
+        : `<p class="tsm-counts">${filtering
+          ? `${filtered.filter((r) => r.status === 'submitted').length} submitted · ${filtered.filter((r) => ['open', 'needs_attention', 'returned'].includes(r.status)).length} not submitted · ${filtered.filter((r) => r.status === 'needs_attention').length} need attention · ${filtered.filter((r) => ['approved', 'locked'].includes(r.status)).length} approved <i class="tsm-of">of ${filtered.length} shown</i>`
+          : `${submitted} submitted · ${notIn} not submitted · ${attention} need attention · ${approved} approved`}</p>`}
 
-      <form class="tcm-filters" method="get" action="/payroll/timesheets">
+      <!-- No status filter on a custom range: there are no statuses over a span
+           with no timesheet, and the dropdown would list payroll states that
+           cannot apply to anything on screen. -->
+      ${custom ? '' : `<form class="tcm-filters" method="get" action="/payroll/timesheets">
         <input type="hidden" name="p" value="${esc(period.start)}">
         <details class="fsheet"${filtering ? ' open' : ''}><summary class="fs-btn">Filter${filtering
           ? ` <b class="pa-badge">${filtered.length}</b>` : ''} <span class="fs-caret">▾</span></summary>
@@ -15271,7 +15298,7 @@ app.get('/payroll/timesheets', (req, res) => {
           </div></div>
         </details>
         ${filtering ? `<span class="tsm-filtered">${filtered.length} of ${rows.length} shown</span>` : ''}
-      </form>
+      </form>`}
 
       ${filtered.length ? `<section class="bs-panel tsg-panel">
         <div class="bs-sec-h"><span class="bs-kicker">Hours by day</span></div>
@@ -15385,7 +15412,12 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
       || TC.sheetPeople(period.start).includes(x.id))
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   const at = siblings.findIndex((x) => x.id === emp.id);
-  const stepTo = (x) => (x ? `/payroll/timesheets/${x.id}?p=${period.start}` : '#');
+  // Carry the filter as well as the period. Walking out of a filtered review
+  // into an unfiltered one silently changes which people you are working
+  // through, and the count beside the arrows would stop describing the list.
+  const keepQ = ['st', 'tr', 'iss'].filter((k) => req.query[k])
+    .map((k) => `&${k}=${encodeURIComponent(String(req.query[k]))}`).join('');
+  const stepTo = (x) => (x ? `/payroll/timesheets/${x.id}?p=${period.start}${keepQ}` : '#');
   const prev = at > 0 ? siblings[at - 1] : null;
   const next = at > -1 && at < siblings.length - 1 ? siblings[at + 1] : null;
   const walker = siblings.length > 1 ? `<nav class="tsw">
@@ -15400,7 +15432,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
     ${flash(req)}
     <div class="bs-page tcm-page inc-detail">
       <div class="tsw-top">
-        <a class="bs-back" href="/payroll/timesheets?p=${period.start}">← Timesheets</a>
+        <a class="bs-back" href="/payroll/timesheets?p=${period.start}${keepQ}">← Timesheets</a>
         ${walker}
       </div>
       <div class="inc-rec-head">

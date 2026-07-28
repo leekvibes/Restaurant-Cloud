@@ -4315,3 +4315,12 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .tsm-range-f { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .tsm-range-f input { font-family: var(--mono); font-size: 12px; padding: 6px 8px;
   border: 1px solid var(--field-border); background: var(--surface); color: var(--ink); }
+
+/* On a phone the day grid gives way to the employee ledger below it.
+   Fourteen dates is three screens of sideways travel on a 375px display, and
+   the question a phone gets asked is "who still needs me", not "what did
+   everyone do on the 9th". The ledger answers that in one column, and tapping
+   a person opens their full period. The grid returns on anything wider. */
+@media (max-width: 760px) {
+  .tsg-panel { display: none; }
+}

@@ -705,10 +705,15 @@ test('a custom range shows hours and refuses to imply a decision', async () => {
   // shape, because a sheet is keyed on its start date alone, so a careless read
   // would load the whole fortnight's record and hang it above one week.
   const html = await text(`/payroll/timesheets?from=${per.start}&to=${plusDays(per.start, 6)}`);
-  assert.match(html, /Custom/, 'it says what it is');
-  assert.match(html, /Hours only/, 'and why the rest is missing');
+  assert.match(html, /Read-only report/, 'it says what it is, in those words');
+  assert.match(html, /Overtime is only calculated for official pay periods/,
+    'and explains the overtime rule rather than implying figures went missing');
   assert.doesNotMatch(html, /ready to approve/i, 'no bulk approval on a span nobody can sign');
   assert.doesNotMatch(html, /Approve all/, 'none at all');
+  // The strip used to keep saying "Awaiting approval" and "Ready to transfer"
+  // over a range where neither is possible.
+  assert.doesNotMatch(html, /Awaiting approval/, 'no approval stat');
+  assert.doesNotMatch(html, /Ready to transfer/, 'and nothing claiming it is ready for payroll');
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM timesheets').get().n, before,
     'and reading a range writes no record');
 });
@@ -716,7 +721,31 @@ test('a custom range shows hours and refuses to imply a decision', async () => {
 test('a real period is not mistaken for a custom range', async () => {
   const per = gridPeriod();
   const html = await text(`/payroll/timesheets?from=${per.start}&to=${per.end}`);
-  assert.doesNotMatch(html, /Hours only/, 'the exact span of a period is that period');
+  assert.doesNotMatch(html, /Read-only report/, 'the exact span of a period is that period');
+  assert.match(html, /Awaiting approval/, 'and keeps its approval controls');
+});
+
+test('the export carries the filters the page is showing', async () => {
+  const all = await text('/timeclock/export?kind=punches&from=2026-01-01&to=2026-12-31');
+  const one = await text(`/timeclock/export?kind=punches&from=2026-01-01&to=2026-12-31&emp=${E.split}`);
+  const lines = (s) => s.trim().split('\n').length;
+  assert.ok(lines(all) > lines(one),
+    'narrowing to one person and exporting no longer hands back the whole floor');
+  assert.ok(lines(one) > 1, 'and still returns their rows');
+});
+
+test('walking to the next employee keeps the filter as well as the period', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets/${E.split}?p=${per.start}&st=open&iss=1`);
+  const arrows = [...html.matchAll(/class="tsx-arrow[^"]*" href="([^"]+)"/g)].map((m) => m[1]);
+  const real = arrows.filter((h) => h !== '#');
+  if (!real.length) return;                      // only one person in the period
+  for (const href of real) {
+    assert.match(href, /st=open/, 'the filter travels with the arrow');
+    assert.match(href, /iss=1/, 'all of it');
+    assert.match(href, new RegExp(`p=${per.start}`), 'and so does the period');
+  }
 });
 
 test('the status filter narrows the grid and says how far', async () => {
