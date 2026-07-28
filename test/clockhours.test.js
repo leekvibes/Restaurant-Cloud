@@ -294,31 +294,55 @@ test('handing the row back puts the clock in charge again', async () => {
 // Things that must not be allowed to destroy the record.
 // ===========================================================================
 
-test('somebody who clocked in cannot be quietly taken off the shift', async () => {
+test('taking somebody off a shift takes their punches with it, and says so first', async () => {
+  // This used to refuse outright whenever somebody had clocked time. Once the
+  // clock is running that is EVERY real person, so the button only worked for
+  // staff who were never there — a control that fails in the normal case is not
+  // protecting anything. It does the whole job now, and warns before it does.
   const sh = shiftOn('2026-03-05', 'dinner');
+  const page = await text(`/shifts/${sh.id}`);
+  assert.match(page, /This also deletes 1 punch/, 'the dialog names what goes with them');
+
+  const before = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ? AND employee_id = ?')
+    .get(sh.id, E.broken).n;
+  assert.ok(before > 0, 'they have a punch to lose');
+
   const res = await post(`/shifts/${sh.id}/remove`, { employee_id: String(E.broken) });
   assert.strictEqual(res.status, 302);
-  assert.match(decodeURIComponent(res.headers.get('location') || ''), /clocked time/,
-    'it says why, and points at the punch');
-  assert.ok(workOf(sh.id, E.broken), 'and the row is still there');
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /punch/, 'and the result says what went');
+  assert.ok(!workOf(sh.id, E.broken), 'they are off the shift');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ? AND employee_id = ?')
+    .get(sh.id, E.broken).n, 0, 'and the punches went too');
+  // Nothing vanishes untraceably — that was the whole point of the old refusal.
+  const ev = db.prepare("SELECT * FROM time_events WHERE action='deleted' AND reason='taken off the shift'").get();
+  assert.ok(ev, 'the deletion is on the record');
+  assert.match(ev.before_val || '', /→/, 'with the times it destroyed');
 });
 
-test('the refusal points at a door that actually opens', async () => {
-  // The first version of the guard told the manager to "delete the punch first"
-  // when no route existed to delete one. Somebody who clocked into the wrong
-  // service could not be taken off it at all — a guard with no way through is
-  // not a guard, it is a wall.
+test('somebody still on the clock cannot be taken off mid-shift', async () => {
+  // The one case still worth refusing: deleting a running punch strands a person
+  // with no record of when they started, and they cannot clock out of a row that
+  // is gone.
+  const cookie = await signIn(PIN(E.clockOnly));
+  await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
+  const live = db.prepare("SELECT * FROM time_entries WHERE employee_id = ? AND status = 'active'").get(E.clockOnly);
+  assert.ok(live, 'they are on the clock');
+
+  const res = await post(`/shifts/${live.shift_id}/remove`, { employee_id: String(E.clockOnly) });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /on the clock right now/, 'refused, with the reason');
+  assert.ok(workOf(live.shift_id, E.clockOnly), 'and they are still on the shift');
+  await post('/portal/clock/out', {}, { cookie });   // leave the fixture clean
+});
+
+test('a single punch can be deleted on its own, with a reason', async () => {
+  // For a punch that should not exist at all — the wrong service, somebody
+  // else's PIN — without taking the person off the shift they did work.
   const emp = E.corrected;
   const e = await punch(emp, '2026-05-06', '09:00', '13:00');
   const sh = shiftOn('2026-05-06', 'dinner');
-  assert.ok(workOf(sh.id, emp), 'they are on the shift');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 4, 'four hours on the shift');
 
-  const refused = await post(`/shifts/${sh.id}/remove`, { employee_id: String(emp) });
-  const msg = decodeURIComponent(refused.headers.get('location') || '');
-  assert.match(msg, /clocked time/, 'removal is refused');
-  assert.match(msg, new RegExp(`/timeclock/${e.id}`), 'and names the punch to open');
-
-  // A reason is required — a punch is a payroll record, not a stray row.
+  // A punch is a payroll record, not a stray row.
   await post(`/timeclock/${e.id}/delete`, { reason: '' });
   assert.ok(db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(e.id), 'no reason, no deletion');
 
@@ -328,15 +352,12 @@ test('the refusal points at a door that actually opens', async () => {
   const ev = db.prepare("SELECT * FROM time_events WHERE entity='entry' AND entity_id=? AND action='deleted'").get(e.id);
   assert.ok(ev, 'the deletion is on the record even though the punch is not');
   assert.match(ev.before_val || '', /09:00|13:00|2026-05-06/, 'with what it destroyed');
-
-  // And now the original action works.
-  const ok = await post(`/shifts/${sh.id}/remove`, { employee_id: String(emp) });
-  assert.strictEqual(ok.status, 302);
-  assert.ok(!workOf(sh.id, emp), 'they come off the shift');
 });
 
 test('a shift with punches on it cannot be deleted out from under them', async () => {
-  const sh = shiftOn('2026-03-05', 'dinner');
+  // Its own punch: the remove test above deliberately clears the ones it uses.
+  await punch(E.broken, '2026-05-20', '09:00', '17:00');
+  const sh = shiftOn('2026-05-20', 'dinner');
   const res = await post(`/shifts/${sh.id}/delete`, {});
   assert.strictEqual(res.status, 302);
   assert.match(decodeURIComponent(res.headers.get('location') || ''), /clocked time/, 'refused, with a reason');

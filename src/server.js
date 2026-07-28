@@ -1798,6 +1798,10 @@ app.get('/shifts/:id', (req, res) => {
   const num = (name, val) =>
     `<label class="bs-pill"><span>${name}</span><input name="${name === 'Kitchen' ? 'food' : name.toLowerCase()}" type="text" inputmode="decimal" value="${val || ''}" placeholder="0.00"></label>`;
 
+  // What each person has clocked on this shift, so the remove button can say
+  // what it is about to take with them rather than springing it afterwards.
+  const punchMap = TC.punchesOnShift(sh.id);
+
   const staffRow = ({ p, st: st2 }, isServer) => {
     const e = entries[p.employeeId] || {};
     const id = `edit-${p.employeeId}`;
@@ -1853,11 +1857,22 @@ app.get('/shifts/:id', (req, res) => {
         <span>These hours were typed over the clock's.</span>
         <button type="submit">Use the clocked hours</button>
       </form>` : ''}
-      <form class="bs-inline-rm" method="post" action="/shifts/${sh.id}/remove"
-            onsubmit="return confirm('Take ${esc(p.name).replace(/'/g, "\\'")} off this shift?')">
+      ${(() => {
+        const pu = punchMap.get(p.employeeId);
+        const first = esc(p.name).replace(/'/g, "\\'");
+        // The dialog names the punches, because they go too. Springing that
+        // afterwards would be worse than the refusal this replaced.
+        const ask = pu && pu.open
+          ? `${first} is on the clock right now — clock them out first.`
+          : pu
+            ? `Take ${first} off this shift?\\n\\nThis also deletes ${pu.n} punch${pu.n === 1 ? '' : 'es'} (${TC.hm(pu.minutes)}). It stays in the record.`
+            : `Take ${first} off this shift?`;
+        return `<form class="bs-inline-rm" method="post" action="/shifts/${sh.id}/remove"
+            onsubmit="return confirm('${ask}')">
         <input type="hidden" name="employee_id" value="${p.employeeId}">
-        <button type="submit">Take off this shift</button>
-      </form>` : ''}
+        <button type="submit">Take off this shift${pu && !pu.open ? ` <i>and ${pu.n} punch${pu.n === 1 ? '' : 'es'}</i>` : ''}</button>
+      </form>`;
+      })()}` : ''}
     </details>`;
   };
 
@@ -2224,26 +2239,61 @@ app.post('/shifts/:id/support', (req, res) => {
   res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Support saved.') + `#edit-${empId}`);
 });
 
+/**
+ * Take somebody off a shift, punches and all.
+ *
+ * This used to refuse whenever the person had clocked time, on the grounds that
+ * deleting the work row drops their pay AND silences the missing-hours warning
+ * — that warning counts work ROWS whose hours are zero, so removing the row
+ * makes the shift read "Ready to send" rather than raising a flag.
+ *
+ * That reasoning was right about the danger and wrong about the remedy. Once
+ * the clock is running, EVERYONE who worked has a punch, so the refusal fired
+ * on every real person and the button only worked for staff who were never
+ * there. A control that fails in the normal case is not protecting anything.
+ *
+ * So it does the whole job in one action, and the button says what that costs
+ * before you press it. The punches go with the work row, the audit events are
+ * written first and outlive them, and the shift's hours are re-derived. Nothing
+ * vanishes untraceably; it just no longer takes two screens.
+ */
 app.post('/shifts/:id/remove', (req, res) => {
   const shiftId = Number(req.params.id);
   const empId = Number(req.body.employee_id);
-  // Removing somebody who clocked in is worse than it looks: no_hours counts
-  // ROWS whose hours are zero, so deleting the row does not raise a flag — it
-  // silences one, and the shift flips to "Ready to send" with their pay gone.
-  // The punch is the record; move or delete that instead.
-  if (TC.hasPunch(shiftId, empId)) {
+  const actor = tcActor(req);
+  const punches = db.prepare('SELECT * FROM time_entries WHERE shift_id = ? AND employee_id = ?')
+    .all(shiftId, empId);
+
+  // Somebody still on the clock is a different problem, and the only one worth
+  // refusing: deleting a running punch strands a person mid-shift with no
+  // record of when they started, and they cannot clock out of something gone.
+  if (punches.some((p) => !p.clock_out_at)) {
     const who = (q.employee.get(empId) || {}).name || 'That person';
-    // Point at the actual punch, not at "the time clock" in general. The first
-    // version of this message sent people looking for a delete action that did
-    // not exist yet, which made removal impossible rather than merely guarded.
-    const one = db.prepare('SELECT id FROM time_entries WHERE shift_id = ? AND employee_id = ? ORDER BY id LIMIT 1')
-      .get(shiftId, empId);
     return res.redirect(`/shifts/${shiftId}?err=1&msg=` + encodeURIComponent(
-      `${who} clocked time on this shift, so taking them off here would drop the hours without a trace. `
-      + `Open their punch${one ? ` at /timeclock/${one.id}` : ''} and correct it to the right service, or delete it — then they come off this shift on their own.`));
+      `${who} is on the clock right now. Clock them out first — taking them off mid-shift would leave the punch with nowhere to go.`));
   }
-  w.deleteWork.run(shiftId, empId);
-  res.redirect(`/shifts/${shiftId}?msg=` + encodeURIComponent('Removed.'));
+
+  db.transaction(() => {
+    for (const p of punches) {
+      // The event before the row, so what it held survives what removed it.
+      TC.logEvent('entry', p.id, 'deleted', actor, {
+        before: `${p.clock_in_at} → ${p.clock_out_at || 'open'} · ${p.position}${p.daypart ? '/' + p.daypart : ''}`,
+        reason: 'taken off the shift',
+      });
+      db.prepare('DELETE FROM time_breaks WHERE time_entry_id = ?').run(p.id);
+      db.prepare('DELETE FROM time_corrections WHERE time_entry_id = ?').run(p.id);
+      db.prepare('DELETE FROM time_entries WHERE id = ?').run(p.id);
+    }
+    if (punches.length) {
+      tcTouchDates(empId, [...new Set(punches.map((p) => p.business_date))], actor, 'taken off a shift');
+    }
+    w.deleteWork.run(shiftId, empId);
+  })();
+
+  const hrs = punches.reduce((a, p) => a + (p.payable_minutes || 0), 0);
+  res.redirect(`/shifts/${shiftId}?msg=` + encodeURIComponent(punches.length
+    ? `Removed, with ${punches.length} punch${punches.length === 1 ? '' : 'es'} (${TC.hm(hrs)}). It is on the record.`
+    : 'Removed.'));
 });
 
 // Hand a row back to the clock. Once a number is typed the clock stops touching

@@ -542,6 +542,18 @@ function anchorEntryFor(employeeId, withinHours = 8) {
   return age != null && age <= withinHours * 60 ? last : null;
 }
 
+/** Every punch on a shift, per person, so a page can say what removing costs. */
+const punchesOnShiftQ = db.prepare(`
+  SELECT employee_id, COUNT(*) n, COALESCE(SUM(payable_minutes), 0) minutes,
+         COALESCE(SUM(clock_out_at IS NULL), 0) open
+    FROM time_entries WHERE shift_id = ? GROUP BY employee_id`);
+function punchesOnShift(shiftId) {
+  const map = new Map();
+  if (!shiftId) return map;
+  for (const r of punchesOnShiftQ.all(shiftId)) map.set(r.employee_id, r);
+  return map;
+}
+
 /** Has this person any punch at all on this shift? Guards the destructive routes. */
 const hasPunch = (shiftId, employeeId) => countPunches.get(shiftId, employeeId).n > 0;
 /** Has anybody? Guards deleting the shift out from under its own time entries. */
@@ -1193,7 +1205,7 @@ module.exports = {
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
-  syncShiftHours, hasPunch, shiftHasPunches, anchorEntryFor, clockedMinutesOn,
+  syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn,
   backfillShiftHours, gridCells, breaksInSpan,
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
   sheetPeople: (start) => sheetPeopleQ.all(start).map((r) => r.employee_id),
