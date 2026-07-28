@@ -758,7 +758,9 @@ app.get('/', (req, res) => {
     // Time clock and timesheets, but only what somebody has to act on.
     try {
       if (TC.settings().alertsOn) {
-        for (const a of TC.alerts({ periods: recentPeriods(2), employees: q.allEmployees.all(), otRule: OT.rule() })) {
+        const feed = TC.alerts({ periods: recentPeriods(2), employees: q.allEmployees.all(), otRule: OT.rule() })
+          .filter((a) => may(a.area));   // the payroll half names people and their hours
+        for (const a of feed) {
           notice(a.severity === 'bad' ? 'todo' : a.severity === 'warn' ? 'todo' : 'idle',
             'shifts', a.text, a.detail || 'Time clock', 'Open', a.href);
         }
@@ -9921,7 +9923,11 @@ function atTime(ts) {
 }
 
 app.get('/staff-portal', (req, res) => {
-  if (!navAllowed('staff')) return res.status(403).send(layout('Not allowed',
+  // A PATH, not an area key. navAllowed resolves its argument through areaFor(),
+  // and areaFor('staff') is null because no area owns a path called 'staff' —
+  // and null means open. This guard, and the one in portalGuard below, have been
+  // returning true for everybody since they were written.
+  if (!navAllowed('/staff-portal')) return res.status(403).send(layout('Not allowed',
     '<div class="bs-blank"><b>Not your area</b><span>Ask the owner to turn on Team for your account.</span></div>'));
 
   const today = isoDate(startOfToday());
@@ -10253,7 +10259,7 @@ const backTo = (res, tab, msg, extra = {}) =>
 const dayOf = (req) => (/^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? { d: req.body.d } : {});
 
 const portalGuard = (req, res) => {
-  if (canWrite() && navAllowed('staff')) return true;
+  if (canWrite() && navAllowed('/staff-portal')) return true;
   res.status(403).end();
   return false;
 };
@@ -14077,6 +14083,7 @@ app.get('/timeclock', (req, res) => {
           <p class="bs-subline">Who is on now, and which punches need fixing. Clocking out sets the hours on the shift, so there is nothing to type — unless you type over it, and then the clock leaves it alone.</p>
         </div>
       </div>
+      ${tcTabs('/timeclock')}
       ${strip}
 
       ${onNow.length ? `<section class="bs-panel tcm-live">
@@ -14115,7 +14122,9 @@ app.get('/timeclock', (req, res) => {
         ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
         <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
         <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
-        <a class="bs-btn-sm" href="/payroll/timesheets">Timesheets</a>
+        <!-- The Timesheets button used to sit here, unguarded, and 403'd for
+             anybody without the payroll area. The tab strip above carries that
+             link now, and filters it by what the account can actually open. -->
       </form>
 
       ${rows.length ? `<div class="bs-lrows tcm-rows">${rows.map(row).join('')}</div>`
@@ -14763,6 +14772,49 @@ app.post('/timeclock/correction/:id', (req, res) => {
 // it prepares.
 // ===========================================================================
 
+/**
+ * Payroll authority, checked on the route rather than inferred from the URL.
+ *
+ * Approving, locking, reopening, returning and TRANSFERRING hours to payroll are
+ * payroll powers, and until now the only thing enforcing that was the path these
+ * routes happen to sit on: the area middleware matches `req.path`, and the
+ * routes themselves checked nothing but canWrite(). That was sound while this
+ * page lived alone under /payroll. It stops being sound the moment the page
+ * shares a workspace with the staff-area time clock — someone would eventually
+ * move a route, and the power to send hours to payroll would move with it,
+ * silently, to every staff editor.
+ *
+ * Returns false and has already sent the 403, so callers read `if (!… ) return;`
+ * — one line, which keeps canWrite() inside the window two tests slice for.
+ */
+/**
+ * The Time Clock workspace's two tabs.
+ *
+ * They are two URLs, not one page with a query param, and deliberately so: the
+ * area middleware decides what an account may open by matching req.path, so a
+ * tab is only really gated if it has its own path. Today is staff; Timesheets is
+ * payroll, because approving and transferring hours is payroll authority.
+ *
+ * Each link is filtered by what the account can actually open, and the strip
+ * disappears below two — one tab is not a tab strip, it is a title. The rule is
+ * the one subNav() in views.js already reasons about, though that function is
+ * dead code and has never run.
+ */
+function tcTabs(active) {
+  const links = [['/timeclock', 'Today'], ['/payroll/timesheets', 'Timesheets']]
+    .filter(([href]) => navAllowed(href));
+  if (links.length < 2) return '';
+  return `<nav class="pa-tabs">${links.map(([href, label]) =>
+    `<a class="pa-tab${href === active ? ' on' : ''}" href="${href}">${label}</a>`).join('')}</nav>`;
+}
+
+function payrollArea(res) {
+  if (navAllowedFor('/payroll')) return true;
+  res.status(403).send(layout('Not your area',
+    '<div class="bs-page"><h1>Not your area</h1><p>Timesheets belong to Payroll.</p></div>'));
+  return false;
+}
+
 // What the shifts in a span are carrying, per person. Both of these were
 // db.prepare() calls written INSIDE the per-employee loop, so SQLite recompiled
 // the identical statement once per employee per request, and the detail page
@@ -14844,6 +14896,7 @@ app.get('/payroll/timesheets', (req, res) => {
           <p class="bs-subline">What the clock recorded this period, and who has signed it off. These are the hours <a class="bs-act" href="/payroll">Payroll</a> runs on — the clock writes them onto each shift as people punch out, and anything typed over is marked.</p>
         </div>
       </div>
+      ${tcTabs('/payroll/timesheets')}
       <section class="bs-panel bs-strip">
         ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}${totalOt ? ` · ${TC.hm(totalOt)} OT` : ''}`)}
         ${statCell('Awaiting approval', String(submitted), readyToApprove ? `${readyToApprove} clean` : submitted ? 'all blocked' : 'none waiting', submitted ? 'warn' : 'ok')}
@@ -14940,9 +14993,16 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
             <div class="bs-sec-h"><span class="bs-kicker">Days</span></div>
             ${v.entries.length ? TC.byDay(v.entries).map(([date, list]) => `
               <div class="ts-mday"><div class="ts-mday-h">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</div>
-                ${list.map((e) => `<a class="ts-mrow" href="/timeclock/${e.id}">
-                  <span>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'} · ${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
-                  <b>${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b></a>`).join('')}
+                <!-- A link only for somebody who can open the other side. A
+                     payroll-only account reading a timesheet was being offered
+                     a route into the staff area that answers 403. -->
+                ${list.map((e) => {
+                  const inner = `<span>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'} · ${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
+                  <b>${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>`;
+                  return navAllowed('/timeclock')
+                    ? `<a class="ts-mrow" href="/timeclock/${e.id}">${inner}</a>`
+                    : `<div class="ts-mrow">${inner}</div>`;
+                }).join('')}
               </div>`).join('')
               : '<p class="inc-hint">Nothing recorded.</p>'}
           </section>
@@ -15097,6 +15157,7 @@ function tsApprove(emp, period, actor, note, override) {
 }
 
 app.post('/payroll/timesheets/:empId/approve', (req, res) => {
+  if (!payrollArea(res)) return;
   if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p></div>'));
   const emp = q.employee.get(Number(req.params.empId));
   if (!emp) return res.status(404).end();
@@ -15110,6 +15171,7 @@ app.post('/payroll/timesheets/:empId/approve', (req, res) => {
 });
 
 app.post('/payroll/timesheets/approve-all', (req, res) => {
+  if (!payrollArea(res)) return;
   if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
   const period = recentPeriods(12).find((p) => p.start === req.body.period);
   if (!period) return res.redirect('/payroll/timesheets');
@@ -15129,6 +15191,7 @@ app.post('/payroll/timesheets/approve-all', (req, res) => {
 });
 
 app.post('/payroll/timesheets/:empId/lock', (req, res) => {
+  if (!payrollArea(res)) return;
   if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
   const emp = q.employee.get(Number(req.params.empId));
   const period = recentPeriods(12).find((p) => p.start === req.body.period);
@@ -15145,6 +15208,7 @@ app.post('/payroll/timesheets/:empId/lock', (req, res) => {
 });
 
 app.post('/payroll/timesheets/:empId/reopen', (req, res) => {
+  if (!payrollArea(res)) return;
   if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
   const emp = q.employee.get(Number(req.params.empId));
   const period = recentPeriods(12).find((p) => p.start === req.body.period);
@@ -15174,6 +15238,7 @@ app.post('/payroll/timesheets/:empId/reopen', (req, res) => {
 
 // --- payroll transfer ------------------------------------------------------
 app.post('/payroll/timesheets/:empId/transfer', (req, res) => {
+  if (!payrollArea(res)) return;
   if (!canWrite()) return res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1></div>'));
   const emp = q.employee.get(Number(req.params.empId));
   const period = recentPeriods(12).find((p) => p.start === req.body.period);
@@ -15207,6 +15272,7 @@ app.post('/payroll/timesheets/:empId/transfer', (req, res) => {
 });
 
 app.post('/payroll/timesheets/:empId/return', (req, res) => {
+  if (!payrollArea(res)) return;
   if (!canWrite()) return res.status(403).send(layout('Not allowed',
     '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p></div>'));
   const emp = q.employee.get(Number(req.params.empId));

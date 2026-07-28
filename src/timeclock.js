@@ -1047,7 +1047,13 @@ function alerts({ periods, employees, otRule } = {}) {
   const out = [];
   const cfg = settings();
   const now = nowUtc();
-  const push = (severity, text, href, detail) => out.push({ severity, text, href, detail });
+  // Each alert carries the area it belongs to. The dashboard used to show the
+  // whole feed to anybody holding EITHER area, so a staff-only account received
+  // the payroll half — including a detail string naming employees and their
+  // hours. Tagging at the source keeps the split honest as alerts are added.
+  const push = (severity, text, href, detail, area = 'staff') =>
+    out.push({ severity, text, href, detail, area });
+  const pushPay = (severity, text, href, detail) => push(severity, text, href, detail, 'payroll');
 
   // Still on the clock long past any believable shift.
   const open = q.allActive.all();
@@ -1078,23 +1084,30 @@ function alerts({ periods, employees, otRule } = {}) {
     const returned = sheets.filter((s) => s.status === 'returned').length;
     const readyToSend = sheets.filter((s) => ['approved', 'locked'].includes(s.status) && s.transfer_state === 'ready').length;
     const stale2 = sheets.filter((s) => ['changed_after_transfer', 'needs_recalculation'].includes(s.transfer_state)).length;
-    if (stale2) push('bad', `${stale2} payroll ${stale2 === 1 ? 'record needs' : 'records need'} recalculating`, `/payroll/timesheets?p=${per.start}`);
-    if (submitted) push('warn', `${submitted} timesheet${submitted === 1 ? '' : 's'} awaiting approval`, `/payroll/timesheets?p=${per.start}`);
-    if (readyToSend) push('info', `${readyToSend} approved timesheet${readyToSend === 1 ? '' : 's'} ready for payroll`, `/payroll/timesheets?p=${per.start}`);
-    if (returned) push('info', `${returned} timesheet${returned === 1 ? '' : 's'} sent back and not yet resubmitted`, `/payroll/timesheets?p=${per.start}`);
+    if (stale2) pushPay('bad', `${stale2} payroll ${stale2 === 1 ? 'record needs' : 'records need'} recalculating`, `/payroll/timesheets?p=${per.start}`);
+    if (submitted) pushPay('warn', `${submitted} timesheet${submitted === 1 ? '' : 's'} awaiting approval`, `/payroll/timesheets?p=${per.start}`);
+    if (readyToSend) pushPay('info', `${readyToSend} approved timesheet${readyToSend === 1 ? '' : 's'} ready for payroll`, `/payroll/timesheets?p=${per.start}`);
+    if (returned) pushPay('info', `${returned} timesheet${returned === 1 ? '' : 's'} sent back and not yet resubmitted`, `/payroll/timesheets?p=${per.start}`);
 
     // Approaching overtime, but only when overtime is actually switched on —
     // a warning about a rule you do not use is noise.
+    //
+    // Measured over THIS WEEK, not the period. It used to compare a whole
+    // period's payable minutes against a weekly threshold, so on a fortnightly
+    // period it warned that anybody working 18 hours a week was near 40. The
+    // week runs Monday to today, which is the same boundary the overtime
+    // calculation itself uses — start + 7 was the bug periods.js exists to kill.
     if (otRule && otRule.enabled) {
       const near = [];
+      const today = businessDateOf(now, cfg.cutoffHour);
+      const weekStart = addDays(today, -((new Date(today + 'T00:00:00Z').getUTCDay() + 6) % 7));
+      const threshold = (otRule.threshold || 40) * 60;
       for (const emp of employees || []) {
         if (emp.ot_exempt) continue;
-        const t = totalsFor(q.entriesInPeriod.all(emp.id, per.start, per.end), {});
-        const weekMin = t.payable;                       // period-to-date
-        const threshold = (otRule.threshold || 40) * 60;
+        const weekMin = totalsFor(q.entriesInPeriod.all(emp.id, weekStart, today), {}).payable;
         if (weekMin >= threshold * 0.9 && weekMin < threshold * 2) near.push(`${emp.name} ${toHours(weekMin)}h`);
       }
-      if (near.length) push('warn', `${near.length} approaching overtime`, '/payroll/timesheets', near.join(' · '));
+      if (near.length) pushPay('warn', `${near.length} approaching overtime`, '/payroll/timesheets', near.join(' · '));
     }
   }
   return out;

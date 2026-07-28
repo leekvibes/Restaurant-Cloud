@@ -210,6 +210,58 @@ test('a view-only account can open its areas and is refused every write', async 
   assert.strictEqual(write.status, 403, 'writes refused');
 });
 
+/**
+ * Today and Timesheets share one workspace but not one permission.
+ *
+ * Approving, locking, reopening, returning and TRANSFERRING hours to payroll are
+ * payroll authority, and for a long time the only thing enforcing that was the
+ * URL these routes sit on — the middleware matches req.path and the routes
+ * themselves checked only canWrite(). That was fine while the page stood alone.
+ * It stops being fine once the two pages wear one tab strip and somebody is
+ * tempted to move a route, so the check now lives on the route.
+ *
+ * Asserted with real signed-in accounts rather than by grepping the source: a
+ * grep cannot tell an area check from the absence of one.
+ */
+test('the two Time Clock tabs are gated separately, and the strip hides what you cannot open', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const mk = async (email, feature) => {
+    const old = users.byEmail.get(email);
+    if (old) users.del.run(old.id);
+    await as(owner, '/users', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams([['name', 'Tab ' + feature], ['email', email],
+        ['password', 'tab-password-1'], ['role', 'editor'],
+        ['features', 'dashboard'], ['features', feature]]).toString(),
+    });
+    return login({ email, password: 'tab-password-1' });
+  };
+
+  const staffOnly = await mk('tabstaff@test.local', 'staff');
+  const payOnly = await mk('tabpay@test.local', 'payroll');
+
+  assert.strictEqual((await as(staffOnly, '/timeclock')).status, 200, 'staff opens Today');
+  assert.strictEqual((await as(staffOnly, '/payroll/timesheets')).status, 403, 'and not Timesheets');
+  assert.strictEqual((await as(payOnly, '/payroll/timesheets')).status, 200, 'payroll opens Timesheets');
+  assert.strictEqual((await as(payOnly, '/timeclock')).status, 403, 'and not Today');
+
+  // The tab it cannot open is absent, not broken. One tab is not a tab strip.
+  const today = await (await as(staffOnly, '/timeclock')).text();
+  assert.ok(!today.includes('href="/payroll/timesheets"'),
+    'a staff-only account is not offered a link that answers 403');
+
+  // Every write route, not just the pages. This is the one that matters: these
+  // are the actions that move hours into payroll.
+  for (const path of ['/payroll/timesheets/1/approve', '/payroll/timesheets/approve-all',
+    '/payroll/timesheets/1/lock', '/payroll/timesheets/1/reopen',
+    '/payroll/timesheets/1/transfer', '/payroll/timesheets/1/return']) {
+    const r = await as(staffOnly, path, {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'period=2026-01-01',
+    });
+    assert.strictEqual(r.status, 403, `${path} is refused for a staff-only editor`);
+  }
+});
+
 // The dashboard pulls from every module at once, so it is the one page where
 // a permissions mistake shows up as content rather than as a 403 — a viewer
 // would just see payroll and cost figures on their home page and never know
