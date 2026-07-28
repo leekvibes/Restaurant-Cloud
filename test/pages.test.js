@@ -290,6 +290,10 @@ test('folding a column folds it in the heading and the row alike', () => {
   const PAIRS = [
     ['bs-dayhead', 'bs-dayrow'], ['bs-payhead', 'bs-payrow'], ['bs-rhead', 'bs-rrow'],
     ['bs-shifthead', 'bs-shiftrow'], ['bs-staffhead', 'bs-staffrow'],
+    // The day grid and the live floor ledger fold their columns at the same
+    // breakpoints their headings do, or the labels stop describing what is
+    // under them.
+    ['tsg-head', 'tsg-row'], ['tcl-h', 'tcl-r'],
   ];
   // Exact class tokens — `.bs-lr-n` must not read as `.bs-lr`.
   const classesIn = (sel) => new Set([...sel.matchAll(/\.([a-z0-9-]+)/g)].map((m) => m[1]));
@@ -509,7 +513,11 @@ test('both themes give the stripe its own colour', () => {
 // The dashboard came back out: framing it flattened the one page whose job is
 // reading at a glance, and it now runs the ruled three-column layout it had
 // before. Shifts, Sales and Payroll keep the pattern.
-const PANEL_PAGES = ['/shifts', '/sales', '/payroll'];
+// The two Time Clock tabs are here deliberately: they carry the newest and
+// densest markup in the app, and until they were listed they were the only
+// panelled pages exempt from the no-nested-panels and one-heading-per-panel
+// rules the rest of the app is held to.
+const PANEL_PAGES = ['/shifts', '/sales', '/payroll', '/timeclock', '/payroll/timesheets'];
 
 /** Outermost-first list of panel fragments on a page, with nesting depth. */
 function panelsWithDepth(html) {
