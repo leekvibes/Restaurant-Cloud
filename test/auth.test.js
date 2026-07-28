@@ -302,6 +302,20 @@ test('the two Time Clock tabs are gated separately, and the strip hides what you
     });
     assert.strictEqual(r.status, 403, `${path} is refused for a staff-only editor`);
   }
+
+  // The other direction. A payroll reviewer has to be able to READ the punch
+  // that is blocking a timesheet — refusing them the page made the blocker
+  // unopenable, a dead end at the exact moment somebody needs to act. Reading a
+  // punch is not the same as gaining the floor manager's job, and it is
+  // certainly not the same as gaining approval authority, which they already had.
+  const { db: adb } = require('../src/db');
+  const anyEntry = adb.prepare('SELECT id FROM time_entries LIMIT 1').get();
+  if (anyEntry) {
+    assert.strictEqual((await as(payOnly, `/timeclock/${anyEntry.id}`)).status, 200,
+      'payroll can open the punch behind a timesheet it reviews');
+  }
+  // But the time-clock LIST is still the staff area's own page.
+  assert.strictEqual((await as(payOnly, '/timeclock')).status, 403, 'and gains nothing else by it');
 });
 
 // The dashboard pulls from every module at once, so it is the one page where

@@ -526,6 +526,53 @@ test('a range typed backwards is read the way it was meant', async () => {
 });
 
 // ===========================================================================
+// Who may change a punch, and when.
+// ===========================================================================
+
+test('an approved timesheet freezes the punches underneath it', async () => {
+  const P = require('../src/periods');
+  const emp = E.corrected;
+  const day = P.recentPeriods(2)[1].start;
+  const per = P.periodFor(day);
+  const e = await punch(emp, day, '09:00', '17:00');
+  const sh = shiftOn(day, 'dinner');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'eight hours to start');
+
+  // Sign for it. A signature is a statement about a set of hours; the hours
+  // stop being editable in place, or the signature quietly stops describing
+  // what it signed.
+  db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)
+    VALUES (?,?,?,'approved')
+    ON CONFLICT(employee_id, period_start) DO UPDATE SET status='approved'`)
+    .run(emp, per.start, per.end);
+
+  const blocked = await post(`/timeclock/${e.id}/edit`, {
+    in: `${day}T09:00`, out: `${day}T19:00`, position: 'server', daypart: 'dinner', reason: 'stayed late',
+  });
+  assert.match(decodeURIComponent(blocked.headers.get('location') || ''), /already approved/,
+    'the edit is refused, and says why');
+  assert.strictEqual(db.prepare('SELECT clock_out_at FROM time_entries WHERE id = ?').get(e.id).clock_out_at.slice(11, 16),
+    '21:00', 'and the punch is untouched');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'so the shift still carries what was signed for');
+
+  // Every other way in is refused too, not just the one somebody tested.
+  const br = await post(`/timeclock/${e.id}/break`, {
+    start: `${day}T12:00`, end: `${day}T12:30`, paid: '0', reason: 'lunch' });
+  assert.match(decodeURIComponent(br.headers.get('location') || ''), /already approved/, 'adding a break too');
+  const del = await post(`/timeclock/${e.id}/delete`, { reason: 'nope' });
+  assert.match(decodeURIComponent(del.headers.get('location') || ''), /already approved/, 'and deleting it');
+  assert.ok(db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(e.id), 'the punch survives');
+
+  // Reopening is the deliberate act that withdraws the signature.
+  db.prepare("UPDATE timesheets SET status='open' WHERE employee_id = ? AND period_start = ?").run(emp, per.start);
+  const ok = await post(`/timeclock/${e.id}/edit`, {
+    in: `${day}T09:00`, out: `${day}T19:00`, position: 'server', daypart: 'dinner', reason: 'stayed late',
+  });
+  assert.strictEqual(ok.status, 302);
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 10, 'and now the correction lands');
+});
+
+// ===========================================================================
 // The Today tab.
 // ===========================================================================
 

@@ -33,7 +33,7 @@ const { q: prodQ, CATEGORIES: PROD_CATS, trendOf, reviewRows,
 // Same reason as products above: cash.js creates cash_recon and adds its
 // columns, and the dashboard alert below reads them.
 const CASH = require('./cash');
-const { currentPeriod, recentPeriods, labelFor, isPeriod, sendRecord, markSent, anchor, setSetting, getSetting,
+const { currentPeriod, recentPeriods, labelFor, isPeriod, periodFor, sendRecord, markSent, anchor, setSetting, getSetting,
   skipRecord, markSkipped, unskipPeriod } = require('./periods');
 const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -14063,12 +14063,68 @@ function tcTouchTimesheet(entryId, actor, why, alsoDates = []) {
 const tcPosName = (slug) => (positions.bySlug.get(slug) || {}).name || slug || '—';
 const tcEmpName = (id) => (q.employee.get(id) || {}).name || `#${id}`;
 
-/** Guard: mutations are for editors. Viewers read. */
-function tcCanEdit(req, res) {
-  if (canWrite()) return true;
-  res.status(403).send(layout('Not allowed',
-    '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
-  return false;
+/**
+ * Who may see a punch: whoever owns the clock, OR whoever reviews the timesheet
+ * it belongs to. A payroll reviewer cannot approve a period without reading the
+ * entry that is blocking it, and refusing them the page made the blocker
+ * unopenable — a dead end at exactly the moment somebody needs to act.
+ */
+const punchReadable = () => navAllowedFor('/timeclock') || navAllowedFor('/payroll');
+
+/**
+ * The timesheet covering a punch, and whether it is frozen.
+ *
+ * A signature is a statement about a set of hours. Once it exists, those hours
+ * stop being editable in place — not because the edit is wrong, but because the
+ * signature would silently stop describing them. Reopening is the deliberate
+ * act that withdraws it, and it is already built and already tells payroll to
+ * recalculate.
+ */
+const FROZEN_SHEET = ['approved', 'locked', 'finalized'];
+function sheetCovering(employeeId, businessDate) {
+  const period = periodFor(businessDate);
+  const sheet = TC.sheetFor(employeeId, period);        // read-only: no create
+  return { period, sheet, frozen: FROZEN_SHEET.includes(sheet.status) };
+}
+
+/**
+ * May this account change this punch, right now?
+ *
+ * Three questions, not one. tcCanEdit used to ask only canWrite(), which meant
+ * a staff-only editor could rewrite the punches behind an approved, locked and
+ * already-transferred timesheet and nothing anywhere refused.
+ *
+ *   1. Can this account write at all?
+ *   2. Does it hold an area that owns punches — the time clock, or payroll?
+ *      Holding one does not grant the other's powers: approving, locking,
+ *      reopening, returning and transferring stay behind payrollArea().
+ *   3. Is the timesheet covering that day still open?
+ *
+ * `entry` may be omitted where there is nothing to check the state of yet — the
+ * add-a-punch form, the settings page. Pass it everywhere else.
+ */
+function tcCanEdit(req, res, entry) {
+  if (!canWrite()) {
+    res.status(403).send(layout('Not allowed',
+      '<div class="bs-page"><h1>Not allowed</h1><p>Your account is view-only.</p><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
+    return false;
+  }
+  if (!punchReadable()) {
+    res.status(403).send(layout('Not your area',
+      '<div class="bs-page"><h1>Not your area</h1><p>Correcting a punch needs the time clock or payroll.</p></div>'));
+    return false;
+  }
+  if (entry && entry.business_date) {
+    const st = sheetCovering(entry.employee_id, entry.business_date);
+    if (st.frozen) {
+      const who = st.sheet.approved_by ? ` by ${st.sheet.approved_by}` : '';
+      res.redirect(`/timeclock/${entry.id}?msg=` + encodeURIComponent(
+        `That day is on a timesheet that was already ${st.sheet.status}${who}. Reopen it on Timesheets first — `
+        + 'changing the hours underneath a signature would leave it describing figures nobody signed for.'));
+      return false;
+    }
+  }
+  return true;
 }
 
 app.get('/timeclock', (req, res) => {
@@ -14605,7 +14661,9 @@ app.post('/timeclock/new', (req, res) => {
 });
 
 app.get('/timeclock/:id', (req, res) => {
-  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  // Payroll may read a punch too: a reviewer cannot clear a blocker they
+  // are not allowed to look at.
+  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such time entry</h1><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
   const brs = TC.q.breaks.all(e.id);
@@ -14766,9 +14824,9 @@ app.get('/timeclock/:id', (req, res) => {
 });
 
 app.post('/timeclock/:id/edit', (req, res) => {
-  if (!tcCanEdit(req, res)) return;
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
+  if (!tcCanEdit(req, res, e)) return;
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   if (!reason) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A reason is required.'));
   const inAt = TC.localInputToUtc(req.body.in) || e.clock_in_at;
@@ -14815,9 +14873,9 @@ app.post('/timeclock/:id/edit', (req, res) => {
 });
 
 app.post('/timeclock/:id/break', (req, res) => {
-  if (!tcCanEdit(req, res)) return;
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
+  if (!tcCanEdit(req, res, e)) return;
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   const start = TC.localInputToUtc(req.body.start), end = TC.localInputToUtc(req.body.end);
   if (!reason || !start || !end || end <= start) {
@@ -14840,9 +14898,9 @@ app.post('/timeclock/:id/break', (req, res) => {
 });
 
 app.post('/timeclock/break/:bid/delete', (req, res) => {
-  if (!tcCanEdit(req, res)) return;
   const b = TC.q.breakById.get(Number(req.params.bid));
   if (!b) return res.status(404).end();
+  if (!tcCanEdit(req, res, TC.q.byId.get(b.time_entry_id))) return;
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   if (!reason) return res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('A reason is required.'));
   const actor = tcActor(req);
@@ -14874,9 +14932,9 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
  * the entry is gone but the fact that it existed, and who removed it, is not.
  */
 app.post('/timeclock/:id/delete', (req, res) => {
-  if (!tcCanEdit(req, res)) return;
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
+  if (!tcCanEdit(req, res, e)) return;
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   if (!reason) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Deleting a punch needs a reason.'));
   if (e.status === 'locked') return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('That punch is locked.'));
