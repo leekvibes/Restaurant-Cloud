@@ -211,6 +211,48 @@ test('a view-only account can open its areas and is refused every write', async 
 });
 
 /**
+ * A capital letter is not a key.
+ *
+ * Express matches routes case-insensitively unless told otherwise, and the area
+ * gate does not: areaFor() compares req.path against lowercase prefixes, so
+ * /Payroll matched no area — and canSee() treats "no area" as open. Every
+ * restricted page in the app was reachable by capitalising one letter, verified
+ * against a real staff-only account: payroll, sales, cash, performance, menu
+ * costing, invoices, settings, and user administration.
+ *
+ * Two locks now. The router is case-sensitive, and areaFor lowercases before
+ * matching, so neither one being wrong on its own reopens it. This test walks
+ * every area rather than the handful somebody thought to try.
+ */
+test('a restricted account cannot reach an area by changing the case of the path', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const existing = users.byEmail.get('case@test.local');
+  if (existing) users.del.run(existing.id);
+  await as(owner, '/users', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams([['name', 'Case Test'], ['email', 'case@test.local'],
+      ['password', 'case-password-1'], ['role', 'editor'],
+      ['features', 'dashboard'], ['features', 'staff']]).toString(),
+  });
+  const u = await login({ email: 'case@test.local', password: 'case-password-1' });
+  assert.ok(u, 'the account signs in');
+
+  // Every area this account was NOT given, in three spellings each.
+  const withheld = ['/payroll', '/sales', '/cash', '/costs', '/menu', '/c/invoices', '/settings', '/users'];
+  for (const p of withheld) {
+    const variants = [p, '/' + p.slice(1, 2).toUpperCase() + p.slice(2), p.toUpperCase()];
+    for (const v of variants) {
+      const r = await as(u, v);
+      assert.notStrictEqual(r.status, 200, `${v} must not be readable (spelling of ${p})`);
+    }
+  }
+  // And the areas it DOES hold still open, so the lock did not seize shut.
+  for (const p of ['/', '/employees', '/staff-portal', '/timeclock']) {
+    assert.strictEqual((await as(u, p)).status, 200, `${p} stays open`);
+  }
+});
+
+/**
  * Today and Timesheets share one workspace but not one permission.
  *
  * Approving, locking, reopening, returning and TRANSFERRING hours to payroll are

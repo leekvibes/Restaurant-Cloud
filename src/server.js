@@ -39,6 +39,22 @@ const multer = require('multer');
 const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const app = express();
+
+// PATHS ARE CASE-SENSITIVE. This is a permission control, not a preference.
+//
+// Express matches routes case-insensitively by default, so /Payroll reached the
+// payroll page. The area gate does NOT: areaFor() compares req.path against
+// lowercase prefixes with ===  and startsWith, so /Payroll matched no area, and
+// canSee() treats "no area" as open. One capital letter turned every restricted
+// page into a public one — payroll, sales, cash, performance, menu costing,
+// invoices, settings and user administration, verified against a real
+// staff-only account.
+//
+// Turning this on makes /Payroll a 404 instead, which closes the whole class
+// rather than the eight paths somebody happened to test. Every route in this
+// file is declared lowercase and every link is written lowercase, so nothing
+// legitimate depends on the old behaviour.
+app.set('case sensitive routing', true);
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');

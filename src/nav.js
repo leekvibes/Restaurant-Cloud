@@ -40,7 +40,13 @@ const byKey = new Map(AREAS.map((a) => [a.key, a]));
 
 /** Which area a path belongs to, or null when nothing claims it. */
 function areaFor(path) {
-  const p = String(path || '');
+  // Lowercased before matching, as a second lock on the same door. Express is
+  // configured case-sensitive so /Payroll never reaches a handler at all — but
+  // this function is also called with hrefs from templates and with paths from
+  // other call sites, and a permission check that depends on somebody else's
+  // configuration being right is a permission check waiting to be wrong.
+  // Every prefix in AREAS is lowercase, so this changes nothing else.
+  const p = String(path || '').toLowerCase();
   let best = null;
   for (const a of AREAS) {
     for (const prefix of a.paths) {
