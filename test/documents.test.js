@@ -17,6 +17,20 @@ const path = require('node:path');
 
 const PORT = 3979;
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// A browser gets its CSRF token injected into every form it loads. These tests
+// post straight at the routes, so they ask for one the same way the service
+// worker does, and cache it per session.
+const __csrf = new Map();
+async function __token(cookie) {
+  const key = cookie || '';
+  if (!__csrf.has(key)) {
+    const r = await fetch(BASE + '/csrf', { headers: key ? { cookie: key } : {} });
+    __csrf.set(key, (await r.text()).trim());
+  }
+  return __csrf.get(key);
+}
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-doc-'));
 const DB = path.join(dir, 'doc.db');
 const UPLOADS = path.join(dir, 'uploads');

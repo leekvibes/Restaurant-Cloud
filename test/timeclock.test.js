@@ -16,6 +16,20 @@ const path = require('node:path');
 
 const PORT = 3989;                     // unique across the suite
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// A browser gets its CSRF token injected into every form it loads. These tests
+// post straight at the routes, so they ask for one the same way the service
+// worker does, and cache it per session.
+const __csrf = new Map();
+async function __token(cookie) {
+  const key = cookie || '';
+  if (!__csrf.has(key)) {
+    const r = await fetch(BASE + '/csrf', { headers: key ? { cookie: key } : {} });
+    __csrf.set(key, (await r.text()).trim());
+  }
+  return __csrf.get(key);
+}
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-tc-'));
 const DB = path.join(dir, 'tc.db');
 // Point the modules this file requires at the SAME database the server uses.
@@ -25,10 +39,10 @@ process.env.DB_PATH = DB;
 process.env.TZ = process.env.TZ || 'America/New_York';
 let child, Database, db;
 
-const post = (p, body, headers = {}) => fetch(BASE + p, {
+const post = async (p, body, headers = {}) => fetch(BASE + p, {
   method: 'POST', redirect: 'manual',
   headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
-  body: new URLSearchParams(body).toString(),
+  body: new URLSearchParams({ ...body, _csrf: await __token((headers || {}).cookie) }).toString(),
 });
 const get = (p, headers = {}) => fetch(BASE + p, { headers, redirect: 'manual' });
 const text = async (p, headers = {}) => (await fetch(BASE + p, { headers })).text();

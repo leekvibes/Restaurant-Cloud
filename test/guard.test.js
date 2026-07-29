@@ -16,6 +16,20 @@ const path = require('node:path');
 
 const PORT = 3997;                     // unique across the suite
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// A browser gets its CSRF token injected into every form it loads. These tests
+// post straight at the routes, so they ask for one the same way the service
+// worker does, and cache it per session.
+const __csrf = new Map();
+async function __token(cookie) {
+  const key = cookie || '';
+  if (!__csrf.has(key)) {
+    const r = await fetch(BASE + '/csrf', { headers: key ? { cookie: key } : {} });
+    __csrf.set(key, (await r.text()).trim());
+  }
+  return __csrf.get(key);
+}
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-gd-'));
 const DB = path.join(dir, 'gd.db');
 const LOG = path.join(dir, 'server.log');
@@ -23,10 +37,10 @@ process.env.DB_PATH = DB;
 process.env.TZ = process.env.TZ || 'America/New_York';
 let child, Database, db, logFd;
 
-const post = (p, body) => fetch(BASE + p, {
+const post = async (p, body) => fetch(BASE + p, {
   method: 'POST', redirect: 'manual',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
-  body: new URLSearchParams(body).toString(),
+  body: new URLSearchParams({ ...body, _csrf: await __token(({} || {}).cookie) }).toString(),
 });
 const msgOf = (res) => decodeURIComponent((res.headers.get('location') || '').split('msg=')[1] || '');
 
@@ -141,4 +155,101 @@ test('attempts survive a restart — waiting one out is not a way through', () =
   assert.ok(again.prepare("SELECT 1 FROM auth_attempts WHERE ident='999'").get(),
     'the record is on disk, not in a process that can be bounced');
   again.close();
+});
+
+// ---------------------------------------------------------------------------
+// CSRF.
+//
+// The attack is one specific thing: a page on another site causing this
+// browser to post, with this browser's cookies attached. Everything below is
+// about that, and about not pretending to solve things a token cannot solve.
+// ---------------------------------------------------------------------------
+
+async function signedIn() {
+  const res = await post('/tips/start', { pin: '5353' });
+  return (res.headers.get('set-cookie') || '').split(';')[0];
+}
+const send = (p, body, headers) => fetch(BASE + p, {
+  method: 'POST', redirect: 'manual',
+  headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
+  body: new URLSearchParams(body).toString(),
+});
+
+test('every form a browser is served carries a token', async () => {
+  const cookie = await signedIn();
+  // Asking for gzip explicitly, because that is the path every real browser
+  // takes and the one where this broke: the compressor wrapped res.send after
+  // the injector did, so the injector was handed a Buffer, skipped it, and
+  // served tokenless forms to everyone while curl — which does not ask for
+  // gzip — showed a page that looked perfect.
+  const html = await (await fetch(BASE + '/portal/clock',
+    { headers: { cookie, 'accept-encoding': 'gzip' } })).text();
+  // Not a count — counting two things with two regexes measures the regexes.
+  // Walk the form tags the injector walks, and require the token to be the very
+  // next thing inside each one that posts.
+  let posting = 0;
+  for (const m of html.matchAll(/<form\b([^>]*)>/gi)) {
+    if (!/method\s*=\s*["']?post/i.test(m[1])) continue;
+    posting++;
+    const after = html.slice(m.index + m[0].length, m.index + m[0].length + 120);
+    assert.match(after, /^<input type="hidden" name="_csrf" value="[a-f0-9]{32}">/,
+      `a posting form was served without a token: ${m[0].slice(0, 70)}`);
+  }
+  assert.ok(posting > 0, 'the page has posting forms to protect');
+});
+
+test('a post from another site is refused, token or no token', async () => {
+  const cookie = await signedIn();
+  const token = await (await fetch(BASE + '/csrf', { headers: { cookie } })).text();
+  // The attack: the victim's cookie, sent by their browser, from somebody
+  // else's page.
+  const forged = await send('/portal/clock/in', { daypart: 'dinner' },
+    { cookie, origin: 'https://evil.example' });
+  assert.strictEqual(forged.status, 403, 'refused on where it came from');
+  // Even holding a real token, because the origin is the tell.
+  const withToken = await send('/portal/clock/in', { daypart: 'dinner', _csrf: token },
+    { cookie, origin: 'https://evil.example' });
+  assert.strictEqual(withToken.status, 403, 'a stolen token does not buy a cross-site post');
+});
+
+test('a browser form without its token is refused', async () => {
+  const cookie = await signedIn();
+  const res = await send('/portal/clock/in', { daypart: 'dinner' },
+    { cookie, origin: BASE, referer: BASE + '/portal/clock' });
+  assert.strictEqual(res.status, 403, 'a same-site browser post must carry one');
+});
+
+test('a token from somebody else\'s session is refused', async () => {
+  const mine = await signedIn();
+  const theirs = (await post('/tips/start', { pin: '4242' })).headers.get('set-cookie').split(';')[0];
+  const theirToken = await (await fetch(BASE + '/csrf', { headers: { cookie: theirs } })).text();
+  assert.notStrictEqual(theirToken, await (await fetch(BASE + '/csrf', { headers: { cookie: mine } })).text(),
+    'the two sessions have different tokens');
+  const res = await send('/portal/clock/in', { daypart: 'dinner', _csrf: theirToken },
+    { cookie: mine, origin: BASE });
+  assert.strictEqual(res.status, 403, 'a token is worth nothing outside its own session');
+});
+
+test('a real browser form with its own token goes through', async () => {
+  const cookie = await signedIn();
+  const token = await (await fetch(BASE + '/csrf', { headers: { cookie } })).text();
+  const res = await send('/portal/clock/in', { daypart: 'dinner', _csrf: token },
+    { cookie, origin: BASE, referer: BASE + '/portal/clock' });
+  assert.notStrictEqual(res.status, 403, 'the legitimate case is not collateral damage');
+});
+
+test('the webhook is not asked for a browser token', async () => {
+  // A machine with a shared secret, no cookies, and no browser to be tricked.
+  const res = await fetch(BASE + '/webhook/benugin', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ date: '2026-07-04', daypart: 'dinner', servers: [] }),
+  });
+  assert.strictEqual(res.status, 401, 'refused on its own secret, not on CSRF');
+});
+
+test('the login doors have no session to derive a token from', async () => {
+  // Guarded by the password and the PIN throttle instead. Demanding a token
+  // here would mean nobody could ever sign in.
+  const res = await post('/tips/start', { pin: '0000' });
+  assert.notStrictEqual(res.status, 403, 'the PIN screen still answers');
 });

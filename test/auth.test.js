@@ -15,6 +15,20 @@ const path = require('node:path');
 
 const PORT = 3987;
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// A browser gets its CSRF token injected into every form it loads. These tests
+// post straight at the routes, so they ask for one the same way the service
+// worker does, and cache it per session.
+const __csrf = new Map();
+async function __token(cookie) {
+  const key = cookie || '';
+  if (!__csrf.has(key)) {
+    const r = await fetch(BASE + '/csrf', { headers: key ? { cookie: key } : {} });
+    __csrf.set(key, (await r.text()).trim());
+  }
+  return __csrf.get(key);
+}
+
 // Its own database, set before anything requires src/db.
 //
 // This file used to boot with no DB_PATH, which means the default — the real
@@ -66,10 +80,10 @@ test.before(up);
 test.after(() => { if (child) child.kill(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const get = (p) => fetch(BASE + p, { redirect: 'manual' });
-const post = (p, body) => fetch(BASE + p, {
+const post = async (p, body) => fetch(BASE + p, {
   method: 'POST', redirect: 'manual',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
-  body: new URLSearchParams(body).toString(),
+  body: new URLSearchParams({ ...body, _csrf: await __token(({} || {}).cookie) }).toString(),
 });
 
 test('staff can reach every step of the tips flow without the manager password', async () => {

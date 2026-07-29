@@ -58,6 +58,100 @@ const app = express();
 app.set('case sensitive routing', true);
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+// ---------------------------------------------------------------------------
+// CSRF.
+//
+// The cookies are already HttpOnly and SameSite=Lax, which stops the classic
+// cross-site form post, so this is defence in depth rather than a hole being
+// closed. It matters because Lax still permits a top-level GET navigation, and
+// because a browser bug or a future SameSite=None cookie would remove the only
+// thing standing there.
+//
+// The token is DERIVED from the session cookie rather than stored: same secret,
+// same HMAC the sessions themselves use. Nothing to persist, nothing to expire,
+// and a token is worthless the moment its session ends — which also makes
+// "a token from another session" fail by construction rather than by lookup.
+//
+// It is injected into every POST form by rewriting the response, not by editing
+// 113 forms and missing some. A form that gets added next year is protected
+// without anybody remembering to protect it, which is the only version of this
+// that stays true.
+// ---------------------------------------------------------------------------
+const CSRF_FIELD = '_csrf';
+/** The token for whoever this request is, or '' when nobody is signed in. */
+function csrfFor(req) {
+  // Read from the header directly, the way readCookie does. There is no
+  // cookie-parser in this app, so req.cookies is always undefined — leaning on
+  // it would have derived an empty token for everybody and quietly turned the
+  // whole check off while looking like it was on.
+  const raw = req.headers.cookie || '';
+  const pick = (name) => {
+    const m = raw.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+    return m ? m[1] : '';
+  };
+  const seat = pick(COOKIE) || pick(PORTAL_COOKIE);
+  return seat ? sign('csrf:' + seat) : '';
+}
+// Login doors have no session to derive a token from, and are guarded by their
+// own means: the owner password, and the PIN throttle. The webhook is a machine
+// with a shared secret and no browser, no cookies and no CSRF to speak of.
+const CSRF_OPEN = new Set(['/login', '/tips/start', '/webhook/benugin']);
+
+/**
+ * The current session's token, for anything that posts without rendering a form
+ * first — the service worker, and the test suite.
+ *
+ * Safe to expose: it is derived from a cookie the caller already holds, so this
+ * tells a reader nothing they could not compute. Cross-origin script cannot
+ * read the response, which is the whole reason a token works.
+ */
+app.get('/csrf', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('text/plain').send(csrfFor(req));
+});
+
+app.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  if (CSRF_OPEN.has(req.path)) return next();
+  const expected = csrfFor(req);
+  // Nobody signed in: there is no session to forge a request against, and the
+  // route's own guard will refuse them anyway.
+  if (!expected) return next();
+  const given = (req.body && req.body[CSRF_FIELD]) || req.get('x-csrf-token') || '';
+
+  // A wrong token is always refused, whoever sent it.
+  if (given && given !== expected) {
+    return res.status(403).send('That form expired or came from somewhere else. Go back, reload the page, and try again.');
+  }
+
+  // A MISSING token is only an error from a browser — and CSRF is only ever a
+  // browser problem. The attack is a page on another site making the victim's
+  // browser post with the victim's cookies attached, and a browser always
+  // announces where a form post came from. So:
+  //
+  //   Origin present and not ours  -> refuse. This is the attack itself.
+  //   Origin present and ours      -> a real form; it must carry the token.
+  //   No Origin at all             -> not a browser, so not a CSRF victim; it
+  //                                   still has to satisfy every auth and area
+  //                                   guard on the route, which is what actually
+  //                                   protects it.
+  //
+  // The honest limit: a script that already has somebody's session cookie can
+  // post without a token. That is not CSRF — anything holding the cookie can
+  // just make the request — and no token scheme fixes it.
+  const origin = req.get('origin') || '';
+  const referer = req.get('referer') || '';
+  const site = (u) => { try { return new URL(u).host; } catch { return ''; } };
+  const from = site(origin) || site(referer);
+  if (from && from !== req.get('host')) {
+    return res.status(403).send('That request came from another site.');
+  }
+  if (from && !given) {
+    return res.status(403).send('That form expired. Go back, reload the page, and try again.');
+  }
+  next();
+});
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 // ---------------------------------------------------------------------------
@@ -110,6 +204,33 @@ app.use((req, res, next) => {
     });
     return res;
   };
+  next();
+});
+
+// Every rendered page carries its CSRF token, injected once, at the edge — so
+// no page has to remember to write a hidden field and none can forget to.
+//
+// This has to be registered AFTER the gzip layer, not with the rest of the CSRF
+// code above. Each of these wraps res.send at request time, and the LAST one to
+// wrap is the first to run. Registered earlier, the injector was handed the
+// gzipped Buffer instead of the page, silently skipped it — a string test it
+// could never pass — and shipped every form without a token to every browser
+// that asks for gzip, which is all of them. Registered here, it rewrites the
+// HTML and hands the finished page down to be compressed.
+app.use((req, res, next) => {
+  const token = csrfFor(req);
+  if (!token) return next();
+  const send = res.send.bind(res);
+  res.send = (body) => {
+    if (typeof body === 'string' && body.indexOf('<form') !== -1) {
+      const hidden = `<input type="hidden" name="${CSRF_FIELD}" value="${token}">`;
+      body = body.replace(/<form\b([^>]*)>/gi, (m, attrs) =>
+        (/method\s*=\s*["']?post/i.test(attrs) ? m + hidden : m));
+    }
+    return send(body);
+  };
+  res.locals = res.locals || {};
+  res.locals.csrf = token;
   next();
 });
 
