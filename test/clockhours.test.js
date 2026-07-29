@@ -526,6 +526,38 @@ test('a range typed backwards is read the way it was meant', async () => {
 });
 
 // ===========================================================================
+// Opening an employee without leaving the grid.
+// ===========================================================================
+
+test('the workspace is served whole as a page and bare as a fragment', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const full = await text(`/payroll/timesheets/${E.split}?p=${per.start}`);
+  const frag = await text(`/payroll/timesheets/${E.split}?p=${per.start}&frag=1`);
+
+  assert.match(full, /<html/, 'the page is a page — what a bookmark opens, and what a plain click gets');
+  assert.doesNotMatch(frag, /<html/, 'the fragment is only the body');
+  assert.match(frag, /ts-rhead/, 'and it is the same workspace');
+  assert.ok(frag.length < full.length, 'without the chrome around it');
+});
+
+test('the grid carries the layer, and the rows stay real links underneath it', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+
+  assert.match(html, /id="tso"/, 'the layer is there');
+  assert.match(html, /id="tso-prev"[\s\S]*?id="tso-next"/, 'with its own previous and next');
+  // Order matters: the script looks the layer up at parse time, and it silently
+  // did nothing when the layer was rendered after it.
+  assert.ok(html.indexOf('id="tso"') < html.indexOf("getElementById('tso')"),
+    'and the layer exists in the document before the script goes looking for it');
+  // With no JavaScript the rows are ordinary links to the full page.
+  assert.match(html, /class="tsg-row" id="p-\d+" href="\/payroll\/timesheets\/\d+\?p=/,
+    'every row is still a real link');
+});
+
+// ===========================================================================
 // Correcting a punch without leaving the review.
 // ===========================================================================
 

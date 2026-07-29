@@ -15417,6 +15417,26 @@ app.get('/payroll/timesheets', (req, res) => {
         ${filtering ? `<span class="tsm-filtered">${filtered.length} of ${rows.length} shown</span>` : ''}
       </form>`}
 
+      <!-- The review layer. Empty until somebody opens an employee; the grid
+           underneath is never navigated away from, so closing it restores the
+           period, the filters and both scroll positions for free — there is
+           nothing to restore, because nothing was lost. -->
+      <div class="tso" id="tso" hidden>
+        <div class="tso-scrim" data-tso-close></div>
+        <div class="tso-panel" role="dialog" aria-modal="true" aria-label="Employee timesheet">
+          <div class="tso-bar">
+            <button type="button" class="tso-x" data-tso-close aria-label="Close">Close</button>
+            <span class="tso-who" id="tso-who"></span>
+            <span class="tso-nav">
+              <button type="button" class="tsx-arrow" id="tso-prev" aria-label="Previous employee">←</button>
+              <span class="tsw-at" id="tso-at"></span>
+              <button type="button" class="tsx-arrow" id="tso-next" aria-label="Next employee">→</button>
+            </span>
+          </div>
+          <div class="tso-body" id="tso-body"></div>
+        </div>
+      </div>
+
       ${filtered.length ? `<section class="bs-panel tsg-panel">
         <div class="bs-sec-h"><span class="bs-kicker">Hours by day</span></div>
         <div class="tsg-scroll">
@@ -15465,6 +15485,69 @@ app.get('/payroll/timesheets', (req, res) => {
           });
           window.addEventListener('scroll', hide, true);
           window.addEventListener('resize', hide);
+        })();
+        </script>
+        <script>
+        (function () {
+          var lay = document.getElementById('tso');
+          if (!lay || !window.fetch) return;         // no JS: the rows are plain links
+          var body = document.getElementById('tso-body');
+          var who = document.getElementById('tso-who');
+          var at = document.getElementById('tso-at');
+          var prev = document.getElementById('tso-prev');
+          var next = document.getElementById('tso-next');
+          // The order the reviewer is actually looking at, filters and all —
+          // so "next" means the next person on screen, not the next in the
+          // database.
+          var order = [].slice.call(document.querySelectorAll('.tsg-row[id^="p-"]'))
+            .map(function (a) { return { href: a.getAttribute('href'), name: (a.querySelector('b') || {}).textContent || '' }; });
+          var i = -1;
+
+          function open(n, push) {
+            if (n < 0 || n >= order.length) return;
+            i = n;
+            var it = order[i];
+            who.textContent = it.name;
+            at.textContent = (i + 1) + ' of ' + order.length;
+            prev.disabled = i === 0;
+            next.disabled = i === order.length - 1;
+            lay.hidden = false;
+            document.documentElement.style.overflow = 'hidden';
+            body.innerHTML = '<p class="inc-hint">Loading…</p>';
+            body.scrollTop = 0;
+            fetch(it.href + (it.href.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
+              .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+              .then(function (html) { body.innerHTML = html; })
+              .catch(function () { location.href = it.href; });   // fall back to the real page
+            if (push) history.pushState({ tso: i }, '', it.href);
+          }
+          function close() {
+            lay.hidden = true;
+            body.innerHTML = '';
+            document.documentElement.style.overflow = '';
+            if (history.state && history.state.tso != null) history.back();
+          }
+
+          document.addEventListener('click', function (ev) {
+            var row = ev.target.closest && ev.target.closest('.tsg-row[id^="p-"]');
+            if (row && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey) {
+              var n = order.findIndex(function (o) { return o.href === row.getAttribute('href'); });
+              if (n > -1) { ev.preventDefault(); open(n, true); return; }
+            }
+            if (ev.target.closest && ev.target.closest('[data-tso-close]')) { ev.preventDefault(); close(); }
+          });
+          prev.addEventListener('click', function () { open(i - 1, true); });
+          next.addEventListener('click', function () { open(i + 1, true); });
+          document.addEventListener('keydown', function (ev) {
+            if (lay.hidden) return;
+            if (ev.key === 'Escape') close();
+            // Arrows only when nothing is being typed into.
+            var t = ev.target.tagName;
+            if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return;
+            if (ev.key === 'ArrowLeft') open(i - 1, true);
+            if (ev.key === 'ArrowRight') open(i + 1, true);
+          });
+          window.addEventListener('popstate', function () { if (!lay.hidden) { lay.hidden = true; body.innerHTML = ''; document.documentElement.style.overflow = ''; } });
         })();
         </script>
         <p class="tsg-foot">${esc(TC.dayLabel(days[0]).replace(/^\w+, /, ''))} – ${esc(TC.dayLabel(days[days.length - 1]).replace(/^\w+, /, ''))}
@@ -15569,8 +15652,15 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   const PRIMARY_LABEL = { approve: 'Approve', return: 'Return to employee', reopen: 'Reopen', transfer: 'Send to payroll' };
   const backTo = `/payroll/timesheets?p=${period.start}${keepQ}`;
 
-  res.send(layout(`${emp.name} · timesheet`, `
-    ${flash(req)}
+  // The same workspace, served two ways. ?frag=1 returns the body alone, which
+  // the grid drops into a layer over itself — so flicking through a roster is
+  // not twelve page loads, and closing puts the reviewer back exactly where
+  // they were, scroll and all, because they never actually left.
+  //
+  // The full page is not a fallback that nobody sees: it is what a plain click
+  // gets with scripting off, what a bookmark opens, and what the tests read.
+  const body = `
+    ${req.query.frag === '1' ? '' : flash(req)}
     <div class="bs-page tcm-page inc-detail">
       <!-- Stays put while the ledger scrolls. Who, which period, where it
            stands, the one thing to do about it, and the way to the next person
@@ -15592,7 +15682,15 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
       </div>
       <div class="inc-rec-head">
         <div class="inc-rec-title">
-          <p class="bs-subline">${v.entries.length} ${v.entries.length === 1 ? 'entry' : 'entries'} · ${esc(labelFor(period))}</p>
+          <!-- Counts both kinds of day. It said "0 entries" over a timesheet
+               with fourteen days on it, because it only knew about punches. -->
+          <p class="bs-subline">${(() => {
+            const p1 = v.entries.length, p2 = v.fromShifts.length;
+            const bits = [];
+            if (p1) bits.push(`${p1} ${p1 === 1 ? 'punch' : 'punches'}`);
+            if (p2) bits.push(`${p2} ${p2 === 1 ? 'day' : 'days'} from the shift sheets`);
+            return bits.length ? esc(bits.join(' · ')) : 'nothing recorded';
+          })()} · ${esc(labelFor(period))}</p>
         </div>
       </div>
 
@@ -15901,7 +15999,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
           </section>
         </aside>
       </div>
-    </div>`));
+    </div>`;
+
+  if (req.query.frag === '1') {
+    res.set('Cache-Control', 'no-store');
+    return res.send(body);
+  }
+  res.send(layout(`${emp.name} · timesheet`, body));
 });
 
 // --- approval, locking, reopening -----------------------------------------
