@@ -3128,6 +3128,20 @@ body.cap-open { overflow: hidden; }
 .cap-recon b.off { color: var(--danger); }
 .cap-note { font-size: 12.5px; color: var(--muted); margin: 14px 0 0; line-height: 1.5; max-width: 62ch; }
 
+/* --- you have already entered this ---------------------------------------
+   Above the fields, not beside a field, because it is not about one value —
+   it is about whether this piece of paper belongs here at all. Amber for the
+   coincidence, red for the invoice number, since only one of those two is
+   worth stopping over. */
+.cap-dupe { display: grid; gap: 5px; margin: 0 0 18px; padding: 13px 15px;
+  border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--ink); }
+.cap-dupe.is-certain { border-left-color: var(--danger); background: var(--danger-bg); }
+.cap-dupe b { font-size: 15px; letter-spacing: -.01em; }
+.cap-dupe span { font-size: 12.5px; line-height: 1.5; }
+.cap-dupe-row { font-family: var(--mono); font-size: 12px; }
+.cap-dupe-hint { color: var(--muted); }
+.cap-dupe .bs-act { justify-self: start; }
+
 /* --- the reading state --------------------------------------------------- */
 .cap-read { display: flex; align-items: center; gap: 10px; font-size: 17px; color: var(--headline); margin-bottom: 18px; }
 .cap-spin { width: 17px; height: 17px; border: 2px solid var(--rule); border-top-color: var(--accent);

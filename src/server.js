@@ -9510,6 +9510,13 @@ function captureOverlay(kinds, args) {
           <div class="cap-sheet" id="cap-sheet"><span class="cap-none">No file · typed in</span></div>
         </div>
         <div class="cap-fields">
+          ${/* The duplicate warning sits above the fields, before any of them
+                are confirmed, because that is the moment it saves work: the
+                check used to run only at save, after the drawer was filled in
+                and the lines reviewed, all of it spent on a piece of paper
+                already on file. Aria-live so it is announced when it appears
+                rather than being a colour a screen reader never mentions. */''}
+          <div class="cap-dupe" id="cap-dupe" role="status" aria-live="polite" hidden></div>
           <div id="cap-reading" hidden>
             <div class="cap-read"><span class="cap-spin"></span><span id="cap-reading-t">Reading it…</span></div>
             <div class="cap-skel"></div><div class="cap-skel"></div><div class="cap-skel"></div>
@@ -9888,6 +9895,7 @@ function captureScript(kinds) {
       el('cap-step-work').hidden = true;
       el('cap-save').hidden = true;
       el('cap-pill').hidden = true;
+      var dz = el('cap-dupe'); if (dz) { dz.hidden = true; dz.innerHTML = ''; }
       el('cap-title').textContent = 'Add ' + (KINDS.length > 1 ? 'an invoice or expense' : KINDS[0] === 'document' ? 'a document' : 'an expense');
       var sheet0 = el('cap-sheet');
       sheet0.innerHTML = '<span class="cap-none">No file · typed in</span>';
@@ -9984,6 +9992,7 @@ function captureScript(kinds) {
       el('cap-reading-t').textContent = READING[kind];
       wrap.querySelectorAll('.cap-panel').forEach(function (f) { f.hidden = true; });
       el('cap-pill').hidden = true;
+      var dz = el('cap-dupe'); if (dz) { dz.hidden = true; dz.innerHTML = ''; }
 
       var fd = new FormData();
       list.forEach(function (f) { fd.append('scan', f); });
@@ -10003,6 +10012,7 @@ function captureScript(kinds) {
           var d = j.data || j;
           if (!d || !Object.keys(d).length) { note('Nothing could be read off that. Type it in — the file is still attached.'); return; }
           fill(d);
+          dupe(j.dupe);
           el('cap-pill').hidden = false;
         })
         .catch(function (e) { showForm(); note('Could not read it — ' + e.message + '. Type it in; the file is still attached.'); });
@@ -10011,6 +10021,34 @@ function captureScript(kinds) {
     function note(msg) {
       var p = panel().querySelector('.cap-note');
       if (p) { p.textContent = msg; p.style.color = 'var(--negative)'; }
+    }
+
+    // --- you have already entered this --------------------------------------
+    // Said as soon as the scan is read, and said in the terms the paperwork is
+    // in: the invoice number, not the price. A price collision is a coincidence
+    // that happens most weeks; the same number twice is the same piece of paper.
+    //
+    // It warns and does not block, because the answer is sometimes "file it
+    // anyway" — a vendor can reissue a credit under a number you already have —
+    // and a hard refusal would leave nowhere to put the second one.
+    function dupe(d) {
+      var box = el('cap-dupe');
+      if (!box) return;
+      if (!d) { box.hidden = true; box.innerHTML = ''; return; }
+      var strong = d.certain;
+      box.className = 'cap-dupe' + (strong ? ' is-certain' : '');
+      box.innerHTML =
+        '<b>' + (strong ? 'You have already entered this.' : 'This looks like one you already have.') + '</b>'
+        + '<span>Matched on ' + esc(d.why) + '.</span>'
+        + '<span class="cap-dupe-row">' + esc(d.label || '') + '</span>'
+        + '<a class="bs-act" href="/c/invoices?open=' + encodeURIComponent(d.id) + '" target="_blank">Open the one on file →</a>'
+        + '<span class="cap-dupe-hint">Saving anyway will file a second copy.</span>';
+      box.hidden = false;
+    }
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
     }
 
     function preview(list) {
@@ -11628,6 +11666,10 @@ app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
       vendor_id: match ? match.id : null,
       matched_vendor: match ? match.name : null,
       tally,
+      // Asked here, on the upload, rather than only at save. By the time the
+      // save runs the drawer has been filled in and the lines reviewed — all of
+      // it spent on a piece of paper already on file.
+      dupe: dupeNoticeFor(data, match ? match.id : null),
     });
   } catch (e) {
     res.json({ error: e.message || 'Could not read that invoice.' });
@@ -11657,36 +11699,100 @@ function pageLinks(row, label = 'Open original') {
 /**
  * An invoice already on file that this one may be a second copy of.
  *
- * Two signals, and the difference between them matters. A vendor's own invoice
- * number is unique by definition — the same number from the same vendor twice
- * is the same piece of paper, not a coincidence. Without a number, the same
- * vendor billing the same amount on the same day is very probably one delivery
- * entered twice, but it is not certain: two identical small deliveries in a day
- * do happen. So one says "this is", the other says "this looks like", and
- * neither refuses the save.
+ * THE INVOICE NUMBER IS THE RED FLAG. A vendor's own number identifies one
+ * piece of paper; the price does not. Two different deliveries can come to the
+ * same money and one delivery can be billed at two different totals, so a check
+ * built on amounts either misses real duplicates or cries wolf at honest ones.
+ * The number is checked first, on its own, and it is what the warning leads
+ * with.
+ *
+ * It is deliberately NOT scoped to the vendor. That was the old rule and it had
+ * a hole you could drive a lorry through: the vendor is matched by name from
+ * the scan, so an invoice read as "Sysco Foods" against one already filed under
+ * "Sysco" compares 0 to 12 and finds nothing — and a vendor created moments
+ * earlier in the same request guaranteed no match at all, because nothing else
+ * could be filed under an id that did not exist a second ago. Numbers are
+ * distinctive enough that the same one appearing twice is worth a look
+ * regardless; when the vendor agrees too, it stops being a question.
+ *
+ * The vendor/day/total signal is kept, below the number and clearly weaker,
+ * because an invoice with no number at all still has to be catchable.
  *
  * Deliberately not matched on the file: two photographs of the same invoice are
  * different bytes, and the same PDF re-saved is different bytes again. It would
  * miss the case that actually happens.
  */
-const normNum = (v) => String(v || '').trim().toLowerCase().replace(/[\s._\/-]/g, '');
+const normNum = (v) => String(v || '').trim().toLowerCase()
+  .replace(/[\s._\/#-]/g, '')                          // punctuation and the # people type in front
+  // Zero-padding is a printing choice, not part of the number: INV-0042 off the
+  // PDF and INV-42 typed in by hand are one invoice. Per run of digits, so a
+  // year inside the number survives — 2007 is not 27.
+  .replace(/\d+/g, (d) => d.replace(/^0+(?=\d)/, ''));
 function duplicateInvoice({ vendorId, number, date, amountCents, exceptId }) {
   const rows = db.prepare('SELECT * FROM m_invoices').all()
     .filter((r) => Number(r.id) !== Number(exceptId));
   const v = vendorId ? Number(vendorId) : null;
   const n = normNum(number);
+  const vendorName = (id) => (id && (db.prepare('SELECT name FROM m_vendors WHERE id = ?').get(id) || {}).name) || null;
+
   if (n) {
-    const hit = rows.find((r) => normNum(r.invoice_number) === n
-      && Number(r.vendor_id || 0) === Number(v || 0));
-    if (hit) return { row: hit, certain: true, why: `invoice number ${String(number).trim()}` };
+    const byNumber = rows.filter((r) => normNum(r.invoice_number) === n);
+    // Same number, same vendor: the same piece of paper.
+    const exact = byNumber.find((r) => v && Number(r.vendor_id || 0) === Number(v));
+    if (exact) {
+      return { row: exact, certain: true, field: 'invoice_number',
+        why: `invoice number ${String(number).trim()}` };
+    }
+    // Same number, different or unknown vendor: still the strongest thing we
+    // have, and the vendor is the part most likely to have been read wrong.
+    if (byNumber.length) {
+      const other = vendorName(byNumber[0].vendor_id);
+      return { row: byNumber[0], certain: true, field: 'invoice_number',
+        why: `invoice number ${String(number).trim()}${other ? `, filed under ${other}` : ''}` };
+    }
   }
+  // The weaker signal, and it only applies where the strong one cannot: if both
+  // invoices carry a number and those numbers differ, they are two invoices,
+  // however alike the money looks. Letting the total speak over the number is
+  // what made this cry wolf — a vendor billing the same round figure twice in a
+  // day is a Tuesday, not a mistake, and being questioned over it teaches
+  // people to click through the question that matters.
   if (date && amountCents) {
     const hit = rows.find((r) => r.invoice_date === date
       && Number(r.amount_cents) === Number(amountCents)
-      && Number(r.vendor_id || 0) === Number(v || 0));
-    if (hit) return { row: hit, certain: false, why: 'the same vendor, day and total' };
+      && Number(r.vendor_id || 0) === Number(v || 0)
+      && !(n && normNum(r.invoice_number)));
+    if (hit) return { row: hit, certain: false, field: 'amount', why: 'the same vendor, day and total' };
   }
   return null;
+}
+
+/**
+ * The same question asked of a scan, before anything is filled in or saved.
+ *
+ * The check already existed and only ran at save — after the drawer had been
+ * filled in, the lines reviewed and the vendor chosen. Everything upstream of
+ * that was work spent on a piece of paper already on file. Asking here, on the
+ * upload itself, is the difference between "you have already entered this" and
+ * "you have already entered this, and here is the ten minutes back".
+ */
+function dupeNoticeFor(data, vendorId) {
+  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+  const hit = duplicateInvoice({
+    vendorId, number: data.invoice_number,
+    date: String(data.invoice_date || '').slice(0, 10) || null,
+    amountCents: cents(data.total ?? data.amount),
+  });
+  if (!hit) return null;
+  return {
+    certain: hit.certain,
+    field: hit.field,
+    why: hit.why,
+    id: hit.row.id,
+    label: [hit.row.invoice_number ? `#${hit.row.invoice_number}` : null,
+      hit.row.invoice_date, hit.row.amount_cents != null ? money(hit.row.amount_cents) : null]
+      .filter(Boolean).join(' · '),
+  };
 }
 
 /**

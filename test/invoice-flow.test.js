@@ -690,6 +690,49 @@ test('a different day, or a different total, is not a duplicate', async () => {
     'same day, a cent apart — files without a question');
 });
 
+// The invoice number is the red flag, and it has to survive the two things
+// that were quietly defeating it: the vendor not matching, and the number
+// being printed differently on the second copy.
+
+test('the same invoice number catches even when the vendor does not match', async () => {
+  // The old rule required the vendor to match too, and the vendor comes from a
+  // NAME read off the scan — so "Sysco Foods" against a "Sysco" already on file
+  // compared two different ids and found nothing. Worse, a vendor created in
+  // the same request could never match anything, because nothing else had ever
+  // been filed under an id that did not exist a second ago.
+  const num = 'BLD-CROSS-9';
+  assert.strictEqual((await post('/c/invoices', { ...INV, invoice_number: num })).status, 302, 'the first files');
+
+  const other = await post('/c/invoices', {
+    ...INV, invoice_number: num, vendor_id: '',       // no vendor at all this time
+    amount: '999.00', invoice_date: '2026-11-30',      // and nothing else in common
+  });
+  assert.strictEqual(other.status, 200, 'still questioned');
+  const html = await other.text();
+  assert.match(html, /invoice number BLD-CROSS-9/, 'on the number, which is the point');
+});
+
+test('a number printed differently is still the same number', async () => {
+  const num = 'BLD-ZERO-7';
+  assert.strictEqual((await post('/c/invoices', { ...INV, invoice_number: num, amount: '10.00' })).status, 302);
+  for (const variant of ['#BLD-ZERO-7', 'bld zero 7', 'BLD/ZERO/7', 'BLD-ZERO-007']) {
+    const res = await post('/c/invoices', { ...INV, invoice_number: variant, amount: '10.00' });
+    assert.strictEqual(res.status, 200, `${variant} is recognised as the same invoice`);
+  }
+});
+
+test('the price on its own is never what raises the flag', async () => {
+  // The owner's rule, and the right one: two different deliveries come to the
+  // same money most weeks. A check built on the total either misses real
+  // duplicates or stops honest ones.
+  const a = { amount: '77.77', vendor_id: String(VENDOR), invoice_date: '2026-12-01',
+    invoice_number: 'BLD-PRICE-A', category: 'Food', status: 'Unpaid', ai_status: 'manual' };
+  assert.strictEqual((await post('/c/invoices', a)).status, 302);
+  const b = await post('/c/invoices', { ...a, invoice_number: 'BLD-PRICE-B' });
+  assert.strictEqual(b.status, 302,
+    'same vendor, same day, same total, different number — files without a question');
+});
+
 test('the list can find the duplicates already filed', async () => {
   const html = await (await fetch(`${BASE}/c/invoices?y=2026`)).text();
   assert.match(html, /Possible duplicates/, 'there is a way to filter to them');
