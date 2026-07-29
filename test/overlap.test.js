@@ -79,13 +79,81 @@ test('a punch that merely touches another is allowed', () => {
     'back to back is a real thing');
 });
 
-test('an open punch blocks anything after it, because it has no end yet', () => {
+test('an open punch blocks the rest of its own day', () => {
   wipe();
   punch('17:00', null);
   refuses(() => punch('19:00', '23:00'), 'inside the open-ended stretch');
   // Before it is fine — a punch for the afternoon is not affected by somebody
   // still being on the clock this evening.
   assert.ok(punch('09:00', '12:00'), 'earlier and finished is untouched');
+});
+
+test('a punch somebody forgot to close does not block them next week', () => {
+  // The whole reason an open punch expires. Read as "covers everything after
+  // this", one forgotten Monday clock-out would refuse Tuesday's clock-in, and
+  // Wednesday's, until a manager went back and fixed last week — with the
+  // employee standing at the door unable to start their shift.
+  wipe();
+  // How a forgotten clock-out is actually held: open-ended, but not active —
+  // an active one is already refused by the one-active-entry index, which is
+  // the "you are already clocked in" message and is meant to be there.
+  const forgotten = punch('17:00', null);
+  TC.q.setStatus.run({ id: forgotten, status: 'missing_punch', by: 'test' });
+  const later = TC.createEntry({ employee_id: EMP, shift_id: null, business_date: '2026-03-11',
+    daypart: 'dinner', position: 'server', clock_in_at: '2026-03-11 17:00:00',
+    source: 'portal', created_by: 'test' });
+  assert.ok(later, 'a week later they clock in as normal');
+  // And the hole is still a hole on its own day.
+  refuses(() => punch('19:00', '23:00'), 'the same evening is still covered');
+});
+
+// --- the same rules one layer down -----------------------------------------
+
+test('the database refuses by hand what the code refuses through the door', () => {
+  // The doors are the enforcement; these triggers are what is left when
+  // somebody opens the database directly or a migration script runs.
+  wipe();
+  punch('17:00', '23:00');
+  const raw = (sql, ...args) => db.prepare(sql).run(...args);
+  const insert = (inAt, outAt, status = 'complete') => raw(
+    `INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source)
+     VALUES (?,?,'dinner','server',?,?,?,'manager')`, EMP, D, inAt, outAt, status);
+
+  assert.throws(() => insert(at('20:00'), at('22:00')), /overlaps another/, 'overlapping');
+  assert.throws(() => insert(at('23:00'), at('22:00')), /end before it starts/, 'backwards');
+  assert.throws(() => insert(at('09:00'), at('12:00'), 'nonsense'), /unknown time entry status/, 'unknown status');
+  assert.throws(() => raw(
+    `INSERT INTO time_entries (employee_id, business_date, daypart, position, clock_in_at, status, source, raw_minutes)
+     VALUES (?,?,'dinner','server',?, 'complete','manager',-5)`, EMP, D, at('09:00')),
+    /minutes cannot be negative/, 'negative minutes');
+
+  const e = TC.q.byId.get(db.prepare('SELECT id FROM time_entries WHERE employee_id = ?').get(EMP).id);
+  assert.throws(() => raw('INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at) VALUES (?,?,?,?)',
+    e.id, EMP, at('16:00'), at('16:30')), /inside its own shift/, 'break outside its shift');
+  raw('INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at) VALUES (?,?,?,?)',
+    e.id, EMP, at('19:00'), at('19:30'));
+  assert.throws(() => raw('INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at) VALUES (?,?,?,?)',
+    e.id, EMP, at('19:15'), at('19:45')), /overlaps another/, 'overlapping breaks');
+});
+
+test('a punch that opens and closes in the same second is allowed', () => {
+  // Timestamps here have second precision, so a double tap really does produce
+  // one. Zero minutes is not backwards, and refusing it would refuse the clock.
+  wipe();
+  const id = TC.q.openEntry.run({ employee_id: EMP, shift_id: null, business_date: D, daypart: 'dinner',
+    position: 'server', clock_in_at: at('17:00'), source: 'portal', created_by: 'test' }).lastInsertRowid;
+  db.prepare("UPDATE time_entries SET clock_out_at = ?, status = 'complete' WHERE id = ?").run(at('17:00'), id);
+  assert.strictEqual(TC.q.byId.get(id).clock_out_at, at('17:00'), 'closed, at zero minutes');
+});
+
+test('the boot scan reads clean on data the rules accept', () => {
+  wipe();
+  punch('09:00', '12:00');
+  punch('17:00', '23:00');
+  const r = TC.punchIntegrity();
+  for (const [k, rows] of Object.entries(r)) {
+    assert.strictEqual(rows.length, 0, `${k} should be empty on data built through the doors`);
+  }
 });
 
 test('a punch for somebody else is never in the way', () => {

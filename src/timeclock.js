@@ -89,6 +89,124 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_tb_one_open
     ON time_breaks (time_entry_id) WHERE end_at IS NULL;
 
+  -- --- the same rules, one layer down --------------------------------------
+  --
+  -- Everything below is already enforced in code, at the four doors in this
+  -- file. These triggers are not a second opinion; they are what still holds
+  -- when somebody opens the database directly, when a migration script runs, or
+  -- when a route added in a year's time reaches for the raw INSERT.
+  --
+  -- SQLite cannot add a CHECK to a table that already exists without rebuilding
+  -- it, and rebuilding the punch table on a live restaurant to gain a
+  -- constraint the app already enforces is a bad trade. Triggers attach to the
+  -- existing table, are idempotent, and say the same thing.
+  --
+  -- They do not validate rows already stored — nothing in SQLite does. The boot
+  -- scan below reports those instead.
+
+  -- A punch cannot end before it starts. Strictly before — a punch that opens
+  -- and closes inside the same second is zero minutes, not a backwards one, and
+  -- timestamps here only have second precision. Refusing equality would refuse
+  -- a genuine double tap and, in the tests, most of the clock. The app layer
+  -- keeps the stricter rule for times a manager types in by hand, where a
+  -- zero-length shift really is a mistake.
+  CREATE TRIGGER IF NOT EXISTS trg_te_order_ins BEFORE INSERT ON time_entries
+  WHEN NEW.clock_out_at IS NOT NULL AND NEW.clock_out_at < NEW.clock_in_at
+  BEGIN SELECT RAISE(ABORT, 'a punch cannot end before it starts'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_te_order_upd
+  BEFORE UPDATE OF clock_in_at, clock_out_at ON time_entries
+  WHEN NEW.clock_out_at IS NOT NULL AND NEW.clock_out_at < NEW.clock_in_at
+  BEGIN SELECT RAISE(ABORT, 'a punch cannot end before it starts'); END;
+
+  -- One person, one minute, one punch. An open punch has no end yet, so it
+  -- covers everything after its clock-in until it is closed.
+  CREATE TRIGGER IF NOT EXISTS trg_te_overlap_ins BEFORE INSERT ON time_entries
+  WHEN EXISTS (SELECT 1 FROM time_entries o
+    WHERE o.employee_id = NEW.employee_id
+      AND o.clock_in_at < COALESCE(NEW.clock_out_at, datetime(NEW.clock_in_at, '+24 hours'))
+      AND COALESCE(o.clock_out_at, datetime(o.clock_in_at, '+24 hours')) > NEW.clock_in_at)
+  BEGIN SELECT RAISE(ABORT, 'that punch overlaps another one for the same employee'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_te_overlap_upd
+  BEFORE UPDATE OF clock_in_at, clock_out_at ON time_entries
+  WHEN EXISTS (SELECT 1 FROM time_entries o
+    WHERE o.employee_id = NEW.employee_id AND o.id <> NEW.id
+      AND o.clock_in_at < COALESCE(NEW.clock_out_at, datetime(NEW.clock_in_at, '+24 hours'))
+      AND COALESCE(o.clock_out_at, datetime(o.clock_in_at, '+24 hours')) > NEW.clock_in_at)
+  BEGIN SELECT RAISE(ABORT, 'that punch overlaps another one for the same employee'); END;
+
+  -- Moving a punch cannot strand the breaks recorded on it. A break left
+  -- outside its own shift still has its minutes deducted from a window that no
+  -- longer contains it.
+  CREATE TRIGGER IF NOT EXISTS trg_te_breaks_fit_upd
+  BEFORE UPDATE OF clock_in_at, clock_out_at ON time_entries
+  WHEN EXISTS (SELECT 1 FROM time_breaks b
+    WHERE b.time_entry_id = NEW.id
+      AND (b.start_at < NEW.clock_in_at
+        OR (NEW.clock_out_at IS NOT NULL AND b.end_at IS NOT NULL AND b.end_at > NEW.clock_out_at)))
+  BEGIN SELECT RAISE(ABORT, 'a break recorded on that punch would fall outside it'); END;
+
+  -- Minutes are counts. A negative one is a bug that pays somebody backwards.
+  CREATE TRIGGER IF NOT EXISTS trg_te_minutes_ins BEFORE INSERT ON time_entries
+  WHEN NEW.raw_minutes < 0 OR NEW.payable_minutes < 0
+    OR NEW.paid_break_min < 0 OR NEW.unpaid_break_min < 0
+  BEGIN SELECT RAISE(ABORT, 'minutes cannot be negative'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_te_minutes_upd
+  BEFORE UPDATE OF raw_minutes, payable_minutes, paid_break_min, unpaid_break_min ON time_entries
+  WHEN NEW.raw_minutes < 0 OR NEW.payable_minutes < 0
+    OR NEW.paid_break_min < 0 OR NEW.unpaid_break_min < 0
+  BEGIN SELECT RAISE(ABORT, 'minutes cannot be negative'); END;
+
+  -- A status outside the set is a row every screen will mis-handle, silently.
+  CREATE TRIGGER IF NOT EXISTS trg_te_status_ins BEFORE INSERT ON time_entries
+  WHEN NEW.status NOT IN ('active','on_break','complete','missing_punch','correction_pending','locked')
+  BEGIN SELECT RAISE(ABORT, 'unknown time entry status'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_te_status_upd BEFORE UPDATE OF status ON time_entries
+  WHEN NEW.status NOT IN ('active','on_break','complete','missing_punch','correction_pending','locked')
+  BEGIN SELECT RAISE(ABORT, 'unknown time entry status'); END;
+
+  -- A break ends after it starts, sits inside its own shift, and does not
+  -- collide with another on the same shift.
+  CREATE TRIGGER IF NOT EXISTS trg_tb_order_ins BEFORE INSERT ON time_breaks
+  WHEN NEW.end_at IS NOT NULL AND NEW.end_at < NEW.start_at
+  BEGIN SELECT RAISE(ABORT, 'a break cannot end before it starts'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_tb_order_upd
+  BEFORE UPDATE OF start_at, end_at ON time_breaks
+  WHEN NEW.end_at IS NOT NULL AND NEW.end_at < NEW.start_at
+  BEGIN SELECT RAISE(ABORT, 'a break cannot end before it starts'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_tb_inside_ins BEFORE INSERT ON time_breaks
+  WHEN EXISTS (SELECT 1 FROM time_entries e WHERE e.id = NEW.time_entry_id
+    AND (NEW.start_at < e.clock_in_at
+      OR (e.clock_out_at IS NOT NULL AND NEW.end_at IS NOT NULL AND NEW.end_at > e.clock_out_at)))
+  BEGIN SELECT RAISE(ABORT, 'a break has to sit inside its own shift'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_tb_inside_upd
+  BEFORE UPDATE OF start_at, end_at ON time_breaks
+  WHEN EXISTS (SELECT 1 FROM time_entries e WHERE e.id = NEW.time_entry_id
+    AND (NEW.start_at < e.clock_in_at
+      OR (e.clock_out_at IS NOT NULL AND NEW.end_at IS NOT NULL AND NEW.end_at > e.clock_out_at)))
+  BEGIN SELECT RAISE(ABORT, 'a break has to sit inside its own shift'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_tb_overlap_ins BEFORE INSERT ON time_breaks
+  WHEN EXISTS (SELECT 1 FROM time_breaks o
+    WHERE o.time_entry_id = NEW.time_entry_id
+      AND o.start_at < COALESCE(NEW.end_at, '9999-12-31 23:59:59')
+      AND COALESCE(o.end_at, '9999-12-31 23:59:59') > NEW.start_at)
+  BEGIN SELECT RAISE(ABORT, 'that break overlaps another on the same shift'); END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_tb_overlap_upd
+  BEFORE UPDATE OF start_at, end_at ON time_breaks
+  WHEN EXISTS (SELECT 1 FROM time_breaks o
+    WHERE o.time_entry_id = NEW.time_entry_id AND o.id <> NEW.id
+      AND o.start_at < COALESCE(NEW.end_at, '9999-12-31 23:59:59')
+      AND COALESCE(o.end_at, '9999-12-31 23:59:59') > NEW.start_at)
+  BEGIN SELECT RAISE(ABORT, 'that break overlaps another on the same shift'); END;
+
   CREATE TABLE IF NOT EXISTS time_corrections (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     time_entry_id INTEGER REFERENCES time_entries(id) ON DELETE CASCADE,
@@ -214,6 +332,63 @@ db.exec(`
   // Transfer is tracked apart from approval on purpose.
   add('transfer_state', "TEXT NOT NULL DEFAULT 'not_ready'");
   add('transferred_at', 'TEXT'); add('transferred_by', 'TEXT');
+})();
+
+// --- what the triggers cannot see ------------------------------------------
+//
+// A trigger judges the row being written and nothing else, so installing one
+// says nothing about the rows already stored. This reads them once at boot and
+// reports what would now be refused.
+//
+// It reports rather than repairs. Every one of these is a real punch belonging
+// to a real person and some of them are hours somebody was paid for; guessing
+// which half of an overlapping pair to delete is not a decision a migration
+// gets to make at four in the morning. It prints, the owner fixes it on the
+// Time clock page, and the triggers keep it from happening again.
+function punchIntegrity() {
+  const one = (sql) => { try { return db.prepare(sql).all(); } catch { return []; } };
+  return {
+    backwards: one(`SELECT id FROM time_entries
+      WHERE clock_out_at IS NOT NULL AND clock_out_at <= clock_in_at`),
+    negative: one(`SELECT id FROM time_entries
+      WHERE raw_minutes < 0 OR payable_minutes < 0 OR paid_break_min < 0 OR unpaid_break_min < 0`),
+    unknownStatus: one(`SELECT id FROM time_entries WHERE status NOT IN
+      ('active','on_break','complete','missing_punch','correction_pending','locked')`),
+    overlapping: one(`SELECT a.id AS a, b.id AS b FROM time_entries a
+      JOIN time_entries b ON b.employee_id = a.employee_id AND b.id > a.id
+        AND a.clock_in_at < COALESCE(b.clock_out_at, datetime(b.clock_in_at, '+24 hours'))
+        AND COALESCE(a.clock_out_at, datetime(a.clock_in_at, '+24 hours')) > b.clock_in_at`),
+    breaksOutside: one(`SELECT b.id FROM time_breaks b JOIN time_entries e ON e.id = b.time_entry_id
+      WHERE b.start_at < e.clock_in_at
+        OR (e.clock_out_at IS NOT NULL AND b.end_at IS NOT NULL AND b.end_at > e.clock_out_at)`),
+    breaksOverlapping: one(`SELECT a.id FROM time_breaks a
+      JOIN time_breaks b ON b.time_entry_id = a.time_entry_id AND b.id > a.id
+        AND a.start_at < COALESCE(b.end_at, '9999-12-31 23:59:59')
+        AND COALESCE(a.end_at, '9999-12-31 23:59:59') > b.start_at`),
+  };
+}
+
+(function reportPunchIntegrity() {
+  // Skipped under the test harness, which builds deliberately broken rows to
+  // check that the screens survive them.
+  if (process.env.ZWIN_SKIP_BACKFILL) return;
+  try {
+    const r = punchIntegrity();
+    const lines = [];
+    if (r.backwards.length) lines.push(`${r.backwards.length} punch(es) ending before they start: #${r.backwards.map((x) => x.id).join(', #')}`);
+    if (r.overlapping.length) lines.push(`${r.overlapping.length} overlapping pair(s): ${r.overlapping.map((x) => `#${x.a}/#${x.b}`).join(', ')}`);
+    if (r.negative.length) lines.push(`${r.negative.length} punch(es) with negative minutes: #${r.negative.map((x) => x.id).join(', #')}`);
+    if (r.unknownStatus.length) lines.push(`${r.unknownStatus.length} punch(es) with an unknown status: #${r.unknownStatus.map((x) => x.id).join(', #')}`);
+    if (r.breaksOutside.length) lines.push(`${r.breaksOutside.length} break(s) sitting outside their shift: #${r.breaksOutside.map((x) => x.id).join(', #')}`);
+    if (r.breaksOverlapping.length) lines.push(`${r.breaksOverlapping.length} overlapping break(s): #${r.breaksOverlapping.map((x) => x.id).join(', #')}`);
+    if (lines.length) {
+      console.warn('[timeclock] punches already stored that the new rules would refuse — '
+        + 'these still show and still pay; fix them on the Time clock page:');
+      for (const l of lines) console.warn('[timeclock]   ' + l);
+    }
+  } catch (e) {
+    console.error('[timeclock] integrity scan skipped:', e.message);
+  }
 })();
 
 // --- settings --------------------------------------------------------------
@@ -661,15 +836,25 @@ class ClockError extends Error {
 // Two punches for one person cannot cover the same minute, and neither can two
 // breaks on one entry. Checked before any correction lands, because an approved
 // change that creates an overlap is a payroll figure counted twice.
+// An unclosed punch reaches forward one day and no further.
+//
+// Reading NULL as "covers everything after this" is what a half-open interval
+// means mathematically, and it is wrong here. A punch with no clock-out is
+// almost never somebody still working — it is somebody who forgot on Monday.
+// Read literally, that Monday hole would collide with Tuesday's punch, and with
+// every punch after it, and the person would be told they cannot clock in until
+// a manager fixes a shift from last week. Nobody works more than a day
+// straight, so an open punch stops mattering after one.
+const OPEN_END = "datetime(clock_in_at, '+24 hours')";
 q.overlapping = db.prepare(`SELECT * FROM time_entries
   WHERE employee_id = @employee_id AND id <> @id
-    AND clock_in_at < @end
-    AND (clock_out_at IS NULL OR clock_out_at > @start)`);
+    AND clock_in_at < COALESCE(@end, datetime(@start, '+24 hours'))
+    AND COALESCE(clock_out_at, ${OPEN_END}) > @start`);
 q.breaksOther = db.prepare('SELECT * FROM time_breaks WHERE time_entry_id = ? AND id <> ?');
 
 /** Throws if [start,end) would collide with another entry for the same person. */
 function assertNoEntryOverlap(entry, start, end) {
-  const clash = q.overlapping.all({ employee_id: entry.employee_id, id: entry.id, start, end: end || '9999-12-31 23:59:59' });
+  const clash = q.overlapping.all({ employee_id: entry.employee_id, id: entry.id, start, end: end || null });
   if (clash.length) {
     throw new ClockError(`That would overlap another time entry (#${clash[0].id}, `
       + `${clockFace(clash[0].clock_in_at)}–${clash[0].clock_out_at ? clockFace(clash[0].clock_out_at) : 'still open'}).`);
@@ -1428,7 +1613,7 @@ module.exports = {
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
-  createEntry, editEntryChecked, addBreak, startOpenBreak,
+  createEntry, editEntryChecked, addBreak, startOpenBreak, punchIntegrity,
   syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
