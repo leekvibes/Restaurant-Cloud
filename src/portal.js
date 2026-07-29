@@ -446,9 +446,13 @@ function sendPush(employeeId, payload) {
  * awaits each send and surfaces the error instead of swallowing it.
  */
 async function sendTest(employeeId) {
-  if (!pushOn) return { enabled: false, devices: 0, sent: 0, failed: 0, errors: [] };
   let subs = [];
   try { subs = q.pushFor.all({ id: employeeId }); } catch { /* */ }
+  // Counted before the early return, so "devices" is what is actually
+  // registered rather than a zero that only means nobody looked. When push is
+  // off on the server that number is the difference between "your phone never
+  // registered" and "your phone is fine, the server is not set up".
+  if (!pushOn) return { enabled: false, devices: subs.length, sent: 0, failed: 0, errors: [] };
   const data = JSON.stringify({
     title: 'Test notification',
     body: 'If you can see this, notifications are working.',
@@ -544,9 +548,9 @@ function sendAdminPush(payload) {
 /** Send a test push to one admin's own devices and report the result — the
  *  admin twin of sendTest(). */
 async function sendAdminTest(uid) {
-  if (!pushOn) return { enabled: false, devices: 0, sent: 0, failed: 0, errors: [] };
   let subs = [];
   try { subs = q.adminPushFor.all({ uid: String(uid) }); } catch { /* */ }
+  if (!pushOn) return { enabled: false, devices: subs.length, sent: 0, failed: 0, errors: [] };
   const data = JSON.stringify({
     title: 'Test notification',
     body: 'If you can see this, admin notifications are working.',

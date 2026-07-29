@@ -3623,7 +3623,18 @@ app.get('/portal', (req, res) => {
       var vapid=box.getAttribute('data-vapid'); box.hidden=false;
       function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
       function state(on){ test.hidden=!on; if(on){t.textContent='Notifications on';s.textContent='You will get specials, notes and your pay on this phone.';btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Notifications';s.textContent='Get a heads-up on your phone for specials, notes and your pay.';btn.textContent='Turn on';btn.dataset.on='';} }
-      navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
+      navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){
+        var on = !!sub && Notification.permission==='granted';
+        state(on);
+        // A device can hold a subscription this server has never heard of. The
+        // browser grants permission and subscribes LOCALLY first, and only then
+        // does the POST that registers it happen — so when that POST fails, the
+        // control shows "on", nothing is ever delivered, and pressing the button
+        // again only turns it off. Re-sending on load costs nothing when the
+        // device is already known (it upserts on the endpoint) and quietly
+        // repairs it when it is not.
+        if(on) fetch('/portal/push/subscribe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sub)}).catch(function(){});
+      }); });
       test.addEventListener('click', function(){
         test.disabled=true; s.textContent='Sending a test…';
         fetch('/portal/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){
@@ -3848,7 +3859,18 @@ app.get('/notifications', (req, res) => {
       var ON='You will get back-office alerts on this device.', OFF='Get these alerts on your phone — a shift sent, the register closed, payroll out, a floor report or an incident.';
       function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
       function state(on){ test.hidden=!on; if(on){t.textContent='Notifications on';s.textContent=ON;btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Push notifications';s.textContent=OFF;btn.textContent='Turn on';btn.dataset.on='';} }
-      navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
+      navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){
+        var on = !!sub && Notification.permission==='granted';
+        state(on);
+        // A device can hold a subscription this server has never heard of. The
+        // browser grants permission and subscribes LOCALLY first, and only then
+        // does the POST that registers it happen — so when that POST fails, the
+        // control shows "on", nothing is ever delivered, and pressing the button
+        // again only turns it off. Re-sending on load costs nothing when the
+        // device is already known (it upserts on the endpoint) and quietly
+        // repairs it when it is not.
+        if(on) fetch('/notifications/push/subscribe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(sub)}).catch(function(){});
+      }); });
       test.addEventListener('click', function(){
         test.disabled=true; s.textContent='Sending a test…';
         fetch('/notifications/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){
