@@ -526,6 +526,70 @@ test('a range typed backwards is read the way it was meant', async () => {
 });
 
 // ===========================================================================
+// Hours that predate the clock.
+// ===========================================================================
+
+test('hours on a shift with no punch behind them still reach the timesheet', async () => {
+  const T = require('../src/timeclock');
+  const P = require('../src/periods');
+  const per = P.recentPeriods(2)[1];
+  const emp = E.pos;
+  const day = plusDays(per.start, 2);
+
+  // A shift written up by hand, the way three months of this restaurant's
+  // history was recorded before anybody clocked in.
+  db.prepare("INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, 'dinner')").run(day);
+  const sh = shiftOn(day, 'dinner');
+  db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents, hours_source)
+    VALUES (?,?,'server',7.25,0,'legacy')
+    ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours=7.25, hours_source='legacy'`).run(sh.id, emp);
+
+  const found = T.shiftOnlyHours(emp, per.start, per.end);
+  assert.ok(found.some((x) => x.business_date === day), 'the day is found');
+  assert.strictEqual(T.totalsFor([], { extra: found }).payable, 7.25 * 60, 'and counts, to the minute');
+
+  const html = await text(`/payroll/timesheets/${emp}?p=${per.start}`);
+  assert.match(html, /from the shift/, 'the ledger says where it came from');
+  assert.match(html, /no punch/, 'and does not pretend there were times');
+  assert.match(html, /7h 15m/, 'with the hours that were recorded');
+});
+
+test('a day with a punch is never counted twice', async () => {
+  const T = require('../src/timeclock');
+  const P = require('../src/periods');
+  const per = P.recentPeriods(2)[1];
+  const emp = E.both;
+  const day = plusDays(per.start, 5);
+  const e = await punch(emp, day, '09:00', '17:00');       // 8h, and syncShiftHours writes work.hours
+  const sh = shiftOn(day, 'dinner');
+  assert.ok(Number(workOf(sh.id, emp).hours) > 0, 'the shift is carrying the clocked hours');
+
+  // That shift has a punch, so it must NOT also come back as shift-only — the
+  // work row there is derived from the punch, and adding both would pay it twice.
+  const extra = T.shiftOnlyHours(emp, per.start, per.end);
+  assert.ok(!extra.some((x) => x.business_date === day), 'a punched day is the clock\'s alone');
+
+  const both = T.totalsFor([e], { extra });
+  assert.strictEqual(both.payable, e.payable_minutes + extra.reduce((a, x) => a + x.minutes, 0),
+    'the total is the punch plus only the days no punch covers');
+});
+
+test('the shift-sheet hours are summed before they are rounded', () => {
+  const T = require('../src/timeclock');
+  // Three rows that each round DOWN individually but up together. Rounding per
+  // row and then adding drifted a real period 1.8 minutes off the shift sheets
+  // it was reading.
+  const extra = [
+    { business_date: '2026-05-11', minutes: 7.4 * 60 },
+    { business_date: '2026-05-12', minutes: 7.4 * 60 },
+    { business_date: '2026-05-13', minutes: 7.4 * 60 },
+  ];
+  const t = T.totalsFor([], { extra });
+  assert.strictEqual(t.payable, 22.2 * 60, 'the sum is exact, not three roundings added up');
+  assert.strictEqual(T.hm(t.payable), '22h 12m', 'and rounds once, at the point of display');
+});
+
+// ===========================================================================
 // Approving a period nobody signed.
 // ===========================================================================
 

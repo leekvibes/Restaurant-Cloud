@@ -586,7 +586,12 @@ const T2 = require('../src/timeclock');
 const sheetOf = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(empId, start);
 /** Submit the way the form does: carrying the totals the page displayed. */
 async function submitSheet(empId, pin, per, extra = {}, cookie) {
-  const seen = T2.totalsFor(T2.q.entriesInPeriod.all(empId, per.start, per.end)).payable;
+  // What the PAGE shows, which is punches plus any hours the shift sheets carry
+  // that no punch accounts for. Computing it without those signed a figure the
+  // employee was never shown, and the submit route rightly refused it — the
+  // signature belongs to the hours that were on screen.
+  const seen = T2.totalsFor(T2.q.entriesInPeriod.all(empId, per.start, per.end),
+    { extra: T2.shiftOnlyHours(empId, per.start, per.end) }).payable;
   return post('/portal/timesheet/submit',
     { period: per.start, confirm: '1', pin, seen: String(seen), ...extra }, { cookie });
 }

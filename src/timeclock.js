@@ -898,6 +898,64 @@ function gridCells(from, to) {
   return map;
 }
 
+/**
+ * Hours a period holds that no punch accounts for.
+ *
+ * Three months of this restaurant's hours predate the time clock: they were
+ * typed onto shift sheets, and they are as real as anything the clock has
+ * recorded since. The timesheet built itself from punches alone, so all of it
+ * was invisible — an employee with no punches simply had no row.
+ *
+ * These are NOT backfilled into time_entries. Doing that would mean inventing
+ * clock-in and clock-out times nobody ever made and writing them into the
+ * payroll record, so that "when did Ana clock in on May 12" would be answered
+ * with a fiction. What was recorded is a total, and a total is what this
+ * returns.
+ *
+ * The NOT EXISTS is what makes double-counting impossible: a shift with any
+ * punch on it belongs to the clock, and work.hours there is derived from those
+ * punches anyway. Only shifts with no punch at all come back.
+ */
+const shiftOnlyHoursQ = db.prepare(`
+  SELECT sh.id AS shift_id, sh.date AS business_date, sh.daypart, sh.status AS shift_status,
+         w.role, w.hours, w.hours_source
+    FROM work w
+    JOIN shifts sh ON sh.id = w.shift_id
+   WHERE w.employee_id = @emp AND sh.date >= @from AND sh.date <= @to AND w.hours > 0
+     AND NOT EXISTS (SELECT 1 FROM time_entries te
+                      WHERE te.shift_id = sh.id AND te.employee_id = w.employee_id)
+   ORDER BY sh.date, sh.daypart`);
+
+// Minutes are NOT rounded per row. work.hours is decimal, and rounding each row
+// to the nearest minute before summing accumulates: a period of 185 rows came
+// out 1.8 minutes adrift of the shift sheets it was reading. Fractional minutes
+// travel through the totals and hm() rounds once, at the point of display —
+// the same rule the clocked side already follows.
+function shiftOnlyHours(employeeId, from, to) {
+  return shiftOnlyHoursQ.all({ emp: employeeId, from, to })
+    .map((r) => ({ ...r, minutes: Number(r.hours) * 60 }));
+}
+
+/** The same, for everybody at once — the grid needs a whole roster. */
+const shiftOnlyAllQ = db.prepare(`
+  SELECT w.employee_id, sh.date AS business_date, SUM(w.hours) hours
+    FROM work w
+    JOIN shifts sh ON sh.id = w.shift_id
+   WHERE sh.date >= @from AND sh.date <= @to AND w.hours > 0
+     AND NOT EXISTS (SELECT 1 FROM time_entries te
+                      WHERE te.shift_id = sh.id AND te.employee_id = w.employee_id)
+   GROUP BY w.employee_id, sh.date`);
+
+function shiftOnlyByEmployee(from, to) {
+  const m = new Map();
+  for (const r of shiftOnlyAllQ.all({ from, to })) {
+    const list = m.get(r.employee_id) || [];
+    list.push({ business_date: r.business_date, minutes: Number(r.hours) * 60 });
+    m.set(r.employee_id, list);
+  }
+  return m;
+}
+
 /** Everyone who belongs in the grid for a span, not just everyone still employed. */
 const gridPeopleQ = db.prepare(`
   SELECT DISTINCT employee_id FROM time_entries WHERE business_date >= ? AND business_date <= ?`);
@@ -978,17 +1036,33 @@ function totalsFor(entries, opts = {}) {
     unpaid += e.unpaid_break_min || 0;
     payable += e.payable_minutes || 0;
   }
+  // Hours the shift sheet carries that no punch accounts for — the months
+  // before the clock existed, and any day somebody was written onto a shift
+  // by hand. They are real hours worked and count toward the period and
+  // toward overtime like any other.
+  //
+  // They add to raw as well as payable, and to neither break figure, because
+  // that is the truth about them: a total was recorded and nothing else. Adding
+  // them to payable alone would make "worked" read lower than "payable", which
+  // is impossible and would look like a bug.
+  //
+  // Never double-counted: the caller only passes days where no punch exists on
+  // that shift, so the two sources cannot describe the same hours.
+  const extra = opts.extra || [];
+  for (const x of extra) { raw += x.minutes || 0; payable += x.minutes || 0; }
+
   // Weekly overtime, measured per workweek the way payroll does it — never
   // per period, never per day.
   let overtime = 0;
   if (opts.otEnabled && !opts.otExempt && opts.periodStart) {
     const week = new Map();
-    for (const e of entries) {
-      if (!e.clock_out_at) continue;
-      const days = Math.floor((new Date(e.business_date) - new Date(opts.periodStart)) / 86400000);
+    const add = (businessDate, mins) => {
+      const days = Math.floor((new Date(businessDate) - new Date(opts.periodStart)) / 86400000);
       const wk = days < 7 ? 0 : 1;
-      week.set(wk, (week.get(wk) || 0) + (e.payable_minutes || 0));
-    }
+      week.set(wk, (week.get(wk) || 0) + (mins || 0));
+    };
+    for (const e of entries) if (e.clock_out_at) add(e.business_date, e.payable_minutes);
+    for (const x of extra) add(x.business_date, x.minutes);
     const threshold = (opts.otThreshold || 40) * 60;
     for (const mins of week.values()) if (mins > threshold) overtime += mins - threshold;
   }
@@ -1271,7 +1345,7 @@ module.exports = {
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
   syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
-  backfillShiftHours, gridCells, breaksInSpan,
+  backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
   sheetPeople: (start) => sheetPeopleQ.all(start).map((r) => r.employee_id),
 };

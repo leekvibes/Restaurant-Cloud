@@ -4713,11 +4713,16 @@ function tsView(emp, period, opts = {}) {
     .filter((c) => entries.some((e) => e.id === c.time_entry_id));
   const issues = TC.issuesFor(entries, corrections);
   const otRule = OT.rule();
+  // Hours the shift sheets carry that no punch accounts for: everything from
+  // before the clock existed, and anyone written onto a shift by hand since.
+  // Only shifts with NO punch come back, so nothing is counted twice.
+  const fromShifts = TC.shiftOnlyHours(emp.id, period.start, period.end);
   const totals = TC.totalsFor(entries, {
     otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
-    otThreshold: otRule.threshold, periodStart: period.start,
+    otThreshold: otRule.threshold, periodStart: period.start, extra: fromShifts,
   });
-  return { sheet, entries, corrections, issues, totals, status: TC.sheetStatus(sheet, issues), otRule };
+  return { sheet, entries, corrections, issues, totals, fromShifts,
+    status: TC.sheetStatus(sheet, issues), otRule };
 }
 
 app.get('/portal/timesheet', (req, res) => {
@@ -15190,10 +15195,14 @@ app.get('/payroll/timesheets', (req, res) => {
   // a timesheet and then left kept a 'submitted' row that the ledger, the
   // counts, the readiness verdict and approve-all all read past — so their hours
   // sat there forever, never approved and never transferred, and nothing said so.
+  // Hours the shift sheets carry with no punch behind them — three months of
+  // this restaurant's history predates the clock, and it was invisible here.
+  const shiftOnly = TC.shiftOnlyByEmployee(period.start, period.end);
   const staffIds = new Set([
     ...q.allEmployees.all().map((e) => e.id),
     ...TC.gridPeople(period.start, period.end),
     ...TC.sheetPeople(period.start),
+    ...shiftOnly.keys(),
   ]);
   const staff = [...staffIds].map((id) => q.employee.get(id)).filter(Boolean)
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
@@ -15204,7 +15213,8 @@ app.get('/payroll/timesheets', (req, res) => {
   const rows = staff.map((emp) => {
     const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
     const corrections = TC.q.pendingForEmployee.all(emp.id).filter((c) => entries.some((e) => e.id === c.time_entry_id));
-    if (!entries.length && !corrections.length) return null;
+    const extra = shiftOnly.get(emp.id) || [];
+    if (!entries.length && !corrections.length && !extra.length) return null;
     // Not even a READ of sheetFor on a custom range: it looks a sheet up by
     // start date, so a range beginning on a real period start would return that
     // whole fortnight's record and speak for numbers it does not describe.
@@ -15216,8 +15226,8 @@ app.get('/payroll/timesheets', (req, res) => {
     // Overtime is per workweek and its bucketing is only correct across a real
     // period; over an arbitrary span it dumps every day past the seventh into
     // one bucket and reports the overflow as OT. Suppressed rather than wrong.
-    const totals = TC.totalsFor(entries, custom ? {} : { otEnabled: otRule.enabled, otExempt: !!emp.ot_exempt,
-      otThreshold: otRule.threshold, periodStart: period.start });
+    const totals = TC.totalsFor(entries, custom ? { extra } : { extra, otEnabled: otRule.enabled,
+      otExempt: !!emp.ot_exempt, otThreshold: otRule.threshold, periodStart: period.start });
     // What the shifts in this period are carrying for them, for comparison.
     const ent = enteredBy.get(emp.id) || { h: 0, overridden: 0 };
     const entered = ent.h;
@@ -15225,6 +15235,7 @@ app.get('/payroll/timesheets', (req, res) => {
     const approval = sheet.id ? TC.q.currentApproval.get(sheet.id) : null;
     const transfer = sheet.id ? TC.q.currentTransfer.get(sheet.id) : null;
     return { emp, sheet, entries, corrections, issues, totals, entered: Number(entered),
+      shiftOnly: new Map(extra.map((x) => [x.business_date, x.minutes])),
       overridden: !!ent.overridden,
       clocked, variance: Math.round((clocked - Number(entered)) * 100) / 100,
       status: TC.sheetStatus(sheet, issues), approval, transfer,
@@ -15266,8 +15277,15 @@ app.get('/payroll/timesheets', (req, res) => {
   const gridRow = (r) => {
     const dayCells = days.map((d) => {
       const c = cells.get(`${r.emp.id}|${d}`);
-      if (!c || !c.entries) return `<span class="tsg-c tsg-none${isMonday(d) && d !== days[0] ? ' tsg-wk' : ''}" data-d="${d}"></span>`;
       const wk = isMonday(d) && d !== days[0] ? ' tsg-wk' : '';
+      const shMin = r.shiftOnly.get(d) || 0;
+      // No punch, but the shift sheet has hours for that day — the months
+      // before the clock existed. Marked so it never reads as clocked time.
+      if ((!c || !c.entries) && shMin) {
+        return `<span class="tsg-c tsg-sh${wk}" data-d="${d}" data-h="${TC.toHours(shMin)}"
+          data-t="${esc(TC.hm(shMin))} · from the shift sheet, no punch">${TC.toHours(shMin)}</span>`;
+      }
+      if (!c || !c.entries) return `<span class="tsg-c tsg-none${wk}" data-d="${d}"></span>`;
       // An open punch is NOT the same as a day off, and must never render as
       // one. A running entry has no payable minutes yet, so it would otherwise
       // be indistinguishable from an empty cell — somebody on shift right now
@@ -15566,7 +15584,15 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
           <section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">The period</span></div>
             <div class="inc-facts">
-              ${fact('Payable (clocked)', `<b>${esc(TC.hm(v.totals.payable))}</b>`)}
+              <!-- "Payable (clocked)" was the label until this figure stopped
+                   being only clocked: it now includes hours the shift sheets
+                   carry that no punch accounts for, which on this restaurant's
+                   history is most of them. A label that says clocked over a
+                   number that is not is the kind of confidently-wrong thing
+                   this page exists to avoid. -->
+              ${fact('Payable', esc(TC.hm(v.totals.payable)))}
+              ${v.fromShifts.length ? fact('Of which from shift sheets',
+                `${esc(TC.hm(v.fromShifts.reduce((a, x) => a + x.minutes, 0)))} <span class="tcm-tag">no punch</span>`) : ''}
               ${fact('Worked', esc(TC.hm(v.totals.raw)))}
               ${fact('Unpaid break', esc(TC.hm(v.totals.unpaid)))}
               ${v.otRule.enabled && !emp.ot_exempt ? fact('Regular / overtime', `${esc(TC.hm(v.totals.regular))} / ${esc(TC.hm(v.totals.overtime))}`) : ''}
@@ -15578,7 +15604,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
 
           <section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">Days</span></div>
-            ${v.entries.length ? (() => {
+            ${v.entries.length || v.fromShifts.length ? (() => {
               // Grouped into weeks when the period spans more than one, with a
               // weekly total — the figure a reviewer checks against overtime,
               // and the reason the boundary has to be the same one the overtime
@@ -15587,17 +15613,28 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               // history feed and not a payroll ledger: reviewing a period runs
               // forward through it, and reversed the week headings read
               // "Week 2" above "Week 1".
-              const days = TC.byDay(v.entries).slice().reverse();
+              // Punched days and shift-only days on one spine. A day can hold
+              // both — clocked into dinner, written onto cafe by hand — so they
+              // merge by date rather than one replacing the other.
+              const byDate = new Map(TC.byDay(v.entries).map(([d, l]) => [d, { punches: l, shifts: [] }]));
+              for (const sh of v.fromShifts) {
+                const slot = byDate.get(sh.business_date)
+                  || byDate.set(sh.business_date, { punches: [], shifts: [] }).get(sh.business_date);
+                slot.shifts.push(sh);
+              }
+              const days = [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([d, both]) => [d, both.punches, both.shifts]);
               const weekOf = (d) => Math.floor(
                 (Date.parse(d + 'T00:00:00Z') - Date.parse(period.start + 'T00:00:00Z')) / 864e5 / 7);
               const weeks = [];
-              for (const [date, list] of days) {
+              for (const [date, list, shifts] of days) {
                 const w = weekOf(date);
                 const last = weeks[weeks.length - 1];
-                if (last && last.w === w) last.days.push([date, list]);
-                else weeks.push({ w, days: [[date, list]] });
+                if (last && last.w === w) last.days.push([date, list, shifts]);
+                else weeks.push({ w, days: [[date, list, shifts]] });
               }
-              const dayMin = (list) => list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
+              const dayMin = (list, shifts) => list.reduce((a, e) => a + (e.payable_minutes || 0), 0)
+                + (shifts || []).reduce((a, x) => a + x.minutes, 0);
               const brk = (e) => {
                 const b = TC.breaksOn(e);
                 return b.unpaid || b.paid
@@ -15605,11 +15642,11 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               };
               return weeks.map((wk) => `
                 ${weeks.length > 1 ? `<div class="ts-wk-h"><span>Week ${wk.w + 1}</span>
-                  <b>${esc(TC.hm(wk.days.reduce((a, [, l]) => a + dayMin(l), 0)))}</b></div>` : ''}
-                ${wk.days.map(([date, list]) => `
+                  <b>${esc(TC.hm(wk.days.reduce((a, [, l, sh]) => a + dayMin(l, sh), 0)))}</b></div>` : ''}
+                ${wk.days.map(([date, list, shifts]) => `
                 <div class="ts-mday" id="d-${date}">
                   <div class="ts-mday-h">${esc(TC.dayLabel(date))}
-                    <b>${esc(TC.hm(dayMin(list)))}</b></div>
+                    <b>${esc(TC.hm(dayMin(list, shifts)))}</b></div>
                   ${list.map((e) => {
                     const iss = v.issues.filter((i) => i.entryId === e.id);
                     const blocking = iss.some((i) => i.blocking);
@@ -15624,6 +15661,17 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                       ? `<a class="ts-mrow${blocking ? ' warn' : ''}" id="e-${e.id}" href="/timeclock/${e.id}">${inner}</a>`
                       : `<div class="ts-mrow${blocking ? ' warn' : ''}" id="e-${e.id}">${inner}</div>`;
                   }).join('')}
+                  <!-- Hours from the shift sheet, with no punch behind them.
+                       Shown as what they are: a total somebody recorded, with
+                       no times, because none were. Inventing a clock-in here
+                       would put fiction in a payroll record. -->
+                  ${(shifts || []).map((x) => `<div class="ts-mrow ts-mrow-sh">
+                    <span class="ts-er-t">no punch</span>
+                    <span class="ts-er-w">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
+                    <span class="ts-er-b">—</span>
+                    <span class="ts-er-f"><i class="tcm-tag">from the shift</i></span>
+                    <b class="ts-er-h">${esc(TC.hm(x.minutes))}</b>
+                  </div>`).join('')}
                 </div>`).join('')}`).join('');
             })()
               : '<p class="inc-hint">Nothing recorded.</p>'}

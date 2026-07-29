@@ -4380,3 +4380,9 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .ts-unsigned { border-left: 3px solid var(--warning); padding: 8px 0 8px 12px; margin: 0 0 14px; }
 .ts-unsigned b { display: block; font-size: 13px; color: var(--headline); }
 .ts-unsigned p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+/* A day recorded on the shift sheet rather than the clock: no times to show,
+   because none were taken. Quieter than a punch, and never pretending to be one. */
+.ts-mrow-sh .ts-er-t { color: var(--faint); font-style: italic; }
+/* A day whose hours came from the shift sheet rather than a punch. Real hours,
+   so they are not dimmed — but marked, because nobody clocked them. */
+.tsg-c.tsg-sh { font-style: italic; color: var(--secondary); }
