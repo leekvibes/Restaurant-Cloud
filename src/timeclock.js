@@ -689,6 +689,94 @@ function assertBreakFits(entry, breakId, start, end) {
   }
 }
 
+// --- the doors every punch goes through ------------------------------------
+//
+// The guards above were only ever called from applyCorrection, so the same
+// change made two ways gave two different answers: a correction request that
+// would overlap an existing punch was refused, while a manager typing the
+// identical times straight into "add a punch" was not. The result is the same
+// minute counted twice, on the sheet and in the pay.
+//
+// These are the only sanctioned ways to create or move a punch. They validate
+// first and write second, so a new write path cannot forget the rules — it can
+// only refuse to use the door, and there is a test that watches for that.
+
+/**
+ * Insert a punch, open-ended or already finished.
+ * @param f  employee_id, shift_id, business_date, daypart, position,
+ *           clock_in_at, clock_out_at (null for still on the clock),
+ *           source, created_by
+ * @returns  the new entry's id
+ */
+function createEntry(f) {
+  const inAt = f.clock_in_at;
+  const outAt = f.clock_out_at || null;
+  if (!inAt) throw new ClockError('A punch needs a clock-in time.');
+  if (outAt && outAt <= inAt) throw new ClockError('The clock-out has to be after the clock-in.');
+  // id 0 matches no row, so the guard compares against every other punch this
+  // person has — which is what a brand new one has to clear.
+  assertNoEntryOverlap({ employee_id: f.employee_id, id: 0 }, inAt, outAt);
+  if (outAt) {
+    const raw = minutesBetween(inAt, outAt);
+    return q.addClosedEntry.run({ ...f, clock_out_at: outAt, raw, payable: raw }).lastInsertRowid;
+  }
+  return q.openEntry.run(f).lastInsertRowid;
+}
+
+/**
+ * Move an existing punch's times, service or position.
+ *
+ * Checks what applyCorrection checks, because it is the same edit: the new
+ * window must not collide with another punch, and the breaks already recorded
+ * have to still fit inside it. A break left hanging outside its entry is
+ * minutes deducted from a shift that no longer contains them.
+ */
+function editEntryChecked(entry, f) {
+  const inAt = f.in || entry.clock_in_at;
+  const outAt = f.out || null;
+  if (outAt && outAt <= inAt) throw new ClockError('The clock-out has to be after the clock-in.');
+  if (entry.status === 'locked') throw new ClockError('That entry is locked — reopen it first.');
+  assertNoEntryOverlap(entry, inAt, outAt);
+  for (const b of q.breaks.all(entry.id)) {
+    if (b.start_at < inAt) throw new ClockError('A recorded break would fall before that clock-in — fix the break first.');
+    if (outAt && b.end_at && b.end_at > outAt) throw new ClockError('A recorded break would run past that clock-out — fix the break first.');
+  }
+  q.editEntry.run({ id: entry.id, in: inAt, out: outAt, daypart: f.daypart, position: f.position, by: f.by });
+}
+
+/**
+ * Start a break that is still running — somebody stepping away right now.
+ *
+ * There is no end yet, so there is nothing to fit inside; what can still be
+ * wrong is the start. It cannot precede the clock-in, and it cannot land inside
+ * a break already recorded on this entry.
+ * @returns the new break's id
+ */
+function startOpenBreak(entry, f) {
+  const at = f.at;
+  if (at < entry.clock_in_at) throw new ClockError('A break cannot start before the clock-in.');
+  for (const b of q.breaks.all(entry.id)) {
+    if (at >= b.start_at && at < (b.end_at || '9999-12-31 23:59:59')) {
+      throw new ClockError(`A break is already recorded over that time (${clockFace(b.start_at)}–${b.end_at ? clockFace(b.end_at) : 'still running'}).`);
+    }
+  }
+  return q.startBreak.run({ time_entry_id: entry.id, employee_id: entry.employee_id,
+    start_at: at, paid: f.paid ? 1 : 0, source: f.source || 'employee', created_by: f.by }).lastInsertRowid;
+}
+
+/**
+ * Add a finished break to an entry — the manager's version of one that was
+ * taken but never punched.
+ * @returns the new break's id
+ */
+function addBreak(entry, f) {
+  assertBreakFits(entry, null, f.start, f.end);
+  const info = q.startBreak.run({ time_entry_id: entry.id, employee_id: entry.employee_id,
+    start_at: f.start, paid: f.paid ? 1 : 0, source: f.source || 'manager', created_by: f.by });
+  q.endBreak.run({ id: info.lastInsertRowid, end_at: f.end, raw: minutesBetween(f.start, f.end) });
+  return info.lastInsertRowid;
+}
+
 // --- applying an approved correction ---------------------------------------
 /**
  * Carry out what a correction asked for.
@@ -762,11 +850,7 @@ function applyCorrection(c, actor, opts = {}) {
     case 'missing_break': {
       const { start, end } = payload;
       if (!start || !end) throw new ClockError('That request did not include the break times.');
-      assertBreakFits(entry, null, start, end);
-      const paid = payload.paid ? 1 : 0;
-      const info = q.startBreak.run({ time_entry_id: entry.id, employee_id: entry.employee_id,
-        start_at: start, paid, source: 'manager', created_by: actor });
-      q.endBreak.run({ id: info.lastInsertRowid, end_at: end, raw: minutesBetween(start, end) });
+      addBreak(entry, { start, end, paid: payload.paid, by: actor });
       note('break_added', null, `${clockFace(start)}–${clockFace(end)}`);
       return finish(`break added ${clockFace(start)}–${clockFace(end)}`);
     }
@@ -1344,6 +1428,7 @@ module.exports = {
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
+  createEntry, editEntryChecked, addBreak, startOpenBreak,
   syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),

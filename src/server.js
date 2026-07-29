@@ -4497,16 +4497,24 @@ app.post('/portal/clock/in', (req, res) => {
       // Links the person to the service without touching hours — the manager's
       // number stays the manager's number.
       w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
-      const info = TC.q.openEntry.run({
+      // Through the shared door. The unique index already stops a double tap,
+      // but not clocking in on top of a punch a manager entered by hand for
+      // this same evening — which is the same minutes paid twice.
+      const eid = TC.createEntry({
         employee_id: emp.id, shift_id: sh.id, business_date: bdate, daypart, position,
         clock_in_at: at, source: 'portal', created_by: emp.name,
       });
-      TC.logEvent('entry', info.lastInsertRowid, 'clock_in', emp.name, { after: at });
+      TC.logEvent('entry', eid, 'clock_in', emp.name, { after: at });
       tcTouchDates(emp.id, [bdate], emp.name, 'a new shift was clocked in');
     })();
   } catch (e) {
     // The partial unique index is the real guard against a double tap.
     if (/UNIQUE/i.test(e.message)) return back('ok=' + encodeURIComponent('You are already clocked in.'));
+    // Said plainly, because the person reading it is standing at the door
+    // about to start work and cannot fix a punch themselves.
+    if (e instanceof TC.ClockError) {
+      return back('err=' + encodeURIComponent(e.message + ' Ask your manager to sort it out.'));
+    }
     throw e;
   }
   setPortalCookie(req, res, emp.id);
@@ -4524,13 +4532,13 @@ app.post('/portal/clock/break/start', (req, res) => {
   const paid = TC.settings().breaksPaid ? 1 : 0;
   try {
     db.transaction(() => {
-      const info = TC.q.startBreak.run({ time_entry_id: active.id, employee_id: emp.id,
-        start_at: TC.nowUtc(), paid, source: 'employee', created_by: emp.name });
+      const bid = TC.startOpenBreak(active, { at: TC.nowUtc(), paid, by: emp.name });
       TC.q.setStatus.run({ id: active.id, status: 'on_break', by: emp.name });
-      TC.logEvent('break', info.lastInsertRowid, 'break_start', emp.name);
+      TC.logEvent('break', bid, 'break_start', emp.name);
     })();
   } catch (e) {
     if (/UNIQUE/i.test(e.message)) return back('ok=' + encodeURIComponent('You are already on a break.'));
+    if (e instanceof TC.ClockError) return back('err=' + encodeURIComponent(e.message));
     throw e;
   }
   setPortalCookie(req, res, emp.id);
@@ -14818,21 +14826,19 @@ app.post('/timeclock/new', (req, res) => {
       const sh = s.findShift.get(bdate, daypart);
       policyForShift(sh);
       w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
-      if (outAt) {
-        const raw = TC.minutesBetween(inAt, outAt);
-        id = TC.q.addClosedEntry.run({ employee_id: emp.id, shift_id: sh.id, business_date: bdate,
-          daypart, position, clock_in_at: inAt, clock_out_at: outAt, source: 'manager',
-          raw, payable: raw, created_by: actor }).lastInsertRowid;
-      } else {
-        id = TC.q.openEntry.run({ employee_id: emp.id, shift_id: sh.id, business_date: bdate,
-          daypart, position, clock_in_at: inAt, source: 'manager', created_by: actor }).lastInsertRowid;
-      }
+      // Through the shared door, so a punch typed in here clears the same
+      // overlap check a correction request has to clear.
+      id = TC.createEntry({ employee_id: emp.id, shift_id: sh.id, business_date: bdate,
+        daypart, position, clock_in_at: inAt, clock_out_at: outAt, source: 'manager', created_by: actor });
       TC.logEvent('entry', id, 'manager_added', actor, { after: `${inAt} → ${outAt || 'open'}`, reason });
       // A new punch changes the period's total just as surely as moving one.
       tcTouchDates(emp.id, [bdate], actor, 'a manager added a punch');
       TC.syncShiftHours(sh.id, emp.id, actor, { role: position });
     })();
   } catch (e) {
+    if (e instanceof TC.ClockError) {
+      return res.redirect('/timeclock/new?msg=' + encodeURIComponent(e.message));
+    }
     if (/UNIQUE/i.test(e.message)) {
       return res.redirect('/timeclock/new?msg=' + encodeURIComponent('That person is already on the clock — close their open entry first.'));
     }
@@ -15020,8 +15026,11 @@ app.post('/timeclock/:id/edit', (req, res) => {
   const wasDate = e.business_date;   // the sheet losing these hours, if it moves
   const wasShiftId = e.shift_id;     // and the shift losing them, which is not the same thing
 
+  try {
   db.transaction(() => {
-    TC.q.editEntry.run({ id: e.id, in: inAt, out: outAt, daypart, position, by: actor });
+    // Through the shared door: the new window must not collide with another of
+    // this person's punches, and the breaks already on it have to still fit.
+    TC.editEntryChecked(e, { in: inAt, out: outAt, daypart, position, by: actor });
     // The service or the day may have moved — re-link to the right shift, still
     // through the one find-or-create every path uses.
     const bdate = TC.businessDateOf(inAt, TC.settings().cutoffHour);
@@ -15050,6 +15059,12 @@ app.post('/timeclock/:id/edit', (req, res) => {
       TC.syncShiftHours(wasShiftId, e.employee_id, actor);
     }
   })();
+  } catch (err) {
+    if (err instanceof TC.ClockError) {
+      return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent(err.message));
+    }
+    throw err;
+  }
   res.redirect(punchBack(req, `/timeclock/${e.id}`, 'Correction saved.', `#e-${e.id}`));
 });
 
@@ -15063,18 +15078,25 @@ app.post('/timeclock/:id/break', (req, res) => {
     return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A break needs a start, a later end, and a reason.'));
   }
   const actor = tcActor(req);
+  try {
   db.transaction(() => {
-    const info = TC.q.startBreak.run({ time_entry_id: e.id, employee_id: e.employee_id,
-      start_at: start, paid: req.body.paid === '1' ? 1 : 0, source: 'manager', created_by: actor });
-    TC.q.endBreak.run({ id: info.lastInsertRowid, end_at: end, raw: TC.minutesBetween(start, end) });
+    // Through the shared door, so a break typed in here has to sit inside the
+    // shift and clear the breaks already on it.
+    const bid = TC.addBreak(e, { start, end, paid: req.body.paid === '1', by: actor });
     TC.recompute(TC.q.byId.get(e.id));
-    TC.logEvent('break', info.lastInsertRowid, 'manager_added', actor, { after: `${start} → ${end}`, reason });
+    TC.logEvent('break', bid, 'manager_added', actor, { after: `${start} → ${end}`, reason });
     TC.logEvent('entry', e.id, 'break_added', actor, { after: `${start} → ${end}`, reason });
     tcTouchTimesheet(e.id, actor, 'a manager added a break');
     // An unpaid break comes straight off the payable minutes, so it comes off
     // the shift's hours too.
     TC.syncShiftHours(e.shift_id, e.employee_id, actor);
   })();
+  } catch (err) {
+    if (err instanceof TC.ClockError) {
+      return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent(err.message));
+    }
+    throw err;
+  }
   res.redirect(punchBack(req, `/timeclock/${e.id}`, 'Break added.', `#e-${e.id}`));
 });
 
