@@ -15521,13 +15521,16 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   // makes the reviewer decide something the app already knows.
   const raw = v.sheet.status || 'open';
   const stale = v.approval && TC.approvalStale(v.approval, v.entries);
+  const split = TC.approvalBlockersSplit(v.sheet, v.issues);
+  // Approve is offered whenever nothing FACTUAL stands in the way — submitted
+  // or not. People forget to sign, people leave, and a period still has to
+  // close. Not having signed is a thing to be told about, not a locked door.
   const primary = raw === 'finalized' ? null
     : raw === 'locked' ? 'reopen'
     : raw === 'approved' && (v.transfer || stale) ? 'reopen'
     : raw === 'approved' ? 'transfer'
-    : raw === 'submitted' && !v.blockers.length ? 'approve'
-    : raw === 'submitted' ? 'return'
-    : null;
+    : (split.hard.length || split.found.length) ? (raw === 'submitted' ? 'return' : null)
+    : 'approve';
   const PRIMARY_LABEL = { approve: 'Approve', return: 'Return to employee', reopen: 'Reopen', transfer: 'Send to payroll' };
   const backTo = `/payroll/timesheets?p=${period.start}${keepQ}`;
 
@@ -15637,19 +15640,32 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
           ${canWrite() ? `<section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">What you can do</span></div>
 
-            ${v.blockers.length && v.sheet.status === 'submitted' ? `<div class="ts-blockers" id="issues">
+            ${split.hard.length || split.found.length ? (() => {
+              const all = split.hard.concat(split.found);
+              return `<div class="ts-blockers" id="issues">
               <b>Cannot approve yet</b>
-              <ul>${v.blockers.slice(0, 6).map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+              <ul>${all.slice(0, 6).map((b) => `<li>${esc(b)}</li>`).join('')}</ul>
+              ${all.length > 6 ? `<p class="inc-hint">and ${all.length - 6} more</p>` : ''}
+            </div>`; })() : ''}
+
+            <!-- Not a blocker. A warning, above the button it warns about. -->
+            ${!split.hard.length && !split.found.length && split.soft.length ? `<div class="ts-unsigned">
+              <b>${esc(firstName(emp.name))} has not submitted this yet</b>
+              <p>${split.soft.map(esc).join(' ')} You can still approve it — people forget, and the
+              period has to close. The reason you give is kept on the approval, so the record shows
+              it was approved without a signature.</p>
             </div>` : ''}
 
-            ${v.sheet.status === 'submitted' && !v.blockers.length ? `
+            ${!['approved', 'locked', 'finalized'].includes(v.sheet.status) && !split.hard.length && !split.found.length ? `
               <form id="act-approve" method="post" action="/payroll/timesheets/${emp.id}/approve" class="tcm-form tcm-act">
                 <input type="hidden" name="period" value="${period.start}">
+                ${split.soft.length ? `<label class="tcm-f wide"><span>Approving unsigned — reason <i>required</i></span>
+                  <input name="override_reason" required maxlength="300" placeholder="Why this is being approved without their signature"></label>` : ''}
                 <label class="tcm-f wide"><span>Note <i>optional</i></span><input name="note" maxlength="300"></label>
                 <button class="bs-btn" type="submit">Approve ${esc(TC.hm(v.totals.payable))}</button>
               </form>` : ''}
 
-            ${v.sheet.status === 'submitted' && v.blockers.length ? `
+            ${!split.hard.length && split.found.length ? `
               <details class="ts-override"><summary>Approve anyway</summary>
                 <form method="post" action="/payroll/timesheets/${emp.id}/approve" class="tcm-form">
                   <input type="hidden" name="period" value="${period.start}">
@@ -15754,10 +15770,19 @@ function tsDecision(emp, period) {
 function tsApprove(emp, period, actor, note, override) {
   const d = tsDecision(emp, period);
   const sheet = TC.sheetFor(emp.id, period, { create: true });
-  const blockers = TC.approvalBlockers(sheet, d.issues);
-  // Structural objections cannot be overridden — an unfinished punch is not a
-  // judgement call. Only an override reason lets the rest through.
-  if (blockers.length && !override) return { ok: false, blockers };
+  const split = TC.approvalBlockersSplit(sheet, d.issues);
+  // A statement of fact is never overridable. A punch with no clock-out has no
+  // duration; an already-approved sheet cannot be approved twice; a locked one
+  // must be reopened. This used to waive the WHOLE list on any override reason,
+  // so "approve anyway" quietly unlocked a locked sheet and reset its transfer
+  // state — from a button whose own comment said it only waived judgement.
+  if (split.hard.length) return { ok: false, blockers: split.hard };
+  // Everything else passes on a recorded reason. Something wrong with the record
+  // is a thing a manager may genuinely know better about; nobody having signed
+  // is the common case of somebody forgetting, and a period still has to close.
+  // Both end up on the approval as override_reason, visible forever.
+  const rest = split.found.concat(split.soft);
+  if (rest.length && !override) return { ok: false, blockers: rest };
   db.transaction(() => {
     TC.q.supersedeApprovals.run({ timesheet_id: sheet.id, by: actor, reason: 'a newer approval replaced it' });
     const info = TC.q.addApproval.run({

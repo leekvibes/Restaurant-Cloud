@@ -1076,15 +1076,44 @@ function fingerprintOf(entries, breakMap) {
  * anything is still moving or contradicts itself. An editor may push past a
  * non-structural objection, but only by naming a reason that is recorded.
  */
+/**
+ * Why a timesheet cannot be approved, split by whether a manager may say
+ * otherwise.
+ *
+ * HARD objections are statements of fact about the record. A punch with no
+ * clock-out has no duration; a sheet that is already approved cannot be
+ * approved again; a locked one has to be reopened first. No reason a manager
+ * types makes any of those less true, so an override must not pass them — and
+ * it used to. tsApprove waived the ENTIRE list on any override reason, which
+ * meant "approve anyway" silently unlocked a locked sheet and reset its
+ * transfer state, from a button whose comment claimed it only waived judgement
+ * calls.
+ *
+ * SOFT ones are judgement. Chief among them: the employee has not signed it.
+ * People forget, people leave, and a period still has to close — so the owner
+ * may approve regardless, having been told, and the fact that nobody signed is
+ * recorded rather than glossed over.
+ */
+function approvalBlockersSplit(sheet, issues) {
+  const hard = [];        // never, not even with a reason
+  const found = [];       // wrong with the record: refuses, but "approve anyway" passes
+  const soft = [];        // nobody signed: warns, and approving asks for a reason
+  if (sheet && sheet.status === 'approved') hard.push('Already approved.');
+  else if (sheet && sheet.status === 'locked') hard.push('Locked — reopen it first.');
+  else if (sheet && sheet.status === 'finalized') hard.push('Finalized.');
+  else if (!sheet || sheet.id == null || sheet.status !== 'submitted') {
+    soft.push('The employee has not submitted this timesheet.');
+  } else if (sheet.resubmit_needed) {
+    soft.push('The hours changed after it was submitted — it needs signing again.');
+  }
+  for (const i of issues) if (i.blocking) found.push(i.text);
+  return { hard, found, soft };
+}
+
+/** Everything standing in the way, in one list, for the pages that just count. */
 function approvalBlockers(sheet, issues) {
-  const out = [];
-  if (!sheet || sheet.id == null) out.push('The employee has not submitted this timesheet.');
-  else if (sheet.status === 'approved') out.push('Already approved.');
-  else if (sheet.status === 'locked') out.push('Locked — reopen it first.');
-  else if (sheet.status !== 'submitted') out.push('The employee has not submitted this timesheet.');
-  else if (sheet.resubmit_needed) out.push('The hours changed after it was submitted — it needs signing again.');
-  for (const i of issues) if (i.blocking) out.push(i.text);
-  return out;
+  const s = approvalBlockersSplit(sheet, issues);
+  return s.hard.concat(s.found, s.soft);
 }
 
 /** Has anything moved since this approval was given? */
@@ -1234,7 +1263,7 @@ if (backfilled.done) {
 
 module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
-  fingerprintOf, approvalBlockers, approvalStale, transferStateOf, TRANSFER_LABEL,
+  fingerprintOf, approvalBlockers, approvalBlockersSplit, approvalStale, transferStateOf, TRANSFER_LABEL,
   q, settings, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
   clockFace, stamp, dayLabel, hm, toHours, breakTotals, breaksOn, recompute, elapsedMinutes,
   payableSoFar, logEvent,

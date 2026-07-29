@@ -4375,3 +4375,8 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .ts-mrow { grid-template-columns: 1fr auto; gap: 2px 10px; }
   .ts-mrow > .ts-er-w, .ts-mrow > .ts-er-b { grid-column: 1 / -1; }
 }
+/* Not a refusal — a warning above the button it is about. Amber, because the
+   period can still be closed; the red treatment belongs to things that cannot. */
+.ts-unsigned { border-left: 3px solid var(--warning); padding: 8px 0 8px 12px; margin: 0 0 14px; }
+.ts-unsigned b { display: block; font-size: 13px; color: var(--headline); }
+.ts-unsigned p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }

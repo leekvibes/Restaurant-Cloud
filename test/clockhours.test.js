@@ -526,6 +526,62 @@ test('a range typed backwards is read the way it was meant', async () => {
 });
 
 // ===========================================================================
+// Approving a period nobody signed.
+// ===========================================================================
+
+test('an unsigned timesheet can be approved, but not without being told', async () => {
+  const P = require('../src/periods');
+  const emp = E.clockOnly;
+  const per = P.recentPeriods(2)[1];
+  const day = plusDays(per.start, 1);
+  await punch(emp, day, '09:00', '17:00');
+  db.prepare('DELETE FROM timesheets WHERE employee_id = ? AND period_start = ?').run(emp, per.start);
+
+  const page = await text(`/payroll/timesheets/${emp}?p=${per.start}`);
+  assert.match(page, /has not submitted this yet/, 'the page says plainly that nobody signed it');
+  assert.doesNotMatch(page, /Cannot approve yet/, 'and does not call that a blocker');
+  assert.match(page, /Approving unsigned — reason/, 'the approve form asks why');
+
+  // Refused without a reason — the point is that somebody is told, not that it
+  // is impossible.
+  const bare = await post(`/payroll/timesheets/${emp}/approve`, { period: per.start });
+  assert.match(decodeURIComponent(bare.headers.get('location') || ''), /not submitted/i, 'it says what is missing');
+  const sheetOf = () => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(emp, per.start);
+  assert.notStrictEqual((sheetOf() || {}).status, 'approved', 'and nothing was approved');
+
+  // With a reason it goes through, and the reason outlives the click.
+  const ok = await post(`/payroll/timesheets/${emp}/approve`, {
+    period: per.start, override_reason: 'Maya left before the period closed' });
+  assert.strictEqual(ok.status, 302);
+  const sheet = sheetOf();
+  assert.strictEqual(sheet.status, 'approved', 'approved without a signature');
+  const a = db.prepare('SELECT * FROM timesheet_approvals WHERE timesheet_id = ? ORDER BY id DESC').get(sheet.id);
+  assert.strictEqual(a.override_reason, 'Maya left before the period closed',
+    'and the record shows it was approved unsigned, and why');
+});
+
+test('a state contradiction is never overridable, however good the reason', async () => {
+  // This is the bug the split exists to fix: "approve anyway" used to waive the
+  // WHOLE list, so a reason could silently unlock a locked sheet and reset its
+  // transfer state — from a button whose own comment claimed it only waived
+  // judgement calls.
+  const P = require('../src/periods');
+  const emp = E.clockOnly;
+  const per = P.recentPeriods(2)[1];
+  db.prepare("UPDATE timesheets SET status = 'locked' WHERE employee_id = ? AND period_start = ?")
+    .run(emp, per.start);
+
+  const res = await post(`/payroll/timesheets/${emp}/approve`, {
+    period: per.start, override_reason: 'I really do mean it' });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /[Ll]ocked/, 'refused, and says why');
+  assert.strictEqual(db.prepare('SELECT status FROM timesheets WHERE employee_id = ? AND period_start = ?')
+    .get(emp, per.start).status, 'locked', 'and it is still locked');
+
+  const page = await text(`/payroll/timesheets/${emp}?p=${per.start}`);
+  assert.doesNotMatch(page, /Approve anyway/, 'the page does not even offer the door');
+});
+
+// ===========================================================================
 // Who may change a punch, and when.
 // ===========================================================================
 
