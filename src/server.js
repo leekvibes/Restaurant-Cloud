@@ -18,6 +18,7 @@ const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const OT = require('./overtime');
 const TC = require('./timeclock');
+const GUARD = require('./guard');
 const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const MX = require('./metrics');
@@ -3976,7 +3977,36 @@ app.post('/portal/stock', (req, res) => {
 //   out. While a person is on the clock the cookie is refreshed on every load,
 //   so a normal shift never logs them out mid-service.
 // ---------------------------------------------------------------------------
-const pinOk = (emp, pin) => String(emp.pin || '') !== '' && String(emp.pin) === String(pin || '').trim();
+const pinMatches = (emp, pin) => String(emp.pin || '') !== '' && String(emp.pin) === String(pin || '').trim();
+
+/**
+ * A PIN check that costs something to get wrong.
+ *
+ * Four digits is ten thousand guesses, and every one of these routes used to
+ * answer as fast as a string comparison. Wrong PINs now accumulate against the
+ * employee AND against the source address — the second bucket is what catches
+ * one PIN sprayed across the whole roster, which the first never sees because
+ * no single person accumulates failures.
+ *
+ * Returns { ok } or { ok: false, wait } with a message that says only that too
+ * many tries have been made. A correct PIN clears the person's bucket at once,
+ * so a cook halfway through a shift is never stranded by somebody else's mess.
+ */
+function pinCheck(req, emp, pin) {
+  const src = GUARD.sourceOf(req);
+  const buckets = [['pin', emp && emp.id], ['pin-ip', src]];
+  const gate = GUARD.mayTry(...buckets);
+  if (!gate.ok) return { ok: false, wait: gate.retryIn, msg: GUARD.waitMessage(gate.retryIn) };
+  if (!pinMatches(emp, pin)) {
+    GUARD.failed(...buckets);
+    return { ok: false, msg: 'That PIN did not match.' };
+  }
+  GUARD.passed('pin', emp && emp.id);
+  return { ok: true };
+}
+
+/** Kept for the read-only checks that are not authentication decisions. */
+const pinOk = pinMatches;
 
 /**
  * The positions a person may CLOCK IN as — strictly the ones assigned to them.
@@ -4415,8 +4445,9 @@ app.post('/portal/clock/out', (req, res) => {
   // Off by default: they are holding the phone they signed in on, so a second
   // PIN confirms nothing the session has not already established. Restaurants
   // that want the extra step can switch it back on in the time-clock settings.
-  if (TC.settings().pinAtOut && !pinOk(emp, req.body.pin)) {
-    return back('err=' + encodeURIComponent('That PIN did not match. Nothing was changed.'));
+  if (TC.settings().pinAtOut) {
+    const g = pinCheck(req, emp, req.body.pin);
+    if (!g.ok) return back('err=' + encodeURIComponent(g.msg + ' Nothing was changed.'));
   }
   if (active.status === 'on_break' || TC.q.openBreak.get(active.id)) {
     return back('err=' + encodeURIComponent('End your break first, then clock out.'));
@@ -4542,7 +4573,10 @@ app.post('/portal/clock/fix', (req, res) => {
   const e = TC.q.byId.get(Number(req.body.entry_id));
   if (!e || e.employee_id !== emp.id) return res.redirect('/portal/clock');
   const back = (p) => res.redirect(`/portal/clock/entry/${e.id}?` + p);
-  if (!pinOk(emp, req.body.pin)) return back('err=1');
+  {
+    const g = pinCheck(req, emp, req.body.pin);
+    if (!g.ok) return back('err=' + encodeURIComponent(g.msg));
+  }
   const reason = String(req.body.reason || '').trim().slice(0, 500);
   if (!reason) return back('err=1');
   const KINDS = ['missing_in', 'missing_out', 'wrong_in', 'wrong_out', 'break', 'missing_break', 'wrong_position', 'wrong_service', 'other'];
@@ -4932,7 +4966,10 @@ app.post('/portal/timesheet/submit', (req, res) => {
   const period = tsPeriodsFor().find((p) => p.start === req.body.period);
   if (!period) return res.redirect('/portal/timesheet?err=' + encodeURIComponent('That pay period is not open for submission.'));
   const back = (p) => res.redirect(`/portal/timesheet?p=${period.start}&` + p);
-  if (!pinOk(emp, req.body.pin)) return back('err=' + encodeURIComponent('That PIN did not match.'));
+  {
+    const g = pinCheck(req, emp, req.body.pin);
+    if (!g.ok) return back('err=' + encodeURIComponent(g.msg));
+  }
   if (req.body.confirm !== '1') return back('err=' + encodeURIComponent('Tick the box to confirm the hours.'));
 
   // Validated again on the server: the page may have been open while something
@@ -5037,14 +5074,28 @@ function stockScript() {
 }
 
 app.post('/tips/start', (req, res) => {
+  // The exposed one. There is no employee here until the PIN itself names one,
+  // so the only bucket available before the guess is the source address — and
+  // it is the bucket that matters, because this is the door a script would walk
+  // ten thousand guesses through.
+  const src = GUARD.sourceOf(req);
+  const gate = GUARD.mayTry(['pin-ip', src]);
+  if (!gate.ok) {
+    return res.redirect('/tips?err=1&msg=' + encodeURIComponent(GUARD.waitMessage(gate.retryIn)));
+  }
   const pin = String(req.body.pin || '').trim();
   const matches = pin ? q.staffByPin.all(pin) : [];
   if (matches.length !== 1) {
+    // A wrong PIN counts against the address, and — once the PIN does name
+    // somebody — against them too, so a duplicate-PIN mess cannot be used as
+    // an unlimited oracle.
+    GUARD.failed(['pin-ip', src], ...(matches.length === 1 ? [['pin', matches[0].id]] : []));
     return res.redirect('/tips?err=1&msg=' + encodeURIComponent(
       matches.length > 1
         ? 'That PIN is set up for more than one person. Tell your manager so it can be fixed.'
         : "That PIN wasn't recognised. Check it and try again, or ask your manager."));
   }
+  GUARD.passed('pin', matches[0].id);
   // The PIN screen is unchanged; where it lands is not. A verified PIN now
   // opens the hub, because the portal holds more than the tip form — and for
   // a cook it holds no form at all. The submission flow behind it is
@@ -5059,18 +5110,22 @@ app.post('/tips/start', (req, res) => {
  * pressed submit — so accept it rather than losing their entry. Same check the
  * old flow made, so no weaker than what it replaced.
  */
-function legacyAuth(body) {
+function legacyAuth(body, req) {
   const id = Number(body.employee_id);
   const pin = String(body.pin || '').trim();
   if (!id || !pin) return null;
   const e = q.employee.get(id);
   if (!e || !e.active || e.role === 'manager') return null;
-  return String(e.pin || '') === pin ? e : null;
+  // Throttled like every other PIN door. This one takes an employee id
+  // outright, so it would otherwise be the easiest of the lot to grind.
+  if (!req) return String(e.pin || '') === pin ? e : null;
+  const g = pinCheck(req, e, pin);
+  return g.ok ? e : null;
 }
 
 app.post('/tips', (req, res) => {
   const fail = (msg) => res.redirect('/tips?err=1&msg=' + encodeURIComponent(msg));
-  const emp = readTipsToken(req.body.token) || legacyAuth(req.body);
+  const emp = readTipsToken(req.body.token) || legacyAuth(req.body, req);
   if (!emp) {
     // Distinguish a genuinely stale token from a wrong PIN on an old page.
     return fail(req.body.employee_id
