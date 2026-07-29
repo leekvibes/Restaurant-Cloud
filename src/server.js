@@ -14662,7 +14662,7 @@ app.post('/timeclock/new', (req, res) => {
     }
     throw e;
   }
-  res.redirect(`/timeclock/${id}?msg=` + encodeURIComponent('Punch added.'));
+  res.redirect(punchBack(req, `/timeclock/${id}`, 'Punch added.', `#e-${id}`));
 });
 
 app.get('/timeclock/:id', (req, res) => {
@@ -14874,7 +14874,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
       TC.syncShiftHours(wasShiftId, e.employee_id, actor);
     }
   })();
-  res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Correction saved.'));
+  res.redirect(punchBack(req, `/timeclock/${e.id}`, 'Correction saved.', `#e-${e.id}`));
 });
 
 app.post('/timeclock/:id/break', (req, res) => {
@@ -14899,7 +14899,7 @@ app.post('/timeclock/:id/break', (req, res) => {
     // the shift's hours too.
     TC.syncShiftHours(e.shift_id, e.employee_id, actor);
   })();
-  res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Break added.'));
+  res.redirect(punchBack(req, `/timeclock/${e.id}`, 'Break added.', `#e-${e.id}`));
 });
 
 app.post('/timeclock/break/:bid/delete', (req, res) => {
@@ -14920,7 +14920,7 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
     tcTouchTimesheet(b.time_entry_id, actor, 'a manager removed a break');
     if (e) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
   })();
-  res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('Break removed.'));
+  res.redirect(punchBack(req, `/timeclock/${b.time_entry_id}`, 'Break removed.', `#e-${b.time_entry_id}`));
 });
 
 /**
@@ -14959,7 +14959,7 @@ app.post('/timeclock/:id/delete', (req, res) => {
     // The hours this punch put on the shift go with it.
     TC.syncShiftHours(shiftId, empId, actor);
   })();
-  res.redirect(`/timeclock?msg=` + encodeURIComponent(`Punch deleted — ${was}.`));
+  res.redirect(punchBack(req, '/timeclock', `Punch deleted — ${was}.`, `#d-${day}`));
 });
 
 /**
@@ -14979,7 +14979,7 @@ app.post('/timeclock/correction/:id', (req, res) => {
   const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
   const actor = tcActor(req);
   const note = String(req.body.note || '').trim().slice(0, 200) || null;
-  const done = (msg) => res.redirect(`/timeclock/${c.time_entry_id}?msg=` + encodeURIComponent(msg));
+  const done = (msg) => res.redirect(punchBack(req, `/timeclock/${c.time_entry_id}`, msg, `#e-${c.time_entry_id}`));
   // Decided once, applied once. Without this a double submit — or a back
   // button — would run the change twice and add the same break, or move the
   // same punch again.
@@ -15079,6 +15079,23 @@ app.post('/timeclock/correction/:id', (req, res) => {
 // TIMESHEETS — the manager's ledger, sitting with Payroll because that is what
 // it prepares.
 // ===========================================================================
+
+/**
+ * Where a punch edit should land when it is done.
+ *
+ * The same correction can be made from the time clock or from inside a payroll
+ * review, and it should return the manager to whichever one they were reading —
+ * bouncing a reviewer out to the time clock in the middle of a period loses
+ * their place and their filters.
+ *
+ * Same-site paths only, and the same regex views.js already uses for its undo
+ * links, so a crafted form cannot post somebody somewhere else.
+ */
+function punchBack(req, fallback, msg, hash) {
+  const asked = String(req.body.back || '');
+  const base = /^\/[A-Za-z0-9/_?=&.%-]*$/.test(asked) ? asked : fallback;
+  return base + (base.includes('?') ? '&' : '?') + 'msg=' + encodeURIComponent(msg) + (hash || '');
+}
 
 /**
  * Payroll authority, checked on the route rather than inferred from the URL.
@@ -15656,10 +15673,50 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                       <span class="ts-er-b">${brk(e)}</span>
                       <span class="ts-er-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? `<i class="tcm-tag warn">${corr} fix</i>` : ''}${blocking ? '<i class="tcm-tag warn">issue</i>' : ''}</span>
                       <b class="ts-er-h">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>`;
-                    // A link only for somebody who can open the other side.
-                    return punchReadable()
-                      ? `<a class="ts-mrow${blocking ? ' warn' : ''}" id="e-${e.id}" href="/timeclock/${e.id}">${inner}</a>`
-                      : `<div class="ts-mrow${blocking ? ' warn' : ''}" id="e-${e.id}">${inner}</div>`;
+                    const frozen = ['approved', 'locked', 'finalized'].includes(v.sheet.status);
+                    // Opens in place. Sending a reviewer to another page in the
+                    // middle of a period loses their place, their filters and
+                    // the person they were halfway through checking.
+                    return `<details class="bs-srow ts-erow" id="e-${e.id}">
+                      <summary class="ts-mrow${blocking ? ' warn' : ''}">${inner}</summary>
+                      <div class="ts-ebody">
+                        ${!canWrite() ? '<p class="inc-hint">Your account is view-only.</p>'
+                        : frozen ? `<p class="inc-hint">This period was ${esc(v.sheet.status)}. Reopen it to change the times — the signature would otherwise stop describing the hours it signed for.</p>`
+                        : `
+                        <form class="bs-inline" method="post" action="/timeclock/${e.id}/edit">
+                          <input type="hidden" name="back" value="${esc(backTo)}">
+                          <label class="bs-pill"><span>In</span><input type="datetime-local" name="in" value="${esc(TC.utcToLocalInput(e.clock_in_at))}" required></label>
+                          <label class="bs-pill"><span>Out</span><input type="datetime-local" name="out" value="${esc(TC.utcToLocalInput(e.clock_out_at))}"></label>
+                          <label class="bs-pill"><span>Position</span><select name="position">
+                            ${allRoles().map((r2) => `<option value="${esc(r2)}"${r2 === e.position ? ' selected' : ''}>${esc(posName(r2))}</option>`).join('')}</select></label>
+                          <label class="bs-pill"><span>Service</span><select name="daypart">
+                            ${DAYPARTS.map((d2) => `<option value="${d2}"${d2 === e.daypart ? ' selected' : ''}>${dp(d2)}</option>`).join('')}</select></label>
+                          <label class="bs-pill wide"><span>Reason</span><input name="reason" required maxlength="300" placeholder="Kept forever"></label>
+                          <button class="bs-btn" type="submit">Save</button>
+                          <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
+                        </form>
+                        ${TC.q.breaks.all(e.id).map((b) => `<form class="ts-brk" method="post" action="/timeclock/break/${b.id}/delete">
+                          <input type="hidden" name="back" value="${esc(backTo)}">
+                          <span>${esc(TC.clockFace(b.start_at))} – ${b.end_at ? esc(TC.clockFace(b.end_at)) : 'open'}${b.paid ? ' · paid' : ''}</span>
+                          <input name="reason" required maxlength="300" placeholder="Why remove it">
+                          <button type="submit">Remove</button>
+                        </form>`).join('')}
+                        <form class="bs-inline" method="post" action="/timeclock/${e.id}/break">
+                          <input type="hidden" name="back" value="${esc(backTo)}">
+                          <label class="bs-pill"><span>Break from</span><input type="datetime-local" name="start" required></label>
+                          <label class="bs-pill"><span>to</span><input type="datetime-local" name="end" required></label>
+                          <label class="bs-pill"><span>Paid?</span><select name="paid"><option value="0">Unpaid</option><option value="1">Paid</option></select></label>
+                          <label class="bs-pill wide"><span>Reason</span><input name="reason" required maxlength="300"></label>
+                          <button class="bs-btn-sm" type="submit">Add break</button>
+                        </form>
+                        <form class="bs-inline-rm" method="post" action="/timeclock/${e.id}/delete"
+                              onsubmit="return confirm('Delete this punch for good? The hours come off the shift. The record that it existed is kept.')">
+                          <input type="hidden" name="back" value="${esc(backTo)}">
+                          <input name="reason" required maxlength="300" placeholder="Why it should not exist">
+                          <button type="submit">Delete this punch</button>
+                        </form>`}
+                      </div>
+                    </details>`;
                   }).join('')}
                   <!-- Hours from the shift sheet, with no punch behind them.
                        Shown as what they are: a total somebody recorded, with
@@ -15675,7 +15732,51 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 </div>`).join('')}`).join('');
             })()
               : '<p class="inc-hint">Nothing recorded.</p>'}
+
+            ${canWrite() && !['approved', 'locked', 'finalized'].includes(v.sheet.status) ? `
+            <details class="bs-srow ts-erow ts-add">
+              <summary class="ts-mrow"><span class="ts-er-t">+ Add</span>
+                <span class="ts-er-w">a session somebody forgot to clock</span>
+                <span class="ts-er-b"></span><span class="ts-er-f"></span><b class="ts-er-h"></b></summary>
+              <div class="ts-ebody">
+                <form class="bs-inline" method="post" action="/timeclock/new">
+                  <input type="hidden" name="employee_id" value="${emp.id}">
+                  <input type="hidden" name="back" value="${esc(backTo)}">
+                  <label class="bs-pill"><span>In</span><input type="datetime-local" name="in" required></label>
+                  <label class="bs-pill"><span>Out</span><input type="datetime-local" name="out"></label>
+                  <label class="bs-pill"><span>Position</span><select name="position">
+                    ${allRoles().map((r2) => `<option value="${esc(r2)}">${esc(posName(r2))}</option>`).join('')}</select></label>
+                  <label class="bs-pill"><span>Service</span><select name="daypart">
+                    ${DAYPARTS.map((d2) => `<option value="${d2}">${dp(d2)}</option>`).join('')}</select></label>
+                  <label class="bs-pill wide"><span>Reason</span><input name="reason" required maxlength="300"
+                    placeholder="Why this is being added by hand"></label>
+                  <button class="bs-btn" type="submit">Add the session</button>
+                </form>
+                <p class="inc-hint">It lands on the shift for the day it starts, and the day's hours are
+                  worked out again. Leaving the clock-out empty records somebody still on shift.</p>
+              </div>
+            </details>` : ''}
           </section>
+
+          ${v.corrections.length ? `<section class="bs-panel inc-sec">
+            <div class="bs-sec-h"><span class="bs-kicker">Fixes ${esc(firstName(emp.name))} has asked for</span>
+              <span class="bs-sec-note">${v.corrections.length} waiting</span></div>
+            <!-- Decided here rather than on another page: a request is a reason
+                 this period cannot be approved, so it belongs where the approving
+                 happens. Approving one applies it and recalculates in the same
+                 transaction — the manager never approves and then edits. -->
+            ${v.corrections.map((c) => `<div class="tcm-corr">
+              <div><b>${esc(c.kind.replace(/_/g, ' '))}</b> — ${esc(c.reason)}
+                ${c.proposed_value ? `<i>“${esc(c.proposed_value)}”</i>` : ''}</div>
+              <div class="tcm-corr-m">${esc(c.requested_by)} · ${esc(TC.stamp(c.requested_at))}</div>
+              ${canWrite() ? `<form class="bs-inline ts-corr-f" method="post" action="/timeclock/correction/${c.id}">
+                <input type="hidden" name="back" value="${esc(backTo)}">
+                <label class="bs-pill wide"><span>Note</span><input name="note" maxlength="300"></label>
+                <button class="bs-btn-sm" name="decision" value="approved" type="submit">Approve the fix</button>
+                <button class="bs-inline-x" name="decision" value="rejected" type="submit">Reject</button>
+              </form>` : ''}
+            </div>`).join('')}
+          </section>` : ''}
 
           ${v.issues.length ? `<section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">Issues</span></div>

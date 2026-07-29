@@ -526,6 +526,57 @@ test('a range typed backwards is read the way it was meant', async () => {
 });
 
 // ===========================================================================
+// Correcting a punch without leaving the review.
+// ===========================================================================
+
+test('an edit made inside the review lands, recalculates, and comes back to the row', async () => {
+  const P = require('../src/periods');
+  const emp = E.broken;
+  const per = P.recentPeriods(2)[1];
+  const day = plusDays(per.start, 8);
+  const e = await punch(emp, day, '17:00', '22:00');        // 5h
+  const back = `/payroll/timesheets/${emp}?p=${per.start}`;
+  const min = () => db.prepare('SELECT payable_minutes m FROM time_entries WHERE id = ?').get(e.id).m;
+  assert.strictEqual(min(), 300);
+
+  // The workspace offers the editor in the row rather than a link away.
+  const page = await text(back);
+  assert.match(page, new RegExp(`id="e-${e.id}"`), 'the row is addressable');
+  assert.match(page, /class="ts-ebody"/, 'and opens an editor in place');
+  assert.match(page, /Add\s*<\/span>\s*<span class="ts-er-w">a session somebody forgot/,
+    'with a way to add a session nobody clocked');
+
+  const r = await post(`/timeclock/${e.id}/edit`, {
+    back, in: `${day}T17:00`, out: `${day}T23:30`, position: 'server', daypart: 'dinner', reason: 'stayed to close',
+  });
+  const to = decodeURIComponent(r.headers.get('location') || '');
+  assert.ok(to.startsWith(back), 'it returns to the same person and period');
+  assert.match(to, new RegExp(`#e-${e.id}$`), 'anchored at the row that was edited');
+  assert.strictEqual(min(), 390, 'and the punch moved');
+
+  // A break added from the same place comes off the day.
+  await post(`/timeclock/${e.id}/break`, {
+    back, start: `${day}T19:00`, end: `${day}T19:30`, paid: '0', reason: 'dinner' });
+  assert.strictEqual(min(), 360, 'the unpaid half hour came off');
+  const after = await text(back);
+  assert.match(after, /span>Payable<\/span><b>6h 0m/, 'and the period total followed it');
+});
+
+test('a crafted return path cannot send somebody off-site', async () => {
+  const P = require('../src/periods');
+  const per = P.recentPeriods(2)[1];
+  const day = plusDays(per.start, 9);
+  const e = await punch(E.broken, day, '10:00', '12:00');
+  const r = await post(`/timeclock/${e.id}/edit`, {
+    back: 'https://example.com/steal', in: `${day}T10:00`, out: `${day}T13:00`,
+    position: 'server', daypart: 'dinner', reason: 'nice try',
+  });
+  const to = r.headers.get('location') || '';
+  assert.ok(!to.includes('example.com'), 'the off-site path is refused');
+  assert.match(to, /^\/timeclock\//, 'and it falls back to where the punch lives');
+});
+
+// ===========================================================================
 // Hours that predate the clock.
 // ===========================================================================
 
