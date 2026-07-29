@@ -99,13 +99,20 @@ const entriesOf = (empId) =>
 
 /** Add a finished punch the way a manager does, through the real route. */
 async function punch(empId, date, from, to, daypart = 'dinner', position = 'server') {
+  const before = entriesOf(empId).length;
   const res = await post('/timeclock/new', {
     employee_id: String(empId), position, daypart,
     in: `${date}T${from}`, out: to ? `${date}T${to}` : '',
     reason: 'seeded by the test',
   });
   assert.strictEqual(res.status, 302, 'the punch was accepted');
-  return entriesOf(empId).slice(-1)[0];
+  // A refusal also redirects, and this used to hand back whatever punch
+  // happened to be newest — so a test could seed nothing, silently assert
+  // against somebody else's leftovers, and pass.
+  const rows = entriesOf(empId);
+  assert.strictEqual(rows.length, before + 1,
+    `the punch was actually created (${decodeURIComponent(res.headers.get('location') || '')})`);
+  return rows[rows.length - 1];
 }
 
 /** Clock in and out through the portal, the way staff do. */
@@ -787,6 +794,147 @@ test('an approved timesheet freezes the punches underneath it', async () => {
   });
   assert.strictEqual(ok.status, 302);
   assert.strictEqual(Number(workOf(sh.id, emp).hours), 10, 'and now the correction lands');
+});
+
+// The freeze above was real but opt-in: it lived inside tcCanEdit, which can
+// only ask "is the sheet under THIS punch frozen". Every route that had no
+// punch yet, or was moving one to a different day, or was acting on the whole
+// shift, called the same guard and sailed straight past it. Each of these was
+// reproduced against a running server before it was fixed.
+
+const P2 = require('../src/periods');
+const freeze = (empId, day, status = 'approved') => {
+  const per = P2.periodFor(day);
+  db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)
+    VALUES (?,?,?,?) ON CONFLICT(employee_id, period_start) DO UPDATE SET status=excluded.status`)
+    .run(empId, per.start, per.end, status);
+  return per;
+};
+const thaw = (empId, day) => db.prepare("UPDATE timesheets SET status='open' WHERE employee_id = ? AND period_start = ?")
+  .run(empId, P2.periodFor(day).start);
+const msgOf = (res) => decodeURIComponent(res.headers.get('location') || '');
+
+test('a signed period will not take a brand-new punch either', async () => {
+  // The widest of them in practice. The freeze stops you editing the eight
+  // hours already signed for; it did not stop you adding another five beside
+  // them. "I never got paid for that Saturday" is a conversation that happens
+  // after the period closes, and add-a-punch is the tool you reach for.
+  const emp = E.split;
+  const day = P2.recentPeriods(3)[2].start;
+  freeze(emp, day);
+  const res = await post('/timeclock/new', {
+    employee_id: String(emp), position: 'server', daypart: 'dinner',
+    in: `${day}T18:00`, out: `${day}T23:00`, reason: 'they say they worked it',
+  });
+  assert.match(msgOf(res), /already approved/, 'refused, and says why');
+  assert.strictEqual(entriesOf(emp).filter((e) => e.business_date === day).length, 0, 'nothing landed');
+  thaw(emp, day);
+});
+
+test('a punch cannot be moved INTO a signed period from outside it', async () => {
+  // The freeze was checked on the day the punch is on now. Editing from the
+  // unfrozen side and landing inside was a way to walk around the wall.
+  const emp = E.broken;
+  const open = P2.recentPeriods(2)[0];
+  const closed = P2.recentPeriods(3)[2];
+  const e = await punch(emp, open.start, '09:00', '17:00');
+  freeze(emp, closed.start);
+  const res = await post(`/timeclock/${e.id}/edit`, {
+    in: `${closed.start}T09:00`, out: `${closed.start}T17:00`,
+    position: 'server', daypart: 'dinner', reason: 'wrong week',
+  });
+  assert.match(msgOf(res), /already approved/, 'refused on the destination');
+  assert.strictEqual(db.prepare('SELECT business_date FROM time_entries WHERE id = ?').get(e.id).business_date,
+    open.start, 'and the punch stayed where it was');
+  thaw(emp, closed.start);
+});
+
+test('an approved correction is not a smaller act than an edit', async () => {
+  // An employee files a fix, payroll signs the period, and days later a manager
+  // works through the pending queue and clicks Approve. The punch moved under a
+  // signature given for different hours, and the manager was told "Approved and
+  // applied".
+  const emp = E.overridden;
+  const day = P2.recentPeriods(3)[2].start;
+  const e = await punch(emp, day, '09:00', '17:00');
+  // Stored times are UTC; the punch above went in as local. Capture what is
+  // actually on the row and compare against that, rather than doing the offset
+  // arithmetic in the assertion and getting it wrong twice a year.
+  const wasOut = db.prepare('SELECT clock_out_at FROM time_entries WHERE id = ?').get(e.id).clock_out_at;
+  const cid = db.prepare(`INSERT INTO time_corrections
+    (time_entry_id, employee_id, kind, payload, reason, requested_by)
+    VALUES (?,?,'wrong_out',?,'stayed late',?)`)
+    .run(e.id, emp, JSON.stringify({ at: `${day} 23:30:00` }), 'Case overridden').lastInsertRowid;
+  freeze(emp, day);
+
+  const res = await post(`/timeclock/correction/${cid}`, { decision: 'approved' });
+  assert.match(msgOf(res), /already approved/, 'refused');
+  assert.strictEqual(db.prepare('SELECT decision FROM time_corrections WHERE id = ?').get(cid).decision, 'pending',
+    'and it stays pending rather than being marked done');
+  assert.strictEqual(db.prepare('SELECT clock_out_at FROM time_entries WHERE id = ?').get(e.id).clock_out_at,
+    wasOut, 'the punch did not move');
+
+  // Rejecting is still allowed: it changes no hours, and leaving requests
+  // pending forever would block the next period's approval.
+  const rej = await post(`/timeclock/correction/${cid}`, { decision: 'rejected', note: 'reopen the sheet first' });
+  assert.strictEqual(db.prepare('SELECT decision FROM time_corrections WHERE id = ?').get(cid).decision, 'rejected',
+    'a refusal goes through');
+  assert.strictEqual(rej.status, 302);
+  thaw(emp, day);
+});
+
+test('the shift page is the other door to the same signed hours', async () => {
+  const emp = E.pos;
+  const day = P2.recentPeriods(3)[2].start;
+  const e = await punch(emp, day, '09:00', '17:00');
+  const sh = shiftOn(day, 'dinner');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'eight to start');
+  freeze(emp, day);
+
+  const typed = await post(`/shifts/${sh.id}/server`, { employee_id: String(emp), hours: '12' });
+  assert.match(msgOf(typed), /already approved/, 'typing hours in is refused');
+  const support = await post(`/shifts/${sh.id}/support`, { employee_id: String(emp), role: 'busser', hours: '12' });
+  assert.match(msgOf(support), /already approved/, 'and on the support form');
+  const reset = await post(`/shifts/${sh.id}/hours-reset`, { employee_id: String(emp) });
+  assert.match(msgOf(reset), /already approved/, 'and handing the row back to the clock');
+  const removed = await post(`/shifts/${sh.id}/remove`, { employee_id: String(emp) });
+  assert.match(msgOf(removed), /already approved/, 'and taking them off the shift entirely');
+
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'the signed figure never moved');
+  assert.ok(db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(e.id), 'and the punch is still there');
+  thaw(emp, day);
+});
+
+test('clocking out of a signed day closes the punch but holds the hours', async () => {
+  // The one case that must NOT be a refusal. Somebody at the end of a real
+  // shift has worked those hours and has to be able to close their entry —
+  // what is held back is rewriting the figure payroll already signed for.
+  // Their own person: every other fixture in this file has been left in some
+  // deliberate state by an earlier test, and one of them is "forgot to clock
+  // out", which is precisely the state this test needs not to start in.
+  const emp = 199;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4199',1500,1)")
+    .run(emp, 'Case frozen-out');
+  const cookie = await signIn('4199');
+  const inRes = await post('/portal/clock/in', { daypart: 'dinner', position: 'server' }, { cookie });
+  assert.strictEqual(inRes.status, 302, 'clocked in');
+  const open = entriesOf(emp).find((x) => !x.clock_out_at);
+  assert.ok(open, `on the clock (${msgOf(inRes)})`);
+  const sh = db.prepare('SELECT * FROM shifts WHERE id = ?').get(open.shift_id);
+  const before = workOf(sh.id, emp);
+  freeze(emp, open.business_date);
+
+  const out = await post('/portal/clock/out', {}, { cookie });
+  assert.strictEqual(out.status, 302);
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(open.id);
+  assert.ok(after.clock_out_at, 'they got to clock out');
+  assert.strictEqual(after.status, 'complete', 'and the punch is finished');
+  assert.strictEqual(workOf(sh.id, emp).hours, before ? before.hours : null,
+    'but the signed hours on the shift did not move');
+  const held = db.prepare("SELECT * FROM time_events WHERE entity='shift' AND action='hours_held_frozen' ORDER BY id DESC")
+    .get();
+  assert.ok(held, 'and the hold is in the audit rather than being silent');
+  thaw(emp, open.business_date);
 });
 
 // ===========================================================================

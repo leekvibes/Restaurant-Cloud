@@ -2367,6 +2367,10 @@ app.post('/shifts/:id/server', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const empId = Number(req.body.employee_id);
+  // Typing hours in on the shift page writes the same work.hours the timesheet
+  // is built from. The Time clock page refuses this on a signed day; this page
+  // is the other door to the same number.
+  if (tcFrozen(res, empId, sh.date, `/shifts/${sh.id}`)) return;
   w.upsertWork.run({
     shift_id: sh.id, employee_id: empId, role: 'server',
     hours: hoursIfGiven(req.body), hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
@@ -2385,6 +2389,7 @@ app.post('/shifts/:id/support', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const empId = Number(req.body.employee_id);
+  if (tcFrozen(res, empId, sh.date, `/shifts/${sh.id}`)) return;
   w.upsertWork.run({
     shift_id: sh.id, employee_id: empId, role: req.body.role,
     hours: hoursIfGiven(req.body), hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
@@ -2428,6 +2433,12 @@ app.post('/shifts/:id/remove', (req, res) => {
       `${who} is on the clock right now. Clock them out first — taking them off mid-shift would leave the punch with nowhere to go.`));
   }
 
+  // This is the most destructive of the lot: it deletes every punch on the day
+  // as well as the work row, so on a signed period it removes the evidence for
+  // hours that have already been approved and possibly already paid.
+  const shRow = s.shiftById.get(shiftId);
+  if (shRow && tcFrozen(res, empId, shRow.date, `/shifts/${shiftId}`)) return;
+
   db.transaction(() => {
     for (const p of punches) {
       // The event before the row, so what it held survives what removed it.
@@ -2457,7 +2468,12 @@ app.post('/shifts/:id/remove', (req, res) => {
 app.post('/shifts/:id/hours-reset', (req, res) => {
   const shiftId = Number(req.params.id);
   const empId = Number(req.body.employee_id);
-  if (!s.shiftById.get(shiftId)) return res.status(404).end();
+  const shRow = s.shiftById.get(shiftId);
+  if (!shRow) return res.status(404).end();
+  // Handing a row back to the clock replaces a signed figure with whatever the
+  // punches currently add up to. That is a change to the signed number, even
+  // though nobody typed a new one.
+  if (tcFrozen(res, empId, shRow.date, `/shifts/${shiftId}`)) return;
   const actor = tcActor(req);
   db.transaction(() => {
     w.releaseHours.run({ shift_id: shiftId, employee_id: empId });
@@ -14289,11 +14305,31 @@ const punchReadable = () => navAllowedFor('/timeclock') || navAllowedFor('/payro
  * act that withdraws it, and it is already built and already tells payroll to
  * recalculate.
  */
-const FROZEN_SHEET = ['approved', 'locked', 'finalized'];
-function sheetCovering(employeeId, businessDate) {
-  const period = periodFor(businessDate);
-  const sheet = TC.sheetFor(employeeId, period);        // read-only: no create
-  return { period, sheet, frozen: FROZEN_SHEET.includes(sheet.status) };
+const FROZEN_SHEET = TC.FROZEN_SHEET;
+const sheetCovering = TC.sheetCovering;
+
+/**
+ * Refuse a write that would land inside a signed period, and say where to go.
+ *
+ * Takes the employee and the DATE the write would land on, rather than an
+ * existing punch, because the two are not the same question and treating them
+ * as one is what left the holes. tcCanEdit could only ask "is the sheet under
+ * this punch frozen" — so a route with no punch yet (adding one), a route
+ * moving a punch to a different day, and a route acting on a whole shift all
+ * sailed past it. Every one of those cases knows the employee and the date.
+ *
+ * @returns true if the write was refused and a response has already been sent.
+ */
+function tcFrozen(res, employeeId, businessDate, backTo) {
+  if (!employeeId || !businessDate) return false;
+  const st = sheetCovering(employeeId, businessDate);
+  if (!st.frozen) return false;
+  const who = st.sheet.approved_by ? ` by ${st.sheet.approved_by}` : '';
+  res.redirect(`${backTo}${backTo.includes('?') ? '&' : '?'}err=1&msg=` + encodeURIComponent(
+    `${TC.dayLabel ? TC.dayLabel(businessDate) : businessDate} is on a timesheet that was already `
+    + `${st.sheet.status}${who}. Reopen it on Timesheets first — changing the hours underneath a `
+    + 'signature would leave it describing figures nobody signed for.'));
+  return true;
 }
 
 /**
@@ -14838,6 +14874,11 @@ app.post('/timeclock/new', (req, res) => {
   if (outAt && outAt <= inAt) return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Clock-out must be after clock-in.'));
   const cfg = TC.settings();
   const bdate = TC.businessDateOf(inAt, cfg.cutoffHour);
+  // The freeze applies to the day this punch would LAND on, which is only
+  // knowable here — tcCanEdit was called above with no entry, because there is
+  // no entry yet. Adding five hours next to the eight on a signed sheet moves
+  // the total just as surely as editing the eight.
+  if (tcFrozen(res, emp.id, bdate, '/timeclock/new')) return;
   const actor = tcActor(req);
   let id;
   try {
@@ -15041,6 +15082,12 @@ app.post('/timeclock/:id/edit', (req, res) => {
   if (outAt && outAt <= inAt) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Clock-out must be after clock-in.'));
   const position = allRoles().includes(req.body.position) ? req.body.position : e.position;
   const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : e.daypart;
+  // tcCanEdit checked the day this punch is on NOW. Moving a clock-in across
+  // the cutoff moves it to another day and another pay period, so the day it is
+  // going TO has to be free as well — otherwise the freeze is a wall you can
+  // walk around by editing from the unfrozen side.
+  const toDate = TC.businessDateOf(inAt, TC.settings().cutoffHour);
+  if (toDate !== e.business_date && tcFrozen(res, e.employee_id, toDate, `/timeclock/${e.id}`)) return;
   const actor = tcActor(req);
   const before = `${e.clock_in_at} → ${e.clock_out_at || 'open'} · ${e.position}${e.daypart ? '/' + e.daypart : ''}`;
   const wasDate = e.business_date;   // the sheet losing these hours, if it moves
@@ -15202,6 +15249,20 @@ app.post('/timeclock/correction/:id', (req, res) => {
   // button — would run the change twice and add the same break, or move the
   // same punch again.
   if (c.decision !== 'pending') return done('That request was already decided.');
+
+  // The freeze, checked here rather than in tcCanEdit above, because at that
+  // point the route has not read the correction and so has no punch and no day
+  // to check. Approving a request is not a smaller act than editing the punch
+  // by hand — it rewrites the same clock-in, the same break, the same hours —
+  // and this was the widest way into a signed period: an employee files a fix
+  // after the sheet is locked, a manager works through the pending queue days
+  // later and clicks Approve, and the punch moves under a signature given for
+  // different hours. Rejecting stays available, because refusing a request
+  // changes no hours and leaving it pending would block the next period.
+  if (decision === 'approved') {
+    const target = TC.q.byId.get(c.time_entry_id);
+    if (target && tcFrozen(res, target.employee_id, target.business_date, `/timeclock/${c.time_entry_id}`)) return;
+  }
 
   const settle = () => {
     const stillOpen = TC.q.correctionsFor.all(c.time_entry_id).some((x) => x.id !== c.id && x.decision === 'pending');
@@ -16265,7 +16326,13 @@ function tsApprove(emp, period, actor, note, override) {
       fingerprint: TC.fingerprintOf(d.entries), override_reason: override || null,
     });
     TC.q.setSheetApproved.run({ id: sheet.id, by: actor });
-    TC.q.setTransferState.run({ id: sheet.id, state: 'ready' });
+    // "Ready" only if nothing has gone to payroll yet. Approving a sheet that
+    // was reopened AFTER being sent does not make it ready — it makes payroll's
+    // copy wrong, and they have to be told. Writing 'ready' here erased the
+    // needs_recalculation the reopen had just set, and the dashboard alert that
+    // reads this column went quiet on the one case it exists for.
+    const sent = TC.q.currentTransfer.get(sheet.id);
+    TC.q.setTransferState.run({ id: sheet.id, state: sent ? 'needs_recalculation' : 'ready' });
     TC.logEvent('timesheet', sheet.id, override ? 'approved_with_override' : 'approved', actor,
       { before: 'submitted', after: `approved · ${TC.hm(d.totals.payable)}`, reason: override || note || null });
     TC.logEvent('approval', info.lastInsertRowid, 'created', actor, { after: `${TC.hm(d.totals.payable)}` });
@@ -16363,6 +16430,16 @@ app.post('/payroll/timesheets/:empId/transfer', (req, res) => {
   const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
   const d = tsDecision(emp, period);
   if (!d.approval) return back('Approve the timesheet first.');
+  // Sent once per approval. There was no guard at all here, so a double tap, a
+  // back button, or two people on the payroll page at once sent the same hours
+  // again — superseding the first record and overwriting who sent it and when,
+  // which is the one thing a transfer record exists to remember. Reopening and
+  // re-approving mints a new approval, so a genuine re-send still goes through.
+  const already = TC.q.currentTransfer.get(d.sheet.id);
+  if (already && already.approval_id === d.approval.id) {
+    return back(`Already sent to payroll by ${already.transferred_by || 'somebody'}`
+      + `${already.transferred_at ? ` on ${TC.stamp(already.transferred_at)}` : ''}.`);
+  }
   const actor = tcActor(req);
   const rate = Number(emp.hourly_rate_cents) || 0;
   const otRule = OT.rule();
@@ -16378,7 +16455,13 @@ app.post('/payroll/timesheets/:empId/transfer', (req, res) => {
       regular_min: d.approval.regular_min, overtime_min: d.approval.overtime_min,
       payable_min: d.approval.payable_min, ot_enabled: d.approval.ot_enabled,
       wage_rate_cents: rate, est_gross_cents: est,
-      fingerprint: TC.fingerprintOf(d.entries), transferred_by: actor,
+      // The approval's fingerprint, not today's. Every minute in this record
+      // came from d.approval, so the fingerprint has to describe the same
+      // moment — stamping the live one against the approved minutes is how a
+      // sheet that had already drifted got sent looking pristine, and could
+      // then never report "changed after transfer", because it was compared
+      // against the state it had already moved to.
+      fingerprint: d.approval.fingerprint, transferred_by: actor,
     });
     TC.q.markTransferred.run({ id: d.sheet.id, by: actor });
     TC.logEvent('timesheet', d.sheet.id, 'transferred_to_payroll', actor,

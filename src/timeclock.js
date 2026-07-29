@@ -700,7 +700,9 @@ const sumForShift = db.prepare(`
      AND payable_minutes IS NOT NULL
      AND status NOT IN ('active', 'on_break')`);
 
-const shiftRow = db.prepare('SELECT id, status FROM shifts WHERE id = ?');
+// date, because syncShiftHours has to know which day it is about to write to
+// before it can ask whether that day has been signed for.
+const shiftRow = db.prepare('SELECT id, status, date FROM shifts WHERE id = ?');
 const countPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ? AND employee_id = ?');
 const countShiftPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ?');
 
@@ -792,6 +794,26 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
   // difference is multiplied by a wage. Three decimals, not two, so the figure
   // can still round-trip against the minutes the timesheet shows.
   const hours = Math.round((r.payable_min / 60) * 1000) / 1000;
+
+  // Same reasoning one step further along: a timesheet that has been approved,
+  // locked or finalized is a signature over a set of hours. This function is
+  // where every hour-write in the app ends up — the clock-out, the manager
+  // edit, the approved correction, the POS webhook — so it is the one place
+  // that can promise a signed figure will not move underneath its signature by
+  // some path nobody thought to guard. Hold, and say so in the audit.
+  //
+  // The punch itself still lands. Somebody clocking out at the end of a real
+  // shift has worked those hours and must be able to close their entry; what is
+  // held is the rewriting of the number payroll already signed for. Reopening
+  // the sheet is the deliberate act that releases it, and the payroll page
+  // already shows the approval as stale in the meantime.
+  if (sh.date && frozenFor(employeeId, sh.date)) {
+    logEvent('shift', shiftId, 'hours_held_frozen', by, {
+      after: `${hours}h clocked`,
+      reason: 'the timesheet covering this day is approved — reopen it to take these hours',
+    });
+    return { written: false, reason: 'sheet_frozen', hours, ...r };
+  }
 
   // A shift that has been emailed had its money worked out and handed over on
   // the numbers it had at the time. Nothing is snapshotted — every view
@@ -1130,6 +1152,27 @@ function sheetFor(employeeId, period, opts = {}) {
   q.makeSheet.run({ employee_id: employeeId, period_start: period.start, period_end: period.end });
   return q.sheet.get(employeeId, period.start);
 }
+
+/**
+ * The timesheet covering one person on one day, and whether it is frozen.
+ *
+ * A signature is a statement about a set of hours. Once it exists those hours
+ * stop being editable in place — not because the edit is wrong, but because the
+ * signature would quietly stop describing them. Reopening is the deliberate act
+ * that withdraws it, and it already tells payroll to recalculate.
+ *
+ * This lives here rather than in server.js because the rule has to be readable
+ * from the layer that writes the hours, not only from the layer that draws the
+ * buttons. A guard a route has to remember to call is a guard some route will
+ * not call — which is exactly how eight of these got out.
+ */
+const FROZEN_SHEET = ['approved', 'locked', 'finalized'];
+function sheetCovering(employeeId, businessDate) {
+  const period = P.periodFor(businessDate);
+  const sheet = sheetFor(employeeId, period);           // read-only: no create
+  return { period, sheet, frozen: FROZEN_SHEET.includes(sheet.status) };
+}
+const frozenFor = (employeeId, businessDate) => sheetCovering(employeeId, businessDate).frozen;
 
 /**
  * Everything wrong with a period's time, each tied to the entry it came from.
@@ -1614,6 +1657,7 @@ module.exports = {
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
   createEntry, editEntryChecked, addBreak, startOpenBreak, punchIntegrity,
+  sheetCovering, frozenFor, FROZEN_SHEET,
   syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
