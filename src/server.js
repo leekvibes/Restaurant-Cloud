@@ -257,11 +257,40 @@ app.use((req, res, next) => {
 // could never pass — and shipped every form without a token to every browser
 // that asks for gzip, which is all of them. Registered here, it rewrites the
 // HTML and hands the finished page down to be compressed.
+//
+// A <form> is not the only way this app posts. Roughly a dozen places post with
+// fetch() instead — the push-notification test and its subscribe/unsubscribe,
+// the clock's keep-alive ping, the invoice, receipt and document readers, the
+// menu coster. None of those has a form tag to hang a hidden field on, so
+// injecting into forms alone left every one of them posting without a token and
+// being refused: "That form expired." An employee testing notifications on a new
+// phone got a failure with nothing wrong at their end.
+//
+// So the page is also handed the token, and fetch is wrapped once to attach it
+// to same-origin writes. One place, rather than a list of twelve call sites to
+// keep in step — which is the same reason the form injection lives here.
+const csrfClient = (token) => `<script>(function(){`
+  + `var t=${JSON.stringify(token)};if(!window.fetch)return;var f=window.fetch;`
+  + `window.fetch=function(input,init){`
+  + `init=init||{};`
+  + `var m=String(init.method||(input&&input.method)||'GET').toUpperCase();`
+  + `if(m!=='GET'&&m!=='HEAD'){`
+  // Same origin only. A token is ours to send here and nobody else's.
+  + `var u=String(typeof input==='string'?input:(input&&input.url)||'');`
+  + `if(!/^[a-z][a-z0-9+.-]*:/i.test(u)||u.indexOf(location.origin)===0){`
+  + `var h=new Headers(init.headers||(input&&input.headers)||undefined);`
+  + `if(!h.has('x-csrf-token'))h.set('x-csrf-token',t);init.headers=h;}}`
+  + `return f.call(this,input,init);};})();</script>`;
+
 app.use((req, res, next) => {
   const token = csrfFor(req);
   if (!token) return next();
   const send = res.send.bind(res);
   res.send = (body) => {
+    // First thing in the head, so anything that posts on load already has it.
+    if (typeof body === 'string' && /<head(\s[^>]*)?>/i.test(body)) {
+      body = body.replace(/<head(\s[^>]*)?>/i, (m) => m + csrfClient(token));
+    }
     if (typeof body === 'string' && body.indexOf('<form') !== -1) {
       const hidden = `<input type="hidden" name="${CSRF_FIELD}" value="${token}">`;
       body = body.replace(/<form\b([^>]*)>/gi, (m, attrs) =>
@@ -3597,12 +3626,22 @@ app.get('/portal', (req, res) => {
       navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
       test.addEventListener('click', function(){
         test.disabled=true; s.textContent='Sending a test…';
-        fetch('/portal/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){return r.json();}).then(function(d){
+        fetch('/portal/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){
+          // A refusal comes back as a page, not JSON, so r.json() would throw
+          // and land in the catch as "try again" — which is the one thing that
+          // will not help. Name it instead.
+          if(!r.ok) throw new Error(r.status===403?'stale':'http');
+          return r.json();
+        }).then(function(d){
           if(!d || !d.enabled) s.textContent='Push is off on the server — the owner still needs to finish setup.';
           else if(!d.devices) s.textContent='This device is not subscribed. Turn it off, then on again.';
           else if(d.sent) s.textContent='Sent to '+d.sent+' device'+(d.sent===1?'':'s')+' — check your lock screen.';
           else s.textContent='Could not deliver: '+((d.errors&&d.errors[0])||'unknown');
-        }).catch(function(){ s.textContent='The test did not send — try again.'; }).then(function(){ test.disabled=false; });
+        }).catch(function(e){
+          s.textContent = (e && e.message==='stale')
+            ? 'This page went stale — pull down to reload, then try again.'
+            : 'The test did not send — check your signal and try again.';
+        }).then(function(){ test.disabled=false; });
       });
       btn.addEventListener('click', function(){
         btn.disabled=true;
@@ -3812,12 +3851,19 @@ app.get('/notifications', (req, res) => {
       navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){ state(!!sub && Notification.permission==='granted'); }); });
       test.addEventListener('click', function(){
         test.disabled=true; s.textContent='Sending a test…';
-        fetch('/notifications/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){return r.json();}).then(function(d){
+        fetch('/notifications/push/test',{method:'POST',headers:{'content-type':'application/json'}}).then(function(r){
+          if(!r.ok) throw new Error(r.status===403?'stale':'http');
+          return r.json();
+        }).then(function(d){
           if(!d || !d.enabled) s.textContent='Push is off on the server — VAPID keys still need to be set.';
           else if(!d.devices) s.textContent='This device is not subscribed. Turn it off, then on again.';
           else if(d.sent) s.textContent='Sent to '+d.sent+' device'+(d.sent===1?'':'s')+' — check your lock screen.';
           else s.textContent='Could not deliver: '+((d.errors&&d.errors[0])||'unknown');
-        }).catch(function(){ s.textContent='The test did not send — try again.'; }).then(function(){ test.disabled=false; });
+        }).catch(function(e){
+          s.textContent = (e && e.message==='stale')
+            ? 'This page went stale — reload it, then try again.'
+            : 'The test did not send — check your connection and try again.';
+        }).then(function(){ test.disabled=false; });
       });
       btn.addEventListener('click', function(){
         btn.disabled=true;

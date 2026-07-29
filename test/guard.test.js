@@ -232,6 +232,56 @@ test('a session that renews itself does not invalidate the page it just drew', a
   assert.notStrictEqual(out.status, 403, 'and keeps working for the next action too');
 });
 
+test('the things that post with fetch instead of a form get a token too', async () => {
+  // A <form> is not the only way this app posts. About a dozen places use
+  // fetch() — the push-notification test and its subscribe/unsubscribe, the
+  // clock's keep-alive ping, the invoice/receipt/document readers, the menu
+  // coster — and none of them has a form tag to hang a hidden field on. They
+  // were all being refused with "That form expired", which is a baffling thing
+  // to be told when you are testing notifications on a new phone.
+  //
+  // The page hands the token to its own JS and wraps fetch once. This runs that
+  // wrapper the way a browser would, in a sandbox, and watches what it sends.
+  const vm = require('node:vm');
+  const cookie = await signedIn();
+  const html = await (await fetch(BASE + '/portal', { headers: { cookie } })).text();
+  const script = (html.match(/<head[^>]*>\s*<script>([\s\S]*?)<\/script>/i) || [])[1];
+  assert.ok(script, 'the page carries the wrapper, first thing in the head');
+
+  const sent = [];
+  const ctx = {
+    Headers,
+    location: { origin: 'https://zwin.example' },
+    window: { fetch: (input, init) => { sent.push({ input, init }); return Promise.resolve('sent'); } },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(script, ctx);
+
+  await ctx.window.fetch('/portal/push/test', { method: 'POST' });
+  assert.strictEqual(sent.length, 1, 'the call still goes through');
+  assert.match(sent[0].init.headers.get('x-csrf-token'), /^[a-f0-9]{32}$/,
+    'and now carries the token the server will ask for');
+
+  await ctx.window.fetch('/portal/clock/history');
+  assert.strictEqual(sent[1].init.headers, undefined, 'a plain GET is left alone');
+
+  await ctx.window.fetch('https://someone-else.example/collect', { method: 'POST' });
+  assert.ok(!sent[2].init.headers || !sent[2].init.headers.get('x-csrf-token'),
+    'and the token is never sent to another origin');
+});
+
+test('a fetch post carrying the header is accepted', async () => {
+  // The other half: the server has to take it from the header, since a JSON
+  // body has nowhere to put a form field.
+  const cookie = await signedIn();
+  const token = await (await fetch(BASE + '/csrf', { headers: { cookie } })).text();
+  const res = await fetch(BASE + '/portal/clock/ping', {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, origin: BASE, 'x-csrf-token': token.trim() },
+  });
+  assert.notStrictEqual(res.status, 403, 'the header is as good as the hidden field');
+});
+
 test('a post from another site is refused, token or no token', async () => {
   const cookie = await signedIn();
   const token = await (await fetch(BASE + '/csrf', { headers: { cookie } })).text();
