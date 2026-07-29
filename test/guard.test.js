@@ -247,6 +247,89 @@ test('the webhook is not asked for a browser token', async () => {
   assert.strictEqual(res.status, 401, 'refused on its own secret, not on CSRF');
 });
 
+// ---------------------------------------------------------------------------
+// Sessions, cookies, and what a failure is allowed to say.
+// ---------------------------------------------------------------------------
+
+test('a session cookie is HttpOnly and SameSite, so script and other sites cannot use it', async () => {
+  const res = await post('/tips/start', { pin: '5353' });
+  const c = res.headers.get('set-cookie') || '';
+  assert.match(c, /HttpOnly/i, 'no script reads it — the XSS that gets one does not also get the session');
+  assert.match(c, /SameSite=Lax/i, 'and another site cannot ride it');
+  assert.match(c, /Max-Age=\d+/i, 'and it does not live forever in the browser');
+  // Secure is conditional on HTTPS and this harness is plain http, so asserting
+  // it here would only assert the test's own scheme. The expiry that actually
+  // matters is checked below: it is inside the signed token, not the cookie.
+});
+
+test('a session that has expired is refused, whatever the browser still holds', async () => {
+  // The cookie's Max-Age is a request to the browser. The expiry that counts is
+  // signed into the token and checked here, so an old cookie kept, copied, or
+  // replayed is worth nothing.
+  const cookie = await signedIn();
+  const [name, value] = cookie.split('=');
+  const [id, exp, sig] = value.split('.');
+  assert.ok(id && exp && sig, 'the token carries its own expiry');
+  assert.ok(Number(exp) > Date.now(), 'which is in the future while it is valid');
+  // Move the expiry into the past. The signature no longer matches, which is
+  // the point — you cannot extend your own session by editing it either.
+  const stale = `${name}=${id}.${Date.now() - 1000}.${sig}`;
+  const res = await fetch(BASE + '/portal/clock', { headers: { cookie: stale }, redirect: 'manual' });
+  assert.strictEqual(res.status, 302, 'sent back to the PIN screen');
+});
+
+test('an expired session never closes a punch', async () => {
+  // The rule this protects: hours are earned by working, not by holding a
+  // valid cookie. A session lapsing mid-shift — the phone locked, the tab
+  // discarded, the 45 minutes simply passing — must leave the entry open for
+  // the person to close when they actually stop working.
+  const cookie = await signedIn();
+  const token = await (await fetch(BASE + '/csrf', { headers: { cookie } })).text();
+  await send('/portal/clock/in', { daypart: 'dinner', position: 'server', _csrf: token },
+    { cookie, origin: BASE });
+  const open = db.prepare("SELECT * FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").get(B);
+  assert.ok(open, 'on the clock');
+
+  // Now go away for longer than the session lasts, and come back to a dead one.
+  const [name, value] = cookie.split('=');
+  const [id, , sig] = value.split('.');
+  const dead = `${name}=${id}.${Date.now() - 1000}.${sig}`;
+  await fetch(BASE + '/portal/clock', { headers: { cookie: dead }, redirect: 'manual' });
+  await fetch(BASE + '/portal', { headers: { cookie: dead }, redirect: 'manual' });
+  await send('/portal/clock/out', { _csrf: token }, { cookie: dead, origin: BASE });
+
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(open.id);
+  assert.strictEqual(after.clock_out_at, null, 'still open — the session died, the shift did not');
+  assert.ok(['active', 'on_break'].includes(after.status), 'and still on the clock');
+});
+
+test('signing out clears both seats on the device', async () => {
+  // The tablet by the pass is where a manager signs in to fix a shift and where
+  // staff punch in. Clearing one and leaving the other is how the next person
+  // to pick it up ends up holding somebody else's session.
+  const res = await fetch(BASE + '/logout', { redirect: 'manual' });
+  const set = res.headers.getSetCookie ? res.headers.getSetCookie() : [res.headers.get('set-cookie') || ''];
+  const joined = set.join(' ; ');
+  assert.match(joined, /rc_auth=;/, 'the office seat is cleared');
+  assert.match(joined, /zwin_portal=;/, 'and so is the portal one');
+  assert.match(joined, /Max-Age=0/, 'immediately, not eventually');
+});
+
+test('a request that fails says so without handing over the source tree', async () => {
+  // Express's own error handler puts the stack trace in the response body
+  // unless NODE_ENV happens to say production. That is absolute paths, the
+  // shape of this repo, and sometimes the SQL and the values in it, handed to
+  // whoever managed to make the request fail.
+  const res = await fetch(BASE + '/webhook/benugin', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json at all',
+  });
+  const body = await res.text();
+  assert.ok(res.status >= 400, 'it is refused');
+  assert.doesNotMatch(body, /\bat\s+\S+\s+\(/, 'no stack frames');
+  assert.doesNotMatch(body, /restaurant-ops|node_modules|\/src\//, 'no paths from this machine');
+  assert.doesNotMatch(body, /SyntaxError|SqliteError|TypeError/, 'and no exception class names');
+});
+
 test('the login doors have no session to derive a token from', async () => {
   // Guarded by the password and the PIN throttle instead. Demanding a token
   // here would mean nobody could ever sign in.

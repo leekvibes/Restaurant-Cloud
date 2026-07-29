@@ -41,6 +41,15 @@ const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSiz
 
 const app = express();
 
+// In production this runs behind Render's proxy, so the TLS terminates one hop
+// away and req.secure is false on every request no matter how the browser
+// connected. Trusting one hop makes it tell the truth, which is what decides
+// whether the session cookie gets its Secure flag. The cookie code also reads
+// x-forwarded-proto directly, so this is a second lock on the same door rather
+// than the only one — but a Secure flag that depends on a single header being
+// spelled the way you expect is not a flag you want to be relying on alone.
+app.set('trust proxy', 1);
+
 // PATHS ARE CASE-SENSITIVE. This is a permission control, not a preference.
 //
 // Express matches routes case-insensitively by default, so /Payroll reached the
@@ -501,7 +510,15 @@ app.post('/login', (req, res) => {
 });
 
 app.get('/logout', (req, res) => {
-  res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  // Both seats, not just the office one. These are separate sessions on
+  // purpose, but they share a device: the tablet by the pass is where a manager
+  // signs in to fix a shift and where staff punch in. Signing out of one and
+  // silently leaving the other is how the next person to pick it up ends up
+  // holding somebody else's session.
+  res.setHeader('Set-Cookie', [
+    `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+    `${PORTAL_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+  ]);
   res.redirect('/login');
 });
 
@@ -17088,6 +17105,36 @@ function maybeRunDailySweep() {
     runAdminSweep();
   } catch (e) { console.error('[sweep]', e && e.message); }
 }
+
+// --- the last word on any request that threw -------------------------------
+//
+// Registered after every route, which is the only place Express will use it.
+// Without one, Express's default handler answers — and its default, unless
+// NODE_ENV happens to say "production", is to put the stack trace in the
+// response body. That is absolute paths, the shape of the source tree, and
+// sometimes the SQL and the values that went into it, handed to whoever made
+// the request fail. Nothing here is worth showing a browser: the stack goes to
+// the log, where the owner can read it, and the person gets a sentence.
+//
+// The four arguments are load-bearing. Express identifies an error handler by
+// arity, so dropping the unused `next` silently turns this back into ordinary
+// middleware that never runs.
+app.use((err, req, res, _next) => {                        // eslint-disable-line no-unused-vars
+  console.error(`[error] ${req.method} ${req.originalUrl}`, err && (err.stack || err.message || err));
+  if (res.headersSent) return;                             // a half-written page cannot be replaced
+  // A malformed body or an oversized upload is the caller's problem and Express
+  // already says so; anything else is ours and is a 500.
+  const st = err && Number(err.status || err.statusCode);
+  res.status(st >= 400 && st < 500 ? st : 500);
+  // A form post that dies should not also lose the page it was posted from.
+  if ((req.get('accept') || '').includes('text/html')) {
+    return res.send(layout('Something went wrong',
+      `<div class="bs-page"><h1>Something went wrong</h1>
+        <p>That did not save. Nothing was changed. Try again — if it keeps happening, the details are in the server log.</p>
+        <a class="bs-back" href="/">← Back</a></div>`));
+  }
+  res.type('text/plain').send('Something went wrong. Nothing was changed.');
+});
 
 app.listen(PORT, () => {
   console.log(`\n  ${RESTAURANT} ops running →  http://localhost:${PORT}\n`);
