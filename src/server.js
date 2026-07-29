@@ -10,6 +10,7 @@ const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftI
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
+const DUPES = require('./dupes');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed } = require('./views');
 const { mountModules, MODULES, pagesOf } = require('./modules');
 const PORTAL = require('./portal');
@@ -9339,7 +9340,9 @@ app.post('/c/expenses/read', docScan.array('scan', 8), async (req, res) => {
   try {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
     const data = await readExpense(req.files);
-    res.json({ ok: true, data });
+    const cents = data.total == null || data.total === '' ? null : Math.round(Number(data.total) * 100);
+    res.json({ ok: true, data,
+      dupe: DUPES.duplicateExpense(db, { where: data.where_bought, spentOn: data.spent_on, amountCents: cents }) });
   } catch (e) {
     console.error('[reader] receipt read failed:', e.message);
     res.json({ error: e.code === 'NO_KEY' ? e.message : `Could not read that — ${e.message}` });
@@ -9350,7 +9353,9 @@ app.post('/c/documents/read', docScan.array('scan', 8), async (req, res) => {
   try {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
     const data = await readDocument(req.files);
-    res.json({ ok: true, data });
+    res.json({ ok: true, data,
+      dupe: DUPES.duplicateDocument(db, { reference: data.reference, issuer: data.issuer,
+        title: data.title, docDate: data.doc_date }) });
   } catch (e) {
     console.error('[reader] document read failed:', e.message);
     res.json({ error: e.code === 'NO_KEY' ? e.message : `Could not read that — ${e.message}` });
@@ -10041,7 +10046,7 @@ function captureScript(kinds) {
         '<b>' + (strong ? 'You have already entered this.' : 'This looks like one you already have.') + '</b>'
         + '<span>Matched on ' + esc(d.why) + '.</span>'
         + '<span class="cap-dupe-row">' + esc(d.label || '') + '</span>'
-        + '<a class="bs-act" href="/c/invoices?open=' + encodeURIComponent(d.id) + '" target="_blank">Open the one on file →</a>'
+        + '<a class="bs-act" href="/c/' + kind + 's?open=' + encodeURIComponent(d.id) + '" target="_blank">Open the one on file →</a>'
         + '<span class="cap-dupe-hint">Saving anyway will file a second copy.</span>';
       box.hidden = false;
     }
@@ -11722,12 +11727,7 @@ function pageLinks(row, label = 'Open original') {
  * different bytes, and the same PDF re-saved is different bytes again. It would
  * miss the case that actually happens.
  */
-const normNum = (v) => String(v || '').trim().toLowerCase()
-  .replace(/[\s._\/#-]/g, '')                          // punctuation and the # people type in front
-  // Zero-padding is a printing choice, not part of the number: INV-0042 off the
-  // PDF and INV-42 typed in by hand are one invoice. Per run of digits, so a
-  // year inside the number survives — 2007 is not 27.
-  .replace(/\d+/g, (d) => d.replace(/^0+(?=\d)/, ''));
+const { normNum } = DUPES;
 function duplicateInvoice({ vendorId, number, date, amountCents, exceptId }) {
   const rows = db.prepare('SELECT * FROM m_invoices').all()
     .filter((r) => Number(r.id) !== Number(exceptId));
