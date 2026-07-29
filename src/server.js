@@ -5488,7 +5488,7 @@ app.get('/employees/:id/edit', (req, res) => {
       <label>Benugin ID <input name="pos_id" value="${val(e.pos_id)}"></label>
       <label class="emp-check" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:9px;font-weight:600">
         <input type="checkbox" name="ot_eligible" value="1"${e.ot_exempt ? '' : ' checked'} style="width:18px;height:18px">
-        Eligible for overtime <span class="sub" style="font-weight:400">— uncheck for salaried or exempt staff. Only applies when overtime is switched on in Payroll.</span></label>
+        Eligible for weekly overtime <span class="sub" style="font-weight:400">— uncheck for salaried or exempt staff. Only applies when weekly overtime is switched on in Payroll.</span></label>
       <button class="btn btn-primary" type="submit">Save changes</button>
     </form>
 
@@ -6053,14 +6053,17 @@ app.get('/payroll', (req, res) => {
 
       ${canWrite() ? `
       <details class="bs-x" id="ot-rules"${req.query.ot ? ' open' : ''}>
-        <summary>Overtime rules — ${ot.enabled
+        <summary>Weekly overtime — ${ot.enabled
           ? `<b class="ok">on</b> · over ${ot.threshold} hrs/wk at ${ot.multiplier}×`
           : '<b>off</b> · straight time only'}</summary>
         <div class="bs-addemp">
-          <p class="bs-addemp-lead">The federal rule: hours over the weekly threshold are paid at the
-            multiplier, measured per workweek — this period is two of them. Off applies nothing and the
-            numbers are straight time. To leave a specific person out (salaried, exempt), turn it off for
-            them on <a class="bs-act" href="/employees">Staff</a>.</p>
+          <p class="bs-addemp-lead">A basic weekly overtime calculation: hours over the weekly threshold
+            are paid at the multiplier, measured per workweek — this period is two of them. Off applies
+            nothing and the numbers are straight time. To leave a specific person out (salaried, exempt),
+            turn it off for them on <a class="bs-act" href="/employees">Staff</a>.</p>
+          <p class="bs-addemp-lead"><b>Zwin currently calculates configured weekly overtime.</b> Review
+            local requirements before finalizing Payroll — daily thresholds, seventh-consecutive-day
+            rules and other state provisions are not applied here.</p>
           <form method="post" action="/payroll/overtime" class="bs-addform">
             <input type="hidden" name="from" value="${esc(from)}"><input type="hidden" name="to" value="${esc(to)}">
             <label class="bs-ot-switch">
