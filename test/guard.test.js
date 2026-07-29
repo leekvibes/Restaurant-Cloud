@@ -198,6 +198,40 @@ test('every form a browser is served carries a token', async () => {
   assert.ok(posting > 0, 'the page has posting forms to protect');
 });
 
+test('a session that renews itself does not invalidate the page it just drew', async () => {
+  // This shipped broken and it took the time clock down for anybody standing
+  // at it. The token was derived from the session cookie's BYTES, and a session
+  // cookie ends in an expiry — while the portal deliberately re-issues one
+  // every time somebody on the clock loads a page, so that a shift can never
+  // sign itself out underneath them. The page went out stamped from the cookie
+  // that arrived; the browser walked away holding a newly issued one; and the
+  // next tap — Break, Clock out — came back "That form expired."
+  //
+  // So: walk the real sequence. Clock in, load the page the way a phone does,
+  // and use exactly the token that page carries with exactly the cookie the
+  // browser now holds.
+  let cookie = await signedIn();
+  const tokenIn = (html) => (html.match(/name="_csrf" value="([a-f0-9]{32})"/) || [])[1];
+
+  const first = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+  const inRes = await send('/portal/clock/in',
+    { daypart: 'dinner', position: 'server', _csrf: tokenIn(first) }, { cookie, origin: BASE });
+  assert.notStrictEqual(inRes.status, 403, 'clocking in goes through');
+
+  const page = await fetch(BASE + '/portal/clock', { headers: { cookie } });
+  const token = tokenIn(await page.text());
+  const renewed = (page.headers.get('set-cookie') || '').split(';')[0];
+  assert.ok(renewed, 'loading the clock page while on the clock renews the session — that is the point');
+  cookie = renewed;                                   // what the browser holds from here on
+
+  const brk = await send('/portal/clock/break/start', { _csrf: token },
+    { cookie, origin: BASE, referer: BASE + '/portal/clock' });
+  assert.notStrictEqual(brk.status, 403,
+    'and the token that page was drawn with still works against the cookie it handed out');
+  const out = await send('/portal/clock/break/end', { _csrf: token }, { cookie, origin: BASE });
+  assert.notStrictEqual(out.status, 403, 'and keeps working for the next action too');
+});
+
 test('a post from another site is refused, token or no token', async () => {
   const cookie = await signedIn();
   const token = await (await fetch(BASE + '/csrf', { headers: { cookie } })).text();

@@ -78,10 +78,19 @@ app.use(express.json());
 // because a browser bug or a future SameSite=None cookie would remove the only
 // thing standing there.
 //
-// The token is DERIVED from the session cookie rather than stored: same secret,
-// same HMAC the sessions themselves use. Nothing to persist, nothing to expire,
-// and a token is worthless the moment its session ends — which also makes
-// "a token from another session" fail by construction rather than by lookup.
+// The token is DERIVED rather than stored: same secret, same HMAC the sessions
+// themselves use. Nothing to persist, nothing to expire, and "a token from
+// another session" fails by construction rather than by lookup.
+//
+// Derived from WHO the session is, not from the bytes of the cookie carrying
+// it. That distinction is the whole of a bug this shipped with: a session
+// cookie ends in an expiry, and the portal deliberately re-issues one every
+// time somebody on the clock loads a page, so a shift can never sign itself
+// out. The page went out stamped with a token computed from the cookie that
+// arrived, while the browser walked away holding a newly issued one — so the
+// page was born holding the wrong token, and the very next tap, Break or Clock
+// out, came back "That form expired". Keyed on the identity, a refreshed cookie
+// is the same session and the token does not move.
 //
 // It is injected into every POST form by rewriting the response, not by editing
 // 113 forms and missing some. A form that gets added next year is protected
@@ -91,6 +100,14 @@ app.use(express.json());
 const CSRF_FIELD = '_csrf';
 /** The token for whoever this request is, or '' when nobody is signed in. */
 function csrfFor(req) {
+  // Worked out once per request. Verifying the portal seat costs a keyed
+  // lookup, and this is asked twice on any form post — once to stamp the
+  // response, once to check the body.
+  if (req.__csrf !== undefined) return req.__csrf;
+  req.__csrf = csrfDerive(req);
+  return req.__csrf;
+}
+function csrfDerive(req) {
   // Read from the header directly, the way readCookie does. There is no
   // cookie-parser in this app, so req.cookies is always undefined — leaning on
   // it would have derived an empty token for everybody and quietly turned the
@@ -100,8 +117,21 @@ function csrfFor(req) {
     const m = raw.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
     return m ? m[1] : '';
   };
-  const seat = pick(COOKIE) || pick(PORTAL_COOKIE);
-  return seat ? sign('csrf:' + seat) : '';
+  // The office seat first, the portal seat second — the same precedence the
+  // rest of the app uses when a device holds both.
+  const office = pick(COOKIE);
+  if (office) {
+    const uid = readToken(decodeURIComponent(office));
+    if (uid) return sign('csrf:office:' + uid);
+  }
+  const portal = pick(PORTAL_COOKIE);
+  if (portal) {
+    // Verified, not merely parsed. Taking the id off an unsigned cookie would
+    // let anyone mint a valid token for any employee by typing one in.
+    const who = readTipsToken(decodeURIComponent(portal));
+    if (who) return sign('csrf:portal:' + who.id);
+  }
+  return '';
 }
 // Login doors have no session to derive a token from, and are guarded by their
 // own means: the owner password, and the PIN throttle. The webhook is a machine
