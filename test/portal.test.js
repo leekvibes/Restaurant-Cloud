@@ -230,11 +230,14 @@ test('the money on a server\'s screen reconciles the way the engine defines it',
     const m = html.match(new RegExp(label + '[\\s\\S]{0,140}?(−?\\$[\\d,]+\\.\\d{2})'));
     return m ? num(m[1]) : null;
   };
+  // Read by the labels the email uses, because the portal now uses them too —
+  // the whole point of that change is that the two describe the same money in
+  // the same words.
   const kept = grab('You kept');
-  const collected = grab('Tips collected');
-  const tippedOut = grab('Tipped out to support') || 0;
-  const cash = grab('Cash in hand');
-  const cheque = grab('To your paycheck');
+  const collected = grab('Total tips collected');
+  const tippedOut = grab('Total tip-out') || 0;
+  const cash = grab('Cash you took home');
+  const cheque = grab('(?:Added to|Adjusted from) your next paycheck');
 
   assert.ok(kept && collected && cash !== null && cheque !== null,
     `all five figures render: ${JSON.stringify({ kept, collected, tippedOut, cash, cheque })}`);
@@ -281,10 +284,16 @@ test('a cook is shown what they received, without a tip-out they never paid', as
   // must not show is "tipped out to support", which is money leaving, and a
   // cook is the support it leaves towards.
   const html = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
-  assert.match(html, /You kept|You worked|Nothing recorded/, 'it says what they got');
+  // "Total tips", the way their own email heads it — a cook does not "keep"
+  // tips after a tip-out, they receive a share, and the two screens describing
+  // that money now use one word for it.
+  assert.match(html, /Total tips|You worked|Nothing recorded/, 'it says what they got');
   assert.ok(!/Nothing to submit/.test(html), 'without repeating what they are not asked for');
-  assert.ok(!/Tipped out to support/.test(html),
+  assert.ok(!/Total tip-out/.test(html),
     'and never bills them for a tip-out they are on the receiving end of');
+  // The support breakdown names its three sources, the way their email does.
+  assert.match(html, /Server tip-out \(card\)|To-go card tips/,
+    'it says which side the tip-out reached them from');
 });
 
 test('a finished shift is one the app has actually finished', async () => {
@@ -373,7 +382,7 @@ test('somebody who received nothing is shown their hours, not a zero', async () 
   // A busser hands nothing in and still gets a share every service, so keying
   // it on that setting would hide real money from the person who earned it.
   const cook = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
-  assert.match(cook, /You kept/, 'a cook who receives a share still sees it');
+  assert.match(cook, /Total tips/, 'a cook who receives a share still sees it');
   assert.ok(!/You worked/.test(cook), 'and is not demoted to an hours line');
 });
 
@@ -818,4 +827,44 @@ test('a brand-new user starts clean — no backlog, only what arrives after them
   await form('/staff-portal/special', { name: 'Zzq After-you-arrived special', price: '22.00' });
   const second = await (await asStaff('/portal', cookie)).text();
   assert.match(second, /Zzq After-you-arrived special/, 'genuinely new notifications still show');
+});
+
+test("the portal breaks a shift down the way that night's email does", async () => {
+  // The ask, in the owner's words: the same breakdown on the portal as in the
+  // email people get, matching whatever position they are. The portal used to
+  // show one line called "Tipped out to support" — a single number covering
+  // every role it went to — and nothing at all about the sales that earned the
+  // tips or the split between card and cash. So the two accounts of the same
+  // money differed by exactly the part somebody would ask about.
+  //
+  // Both are rendered from the same engine result now. This checks the sections
+  // are actually there and that the itemised tip-out adds up to the total it
+  // used to show alone, which is the arithmetic that would break first if the
+  // portal ever grew its own.
+  const html = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+
+  for (const section of ['Your sales', 'Your tips', 'Tip-out', 'How it reaches you']) {
+    assert.match(html, new RegExp(section), `the ${section} section is on the page`);
+  }
+  for (const label of ['Card tips', 'Cash tips', 'Total tips collected', 'Tips you keep']) {
+    assert.match(html, new RegExp(label), `${label} is broken out, as the email breaks it out`);
+  }
+
+  const num = (v) => Math.round(Number(String(v).replace(/[$,−-]/g, '')) * 100);
+  const grab = (label) => {
+    const m = html.match(new RegExp(label + '[\\s\\S]{0,140}?(−?\\$[\\d,]+\\.\\d{2})'));
+    return m ? num(m[1]) : null;
+  };
+  // The tip-out is itemised by position now, not one lump. Every line between
+  // the "Tip-out" heading and its total is a role that actually received money.
+  const block = html.slice(html.indexOf('Tip-out'), html.indexOf('Total tip-out'));
+  const parts = [...block.matchAll(/−(\$[\d,]+\.\d{2})/g)].map((m) => num(m[1]));
+  assert.ok(parts.length >= 1, 'the tip-out names at least one position it went to');
+  assert.strictEqual(parts.reduce((a, b) => a + b, 0), grab('Total tip-out'),
+    'and the named pieces add up to the total — the same number the old single line showed');
+
+  // Card and cash are what collected is made of, which is the identity the
+  // email states line by line.
+  assert.strictEqual(grab('Card tips') + grab('Cash tips'), grab('Total tips collected'),
+    'card plus cash is what was collected');
 });

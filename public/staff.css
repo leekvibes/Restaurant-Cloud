@@ -502,6 +502,13 @@ body.bare {
 .pt-kick b { font-weight: 700; }
 
 /* --- before your shift ---------------------------------------------------- */
+/* Section headings inside a breakdown, and the sentence under a line that
+   needs one. The email explains a negative paycheck adjustment and a tip-out
+   nobody was there to take; the phone has to explain them too, or the two
+   accounts of the same money differ by exactly the part that confuses people. */
+.pt-kick-sec { margin-top: 24px; }
+.pt-fine { font-size: 12.5px; color: var(--pt-muted); line-height: 1.55; margin: 8px 0 0; }
+
 .pt-notes { margin-top: 2px; }
 .pt-note {
   border-left: 3px solid var(--pt-faint);

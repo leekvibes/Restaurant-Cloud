@@ -3635,16 +3635,29 @@ function earningsFor(empId, limit = 400) {
     const hours = asServer ? asServer.hours : asSupport ? asSupport.hours : (sh.worked_hours || 0);
     const pay = { salaried, rate, hours, wage: Math.round(rate * (hours || 0)), role: sh.worked_role };
 
+    // `detail` is the engine's own row for this person, carried through whole.
+    //
+    // The nightly email itemises where every figure came from — the sales that
+    // earned the tips, card against cash, each role the tip-out went to by
+    // name, and which roles took nothing because nobody worked them. The portal
+    // had one lump called "Tipped out to support" and left somebody to guess at
+    // the rest. Both now read the same lines, because both read the same
+    // object: this is the very result the email is rendered from, not a second
+    // calculation that would eventually disagree with it. skippedPots rides
+    // along for the same reason — a night with no busser is the difference
+    // between a missing line and a line that was never charged.
+    const detail = { skipped: r.skippedPots || [] };
     if (asServer) {
       out.push({ shift: sh, kind: 'server', kept: asServer.tipsKept,
         collected: asServer.totalTips, tippedOut: asServer.tipoutTotal,
         cash: asServer.cashTips, toPaycheck: asServer.tipsKept - asServer.cashTips,
-        ...pay });
+        detail: { ...detail, ...asServer }, ...pay });
     } else if (asSupport) {
       const cash = asSupport.cashTotal || 0;
       const card = asSupport.cardTotal || 0;
       out.push({ shift: sh, kind: 'support', kept: cash + card,
-        collected: cash + card, tippedOut: 0, cash, toPaycheck: card, ...pay });
+        collected: cash + card, tippedOut: 0, cash, toPaycheck: card,
+        detail: { ...detail, ...asSupport }, ...pay });
     } else {
       out.push({ shift: sh, kind: 'hours', kept: 0, collected: 0, tippedOut: 0,
         cash: 0, toPaycheck: 0, ...pay });
@@ -4048,23 +4061,85 @@ app.get('/notifications', (req, res) => {
 // The full breakdown of one shift — the same lines whether it is shown as the
 // last-shift hero on the earnings page or on its own when tapped. One builder
 // so the two can never say different things about the same night.
+/**
+ * One shift, broken down the way that night's email breaks it down.
+ *
+ * The email has always itemised this: the sales that earned the tips, card
+ * against cash, every role the tip-out went to BY NAME, and the roles that took
+ * nothing because nobody worked them. The portal showed a single line called
+ * "Tipped out to support" and left the rest to be guessed at — so the two
+ * screens describing the same money said different amounts of it, and the one
+ * in the person's pocket said less.
+ *
+ * Same sections, same order, same words, off the same engine result. A server
+ * reads a server's breakdown and a busser reads a busser's, exactly as their
+ * email does, because it is the same object rendered twice.
+ */
 function shiftBreakdown(x) {
   const line = (k, v, tone) => `<div class="pt-line"><span>${k}</span><b${tone ? ` class="${tone}"` : ''}>${v}</b></div>`;
+  const head = (t) => `<div class="pt-kick pt-kick-sec"><span>${t}</span></div>`;
+  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   const wage = x.salaried ? line('Paid', 'salaried')
     : x.rate ? line('Your rate', `${money(x.rate)}/hr`) + line('Hours pay', money(x.wage))
     : line('Your rate', 'not set — ask your manager');
+  const worked = line('Hours worked', hrsShort(x.hours)) + (x.salaried || x.rate ? wage : '');
+
   const nothing = !x.kept && !x.collected;
   if (x.kind === 'hours' || nothing) {
     return `<div class="pt-hero"><span>You worked</span><b class="pt-huge">${hrsShort(x.hours)}</b></div>
       ${wage}`;
   }
+  const d = x.detail || {};
+
+  if (x.kind === 'support') {
+    // Three sources, named — the same three the support email names. Which one
+    // a figure came from is the question people actually ask about a tip-out.
+    const cash = d.cashTotal || 0;
+    const togo = d.poolCard || 0;
+    const fromServers = d.tipShare || 0;
+    return `<div class="pt-hero"><span>Total tips</span><b class="pt-huge ok">${money(x.kept)}</b></div>
+      ${head('Where it came from')}
+      ${line('Cash tips', money(cash))}
+      ${line('To-go card tips', money(togo))}
+      ${line('Server tip-out (card)', money(fromServers))}
+      ${line('Total tips', money(cash + togo + fromServers), 'ok')}
+      ${head('How it reaches you')}
+      ${line('Cash in hand', money(cash))}
+      ${line('To your paycheck', money(togo + fromServers))}
+      ${head('Your shift')}
+      ${worked}`;
+  }
+
+  const sales = d.sales || {};
+  const outs = Object.entries(d.tipouts || {}).filter(([, c]) => c);
+  const skipped = (d.skipped || []).map((s) => posName(s.role));
+  const paycheck = x.toPaycheck;
   return `<div class="pt-hero"><span>You kept</span><b class="pt-huge ok">${money(x.kept)}</b></div>
-    ${line('Tips collected', money(x.collected))}
-    ${x.tippedOut ? line('Tipped out to support', `−${money(x.tippedOut)}`, 'bad') : ''}
-    ${line('Cash in hand', money(x.cash))}
-    ${line('To your paycheck', money(x.toPaycheck))}
-    ${line('Hours worked', hrsShort(x.hours))}
-    ${x.salaried || x.rate ? wage : ''}`;
+    ${sales.food || sales.coffee || sales.alcohol ? `${head('Your sales')}
+      ${line('Food', money(sales.food || 0))}
+      ${sales.coffee ? line('Coffee', money(sales.coffee)) : ''}
+      ${sales.alcohol ? line('Alcohol', money(sales.alcohol)) : ''}` : ''}
+    ${head('Your tips')}
+    ${line('Card tips', money(d.cardTips || 0))}
+    ${line('Cash tips', money(d.cashTips || 0))}
+    ${line('Total tips collected', money(x.collected), 'ok')}
+    ${head('Tip-out')}
+    ${outs.length
+      ? outs.map(([role, cents]) => line(posName(role), `−${money(cents)}`, 'bad')).join('')
+        + line('Total tip-out', `−${money(x.tippedOut)}`, 'bad')
+      : line('No tip-out', money(0))}
+    ${skipped.length ? `<p class="pt-fine">No ${skipped.join(' or ').toLowerCase()} worked this shift, so no tip-out went to them — you keep it.</p>` : ''}
+    ${line('Tips you keep', money(x.kept), 'ok')}
+    ${head('How it reaches you')}
+    ${line('Cash you took home', money(x.cash))}
+    ${paycheck >= 0
+      ? line('Added to your next paycheck', `+${money(paycheck)}`, 'ok')
+      : line('Adjusted from your next paycheck', `−${money(-paycheck)}`, 'bad')}
+    ${paycheck < 0 ? `<p class="pt-fine">You took home more cash than your net tips, because part of it funds the
+      kitchen and busser tip-out — so your paycheck is reduced by that difference. Your total is still
+      ${money(x.kept)}${x.rate ? ' in tips, plus your wage' : ''}.</p>` : ''}
+    ${head('Your shift')}
+    ${worked}`;
 }
 
 // One shift on its own, reached by tapping any row in the history. Recomputed
