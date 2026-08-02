@@ -320,7 +320,14 @@ app.use((req, res, next) => {
 // to same-origin writes. One place, rather than a list of twelve call sites to
 // keep in step — which is the same reason the form injection lives here.
 const csrfClient = (token) => `<script>(function(){`
-  + `var t=${JSON.stringify(token)};if(!window.fetch)return;var f=window.fetch;`
+  + `var t=${JSON.stringify(token)};`
+  // Exposed, because a form built in script and submitted with form.submit()
+  // gets neither the injected hidden field (this rewrites the HTML that is
+  // served, not the DOM that is later created) nor a submit event to hook —
+  // .submit() deliberately skips listeners. Anything constructing a form by
+  // hand has to add this field itself, and there is a test that says so.
+  + `window.__csrf=t;`
+  + `if(!window.fetch)return;var f=window.fetch;`
   + `window.fetch=function(input,init){`
   + `init=init||{};`
   + `var m=String(init.method||(input&&input.method)||'GET').toUpperCase();`
@@ -2394,6 +2401,8 @@ app.get('/shifts/:id', (req, res) => {
         form.method = 'post';
         form.action = '/shifts/${sh.id}/' + (kind === 'server' ? 'server' : 'support');
         function add(n, v) { var i = document.createElement('input'); i.type = 'hidden'; i.name = n; i.value = v == null ? '' : v; form.appendChild(i); }
+        // This form never existed in the HTML, so nothing stamped it.
+        add('_csrf', window.__csrf || '');
         add('employee_id', emp);
         card.querySelectorAll('.cell-in').forEach(function (inp) { add(inp.getAttribute('data-f'), inp.value); });
         if (kind === 'server') { add('alcohol', e.alcohol || 0); }   // not shown on the card, keep it

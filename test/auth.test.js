@@ -735,3 +735,18 @@ test('every route that takes an upload also checks the token after it', () => {
     }
   }
 });
+
+test('a form built in script carries the token too', () => {
+  // Three separate outages came from the same blind spot: the token is injected
+  // into the HTML that is SERVED, so anything that posts without a form tag in
+  // that HTML gets nothing. fetch() is handled by the wrapper. A form built with
+  // createElement is not — and form.submit() skips submit listeners by design,
+  // so it cannot be caught at the edge either. It has to add the field itself.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  for (const m of src.matchAll(/createElement\('form'\)/g)) {
+    const after = src.slice(m.index, m.index + 1400);
+    assert.match(after, /_csrf/,
+      'a form is built in script here and submitted without a token — add '
+      + "add('_csrf', window.__csrf) — near: " + after.slice(0, 120).replace(/\s+/g, ' '));
+  }
+});
