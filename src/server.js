@@ -139,6 +139,25 @@ function csrfDerive(req) {
 const CSRF_OPEN = new Set(['/login', '/tips/start', '/webhook/benugin']);
 
 /**
+ * The only paths that may send a multipart body — every route with a multer on
+ * it, and nothing else.
+ *
+ * This is the list the token check is allowed to be deferred on. It exists
+ * because deferral has to be decided by where the request is GOING, not by what
+ * the caller claims to be sending: a caller controls its own Content-Type, and
+ * every route not on this list has no multer to finish the job. There is a test
+ * that fails the build if a route grows a multer without appearing here.
+ */
+const CSRF_UPLOAD = [
+  /^\/shifts\/[^/]+\/read-report$/,
+  /^\/c\/expenses\/read$/,
+  /^\/c\/documents\/read$/,
+  /^\/c\/invoices\/read$/,
+  /^\/c\/[^/]+$/,            // the generic collection save, /c/:slug
+  /^\/c\/[^/]+\/[^/]+$/,     // and its edit, /c/:slug/:id
+];
+
+/**
  * The current session's token, for anything that posts without rendering a form
  * first — the service worker, and the test suite.
  *
@@ -172,9 +191,18 @@ app.use((req, res, next) => {
   //
   // The cross-site check still applies right here, because that one only reads
   // headers. What is deferred is the token comparison, to csrfBody below, which
-  // the upload routes run immediately after their multer. A source-level test
-  // fails the build if one of them forgets.
-  if (/^multipart\/form-data/i.test(req.get('content-type') || '')) {
+  // the upload routes run immediately after their multer.
+  //
+  // Deferred by PATH, never by what the caller said the body was. Keying this
+  // on the request's own Content-Type was a hole straight through the middle of
+  // the whole layer: the deferral is a one-way door — the global check steps
+  // aside and only csrfBody picks it back up — and csrfBody runs on seven
+  // routes. Set that one header on any of the other hundred-odd and the token
+  // was never checked by anybody. Deleting invoices, deactivating staff,
+  // approving timesheets, all of it, with no token at all. Fail-closed now: a
+  // multipart body on a path that does not expect one gets the ordinary
+  // treatment, which finds an empty req.body, no token, and refuses.
+  if (/^multipart\/form-data/i.test(req.get('content-type') || '') && CSRF_UPLOAD.some((re) => re.test(req.path))) {
     req.__csrfDeferred = true;
     return crossSiteOk(req, res) ? next() : undefined;
   }
@@ -2421,6 +2449,16 @@ app.post('/shifts/:id/delete', (req, res) => {
   // NULLs their shift_id instead. The punches survive with nothing to belong
   // to, and recreating the same date and service mints a new id they never
   // re-attach to. Refuse, and say where to look.
+  // The freeze, on everyone the delete would take with it. Its four siblings on
+  // this page each check it; this one did not, and the punch check below does
+  // not stand in for it — that looks at time_entries only, so a day whose hours
+  // were typed in by hand passes straight through and the work rows go with the
+  // shift. Those hours are on the timesheet as "from the shift" rows, so an
+  // approved period could lose hours it had already signed for, with nothing
+  // marked for recalculation and nothing said to anybody.
+  for (const row of w.workForShift.all(sh.id)) {
+    if (tcFrozen(res, row.employee_id, sh.date, `/shifts/${sh.id}`)) return;
+  }
   if (TC.shiftHasPunches(sh.id)) {
     return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent(
       'People clocked time on this shift. Delete their punches on the time clock first — deleting the shift would leave the hours with nowhere to go.'));
@@ -3680,6 +3718,12 @@ app.get('/portal', (req, res) => {
       if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
       var btn=document.getElementById('ptpush-b'), t=document.getElementById('ptpush-t'), s=document.getElementById('ptpush-s'), test=document.getElementById('ptpush-test');
       var vapid=box.getAttribute('data-vapid'); box.hidden=false;
+      // No key on the server means subscribe() cannot succeed — it throws on a
+      // zero-length applicationServerKey. Offering the button anyway spends the
+      // one notification prompt the OS ever gives, on nothing: deny it and the
+      // browser will not ask again. Say what is actually wrong instead.
+      if(!vapid){ btn.hidden=true; if(test) test.hidden=true;
+        s.textContent='Notifications are not set up on the server yet — ask the owner to add the push keys.'; return; }
       function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
       function state(on){ test.hidden=!on; if(on){t.textContent='Notifications on';s.textContent='You will get specials, notes and your pay on this phone.';btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Notifications';s.textContent='Get a heads-up on your phone for specials, notes and your pay.';btn.textContent='Turn on';btn.dataset.on='';} }
       navigator.serviceWorker.ready.then(function(reg){ reg.pushManager.getSubscription().then(function(sub){
@@ -3915,6 +3959,12 @@ app.get('/notifications', (req, res) => {
       if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
       var btn=document.getElementById('anpush-b'), t=document.getElementById('anpush-t'), s=document.getElementById('anpush-s'), test=document.getElementById('anpush-test');
       var vapid=box.getAttribute('data-vapid'); box.hidden=false;
+      // No key on the server means subscribe() cannot succeed — it throws on a
+      // zero-length applicationServerKey. Offering the button anyway spends the
+      // one notification prompt the OS ever gives, on nothing: deny it and the
+      // browser will not ask again. Say what is actually wrong instead.
+      if(!vapid){ btn.hidden=true; if(test) test.hidden=true;
+        s.textContent='Notifications are not set up on the server yet — ask the owner to add the push keys.'; return; }
       var ON='You will get back-office alerts on this device.', OFF='Get these alerts on your phone — a shift sent, the register closed, payroll out, a floor report or an incident.';
       function u8(b64){var pad='='.repeat((4-b64.length%4)%4);var x=(b64+pad).replace(/-/g,'+').replace(/_/g,'/');var raw=atob(x);var o=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)o[i]=raw.charCodeAt(i);return o;}
       function state(on){ test.hidden=!on; if(on){t.textContent='Notifications on';s.textContent=ON;btn.textContent='Turn off';btn.dataset.on='1';} else {t.textContent='Push notifications';s.textContent=OFF;btn.textContent='Turn on';btn.dataset.on='';} }
@@ -4773,21 +4823,44 @@ app.post('/portal/clock/out', (req, res) => {
     return back('err=' + encodeURIComponent('End your break first, then clock out.'));
   }
   const out = TC.nowUtc();
-  db.transaction(() => {
-    const raw = TC.minutesBetween(active.clock_in_at, out);
-    const bt = TC.breakTotals(active.id);
-    TC.q.closeEntry.run({ id: active.id, out, raw, paid: bt.paid, unpaid: bt.unpaid,
-      payable: Math.max(0, raw - bt.unpaid), by: emp.name });
-    TC.logEvent('entry', active.id, 'clock_out', emp.name, { after: out });
-    tcTouchDates(emp.id, [active.business_date], emp.name, 'a shift was clocked out');
-    // The punch IS the hours. This is the line that ends manual entry — and it
-    // sits inside the same transaction as the punch, so the shift can never be
-    // left holding hours for a clock-out that did not commit.
-    const synced = TC.syncShiftHours(active.shift_id, emp.id, emp.name, { role: active.position });
-    if (synced.written) {
-      TC.logEvent('entry', active.id, 'hours_written', emp.name, { after: `${synced.hours}h on the shift` });
-    }
-  })();
+  // Closing a punch sets clock_out_at, which is exactly what the overlap and
+  // break-fit triggers watch — so this write CAN be refused by the database,
+  // and until now nothing caught it. Every manager route has a catch and turns
+  // the refusal into a sentence; this one, the one a person taps at the end of
+  // a ten-hour shift, let a SqliteError go all the way to the error handler.
+  // They got "Something went wrong", trying again failed identically forever,
+  // and they stayed on the clock — their hours reaching neither the shift, nor
+  // the tip pool, nor payroll — until a manager worked out which other row was
+  // in the way. Two ordinary things reach it: a manager back-dating another
+  // punch across this one, and a manager typing a break with the wrong AM/PM.
+  try {
+    db.transaction(() => {
+      const raw = TC.minutesBetween(active.clock_in_at, out);
+      const bt = TC.breakTotals(active.id);
+      TC.q.closeEntry.run({ id: active.id, out, raw, paid: bt.paid, unpaid: bt.unpaid,
+        payable: Math.max(0, raw - bt.unpaid), by: emp.name });
+      TC.logEvent('entry', active.id, 'clock_out', emp.name, { after: out });
+      tcTouchDates(emp.id, [active.business_date], emp.name, 'a shift was clocked out');
+      // The punch IS the hours. This is the line that ends manual entry — and it
+      // sits inside the same transaction as the punch, so the shift can never be
+      // left holding hours for a clock-out that did not commit.
+      const synced = TC.syncShiftHours(active.shift_id, emp.id, emp.name, { role: active.position });
+      if (synced.written) {
+        TC.logEvent('entry', active.id, 'hours_written', emp.name, { after: `${synced.hours}h on the shift` });
+      }
+    })();
+  } catch (e) {
+    // Named, and recorded, so the manager who has to clear it can see what
+    // happened rather than hearing "it won't let me clock out".
+    console.error('[clock] clock-out refused for', emp.name, '-', e && e.message);
+    try {
+      TC.logEvent('entry', active.id, 'clock_out_blocked', emp.name,
+        { reason: String((e && e.message) || 'refused').slice(0, 200) });
+    } catch { /* the message below still gets out */ }
+    return back('err=' + encodeURIComponent(
+      'Your clock-out could not be saved — something else on your record is in the way. '
+      + 'Tell your manager: you are still on the clock and they need to clear it. Your time is not lost.'));
+  }
   back('done=' + active.id);
 });
 
@@ -5644,7 +5717,12 @@ app.post('/employees', (req, res) => {
   const clash = pinTaken(pin, 0);
   if (clash) {
     return res.redirect('/employees?err=1&msg=' + encodeURIComponent(
-      `${clash.name} already uses PIN ${String(pin).trim()}. Give ${name.trim()} a different one — staff sign in to the tips page with their PIN, so it has to be unique.`));
+      // Never the PIN itself. This message becomes a query string, and a staff
+      // PIN is a whole credential on its own — /tips/start takes the PIN alone
+      // and hands back a portal session. Printed here it went into the address
+      // bar, into browser history on the office machine, and into whatever the
+      // host logs, paired with the name of the person it belongs to.
+      `${clash.name} already uses that PIN. Give ${name.trim()} a different one — staff sign in to the tips page with their PIN, so it has to be unique.`));
   }
   q.addEmployee.run({
     name: name.trim(), role, email: (email || '').trim() || null,
@@ -5711,7 +5789,9 @@ app.post('/employees/:id', (req, res) => {
   const clash = pinTaken(pin, e.id);
   if (clash) {
     return res.redirect(`/employees/${e.id}/edit?err=1&msg=` + encodeURIComponent(
-      `${clash.name} already uses PIN ${String(pin).trim()}. Pick a different one — staff sign in to the tips page with their PIN.`));
+      // Same reason as the add path above — and this is the likelier of the two
+      // to fire, because reassigning a PIN is exactly when you collide with one.
+      `${clash.name} already uses that PIN. Pick a different one — staff sign in to the tips page with their PIN.`));
   }
   q.updateEmployee.run({
     id: e.id, name: name.trim(), role, email: (email || '').trim() || null,

@@ -888,6 +888,14 @@ function assertBreakFits(entry, breakId, start, end) {
   if (!(start < end)) throw new ClockError('A break has to end after it starts.');
   if (start < entry.clock_in_at) throw new ClockError('A break cannot start before the clock-in.');
   if (entry.clock_out_at && end > entry.clock_out_at) throw new ClockError('A break cannot end after the clock-out.');
+  // An open punch has no clock-out to cap against, which used to mean a break
+  // could be recorded on it at any time at all — including later today. A
+  // mistyped AM/PM put one there, and the person then could not clock out,
+  // because the break no longer fitted inside the shift the moment it closed.
+  // Refuse it at the point somebody types it, where it can still be corrected.
+  if (!entry.clock_out_at && end > nowUtc()) {
+    throw new ClockError('That break has not happened yet — check the times.');
+  }
   for (const b of q.breaksOther.all(entry.id, breakId || 0)) {
     const bEnd = b.end_at || '9999-12-31 23:59:59';
     if (start < bEnd && end > b.start_at) {

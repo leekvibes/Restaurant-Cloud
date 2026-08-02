@@ -750,3 +750,49 @@ test('a form built in script carries the token too', () => {
       + "add('_csrf', window.__csrf) — near: " + after.slice(0, 120).replace(/\s+/g, ' '));
   }
 });
+
+test('claiming to be an upload does not turn the token check off', () => {
+  // The deferral was keyed on the CALLER'S Content-Type. Deferring is a one-way
+  // door — the global check steps aside and only csrfBody picks it back up, and
+  // csrfBody runs on the seven upload routes. So setting one header on any of
+  // the other hundred-odd POSTs meant the token was never checked by anybody:
+  // deleting invoices, deactivating staff, approving timesheets, all of it.
+  //
+  // It is keyed on the PATH now. This asserts the list is a list of real upload
+  // routes and nothing else, which is the property that makes that safe.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const block = src.slice(src.indexOf('const CSRF_UPLOAD = ['), src.indexOf('];', src.indexOf('const CSRF_UPLOAD = [')));
+  const patterns = block.split('\n')
+    .map((l) => l.trim().replace(/\s*\/\/.*$/, '').replace(/,$/, ''))   // drop trailing comments
+    .filter((l) => l.startsWith('/^'));
+  assert.ok(patterns.length >= 5, `the upload list has entries, got ${patterns.length}`);
+  for (const p of patterns) {
+    assert.match(p, /^\/\^.*\$\/$/, `"${p}" is not anchored at both ends`);
+  }
+
+  // The property that makes deferring safe: every route that takes a file is
+  // covered, so its check really does reach csrfBody. Built by running the
+  // actual patterns against the actual route paths, rather than comparing
+  // strings and hoping the two spellings agree.
+  const live = patterns.map((p) => new RegExp(p.slice(1, -1)));
+  const withMulter = [...src.matchAll(/app\.post\('([^']+)'[^)]*?\.(?:array|single|fields|any|none)\(/g)]
+    .map((m) => m[1]);
+  assert.ok(withMulter.length >= 4, `found the upload routes, got ${withMulter.length}`);
+  for (const p of withMulter) {
+    const sample = p.replace(/:[^/]+/g, 'x');       // /c/:slug/:id -> /c/x/x
+    assert.ok(live.some((re) => re.test(sample)),
+      `${p} takes an upload but no CSRF_UPLOAD entry matches it, so its token check is deferred to nobody`);
+  }
+});
+
+test('an upload path that is not an upload route is refused without a token', async () => {
+  // The live half of the same thing: a delete route, called with a multipart
+  // body and no token, the way the bypass did it.
+  const owner = await login({ password: 'test-manager-password' });
+  const fd = new FormData();
+  fd.set('x', '1');
+  const res = await as(owner, '/employees/999999/toggle',
+    { method: 'POST', body: fd, headers: { origin: BASE } });
+  assert.strictEqual(res.status, 403,
+    'a multipart body on a route with no multer must get the ordinary check, not a free pass');
+});
