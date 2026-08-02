@@ -859,6 +859,15 @@ body.bare {
 .ts-returned b { color: var(--pt-ink); font-size: 15px; }
 .ts-returned p { color: var(--pt-body); font-size: 13.5px; margin: 6px 0; line-height: 1.5; }
 .ts-returned i { font-style: normal; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; color: var(--pt-muted); }
+/* The finished period still waiting for a signature. Green, not red: nothing
+   is wrong, there is simply something to do — and it is a link to the screen
+   where the button lives, because saying "ready to submit" on a page with no
+   submit button is the bug this exists to end. */
+.ts-awaiting { display: block; text-decoration: none; padding: 14px; margin: 16px 0;
+  border-left: 3px solid var(--pt-green); background: var(--pt-field); }
+.ts-awaiting b { display: block; color: var(--pt-ink); font-size: 15px; }
+.ts-awaiting span { display: block; color: var(--pt-body); font-size: 13.5px; margin-top: 5px; line-height: 1.5; }
+
 .ts-issues { display: grid; gap: 8px; }
 .ts-issue { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 11px 12px;
   border: 1px solid var(--pt-line); background: var(--pt-field); text-decoration: none; color: var(--pt-ink); font-size: 13.5px; }

@@ -1178,7 +1178,9 @@ test('the clock page carries today, the action, and both shortcuts', async () =>
   const html = await text('/portal/clock', { cookie });
   assert.match(html, /Worked today/, "today's total leads");
   assert.match(html, /Clock in/, 'the primary action is there');
-  assert.match(html, /href="\/portal\/timesheet"/, 'the timesheet is one tap away');
+  // The tile carries the period it is talking about, so tapping the badge lands
+  // on the screen the badge means rather than on whatever is running today.
+  assert.match(html, /href="\/portal\/timesheet(\?p=[^"]*)?"/, 'the timesheet is one tap away');
   assert.match(html, /href="\/portal\/requests"/, 'and so are their requests');
 });
 
@@ -1372,4 +1374,54 @@ test('a day belongs to the person who worked it', async () => {
   const html = await text(`/portal/timesheet/day/${day}`, { cookie });
   assert.ok(!/Position/.test(html) || /Nothing recorded/.test(html),
     "another person's punches are not shown");
+});
+
+test('a finished period is submittable, and the portal says where', async () => {
+  // The bug: "Ready to submit" on the hub, and a timesheet page with no submit
+  // button anywhere on it. Two different answers to "can this be submitted" —
+  // the hub's ignored whether the period had ended, and the page's did not. So
+  // mid-period the badge sent people to a screen where the button is correctly
+  // hidden, and the moment the period ended the hub moved on to the new empty
+  // one, so the sheet that did need signing never got a badge at all. There was
+  // no point in a period's life where both agreed.
+  //
+  // Its own id and PIN: 91 to 97 are all spoken for in this file, and an
+  // INSERT OR IGNORE onto a taken id leaves signIn holding somebody else's PIN
+  // and the whole test asserting against the wrong person's portal.
+  const emp = 186;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3186',1500,1)")
+    .run(emp, 'Submit Case');
+  const D2 = require('../src/dates');
+  const done = P.recentPeriods(2)[1];            // the period before this one — finished
+  const day = D2.addDays(done.start, 1);
+  db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',480,480)`)
+    .run(emp, day, `${day} 17:00:00`, `${D2.addDays(day, 1)} 01:00:00`);
+
+  const cookie = await signIn('3186');
+
+  // Landing on the period they are working still shows that period — somebody
+  // checking today's hours must not have the ground moved under them — but it
+  // now says the finished one is waiting, and links straight to it.
+  const running = await text('/portal/timesheet', { cookie });
+  assert.match(running, /is ready to submit/i, 'the running period points at the one that is waiting');
+  assert.match(running, new RegExp(`/portal/timesheet\\?p=${done.start}`), 'and links to it');
+
+  // And on that period, the button actually exists.
+  const finished = await text(`/portal/timesheet?p=${done.start}`, { cookie });
+  assert.match(finished, /Submit timesheet/, 'the submit button is there');
+  assert.match(finished, /action="\/portal\/timesheet\/submit"/, 'with the form behind it');
+
+  // Which is the whole point: it goes through. Sending what the form carries,
+  // including the hours it was drawn with — the route compares them against the
+  // live total so a signature can never land on figures that moved while the
+  // page was open.
+  const seen = (finished.match(/name="seen" value="(\d+)"/) || [])[1];
+  assert.ok(seen, 'the form carries the hours being signed for');
+  const res = await post('/portal/timesheet/submit',
+    { period: done.start, pin: '3186', confirm: '1', seen }, { cookie });
+  assert.strictEqual(res.status, 302);
+  const sheet = db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(emp, done.start);
+  assert.strictEqual(sheet.status, 'submitted', 'and the timesheet is signed');
 });

@@ -4415,7 +4415,11 @@ function clockStatus(emp) {
     const bt = TC.breakTotals(active.id);
     todayMin += Math.max(0, TC.elapsedMinutes(active) - bt.unpaid);
   }
-  const period = currentPeriod();
+  // The period that wants their signature, if there is one — otherwise the one
+  // they are working. The tile is about whichever of those it is, so tapping it
+  // always lands on the screen the badge is talking about.
+  const toSign = periodToSign(emp, today);
+  const period = toSign || currentPeriod();
   const sheet = TC.sheetFor(emp.id, period);
   const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
   const pending = TC.q.pendingForEmployee.all(emp.id);
@@ -4423,9 +4427,9 @@ function clockStatus(emp) {
   const sheetState = TC.sheetStatus(sheet, issues);
 
   // What the timesheet needs from THEM — not every state, only the ones that
-  // are their move to make.
-  const canSubmit = sheetState !== 'submitted' && !['approved', 'locked'].includes(sheet.status)
-    && entries.length > 0 && !issues.some((i) => i.blocking);
+  // are their move to make. "Ready to submit" now means a button exists on the
+  // other end of it, which it did not before.
+  const canSubmit = !!toSign && !issues.some((i) => i.blocking);
   // Being on the clock right now is not a problem with the timesheet, it is
   // just today. Only issues that are genuinely theirs to fix earn a badge —
   // otherwise the thing is always shouting during a normal shift.
@@ -4604,7 +4608,9 @@ function clockPage(req, who, opts = {}) {
       ${justOut ? '' : card}
 
       <div class="tc-shorts">
-        ${shortcut('/portal/timesheet', 'Timesheet',
+        ${/* Carrying the period, so the tile lands on the one the badge is
+              about rather than on whatever is running today. */''}
+        ${shortcut(`/portal/timesheet?p=${encodeURIComponent(st.period.start)}`, 'Timesheet',
           `${esc(labelFor(st.period))} · ${TC.hm(TC.totalsFor(st.entries).payable)}`, st.sheetBadge)}
         ${shortcut('/portal/requests', 'My requests', 'Fixes you have asked for', st.reqBadge)}
       </div>
@@ -5132,6 +5138,34 @@ app.get('/portal/clock/history', (req, res) => {
 const tsPeriodsFor = () => recentPeriods(8);
 const tsFindPeriod = (start) => tsPeriodsFor().find((p) => p.start === start) || currentPeriod();
 
+/**
+ * The pay period that is actually this person's to sign, or null.
+ *
+ * One answer, used by the hub badge and by which period the timesheet page
+ * opens on, because those two disagreeing is what left staff with no way to
+ * submit at all. The hub looked only at the period running RIGHT NOW — which
+ * is the one period nobody may sign, since you do not put your name to hours
+ * you are still working — so mid-period it said "Ready to submit" and sent
+ * people to a page whose submit button is deliberately hidden. And the moment
+ * the period ended the hub moved on to the new, empty one, so the sheet that
+ * genuinely needed signing never earned a badge at any point in its life.
+ *
+ * A period is theirs to sign when it has ended, they worked in it, and nobody
+ * has signed it yet. Only the last few are worth looking at: a sheet nobody
+ * submitted three months ago is a conversation with a manager, not a button.
+ */
+const periodToSign = (emp, today) => {
+  for (const p of tsPeriodsFor().slice(0, 3)) {
+    if (today < p.end) continue;                                  // still running
+    const sh = TC.sheetFor(emp.id, p);
+    if (['approved', 'locked', 'finalized'].includes(sh.status)) continue;
+    if (sh.status === 'submitted' && !sh.resubmit_needed) continue;
+    if (!TC.q.entriesInPeriod.all(emp.id, p.start, p.end).length) continue;
+    return p;
+  }
+  return null;
+};
+
 /** Everything one period needs, gathered once. */
 function tsView(emp, period, opts = {}) {
   const sheet = TC.sheetFor(emp.id, period, opts);
@@ -5157,11 +5191,20 @@ app.get('/portal/timesheet', (req, res) => {
   if (!who) return;
   const { emp } = who;
   const periods = tsPeriodsFor();                 // newest first
+  const cfg = TC.settings();
+  const todayIso = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  // Opening on the period they are working is right — that is what somebody
+  // checking their hours came for. What was missing is any sign that a FINISHED
+  // period is sitting there unsigned: the submit button is correctly hidden on
+  // a running period, so all anybody ever saw was a timesheet with no way to
+  // submit it, and the period that wanted a signature was behind an arrow
+  // nobody had a reason to press. The banner below says so, and links straight
+  // to it. Moving the default instead would have hidden today's hours from
+  // somebody who only wanted to look at them.
+  const awaiting = req.query.p ? null : periodToSign(emp, todayIso);
   const idx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
   const period = periods[idx] || currentPeriod();
   const v = tsView(emp, period);
-  const cfg = TC.settings();
-  const todayIso = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   const hm = (m) => {
     if (!m) return '--';
@@ -5262,6 +5305,15 @@ app.get('/portal/timesheet', (req, res) => {
           <div class="tsx-status ts-${esc(v.status)}" id="ts-state">${esc(statusLabel)}${
             submitted && v.sheet.submitted_at ? ` · ${esc(TC.stamp(v.sheet.submitted_at))}` : ''}</div>
         </section>
+
+        ${/* The period that has ended and still wants their name on it. Shown
+              while they are looking at the one they are working, because that
+              is the screen they land on and the one where the submit button is
+              — correctly — not there. */''}
+        ${awaiting ? `<a class="ts-awaiting" href="/portal/timesheet?p=${encodeURIComponent(awaiting.start)}">
+          <b>${esc(labelFor(awaiting))} is ready to submit</b>
+          <span>That period has ended. Tap to check the hours and send them for approval.</span>
+        </a>` : ''}
 
         ${v.sheet.status === 'returned' ? `<section class="ts-returned" id="ts-issues">
           <b>Returned for correction</b>
