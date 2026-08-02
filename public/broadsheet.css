@@ -4425,35 +4425,70 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    filters and both scroll positions for nothing — there is nothing to restore,
    because nothing was lost. With scripting off the rows stay ordinary links to
    the full page, which is also what a bookmark opens. */
-.tso { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; }
+/* --- the employee timesheet, as a sheet ---------------------------------
+   It comes up from the bottom. A side panel reads as "somewhere else"; a
+   sheet reads as "this row, opened", which is what it is — you are still on
+   the list, looking closer at one line of it.
+
+   Deliberately not full height: the strip of the list left showing above it
+   is what tells you the list is still there and still where you left it. */
+.tso { position: fixed; inset: 0; z-index: 80; display: flex;
+  align-items: flex-end; justify-content: center; }
 .tso[hidden] { display: none; }
-.tso-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.34); }
+.tso-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.38);
+  opacity: 0; transition: opacity .26s ease; }
+.tso.is-open .tso-scrim { opacity: 1; }
 .tso-panel {
-  position: relative; width: min(1080px, 100%); height: 100%;
-  background: var(--paper); border-left: 1px solid var(--rule-heavy);
+  position: relative; width: min(1040px, 100%); height: min(88vh, 100%);
+  background: var(--paper); border: 1px solid var(--rule-heavy); border-bottom: 0;
+  /* Square, like everything else here. `.bs *` resets border-radius to 0 across
+     the whole broadsheet on purpose — a rounded sheet would be the only curved
+     corner in the app, which reads as borrowed from somewhere else. */
+  overflow: hidden;
   display: flex; flex-direction: column;
+  transform: translateY(100%);
+  transition: transform .3s cubic-bezier(.22,.8,.28,1);
 }
+.tso.is-open .tso-panel { transform: none; }
+/* The handle you would drag on a phone. It closes on a tap, and it is the
+   thing that makes the sheet read as a sheet rather than a stuck dialog. */
+.tso-grip { flex: none; height: 22px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; background: var(--paper); }
+.tso-grip::before { content: ''; width: 46px; height: 3px; background: var(--rule-heavy); }
 .tso-bar {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 12px 20px; border-bottom: 2px solid var(--rule-heavy); background: var(--paper);
+  flex: none; display: flex; align-items: center; gap: 14px;
+  padding: 4px 18px 12px; background: var(--paper);
 }
 .tso-x { background: none; border: 1px solid var(--rule); padding: 6px 14px;
   font: inherit; font-size: 13px; color: var(--ink); cursor: pointer; }
-.tso-who { font-family: var(--serif); font-size: 19px; color: var(--headline); }
 .tso-nav { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .tso-nav .tsx-arrow {
   min-width: 34px; padding: 6px 10px; border: 1px solid var(--rule);
   background: none; color: var(--ink); font: inherit; cursor: pointer;
 }
 .tso-nav .tsx-arrow:disabled { opacity: .3; cursor: default; }
-/* The ledger scrolls inside the layer, not the page behind it. */
+/* The ledger scrolls inside the sheet, not the page behind it. */
 .tso-body { flex: 1 1 auto; overflow-y: auto; padding: 0 20px 40px; }
-/* The workspace's own sticky header is redundant in here — the layer's bar is
-   already pinned above it, and two stacked headers eat half a laptop screen. */
-.tso-body .ts-rhead { position: static; border-bottom: 1px solid var(--rule); }
+/* One header, not two. The timesheet's own header carries the name, the
+   period, where it stands and the one thing to do about it — so it stays, and
+   sticks to the top of the scroll; the sheet's bar carries none of it. The
+   back link is meaningless in here: closing IS going back. */
+.tso-body .ts-rhead { position: sticky; top: 0; z-index: 1; background: var(--paper);
+  border-bottom: 1px solid var(--rule); }
 .tso-body .tsw, .tso-body .bs-back { display: none; }
+/* The standing explanation of what these figures are belongs on the page
+   you can linger on. In a sheet you open forty times a period it is the
+   same paragraph forty times, between you and the numbers. */
+.tso-body .perf-foot { display: none; }
 
 @media (max-width: 900px) {
-  .tso-panel { width: 100%; border-left: 0; }
+  .tso-panel { width: 100%; height: min(92vh, 100%); }
   .tso-body { padding: 0 14px 80px; }
+}
+/* Somebody who has asked for less movement gets the sheet, without the travel. */
+@media (prefers-reduced-motion: reduce) {
+  .tso-panel, .tso-scrim { transition: none; }
+  .tso-panel { transform: none; }
+}
+
 }

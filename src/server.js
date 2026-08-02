@@ -15963,12 +15963,19 @@ app.get('/payroll/timesheets', (req, res) => {
            underneath is never navigated away from, so closing it restores the
            period, the filters and both scroll positions for free — there is
            nothing to restore, because nothing was lost. -->
+      ${/* A sheet that comes up from the bottom, not a panel that slides in from
+            the side. The bar on it is deliberately almost empty: it used to
+            repeat the name that the timesheet underneath already puts in its
+            own header, so every open showed the same person's name twice and
+            two stacked headers ate a third of a laptop screen. What is left is
+            the three things the bar is the only place for — the way out, where
+            you are in the list, and the way to the next person. */''}
       <div class="tso" id="tso" hidden>
         <div class="tso-scrim" data-tso-close></div>
         <div class="tso-panel" role="dialog" aria-modal="true" aria-label="Employee timesheet">
+          <div class="tso-grip" data-tso-close aria-hidden="true"></div>
           <div class="tso-bar">
             <button type="button" class="tso-x" data-tso-close aria-label="Close">Close</button>
-            <span class="tso-who" id="tso-who"></span>
             <span class="tso-nav">
               <button type="button" class="tsx-arrow" id="tso-prev" aria-label="Previous employee">←</button>
               <span class="tsw-at" id="tso-at"></span>
@@ -16034,7 +16041,6 @@ app.get('/payroll/timesheets', (req, res) => {
           var lay = document.getElementById('tso');
           if (!lay || !window.fetch) return;         // no JS: the rows are plain links
           var body = document.getElementById('tso-body');
-          var who = document.getElementById('tso-who');
           var at = document.getElementById('tso-at');
           var prev = document.getElementById('tso-prev');
           var next = document.getElementById('tso-next');
@@ -16049,11 +16055,18 @@ app.get('/payroll/timesheets', (req, res) => {
             if (n < 0 || n >= order.length) return;
             i = n;
             var it = order[i];
-            who.textContent = it.name;
             at.textContent = (i + 1) + ' of ' + order.length;
             prev.disabled = i === 0;
             next.disabled = i === order.length - 1;
             lay.hidden = false;
+            void lay.offsetHeight;
+            lay.classList.add('is-open');
+            // hidden is display:none, and an element that was display:none a
+            // moment ago has no state to transition FROM — the browser has to be
+            // made to lay it out in the closed position first, or the sheet just
+            // appears, already up. Reading offsetHeight forces that synchronously;
+            // waiting for an animation frame does the same job only while the tab
+            // is painting, which is not a thing to hang a visible behaviour on.
             document.documentElement.style.overflow = 'hidden';
             body.innerHTML = '<p class="inc-hint">Loading…</p>';
             body.scrollTop = 0;
@@ -16064,9 +16077,19 @@ app.get('/payroll/timesheets', (req, res) => {
             if (push) history.pushState({ tso: i }, '', it.href);
           }
           function close() {
-            lay.hidden = true;
-            body.innerHTML = '';
+            lay.classList.remove('is-open');
             document.documentElement.style.overflow = '';
+            // Emptied and hidden only once it has gone back down. Clearing the
+            // body first would leave an empty sheet sliding away.
+            var done = false;
+            function finish() {
+              if (done) return;
+              done = true;
+              lay.hidden = true;
+              body.innerHTML = '';
+            }
+            lay.addEventListener('transitionend', finish, { once: true });
+            setTimeout(finish, 400);            // and if the transition never fires
             if (history.state && history.state.tso != null) history.back();
           }
 
@@ -16516,29 +16539,36 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
             </div>`).join('')}
           </section>` : ''}
 
+          ${v.sheet.submitted_at || v.sheet.returned_at || v.sheet.resubmit_needed ? `
           <section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">Submission</span></div>
             <div class="inc-facts">
-              ${fact('Status', esc(TC.SHEET_LABEL[v.status]))}
+              ${/* Not the status — the header already carries it as a chip, and
+                    saying it twice on one screen is how a screen starts to read
+                    as a form to fill in rather than a thing to understand. */''}
               ${v.sheet.submitted_at ? fact('Submitted', esc(TC.stamp(v.sheet.submitted_at))) : ''}
               ${v.sheet.submitted_note ? fact('Their note', esc(v.sheet.submitted_note)) : ''}
               ${v.sheet.returned_at ? fact('Returned', `${esc(TC.stamp(v.sheet.returned_at))} · ${esc(v.sheet.returned_by || '')}`) : ''}
               ${v.sheet.returned_reason ? fact('Why', esc(v.sheet.returned_reason)) : ''}
               ${v.sheet.resubmit_needed ? fact('Resubmit', 'needed — something changed') : ''}
             </div>
-          </section>
+          </section>` : ''}
 
+          ${/* Only when there is any. A panel headed History that says "Nothing
+                yet" is a heading earning its space for nothing — and on a sheet
+                opened forty times a period, that is forty readings of the word
+                nothing between somebody and the hours they came to check. */''}
+          ${events.length ? `
           <section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">History</span></div>
             <ul class="inc-timeline">
-              ${events.length ? events.map((ev) => `<li class="inc-ev"><span class="inc-ev-dot"></span>
+              ${events.map((ev) => `<li class="inc-ev"><span class="inc-ev-dot"></span>
                 <div class="inc-ev-body"><div class="inc-ev-head"><b>${esc(ev.actor || '')}</b><span>${esc(TC.stamp(ev.at))}</span></div>
                 <div class="inc-ev-note">${esc(ev.action.replace(/_/g, ' '))}</div>
                 ${ev.after_val ? `<div class="inc-ev-change">${esc(ev.after_val)}</div>` : ''}
-                ${ev.reason ? `<div class="inc-ev-change">“${esc(ev.reason)}”</div>` : ''}</div></li>`).join('')
-                : '<li class="inc-hint">Nothing yet.</li>'}
+                ${ev.reason ? `<div class="inc-ev-change">“${esc(ev.reason)}”</div>` : ''}</div></li>`).join('')}
             </ul>
-          </section>
+          </section>` : ''}
         </aside>
       </div>
     </div>`;
