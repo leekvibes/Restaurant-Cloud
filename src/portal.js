@@ -387,9 +387,16 @@ function derivePublic(priv) {
     return ecdh.getPublicKey().toString('base64url');
   } catch { return ''; }
 }
+// No placeholder. A public key with no private half behind it is worse than
+// nothing: the browser accepts it, the device subscribes against it, and the
+// row is stored — a subscription that can never be sent to, by anybody, ever.
+// Then when a real key is finally configured the push service rejects those
+// old subscriptions on the key mismatch, and the browser will not replace one
+// in place. Empty instead, so the control can say push is not set up rather
+// than manufacture dead registrations.
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY
   || (VAPID_PRIVATE && derivePublic(VAPID_PRIVATE))
-  || 'BDBikVKwVdR0sS6xLWv6wODL4D7Vj1jFxz_bOgFVwnNzhWLilYGKmfb2XpYvB6R7WmeaYhV0uPyt7dl1EDSTihE';
+  || '';
 const pushOn = !!VAPID_PRIVATE;
 if (pushOn) {
   try {

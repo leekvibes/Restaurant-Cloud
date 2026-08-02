@@ -627,6 +627,19 @@ const curPeriod = () => P.recentPeriods(2)[1];
 function seedInPeriod(empId, dayOffset = 1, from = '09:00', to = '17:00') {
   const per = curPeriod();
   const day = require('../src/dates').addDays(per.start, dayOffset);
+  // Claim the day first.
+  //
+  // The offset is counted from the start of the CURRENT pay period, so which
+  // calendar date it lands on moves as the real date does — and on the days
+  // where it lands on one an earlier test already punched, the two punches
+  // overlap and the database refuses the second. That is the overlap rule doing
+  // its job on a fixture that was quietly assuming an empty day; it stayed
+  // invisible until the date rolled far enough for the two to meet. Every
+  // caller uses its own (employee, offset), so clearing is safe and makes the
+  // seed mean the same thing whatever day the suite is run on.
+  db.prepare('DELETE FROM time_breaks WHERE time_entry_id IN (SELECT id FROM time_entries WHERE employee_id = ? AND business_date = ?)')
+    .run(empId, day);
+  db.prepare('DELETE FROM time_entries WHERE employee_id = ? AND business_date = ?').run(empId, day);
   const i = T2.localInputToUtc(`${day}T${from}`), o = T2.localInputToUtc(`${day}T${to}`);
   const raw = Math.round((new Date(o.replace(' ', 'T') + 'Z') - new Date(i.replace(' ', 'T') + 'Z')) / 60000);
   return db.prepare(`INSERT INTO time_entries

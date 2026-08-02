@@ -672,7 +672,11 @@ function renderEquipmentEdit(m, req, row) {
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
-function mountModules(app) {
+// csrfBody comes from server.js because it needs the session secret. An
+// upload's fields are parsed by multer, which runs after the global CSRF
+// check, so the token has to be compared here instead — the two routes below
+// are the collection save and edit, and both take files.
+function mountModules(app, csrfBody = (req, res, next) => next()) {
   app.use('/uploads', require('express').static(UPLOAD_DIR));
 
   app.get('/c/:slug', (req, res) => {
@@ -742,7 +746,7 @@ function mountModules(app) {
       <script>function modFilter(){var q=(document.getElementById('mod-search').value||'').toLowerCase(),n=0;document.querySelectorAll('#mod-body tr').forEach(function(r){var show=r.textContent.toLowerCase().indexOf(q)!==-1;r.style.display=show?'':'none';if(show)n++;});var c=document.getElementById('mod-count');if(c)c.textContent=n+' items';}</script>`));
   });
 
-  app.post('/c/:slug', upload.any(), (req, res) => {
+  app.post('/c/:slug', upload.any(), csrfBody, (req, res) => {
     const m = bySlug[req.params.slug];
     if (!m) return res.status(404).end();
     const data = {};
@@ -838,7 +842,7 @@ function mountModules(app) {
     `));
   });
 
-  app.post('/c/:slug/:id', upload.any(), (req, res) => {
+  app.post('/c/:slug/:id', upload.any(), csrfBody, (req, res) => {
     const m = bySlug[req.params.slug];
     if (!m || m.appendOnly) return res.status(404).end();
     const row = db.prepare(`SELECT * FROM ${m.table} WHERE id = ?`).get(req.params.id);

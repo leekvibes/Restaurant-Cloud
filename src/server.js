@@ -160,6 +160,25 @@ app.use((req, res, next) => {
   if (!expected) return next();
   const given = (req.body && req.body[CSRF_FIELD]) || req.get('x-csrf-token') || '';
 
+  // An upload's fields are not here yet.
+  //
+  // express.urlencoded and express.json are global and have already run, so for
+  // an ordinary post req.body is populated by now. multipart is different: it is
+  // parsed by multer, which is ROUTE middleware and runs after this. So on an
+  // upload req.body is empty here no matter what the form carried, `given` is
+  // blank, and the same-site rule below refused every single one — the receipt,
+  // the invoice, the document. The page froze on "Saving…" and then showed a
+  // bare refusal, and nothing had reached the database.
+  //
+  // The cross-site check still applies right here, because that one only reads
+  // headers. What is deferred is the token comparison, to csrfBody below, which
+  // the upload routes run immediately after their multer. A source-level test
+  // fails the build if one of them forgets.
+  if (/^multipart\/form-data/i.test(req.get('content-type') || '')) {
+    req.__csrfDeferred = true;
+    return crossSiteOk(req, res) ? next() : undefined;
+  }
+
   // A wrong token is always refused, whoever sent it.
   if (given && given !== expected) {
     return res.status(403).send('That form expired or came from somewhere else. Go back, reload the page, and try again.');
@@ -180,18 +199,49 @@ app.use((req, res, next) => {
   // The honest limit: a script that already has somebody's session cookie can
   // post without a token. That is not CSRF — anything holding the cookie can
   // just make the request — and no token scheme fixes it.
-  const origin = req.get('origin') || '';
-  const referer = req.get('referer') || '';
-  const site = (u) => { try { return new URL(u).host; } catch { return ''; } };
-  const from = site(origin) || site(referer);
-  if (from && from !== req.get('host')) {
-    return res.status(403).send('That request came from another site.');
-  }
-  if (from && !given) {
+  if (!crossSiteOk(req, res)) return;
+  if (whereFrom(req) && !given) {
     return res.status(403).send('That form expired. Go back, reload the page, and try again.');
   }
   next();
 });
+
+/** The site a browser says this request came from, or '' if it did not say. */
+function whereFrom(req) {
+  const site = (u) => { try { return new URL(u).host; } catch { return ''; } };
+  return site(req.get('origin') || '') || site(req.get('referer') || '');
+}
+/** False once it has answered — the attack itself, refused on where it came from. */
+function crossSiteOk(req, res) {
+  const from = whereFrom(req);
+  if (from && from !== req.get('host')) {
+    res.status(403).send('That request came from another site.');
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The token check for a request whose body arrives late.
+ *
+ * Runs straight after the multer that parses an upload, where req.body finally
+ * holds the fields the form sent. Same rule as the ordinary path: a wrong token
+ * is always refused, and a missing one is refused when a browser told us where
+ * it came from.
+ */
+function csrfBody(req, res, next) {
+  if (!req.__csrfDeferred) return next();
+  const expected = csrfFor(req);
+  if (!expected) return next();
+  const given = (req.body && req.body[CSRF_FIELD]) || req.get('x-csrf-token') || '';
+  if (given && given !== expected) {
+    return res.status(403).send('That form expired or came from somewhere else. Go back, reload the page, and try again.');
+  }
+  if (whereFrom(req) && !given) {
+    return res.status(403).send('That form expired. Go back, reload the page, and try again.');
+  }
+  next();
+}
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 // ---------------------------------------------------------------------------
@@ -2548,7 +2598,7 @@ app.post('/shifts/:id/pool', (req, res) => {
 });
 
 // Read a photo of the POS report → extract per-server numbers → pre-fill the shift.
-app.post('/shifts/:id/read-report', reportUpload.array('photos', 12), async (req, res) => {
+app.post('/shifts/:id/read-report', reportUpload.array('photos', 12), csrfBody, async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const back = (msg, err) => res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(msg) + (err ? '&err=1' : ''));
@@ -9434,7 +9484,7 @@ function docState(r) {
 // the file, and reaching for it from here reads it before it exists.
 const docScan = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-app.post('/c/expenses/read', docScan.array('scan', 8), async (req, res) => {
+app.post('/c/expenses/read', docScan.array('scan', 8), csrfBody, async (req, res) => {
   try {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
     const data = await readExpense(req.files);
@@ -9447,7 +9497,7 @@ app.post('/c/expenses/read', docScan.array('scan', 8), async (req, res) => {
   }
 });
 
-app.post('/c/documents/read', docScan.array('scan', 8), async (req, res) => {
+app.post('/c/documents/read', docScan.array('scan', 8), csrfBody, async (req, res) => {
   try {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
     const data = await readDocument(req.files);
@@ -11748,7 +11798,7 @@ const invoiceUpload = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
 });
 const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
-app.post('/c/invoices/read', scanUpload.array('scan', 8), async (req, res) => {
+app.post('/c/invoices/read', scanUpload.array('scan', 8), csrfBody, async (req, res) => {
   try {
     if (!req.files || !req.files.length) return res.json({ error: 'No file received.' });
     const data = await readInvoice(req.files);
@@ -11927,7 +11977,7 @@ app.post('/c/invoices/:id/delete', (req, res) => {
     `Invoice deleted${bought.length ? `, and ${bought.length} purchase${bought.length === 1 ? '' : 's'} removed from your product history` : ''}.`));
 });
 
-app.post('/c/invoices', invoiceUpload.array('file', 12), (req, res) => {
+app.post('/c/invoices', invoiceUpload.array('file', 12), csrfBody, (req, res) => {
   const total = toCents(req.body.amount);
   if (!total) return res.redirect('/c/invoices?err=1&msg=' + encodeURIComponent('An invoice needs a total.'));
 
@@ -17272,7 +17322,7 @@ app.post('/c/incidents/:id/followup', (req, res) => {
   res.redirect(`/c/incidents/${id}?msg=` + encodeURIComponent('Follow-up added.'));
 });
 
-mountModules(app);
+mountModules(app, csrfBody);
 
 // ---------------------------------------------------------------------------
 // One-time data migration: the two months of history that pre-date ZWIN.

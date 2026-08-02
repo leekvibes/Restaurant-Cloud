@@ -124,6 +124,16 @@ test('every lifecycle state has somewhere to appear', async () => {
 });
 
 test('the stat strip excludes open shifts', async () => {
+  // The strip measures THIS CALENDAR MONTH, and the fixture lays its shifts
+  // down as "n days ago" — so on the first days of a month every one of them
+  // is in the previous month and this month holds nothing empty to exclude.
+  // The test then had nothing to prove and failed, on those days only. Rather
+  // than depend on the date, give it the shift it needs: an empty one, today,
+  // which is exactly the case the strip exists to leave out.
+  const today = back(0);
+  if (!db.prepare("SELECT 1 FROM shifts WHERE date = ? AND daypart = 'dinner'").get(today)) {
+    db.prepare("INSERT INTO shifts (date, daypart, status) VALUES (?, 'dinner', 'open')").run(today);
+  }
   const h = await html('/shifts');
   assert.match(h, /open shifts excluded/, 'and says so on the page');
 
@@ -131,9 +141,11 @@ test('the stat strip excludes open shifts', async () => {
   // down — today is never a measurement.
   const strip = h.slice(h.indexOf('bs-strip'), h.indexOf('bs-filter'));
   const completed = Number((strip.match(/(\d+) completed shift/) || [])[1]);
-  const all = db.prepare("SELECT COUNT(*) n FROM shifts WHERE date LIKE ?").get(back(0).slice(0, 7) + '%').n;
+  const month = back(0).slice(0, 7);
+  const all = db.prepare('SELECT COUNT(*) n FROM shifts WHERE date LIKE ?').get(month + '%').n;
   assert.ok(completed > 0, 'something is counted');
-  assert.ok(completed < all, `${completed} counted out of ${all} — the empty ones are excluded`);
+  assert.ok(completed < all,
+    `${completed} counted out of ${all} in ${month} — the empty ones are excluded`);
 });
 
 test('months are a browsable list, the newest one selected', async () => {

@@ -642,3 +642,96 @@ test('the login screen loads the stylesheet its markup depends on', async () => 
   assert.deepStrictEqual(orphans, [],
     `these classes have no rule in any stylesheet the page loads (${sheets.join(', ')})`);
 });
+
+// ===========================================================================
+// Uploads, where the token arrives late.
+//
+// This file is the only one that runs with APP_PASSWORD set, which is the only
+// configuration where CSRF is live — with no password there is no session to
+// derive a token from and the whole check stands down. That is exactly why the
+// bug below reached the owner and not the test suite.
+//
+// express.urlencoded and express.json are global and have run by the time the
+// CSRF middleware sees a request, so an ordinary post has its fields. multipart
+// does not: it is parsed by multer, which is ROUTE middleware and runs after.
+// So on every upload req.body was empty at check time, the token the form
+// carried was invisible, and the same-site rule refused it. Every receipt,
+// every invoice, every document. The page sat on "Saving…" and then showed a
+// bare refusal, and nothing reached the database — including the notification
+// that a save would have raised, which is why the back office went quiet.
+// ===========================================================================
+
+const receipt = () => new Blob([Buffer.from('not really a jpeg')], { type: 'image/jpeg' });
+
+async function tokenOn(cookie, page) {
+  const html = await (await as(cookie, page)).text();
+  return (html.match(/name="_csrf" value="([a-f0-9]{32})"/) || [])[1];
+}
+
+test('an upload saves, with the token its form was drawn with', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const token = await tokenOn(owner, '/c/expenses');
+  assert.ok(token, 'the expenses page stamps its forms');
+
+  const fd = new FormData();
+  fd.set('_csrf', token);
+  fd.set('spent_on', '2026-07-29');
+  fd.set('name', 'Coffee filters');
+  fd.set('where_bought', 'Restaurant Depot');
+  fd.set('category', 'Supplies');
+  fd.set('amount_cents', '18.40');
+  fd.set('paid_by', 'Rosa');
+  fd.set('paid_with', 'Their own money');
+  fd.set('file', receipt(), 'receipt.jpg');
+
+  const res = await as(owner, '/c/expenses', { method: 'POST', body: fd, headers: { origin: BASE } });
+  assert.strictEqual(res.status, 302, 'it saves');
+  assert.match(res.headers.get('location') || '', /Saved/, 'and says so');
+});
+
+test('and the save is what raises the notification the office was missing', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const html = await (await as(owner, '/notifications')).text();
+  assert.match(html, /Rosa is owed \$18\.40/,
+    'somebody paid out of their own pocket and the back office is told — this is the line that vanished '
+    + 'while uploads were being refused, because the notification is raised by the save that never happened');
+});
+
+test('an upload from another site is still refused', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const token = await tokenOn(owner, '/c/expenses');
+  const fd = new FormData();
+  fd.set('_csrf', token);
+  fd.set('spent_on', '2026-07-29'); fd.set('name', 'Forged');
+  fd.set('category', 'Supplies'); fd.set('amount_cents', '1'); fd.set('paid_by', 'x');
+  fd.set('file', receipt(), 'r.jpg');
+  const res = await as(owner, '/c/expenses',
+    { method: 'POST', body: fd, headers: { origin: 'https://evil.example' } });
+  assert.strictEqual(res.status, 403, 'refused on where it came from, before the body is even read');
+});
+
+test('an upload with no token at all is still refused', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const fd = new FormData();
+  fd.set('spent_on', '2026-07-29'); fd.set('name', 'No token');
+  fd.set('category', 'Supplies'); fd.set('amount_cents', '1'); fd.set('paid_by', 'x');
+  fd.set('file', receipt(), 'r.jpg');
+  const res = await as(owner, '/c/expenses', { method: 'POST', body: fd, headers: { origin: BASE } });
+  assert.strictEqual(res.status, 403, 'deferring the check must not mean skipping it');
+});
+
+test('every route that takes an upload also checks the token after it', () => {
+  // The deferral is only safe if the second half actually runs. A route that
+  // adds a multer and forgets csrfBody has no CSRF protection at all beyond the
+  // Origin header — so this fails the build rather than waiting to be noticed.
+  for (const file of ['server.js', 'modules.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8');
+    for (const m of src.matchAll(/app\.post\((.+?)=>/g)) {
+      const line = m[1];
+      if (!/\.(array|single|fields|any|none)\(/.test(line)) continue;   // not an upload
+      assert.match(line, /csrfBody/,
+        `src/${file}: this upload route parses a body multer put there, but never checks the token `
+        + `that arrived with it — add csrfBody after the multer: ${line.slice(0, 90)}`);
+    }
+  }
+});
