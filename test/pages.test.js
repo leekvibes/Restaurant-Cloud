@@ -1103,3 +1103,26 @@ test('a closed ledger still shows what each month came to', async () => {
     assert.match(h, /bs-month-meta/, 'and how many rows are inside it');
   }
 });
+
+test('the grid editor lives on the pages that host a grid, not in the fragment', async () => {
+  // A <script> inside HTML assigned with innerHTML NEVER runs. The review grid
+  // arrives two ways — with the full page, and as a fragment dropped into the
+  // sheet — and the editing script started life inside that fragment. So
+  // clicking a cell worked perfectly on the page and did nothing at all from
+  // the Timesheets list, which is the way anybody actually opens it.
+  const d = new (require('better-sqlite3'))(DB, { readonly: true });
+  const emp = d.prepare('SELECT id FROM employees LIMIT 1').get();
+  d.close();
+  const marker = 'Click a cell, type, done';
+
+  const frag = await (await fetch(`${BASE}/payroll/timesheets/${emp.id}?frag=1`)).text();
+  assert.ok(!frag.includes(marker),
+    'the fragment must not carry the editor — a script in it could never run');
+  assert.match(frag, /data-positions="/,
+    'so what the editor needs rides on the markup, which does survive innerHTML');
+
+  for (const host of ['/payroll/timesheets', `/payroll/timesheets/${emp.id}`]) {
+    const html = await (await fetch(BASE + host)).text();
+    assert.ok(html.includes(marker), `${host} hosts a grid, so it must carry the editor`);
+  }
+});

@@ -16421,11 +16421,18 @@ app.get('/payroll/timesheets', (req, res) => {
             document.documentElement.style.overflow = 'hidden';
             body.innerHTML = '<p class="inc-hint">Loading…</p>';
             body.scrollTop = 0;
-            fetch(it.href + (it.href.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
+            if (push) history.pushState({ tso: i }, '', it.href);
+            return load(it.href);
+          }
+          // Exposed so an edit made inside the sheet can ask it to re-read —
+          // the sheet is the only thing that knows which employee and which
+          // period is on screen.
+          window.__tsoReload = function () { return i >= 0 ? load(order[i].href) : null; };
+          function load(href) {
+            return fetch(href + (href.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
               .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
               .then(function (html) { body.innerHTML = html; })
-              .catch(function () { location.href = it.href; });   // fall back to the real page
-            if (push) history.pushState({ tso: i }, '', it.href);
+              .catch(function () { location.href = href; });   // fall back to the real page
           }
           function close() {
             lay.classList.remove('is-open');
@@ -16466,6 +16473,7 @@ app.get('/payroll/timesheets', (req, res) => {
           window.addEventListener('popstate', function () { if (!lay.hidden) { lay.hidden = true; body.innerHTML = ''; document.documentElement.style.overflow = ''; } });
         })();
         </script>
+        ${tsGridScript()}
         <p class="tsg-foot">${esc(TC.dayLabel(days[0]).replace(/^\w+, /, ''))} – ${esc(TC.dayLabel(days[days.length - 1]).replace(/^\w+, /, ''))}
           · scroll sideways for the rest of the period · tap a day for what is behind it</p>
       </section>` : ''}
@@ -16495,6 +16503,133 @@ app.get('/payroll/timesheets', (req, res) => {
         : '<div class="bs-blank"><b>No time recorded</b><span>Nobody clocked in during this period.</span></div>'}
     </div>`));
 });
+
+const tsGridScript = () => `<script>
+    (function () {
+      // Click a cell, type, done.
+      //
+      // Delegated from the container, because this markup arrives by fetch —
+      // the sheet re-reads the whole fragment after every save, so anything
+      // bound to individual cells would be bound to elements that no longer
+      // exist. Re-reading rather than patching in place is deliberate: an edit
+      // changes the day, the week and the period, and can re-split overtime on
+      // OTHER rows. Only the server knows all of that, so it is asked.
+      if (!window.fetch || window.__tsgBound) return;   // no JS: the page still reads
+      window.__tsgBound = true;
+      // Bound to the document, once. The grid arrives two ways — with the full
+      // review page, and later as a fragment dropped into the sheet by
+      // innerHTML — and a script inside that fragment would never run at all,
+      // because innerHTML does not execute scripts. That is why clicking a cell
+      // did nothing from the Timesheets list while working perfectly on the
+      // page: same markup, same handler, never attached.
+      var root = document;
+      var busy = false;
+
+      function reload() {
+        // In the sheet, ask the sheet to re-read itself — it knows which
+        // employee and period it is showing. On the full page, re-read here.
+        if (window.__tsoReload) return window.__tsoReload();
+        var url = location.pathname + location.search;
+        return fetch(url + (url.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+          .then(function (html) {
+            var host = document.getElementById('tsg-root');
+            if (host) host.outerHTML = html; else location.reload();
+          })
+          .catch(function () { location.reload(); });
+      }
+      function say(msg) {
+        var had = document.querySelector('.tsg-err'); if (had) had.remove();
+        if (!msg) return;
+        var p = document.createElement('p'); p.className = 'tsg-err'; p.textContent = msg;
+        var sheet = document.querySelector('.tsg-sheet'); if (sheet) sheet.insertBefore(p, sheet.firstChild);
+      }
+
+      var open = null;                                   // the cell being edited
+      function cancel() {
+        if (!open) return;
+        open.el.textContent = open.text;
+        open.el.classList.remove('busy');
+        open = null;
+      }
+
+      function save(cellEl, value, reopen) {
+        if (busy) return; busy = true; cellEl.classList.add('busy');
+        var body = { field: cellEl.dataset.f, value: value };
+        if (cellEl.dataset.b) body.break_id = Number(cellEl.dataset.b);
+        if (reopen) body.reopen = true;
+        fetch('/timeclock/' + cellEl.dataset.e + '/cell', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
+          .then(function (out) {
+            busy = false;
+            if (out.s === 200) { say(''); open = null; return reload(); }
+            // A signed period asks once, right here, rather than sending
+            // somebody off to reopen it and come back to the cell they were in.
+            if (out.s === 409 && out.j.needs_reopen) {
+              // Escaped twice on purpose: this sits inside a server-side
+              // template literal, so a single backslash-n would be a real
+              // newline in the JavaScript that reaches the browser — which
+              // ends the string mid-line and takes the whole script with it.
+              if (confirm(out.j.message + '\\n\\nReopen it and make this change?')) return save(cellEl, value, true);
+              return cancel();
+            }
+            say(out.j.error || 'That did not save.');
+            cancel();
+          })
+          .catch(function () { busy = false; say('That did not save — check your connection.'); cancel(); });
+      }
+
+      root.addEventListener('click', function (ev) {
+        var bk = ev.target.closest && ev.target.closest('.tsg-bk');
+        if (bk) {                                        // breaks keep their own times, under the row
+          var panel = document.querySelector('[data-brks="' + bk.dataset.brk + '"]');
+          if (panel) panel.hidden = !panel.hidden;
+          return;
+        }
+        var c = ev.target.closest && ev.target.closest('.tsg-c');
+        if (!c || c.classList.contains('ro') || (open && c === open.el)) return;
+        cancel();
+        var field = c.dataset.f, text = c.textContent, input;
+        if (field === 'position') {
+          input = document.createElement('select');
+          // Read off the grid itself, because a script in the fragment could
+          // never have set a global.
+          var sheetEl = c.closest('.tsg-sheet');
+          var list = []; try { list = JSON.parse(sheetEl.getAttribute('data-positions') || '[]'); } catch (e2) { list = []; }
+          list.forEach(function (p) {
+            var o = document.createElement('option');
+            o.value = p.slug; o.textContent = p.name; o.selected = p.slug === c.dataset.v;
+            input.appendChild(o);
+          });
+        } else {
+          // A native time control: the system wheel on a phone, typeable on a
+          // desktop, and shown AM/PM or 24-hour by the browser's own locale
+          // rather than by us guessing which one somebody reads.
+          input = document.createElement('input');
+          input.type = 'time'; input.value = c.dataset.v;
+        }
+        input.className = 'tsg-in';
+        open = { el: c, text: text };
+        c.textContent = ''; c.appendChild(input);
+        input.focus();
+
+        var done = false;
+        function commit() {
+          if (done) return; done = true;
+          var v = input.value;
+          if (!v || v === c.dataset.v) return cancel();
+          save(c, v, false);
+        }
+        input.addEventListener('keydown', function (e2) {
+          if (e2.key === 'Enter') { e2.preventDefault(); commit(); }
+          if (e2.key === 'Escape') { done = true; cancel(); }
+        });
+        input.addEventListener('blur', commit);
+        if (field === 'position') input.addEventListener('change', commit);
+      });
+    })();
+    </script>`;
 
 app.get('/payroll/timesheets/:empId', (req, res) => {
   if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
@@ -16578,7 +16713,6 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   const body = `
     ${req.query.frag === '1' ? '' : flash(req)}
     <div class="bs-page tcm-page inc-detail" id="tsg-root">
-      <script>window.POSITIONS = ${JSON.stringify(allRoles().map((r2) => ({ slug: r2, name: posName(r2) })))};</script>
       <!-- Stays put while the ledger scrolls. Who, which period, where it
            stands, the one thing to do about it, and the way to the next person
            are the whole job — losing them at the bottom of a long timesheet is
@@ -16611,7 +16745,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
         </div>
       </div>
 
-      <section class="bs-panel tsg-sheet">
+      <section class="bs-panel tsg-sheet" data-positions="${esc(JSON.stringify(allRoles().map((r2) => ({ slug: r2, name: posName(r2) }))))}">
             ${/* The review grid.
                   One row per punch, the columns a reviewer actually reconciles
                   against, and every editable value a button you click and type
@@ -16868,124 +17002,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
         </aside>
       </div>
     </div>
-    <script>
-    (function () {
-      // Click a cell, type, done.
-      //
-      // Delegated from the container, because this markup arrives by fetch —
-      // the sheet re-reads the whole fragment after every save, so anything
-      // bound to individual cells would be bound to elements that no longer
-      // exist. Re-reading rather than patching in place is deliberate: an edit
-      // changes the day, the week and the period, and can re-split overtime on
-      // OTHER rows. Only the server knows all of that, so it is asked.
-      var root = document.getElementById('tsg-root');
-      if (!root || !window.fetch) return;               // no JS: the page still reads
-      var busy = false;
-
-      function reload() {
-        var url = location.pathname + location.search;
-        return fetch(url + (url.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
-          .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
-          .then(function (html) {
-            var host = document.getElementById('tso-body') || root.parentNode;
-            host.innerHTML = html;
-          })
-          .catch(function () { location.reload(); });
-      }
-      function say(msg) {
-        var had = root.querySelector('.tsg-err'); if (had) had.remove();
-        if (!msg) return;
-        var p = document.createElement('p'); p.className = 'tsg-err'; p.textContent = msg;
-        var sheet = root.querySelector('.tsg-sheet'); if (sheet) sheet.insertBefore(p, sheet.firstChild);
-      }
-
-      var open = null;                                   // the cell being edited
-      function cancel() {
-        if (!open) return;
-        open.el.textContent = open.text;
-        open.el.classList.remove('busy');
-        open = null;
-      }
-
-      function save(cellEl, value, reopen) {
-        if (busy) return; busy = true; cellEl.classList.add('busy');
-        var body = { field: cellEl.dataset.f, value: value };
-        if (cellEl.dataset.b) body.break_id = Number(cellEl.dataset.b);
-        if (reopen) body.reopen = true;
-        fetch('/timeclock/' + cellEl.dataset.e + '/cell', {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-        }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
-          .then(function (out) {
-            busy = false;
-            if (out.s === 200) { say(''); open = null; return reload(); }
-            // A signed period asks once, right here, rather than sending
-            // somebody off to reopen it and come back to the cell they were in.
-            if (out.s === 409 && out.j.needs_reopen) {
-              // Escaped twice on purpose: this sits inside a server-side
-              // template literal, so a single backslash-n would be a real
-              // newline in the JavaScript that reaches the browser — which
-              // ends the string mid-line and takes the whole script with it.
-              if (confirm(out.j.message + '\\n\\nReopen it and make this change?')) return save(cellEl, value, true);
-              return cancel();
-            }
-            say(out.j.error || 'That did not save.');
-            cancel();
-          })
-          .catch(function () { busy = false; say('That did not save — check your connection.'); cancel(); });
-      }
-
-      root.addEventListener('click', function (ev) {
-        var bk = ev.target.closest && ev.target.closest('.tsg-bk');
-        if (bk) {                                        // breaks keep their own times, under the row
-          var panel = root.querySelector('[data-brks="' + bk.dataset.brk + '"]');
-          if (panel) panel.hidden = !panel.hidden;
-          return;
-        }
-        var c = ev.target.closest && ev.target.closest('.tsg-c');
-        if (!c || c.classList.contains('ro') || (open && c === open.el)) return;
-        cancel();
-        var field = c.dataset.f, text = c.textContent, input;
-        if (field === 'position') {
-          input = document.createElement('select');
-          (window.POSITIONS || []).forEach(function (p) {
-            var o = document.createElement('option');
-            o.value = p.slug; o.textContent = p.name; o.selected = p.slug === c.dataset.v;
-            input.appendChild(o);
-          });
-        } else {
-          // A native time control: the system wheel on a phone, typeable on a
-          // desktop, and shown AM/PM or 24-hour by the browser's own locale
-          // rather than by us guessing which one somebody reads.
-          input = document.createElement('input');
-          input.type = 'time'; input.value = c.dataset.v;
-        }
-        input.className = 'tsg-in';
-        open = { el: c, text: text };
-        c.textContent = ''; c.appendChild(input);
-        input.focus();
-
-        var done = false;
-        function commit() {
-          if (done) return; done = true;
-          var v = input.value;
-          if (!v || v === c.dataset.v) return cancel();
-          save(c, v, false);
-        }
-        input.addEventListener('keydown', function (e2) {
-          if (e2.key === 'Enter') { e2.preventDefault(); commit(); }
-          if (e2.key === 'Escape') { done = true; cancel(); }
-        });
-        input.addEventListener('blur', commit);
-        if (field === 'position') input.addEventListener('change', commit);
-      });
-    })();
-    </script>`;
+`;
 
   if (req.query.frag === '1') {
     res.set('Cache-Control', 'no-store');
     return res.send(body);
   }
-  res.send(layout(`${emp.name} · timesheet`, body));
+  res.send(layout(`${emp.name} · timesheet`, body + tsGridScript()));
 });
 
 // --- approval, locking, reopening -----------------------------------------
