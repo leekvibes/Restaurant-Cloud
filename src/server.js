@@ -15338,8 +15338,12 @@ app.post('/timeclock/new', (req, res) => {
   const outAt = TC.localInputToUtc(req.body.out);
   const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
   const position = allRoles().includes(req.body.position) ? req.body.position : null;
-  if (!emp || !reason || !inAt || !daypart || !position) {
-    return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Fill in the employee, times, position and a reason.'));
+  // A manager is never asked to justify a correction. The record still says who
+  // changed what, when, and what it was before — which is the part anybody
+  // reviewing this later actually needs. Typing a sentence about it was friction
+  // on the person fixing a mistake, not evidence.
+  if (!emp || !inAt || !daypart || !position) {
+    return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Fill in the employee, the times, and the position.'));
   }
   if (outAt && outAt <= inAt) return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Clock-out must be after clock-in.'));
   const cfg = TC.settings();
@@ -15545,8 +15549,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
   if (!tcCanEdit(req, res, e)) return;
-  const reason = String(req.body.reason || '').trim().slice(0, 300);
-  if (!reason) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A reason is required.'));
+  const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
   const inAt = TC.localInputToUtc(req.body.in) || e.clock_in_at;
   const outAt = TC.localInputToUtc(req.body.out);
   if (outAt && outAt <= inAt) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Clock-out must be after clock-in.'));
@@ -15611,8 +15614,8 @@ app.post('/timeclock/:id/break', (req, res) => {
   if (!tcCanEdit(req, res, e)) return;
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   const start = TC.localInputToUtc(req.body.start), end = TC.localInputToUtc(req.body.end);
-  if (!reason || !start || !end || end <= start) {
-    return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A break needs a start, a later end, and a reason.'));
+  if (!start || !end || end <= start) {
+    return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('A break needs a start and a later end.'));
   }
   const actor = tcActor(req);
   try {
@@ -15641,8 +15644,7 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
   const b = TC.q.breakById.get(Number(req.params.bid));
   if (!b) return res.status(404).end();
   if (!tcCanEdit(req, res, TC.q.byId.get(b.time_entry_id))) return;
-  const reason = String(req.body.reason || '').trim().slice(0, 300);
-  if (!reason) return res.redirect(`/timeclock/${b.time_entry_id}?msg=` + encodeURIComponent('A reason is required.'));
+  const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
   const actor = tcActor(req);
   db.transaction(() => {
     TC.logEvent('entry', b.time_entry_id, 'break_removed', actor,
@@ -16898,8 +16900,12 @@ app.post('/payroll/timesheets/:empId/reopen', (req, res) => {
   const period = recentPeriods(12).find((p) => p.start === req.body.period);
   if (!emp || !period) return res.redirect('/payroll/timesheets');
   const back = (m) => res.redirect(`/payroll/timesheets/${emp.id}?p=${period.start}&msg=` + encodeURIComponent(m));
-  const reason = String(req.body.reason || '').trim().slice(0, 300);
-  if (!reason) return back('A reason is required to reopen.');
+  // Reopening writes its own line rather than demanding one. The act is the
+  // statement — somebody with the authority to reopen a signed period did, and
+  // it is stamped with their name and the moment. Asking them to also type why
+  // is what made correcting a timesheet feel like filing a form.
+  const reason = String(req.body.reason || '').trim().slice(0, 300)
+    || `reopened by ${tcActor(req)} to correct the timesheet`;
   const sheet = TC.sheetFor(emp.id, period, { create: true });
   if (!['approved', 'locked'].includes(sheet.status)) return back('That timesheet is not approved.');
   const actor = tcActor(req);

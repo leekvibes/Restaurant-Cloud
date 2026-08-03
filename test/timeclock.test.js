@@ -340,14 +340,13 @@ test('every punch writes an audit row', () => {
 
 // --- manager side ----------------------------------------------------------
 
-test('a manager can add a forgotten punch, and it needs a reason', async () => {
-  const before = db.prepare('SELECT COUNT(*) n FROM time_entries').get().n;
+test('a manager can add a forgotten punch without justifying it', async () => {
+  // A manager is never asked to type a reason. The record still says who added
+  // it and when and what it holds — which is what anybody reviewing it later
+  // needs. The sentence was friction on the person fixing somebody else's
+  // mistake, and it is the thing that made this flow feel like paperwork.
   await post('/timeclock/new', { employee_id: String(EMP.multi), daypart: 'cafe', position: 'server',
-    in: '2026-07-20T09:00', out: '2026-07-20T14:00', reason: '' });
-  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries').get().n, before, 'no reason, no entry');
-
-  await post('/timeclock/new', { employee_id: String(EMP.multi), daypart: 'cafe', position: 'server',
-    in: '2026-07-20T09:00', out: '2026-07-20T14:00', reason: 'Forgot to clock in' });
+    in: '2026-07-20T09:00', out: '2026-07-20T14:00' });
   const e = db.prepare("SELECT * FROM time_entries WHERE business_date = '2026-07-20'").get();
   assert.ok(e, 'the entry is added');
   assert.strictEqual(e.source, 'manager');
@@ -355,7 +354,9 @@ test('a manager can add a forgotten punch, and it needs a reason', async () => {
   assert.strictEqual(e.payable_minutes, 300, 'five hours');
   assert.ok(e.shift_id, 'and linked to that day\'s café shift');
   const ev = db.prepare("SELECT * FROM time_events WHERE entity='entry' AND entity_id=? AND action='manager_added'").get(e.id);
-  assert.ok(ev && ev.reason, 'with the reason on the record');
+  assert.ok(ev, 'and the audit records that a manager added it');
+  assert.ok(ev.actor, 'naming who');
+  assert.ok(ev.at, 'and when');
 });
 
 test('a manager correction keeps the original value in the audit trail', async () => {
@@ -956,9 +957,6 @@ test('locking, then reopening, keeps the original approval as history', async ()
   await post(`/payroll/timesheets/${EMP4}/lock`, { period: per.start });
   assert.strictEqual(sheetRow(EMP4, per.start).status, 'locked');
 
-  await post(`/payroll/timesheets/${EMP4}/reopen`, { period: per.start, reason: '' });
-  assert.strictEqual(sheetRow(EMP4, per.start).status, 'locked', 'no reason, no reopen');
-
   await post(`/payroll/timesheets/${EMP4}/reopen`, { period: per.start, reason: 'missed an hour' });
   const s = sheetRow(EMP4, per.start);
   assert.strictEqual(s.status, 'submitted', 'back with the manager, not thrown to the employee');
@@ -1424,4 +1422,35 @@ test('a finished period is submittable, and the portal says where', async () => 
   assert.strictEqual(res.status, 302);
   const sheet = db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(emp, done.start);
   assert.strictEqual(sheet.status, 'submitted', 'and the timesheet is signed');
+});
+
+test('reopening writes its own line rather than demanding one', async () => {
+  // A manager is never asked to justify a correction. Reopening a signed period
+  // is the sharpest case of that — it used to refuse outright without a typed
+  // sentence, which is the moment the flow stopped feeling like fixing a
+  // timesheet and started feeling like filing a form. The act is the statement:
+  // somebody with the authority to reopen did, and it is stamped with their
+  // name and the moment.
+  const emp = 187;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3187',1500,1)")
+    .run(emp, 'Reopen Case');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const day = D2.addDays(per.start, 2);
+  db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',480,480)`)
+    .run(emp, day, `${day} 17:00:00`, `${D2.addDays(day, 1)} 01:00:00`);
+  db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)
+    VALUES (?,?,?,'submitted') ON CONFLICT(employee_id, period_start) DO UPDATE SET status='submitted'`)
+    .run(emp, per.start, per.end);
+
+  await post(`/payroll/timesheets/${emp}/approve`, { period: per.start, override: 'approved for the test' });
+  assert.strictEqual(sheetRow(emp, per.start).status, 'approved', 'signed off');
+
+  await post(`/payroll/timesheets/${emp}/reopen`, { period: per.start });      // no reason at all
+  const s = sheetRow(emp, per.start);
+  assert.strictEqual(s.status, 'submitted', 'it reopens anyway');
+  assert.match(s.reopen_reason, /to correct the timesheet/, 'having written its own line');
+  assert.match(s.reopen_reason, /Reopen Case|reopened by/, 'that names who did it');
 });
