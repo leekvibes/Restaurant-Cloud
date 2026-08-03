@@ -1119,3 +1119,29 @@ body.bare {
 @media (min-width: 760px) {
   .tsx { max-width: 620px; margin: 0 auto; }
 }
+
+/* --- the pay period, on Your hours & pay -------------------------------------
+   What the emailed summary says, on a page. Somebody who deletes the email —
+   or never had an address on file — had nowhere in the app to read what they
+   were paid for the fortnight. */
+.pp-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 4px 0 12px; }
+.pp-range { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 15px; color: var(--pt-ink); }
+.pp-arrow { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%;
+  border: 1px solid var(--pt-line); color: var(--pt-blue); font-size: 20px; line-height: 1;
+  text-decoration: none; flex: none; }
+.pp-arrow.off { opacity: .32; pointer-events: none; }
+
+/* The one figure they came for, before the lines that make it up. */
+.pp-hero { display: grid; gap: 3px; padding: 16px; margin-bottom: 4px;
+  background: var(--pt-field); border: 1px solid var(--pt-line); }
+.pp-hero span { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 10.5px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--pt-muted); }
+.pp-hero b { font-size: 32px; line-height: 1.1; color: var(--pt-green); }
+.pp-hero i { font-style: normal; font-size: 12.5px; color: var(--pt-muted); }
+
+/* A link in a section kick — "See all" beside "What's new". */
+.pt-kick-a { color: var(--pt-blue); font-size: 12.5px; font-weight: 500; text-decoration: none;
+  letter-spacing: 0; text-transform: none; font-family: inherit; }
+.pt-allnote { margin-top: 18px; }
+.pt-allnote a { color: var(--pt-blue); text-decoration: none; font-weight: 500; }

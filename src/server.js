@@ -3759,9 +3759,10 @@ app.get('/portal', (req, res) => {
   PORTAL.q.ensureSeen.run({ id: emp.id }); // first time we ever see them → baseline now, no backlog
   const unseen = PORTAL.q.unseenFor.all({ id: emp.id });
   if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
-  const NEW_GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖' };
+  const NEW_GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖',
+    timesheet: '▤', timeclock: '◷' };
   const newBlock = unseen.length ? `
-    <div class="pt-kick"><span>What's new</span><span>${unseen.length}</span></div>
+    <div class="pt-kick"><span>What's new</span><a class="pt-kick-a" href="/portal/notifications">See all</a></div>
     <div class="pt-news">
       ${unseen.map((e) => `<a class="pt-newr" href="${esc(e.href || '/portal')}">
         <span class="pt-new-g" aria-hidden="true">${NEW_GLYPH[e.kind] || '•'}</span>
@@ -3929,6 +3930,8 @@ app.get('/portal', (req, res) => {
         ${row('/portal/stock', '⊞', 'Report out of stock', 'Out of something, or running low')}
       </div>
 
+      ${newBlock ? '' : `<p class="pt-quiet pt-allnote"><a href="/portal/notifications">Your notifications</a>
+        — everything your manager has sent you.</p>`}
       ${pushBlock}
     </div>
     <div class="pt-foot">
@@ -4220,6 +4223,25 @@ app.get('/portal/earnings/:id', (req, res) => {
     <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
 });
 
+/**
+ * One person's pay period, exactly as their emailed summary states it.
+ *
+ * Runs the SAME aggregation the payroll table and the email run, filtered to
+ * one employee — no second calculation, so the screen and the cheque cannot
+ * disagree. The email was the only place this existed: delete it and there was
+ * nowhere in the app to go and read what you were paid for the fortnight, and
+ * anybody without an email address never saw it at all.
+ */
+function periodPayFor(empId, period) {
+  const { rows } = aggregatePayroll(period.start, period.end);
+  const r = rows.find((x) => x.employeeId === empId);
+  if (!r) return null;
+  return r;
+}
+
+/** The periods a person can look back over, newest first. */
+const payPeriodsFor = () => recentPeriods(8);
+
 app.get('/portal/earnings', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -4274,10 +4296,68 @@ app.get('/portal/earnings', (req, res) => {
   ].filter(Boolean);
   const statCell = ([v, k]) => `<div class="pt-stat"><b>${v}</b><span>${k}</span></div>`;
 
+  // --- the pay period, at the top, because it is the number people came for --
+  //
+  // This is what the emailed summary says, on a page. It opens on the last
+  // period that has ENDED rather than the one running: a fortnight still being
+  // worked has a total that will be wrong by the end of the night, and the
+  // figure somebody wants to check is the one they were actually paid.
+  const payPeriods = payPeriodsFor();
+  const todayIso = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const defaultIdx = Math.max(0, payPeriods.findIndex((x) => todayIso > x.end));
+  const pIdx = (() => {
+    const asked = payPeriods.findIndex((x) => x.start === req.query.p);
+    return asked >= 0 ? asked : defaultIdx;
+  })();
+  const period = payPeriods[pIdx];
+  const pay = period ? periodPayFor(emp.id, period) : null;
+  const sent = period ? sendRecord(period.start) : null;
+  const payLink = (i) => `/portal/earnings?p=${payPeriods[i].start}`;
+
+  const payCard = !period ? '' : `
+    <div class="pt-kick pt-kick-sec"><span>Pay period</span></div>
+    <nav class="pp-nav">
+      <a class="pp-arrow${pIdx + 1 < payPeriods.length ? '' : ' off'}"
+         href="${pIdx + 1 < payPeriods.length ? payLink(pIdx + 1) : '#'}" aria-label="Earlier period">‹</a>
+      <b class="pp-range">${esc(labelFor(period))}</b>
+      <a class="pp-arrow${pIdx > 0 ? '' : ' off'}"
+         href="${pIdx > 0 ? payLink(pIdx - 1) : '#'}" aria-label="Later period">›</a>
+    </nav>
+    ${!pay ? `<p class="pt-quiet">You have nothing recorded in this period.</p>` : `
+    <div class="pp-hero">
+      <span>On this check</span>
+      <b>${money(pay.takeHome)}</b>
+      <i>${sent ? `Sent ${esc(String(sent.sent_at).slice(0, 10))}`
+        : todayIso > period.end ? 'Not sent yet' : 'This period is still running'}</i>
+    </div>
+    <div class="pt-line"><span>Shifts worked</span><b>${pay.shifts}</b></div>
+    <div class="pt-line"><span>Total hours</span><b>${pay.hours}</b></div>
+    ${pay.wk1Hours || pay.wk2Hours
+      ? `<p class="pt-fine">Week 1: ${pay.wk1Hours} hrs · Week 2: ${pay.wk2Hours} hrs</p>` : ''}
+    ${pay.otHours ? `<div class="pt-line"><span>Of that, overtime</span><b>${pay.otHours} hrs</b></div>` : ''}
+
+    <div class="pt-kick pt-kick-sec"><span>On your paycheck</span></div>
+    ${/* Zero lines are left off. This page's rule — a cook opening it sees "You
+           worked", not "You kept $0.00" — is that on a screen about pay a zero
+           reads as a statement about their pay. A kitchen hand gets no card
+           tips, and a "Card tips $0.00" line tells them nothing they did not
+           know while implying it might have been otherwise. */''}
+    ${pay.wage ? `<div class="pt-line"><span>Wages</span><b>${money(pay.wage)}</b></div>` : ''}
+    ${pay.otPay ? `<p class="pt-fine">Includes ${money(pay.otPay)} of overtime pay.</p>` : ''}
+    ${pay.paycheckTips ? `<div class="pt-line"><span>Card tips</span><b>${money(pay.paycheckTips)}</b></div>` : ''}
+    <div class="pt-line"><span>Total on this check</span><b class="ok">${money(pay.takeHome)}</b></div>
+
+    ${pay.cashTips ? `
+      <div class="pt-kick pt-kick-sec"><span>Already paid to you</span></div>
+      <div class="pt-line"><span>Cash tips</span><b>${money(pay.cashTips)}</b></div>
+      <p class="pt-fine">You already have this — it is not on the check.</p>` : ''}
+    <p class="pt-fine">This adds up the shifts below — it isn't extra pay.</p>`}`;
+
   res.send(portalPage("What you've earned", `
     ${portalTop({ href: '/portal', label: 'Home' }, 'Earnings')}
     <div class="pt-body">
       <h1 class="pt-title">What you've earned</h1>
+      ${payCard}
       ${last ? `
         <div class="pt-kick"><span>Your last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>
         ${shiftBreakdown(last)}`
@@ -5426,6 +5506,53 @@ app.post('/portal/clock/add', (req, res) => {
  * Corrections used to be readable only by opening the entry they belonged to,
  * which meant "did my manager ever answer that?" had no single answer.
  */
+/**
+ * Everything the restaurant has told this person, kept.
+ *
+ * The hub's "What's new" clears the moment it is read, which is right for a
+ * special or an 86 and wrong for "your timesheet was declined — here is why".
+ * A person who glanced at the hub on the way in had no way back to it: the
+ * office has /notifications and the portal had nothing. This is that page.
+ */
+app.get('/portal/notifications', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const rows = PORTAL.q.eventsFor.all({ id: emp.id });
+  const GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖',
+    timesheet: '▤', timeclock: '◷' };
+
+  // Grouped by day, because "when" is how anybody looks for one of these.
+  const groups = [];
+  for (const e of rows) {
+    const day = String(e.created_at || '').slice(0, 10);
+    if (!groups.length || groups[groups.length - 1].day !== day) groups.push({ day, list: [] });
+    groups[groups.length - 1].list.push(e);
+  }
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const dayLabel = (d) => (d === today ? 'Today'
+    : d === addDays(today, -1) ? 'Yesterday'
+    : new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }));
+
+  res.send(portalPage('Notifications', `
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Notifications')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">Notifications</h1>
+      ${rows.length ? groups.map((g) => `
+        <div class="pt-kick pt-kick-sec"><span>${esc(dayLabel(g.day))}</span></div>
+        <div class="pt-news">
+          ${g.list.map((e) => `<a class="pt-newr" href="${esc(e.href || '/portal')}">
+            <span class="pt-new-g" aria-hidden="true">${GLYPH[e.kind] || '•'}</span>
+            <span class="pt-new-t"><b>${esc(e.title)}</b>${e.body ? `<span>${esc(e.body)}</span>` : ''}</span>
+            <span class="pt-new-w">${esc(atTime(e.created_at))}</span>
+          </a>`).join('')}
+        </div>`).join('')
+        : '<p class="tc-note">Nothing yet. Anything your manager sends you shows up here.</p>'}
+      <p class="pt-fine">Pay summaries, timesheet decisions and answers to your
+        requests are kept here — the board notes and specials are on their own pages too.</p>
+    </div>`));
+});
+
 app.get('/portal/requests', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -6577,6 +6704,20 @@ app.post('/payroll/send', async (req, res) => {
 
   const out = await sendEmails(emails);
   markSent(from, to, out.sent || out.previewed);
+
+  // And on their phone, not only in their inbox.
+  //
+  // Everyone the summary was built for, INCLUDING anybody with no email
+  // address on file — they are exactly the people who otherwise hear nothing
+  // at all, and the portal is where they can now read the same figures.
+  const label = labelFor({ start: from, end: to });
+  for (const e of emails) {
+    if (!e.employeeId) continue;
+    try {
+      PORTAL.notify('earnings', `Your pay summary for ${label} is ready`,
+        { employeeId: e.employeeId, href: `/portal/earnings?p=${from}` });
+    } catch { /* the mail already went; a notification must not undo that */ }
+  }
   // Tell the back office payroll went out — the period, and how many people got
   // their summary. Only when mail actually sent, not on a previews-only run.
   if (out.sent) {
@@ -15840,6 +15981,7 @@ function decideCorrection(c, decision, actor, note) {
       TC.logEvent('correction', c.id, 'rejected', actor, { reason: note });
       settle();
     })();
+    reqTell(c, `Your ${reqKind(c).toLowerCase()} request was declined`, note);
     return { ok: true, msg: 'Request rejected — the entry is unchanged.', entryId: entryId() };
   }
 
@@ -15872,6 +16014,7 @@ function decideCorrection(c, decision, actor, note) {
         { reason: note || 'handled by hand — see the entry history' });
       settle();
     })();
+    reqTell(c, `Your ${reqKind(c).toLowerCase()} request was handled`, note);
     return { ok: true, entryId: entryId(),
       msg: 'Marked handled. Make any change on the entry itself so the reason travels with it.' };
   }
@@ -15945,6 +16088,7 @@ function decideCorrection(c, decision, actor, note) {
       }
       settle();
     })();
+    reqTell(c, `Your ${reqKind(c).toLowerCase()} request was approved`, summary);
     return { ok: true, msg: `Approved and applied — ${summary}.`, entryId: entryId() };
   } catch (err) {
     // Nothing was written: the transaction rolled back. Say what stopped it and
@@ -15964,6 +16108,28 @@ const REQ_KIND = {
   wrong_position: 'Position', wrong_service: 'Service', other: 'Something else',
 };
 const reqKind = (c) => REQ_KIND[c.kind] || String(c.kind).replace(/_/g, ' ');
+
+/**
+ * Tell the person who asked what was decided.
+ *
+ * Every outcome, not only the happy one: somebody whose request was declined
+ * needs that more than somebody whose was granted, because they are the one who
+ * still has to do something about it. Sent from decideCorrection so a bulk
+ * decision reaches people exactly as a single one does, and never throws — a
+ * notification failing must not roll back a decision that has already been
+ * written.
+ */
+function reqTell(c, title, detail) {
+  try {
+    const entry = TC.q.correctionById.get(c.id);
+    PORTAL.notify('timeclock', title, {
+      body: detail || null,
+      employeeId: c.employee_id,
+      href: (entry && entry.time_entry_id)
+        ? `/portal/clock/entry/${entry.time_entry_id}` : '/portal/requests',
+    });
+  } catch { /* the decision stands */ }
+}
 
 /** Unpaid break minutes on an entry, from the break rows themselves. */
 const reqUnpaid = (entryId) => TC.q.breaks.all(entryId)
@@ -17939,6 +18105,13 @@ function tsApprove(emp, period, actor, note, override) {
       { before: 'submitted', after: `approved · ${TC.hm(d.totals.payable)}`, reason: override || note || null });
     TC.logEvent('approval', info.lastInsertRowid, 'created', actor, { after: `${TC.hm(d.totals.payable)}` });
   })();
+  // Told, not left to check. Here rather than in the route, so approving in
+  // bulk reaches people exactly as approving one at a time does.
+  try {
+    PORTAL.notify('timesheet', `Your timesheet for ${labelFor(period)} was approved`,
+      { body: `${TC.hm(d.totals.payable)} approved by ${actor}.`,
+        employeeId: emp.id, href: `/portal/timesheet?p=${period.start}` });
+  } catch { /* the approval stands regardless */ }
   return { ok: true, totals: d.totals };
 }
 
@@ -18095,6 +18268,10 @@ app.post('/payroll/timesheets/:empId/return', (req, res) => {
     TC.q.returnSheet.run({ id: sheet.id, by: actor, reason });
     TC.logEvent('timesheet', sheet.id, 'returned', actor, { reason });
   })();
+  try {
+    PORTAL.notify('timesheet', `Your timesheet for ${labelFor(period)} needs another look`,
+      { body: reason, employeeId: emp.id, href: `/portal/timesheet?p=${period.start}` });
+  } catch { /* returned regardless */ }
   back(`Returned to ${emp.name}.`);
 });
 

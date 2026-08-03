@@ -853,13 +853,17 @@ test("the portal breaks a shift down the way that night's email does", async () 
   }
 
   const num = (v) => Math.round(Number(String(v).replace(/[$,−-]/g, '')) * 100);
+  // Scoped to the shift breakdown. The page now opens with a pay-PERIOD card
+  // that has its own Card tips line, and a page-wide scrape would compare the
+  // fortnight's figures against the night's.
+  const shiftHtml = html.slice(html.indexOf('Your last shift'));
   const grab = (label) => {
-    const m = html.match(new RegExp(label + '[\\s\\S]{0,140}?(−?\\$[\\d,]+\\.\\d{2})'));
+    const m = shiftHtml.match(new RegExp(label + '[\\s\\S]{0,140}?(−?\\$[\\d,]+\\.\\d{2})'));
     return m ? num(m[1]) : null;
   };
   // The tip-out is itemised by position now, not one lump. Every line between
   // the "Tip-out" heading and its total is a role that actually received money.
-  const block = html.slice(html.indexOf('Tip-out'), html.indexOf('Total tip-out'));
+  const block = shiftHtml.slice(shiftHtml.indexOf('Tip-out'), shiftHtml.indexOf('Total tip-out'));
   const parts = [...block.matchAll(/−(\$[\d,]+\.\d{2})/g)].map((m) => num(m[1]));
   assert.ok(parts.length >= 1, 'the tip-out names at least one position it went to');
   assert.strictEqual(parts.reduce((a, b) => a + b, 0), grab('Total tip-out'),

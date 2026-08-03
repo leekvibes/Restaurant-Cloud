@@ -2203,3 +2203,152 @@ test('a request whose shift moved under it says so before you approve', async ()
   assert.match(html, /changed since this was asked/i, 'it warns');
   assert.match(html, /3:30 PM/, 'and says what it reads now');
 });
+
+// ── Being told ───────────────────────────────────────────────────────────────
+// Everything a manager decided about somebody's time used to reach them by
+// email or not at all: approving a timesheet, declining a request and sending
+// payroll all wrote an audit line and nothing else.
+
+test('a decided request tells the person who asked — either way', async () => {
+  const emp = 212;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3212',1500,1)")
+    .run(emp, 'Told Either Way');
+  const day = '2026-05-30';
+  const mk = (d) => db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',120,120)`)
+    .run(emp, d, `${d} 21:00:00`, `${d} 23:00:00`).lastInsertRowid;
+  const yes = mk(day);
+  const no = mk('2026-05-31');
+
+  const cookie = await signIn('3212');
+  const before = db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n;
+  await post('/portal/clock/fix', { entry_id: String(yes), kind: 'shift_times', pin: '3212',
+    at_in: `${day}T16:00`, note: 'in early' }, { cookie });
+  await post('/portal/clock/fix', { entry_id: String(no), kind: 'shift_times', pin: '3212',
+    at_out: '2026-05-31T20:30', note: 'stayed late' }, { cookie });
+  const [a, b] = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND decision='pending' ORDER BY id").all(emp);
+
+  await post(`/timeclock/correction/${a.id}`, { decision: 'approved' });
+  await post(`/timeclock/correction/${b.id}`, { decision: 'rejected', note: 'You left at the usual time.' });
+
+  const events = db.prepare(
+    "SELECT * FROM portal_events WHERE employee_id = ? AND kind='timeclock' ORDER BY id").all(emp);
+  assert.strictEqual(events.length, 2, 'both decisions were passed on');
+  assert.match(events[0].title, /approved/i, 'the granted one');
+  assert.match(events[1].title, /declined/i, 'and the refused one');
+  // A refusal without the reason is a message that helps nobody — they are the
+  // one who still has to do something about it.
+  assert.match(events[1].body, /You left at the usual time/, 'carrying why');
+  assert.ok(events.every((e) => e.employee_id === emp), 'addressed to them, not the floor');
+  assert.ok(before <= db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n);
+});
+
+test('approving a timesheet tells them, and so does sending it back', async () => {
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const mk = (id, pin, name) => {
+    db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+      .run(id, name, pin);
+    const day = D2.addDays(per.start, 3);
+    db.prepare(`INSERT INTO time_entries
+      (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+      VALUES (?,?,'dinner','server',?,?, 'complete','manager',300,300)`)
+      .run(id, day, `${day} 21:00:00`, `${day} 23:00:00`);
+    db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status, submitted_at)
+      VALUES (?,?,?,'submitted', datetime('now'))
+      ON CONFLICT(employee_id, period_start) DO UPDATE SET status='submitted', submitted_at=datetime('now')`)
+      .run(id, per.start, per.end);
+  };
+  mk(213, '3213', 'Signed Off Told');
+  mk(214, '3214', 'Sent Back Told');
+
+  await post('/payroll/timesheets/213/approve', { period: per.start, override_reason: 'checked by hand' });
+  await post('/payroll/timesheets/214/return', { period: per.start, reason: 'Friday is short — check your clock-out.' });
+
+  const ok = db.prepare("SELECT * FROM portal_events WHERE employee_id=213 AND kind='timesheet' ORDER BY id DESC").get();
+  assert.ok(ok, 'the approval reached them');
+  assert.match(ok.title, /approved/i);
+  assert.match(ok.body, /approved by/, 'and says who');
+  assert.match(ok.href, /\/portal\/timesheet\?p=/, 'linking to the sheet');
+
+  const back = db.prepare("SELECT * FROM portal_events WHERE employee_id=214 AND kind='timesheet' ORDER BY id DESC").get();
+  assert.ok(back, 'so did the return');
+  assert.match(back.title, /another look/i, 'without saying "rejected" at somebody');
+  assert.match(back.body, /check your clock-out/, 'and carries the reason they need');
+});
+
+test('everything sent to a person is kept, not cleared on a glance', async () => {
+  // The hub's "What's new" clears the moment it is read — right for an 86,
+  // wrong for "your timesheet was declined". Somebody who glanced at the hub
+  // on the way in had no way back to it.
+  const emp = 215;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3215',1500,1)")
+    .run(emp, 'Kept For Me');
+  db.prepare(`INSERT INTO portal_events (kind, title, body, employee_id, href)
+    VALUES ('timesheet','Your timesheet was approved','8h by Owner',?,'/portal/timesheet')`).run(emp);
+  const cookie = await signIn('3215');
+
+  // Reading the hub consumes the unseen block...
+  await text('/portal', { cookie });
+  const hub = await text('/portal', { cookie });
+  assert.ok(!/Your timesheet was approved/.test(hub), 'the hub block has cleared, as it always did');
+
+  // ...and the list still has it.
+  const list = await text('/portal/notifications', { cookie });
+  assert.match(list, /Your timesheet was approved/, 'the notification is still findable');
+  assert.match(list, /8h by Owner/, 'with its detail');
+  // And the hub points at it even with nothing new.
+  assert.match(hub, /href="\/portal\/notifications"/, 'and the hub says where to look');
+});
+
+test('sending payroll tells everybody it was built for, email or not', async () => {
+  const emp = 216;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3216',1500,1)")
+    .run(emp, 'No Address');
+  db.prepare('UPDATE employees SET email = NULL WHERE id = ?').run(emp);
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const day = D2.addDays(per.start, 6);
+  db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'dinner','open')").run(day);
+  const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day);
+  db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
+    VALUES (?,?,'server',7,'manager') ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 7`).run(sh.id, emp);
+
+  const before = db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n;
+  await post('/payroll/send', { from: per.start, to: per.end });
+  const ev = db.prepare("SELECT * FROM portal_events WHERE employee_id = ? ORDER BY id DESC").get(emp);
+
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n,
+    before + 1, 'they were told');
+  // Somebody with no address is exactly the person who hears nothing otherwise.
+  assert.match(ev.title, /pay summary/i);
+  assert.match(ev.href, /\/portal\/earnings\?p=/, 'and can go and read the figures');
+});
+
+test('the pay period on their own page is the one the email states', async () => {
+  const emp = 217;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3217',2000,1)")
+    .run(emp, 'Reads It Back');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  for (const i of [1, 2]) {
+    const day = D2.addDays(per.start, i);
+    db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'dinner','open')").run(day);
+    const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day);
+    db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
+      VALUES (?,?,'server',5,'manager') ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 5`).run(sh.id, emp);
+  }
+  const cookie = await signIn('3217');
+  const html = await text(`/portal/earnings?p=${per.start}`, { cookie });
+
+  assert.match(html, /Pay period/i, 'the period is on the page');
+  assert.match(html, /On this check/, 'with the figure they came for');
+  assert.match(html, /Shifts worked/, 'and what makes it up');
+  assert.match(html, /Total on this check/);
+  // 10 hours at $20 is $200 — the same arithmetic aggregatePayroll does for the
+  // email, because it IS aggregatePayroll.
+  assert.match(html, /\$200\.00/, 'the figure matches the aggregation the email uses');
+  // The arrows reach earlier periods rather than stranding them on one.
+  assert.match(html, /class="pp-arrow[^"]*" *\n? *href="\/portal\/earnings\?p=/, 'and they can look back');
+});
