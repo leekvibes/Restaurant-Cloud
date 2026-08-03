@@ -4946,6 +4946,152 @@ app.post('/portal/clock/out', (req, res) => {
 });
 
 /** One finished entry, and the place to ask for a fix. */
+/**
+ * The employee's edit sheet, for one shift.
+ *
+ * Lives here rather than inside a route because "click any shift and change
+ * its times" is not a property of one screen — it is a property of a shift.
+ * Wherever a person can see a shift they can see it wrong, and the place to
+ * fix it is there rather than three taps away on a page they had no reason to
+ * open.
+ *
+ * Every handle is a data attribute scoped to the sheet's own form, not an id,
+ * so a day with two shifts on it gets two sheets that do not collide. Ids
+ * would have — silently, by wiring the second sheet's arithmetic to the
+ * first sheet's inputs.
+ */
+function pesCanAsk(e) {
+  // Not while they are still on it: the end has not happened yet, and a
+  // request to change a time that does not exist is not a thing to file.
+  if (TC.isOpen(e) && !e.clock_out_at) {
+    return { can: false, why: 'You are still on this shift — clock out first, then you can ask for a change.' };
+  }
+  return { can: true, why: '' };
+}
+
+/** Unpaid break minutes, read off the break rows rather than the cached column. */
+const pesUnpaid = (brs) => brs.reduce(
+  (n, b) => n + (b.paid || !b.end_at ? 0 : (b.raw_minutes || 0)), 0);
+
+/** The button that opens it. */
+const pesButton = (e, label = 'Edit shift', cls = 'tc-btn tc-btn-go tc-btn-big') =>
+  `<button type="button" class="${cls}" data-pes-open="${e.id}">${esc(label)}</button>`;
+
+/** The sheet itself. Render one per shift; they are fixed-position and hidden. */
+function pesSheet(e, brs) {
+  const inLocal = TC.utcToLocalInput(e.clock_in_at);
+  // An unfinished shift has no end to show, so it offers the clock-in's own
+  // day and leaves the time blank rather than inventing one.
+  const outLocal = e.clock_out_at
+    ? TC.utcToLocalInput(e.clock_out_at)
+    : inLocal.slice(0, 10) + 'T';
+  return `
+    <div class="pes" data-pes="${e.id}" hidden>
+      <div class="pes-scrim" data-pes-close></div>
+      <form class="pes-panel" method="post" action="/portal/clock/fix"
+            data-unpaid="${pesUnpaid(brs)}"
+            data-orig-in="${esc(inLocal)}" data-orig-out="${esc(outLocal)}">
+        <div class="pes-bar">
+          <button type="button" class="pes-back" data-pes-close aria-label="Back">‹</button>
+          <b>Edit shift</b>
+        </div>
+        <input type="hidden" name="entry_id" value="${e.id}">
+        <input type="hidden" name="kind" value="shift_times">
+        <input type="hidden" name="at_in" data-pes-in>
+        <input type="hidden" name="at_out" data-pes-out>
+
+        ${/* Date and time apart, as two things you tap — which is what the
+               phone's own pickers are, and what makes a shift that ends after
+               midnight expressible without explaining anything. */''}
+        <label class="pes-row"><span>Starts</span>
+          <input type="date" data-pes-ind value="${esc(inLocal.slice(0, 10))}">
+          <input type="time" data-pes-int value="${esc(inLocal.slice(11, 16))}">
+        </label>
+        <label class="pes-row"><span>Ends</span>
+          <input type="date" data-pes-outd value="${esc(outLocal.slice(0, 10))}">
+          <input type="time" data-pes-outt value="${esc(outLocal.slice(11, 16))}">
+        </label>
+
+        <div class="pes-total"><span>Total hours<i data-pes-sub></i></span><b data-pes-tot>—</b></div>
+
+        <label class="pes-note"><span>Add a note <i>optional</i></span>
+          <textarea name="note" maxlength="500" rows="3" placeholder="Attach a note to your request"></textarea></label>
+
+        <label class="pes-row pes-pin"><span>Your PIN</span>
+          <input name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required></label>
+
+        <p class="pes-fine">All requests are sent to your manager for approval. Nothing changes until they say so.</p>
+        <button class="tc-btn tc-btn-go tc-btn-big" type="submit">Send for approval</button>
+      </form>
+    </div>`;
+}
+
+/** One script, however many sheets are on the page. Emit once, at the end. */
+function pesScript() {
+  return `<script>
+  (function () {
+    function hm(m) { return Math.floor(m / 60) + 'h ' + (m % 60) + 'm'; }
+    function bits(lay) {
+      var f = lay.querySelector('form');
+      return { f: f,
+        ind: f.querySelector('[data-pes-ind]'), int_: f.querySelector('[data-pes-int]'),
+        outd: f.querySelector('[data-pes-outd]'), outt: f.querySelector('[data-pes-outt]'),
+        tot: f.querySelector('[data-pes-tot]'), sub: f.querySelector('[data-pes-sub]') };
+    }
+    function count(lay) {
+      // The total is worked out here rather than asked for, because it is not a
+      // thing anybody knows — it is a thing the two times mean.
+      //
+      // Unpaid break time comes off it, because that is what the shift pays
+      // (recompute(): payable = raw - unpaid) and this screen must not quote a
+      // bigger number than the one that reaches the cheque. The deduction is
+      // spelled out underneath rather than silently applied.
+      var b = bits(lay), unpaid = Number(b.f.getAttribute('data-unpaid')) || 0;
+      if (!b.ind.value || !b.int_.value || !b.outd.value || !b.outt.value) {
+        b.tot.textContent = '—'; b.sub.textContent = ''; return null;
+      }
+      var m = Math.round((new Date(b.outd.value + 'T' + b.outt.value)
+                        - new Date(b.ind.value + 'T' + b.int_.value)) / 60000);
+      if (!(m > 0)) { b.tot.textContent = 'check the times'; b.sub.textContent = ''; return null; }
+      b.tot.textContent = hm(Math.max(0, m - unpaid));
+      b.sub.textContent = unpaid ? hm(m) + ' less ' + unpaid + 'm unpaid break' : '';
+      return m;
+    }
+    function show(lay, on) {
+      lay.hidden = !on;
+      void lay.offsetHeight;
+      lay.classList.toggle('is-open', on);
+      document.documentElement.style.overflow = on ? 'hidden' : '';
+    }
+    document.addEventListener('click', function (ev) {
+      var o = ev.target.closest && ev.target.closest('[data-pes-open]');
+      if (o) {
+        var lay = document.querySelector('.pes[data-pes="' + o.getAttribute('data-pes-open') + '"]');
+        if (lay) { show(lay, true); count(lay); }
+        return;
+      }
+      var c = ev.target.closest && ev.target.closest('[data-pes-close]');
+      if (c && c.closest('.pes')) show(c.closest('.pes'), false);
+    });
+    document.addEventListener('change', function (ev) {
+      var lay = ev.target.closest && ev.target.closest('.pes');
+      if (lay) count(lay);
+    });
+    document.addEventListener('submit', function (ev) {
+      var lay = ev.target.closest && ev.target.closest('.pes');
+      if (!lay) return;
+      if (count(lay) === null) { ev.preventDefault(); return; }
+      // Only what actually moved travels. An unchanged end is not a request to
+      // set the end to what it already is.
+      var b = bits(lay);
+      var inNew = b.ind.value + 'T' + b.int_.value, outNew = b.outd.value + 'T' + b.outt.value;
+      b.f.querySelector('[data-pes-in]').value = inNew === b.f.getAttribute('data-orig-in') ? '' : inNew;
+      b.f.querySelector('[data-pes-out]').value = outNew === b.f.getAttribute('data-orig-out') ? '' : outNew;
+    });
+  })();
+  </script>`;
+}
+
 app.get('/portal/clock/entry/:id', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -4958,27 +5104,12 @@ app.get('/portal/clock/entry/:id', (req, res) => {
   const corrOpen = corr.some((c) => c.decision === 'pending');
   const fact = (k, v) => `<div class="tc-fact"><span>${k}</span><b>${v}</b></div>`;
 
-  // What the sheet opens with. An unfinished shift has no end to show, so it
-  // offers the clock-in's own day and leaves the time blank rather than
-  // inventing one.
-  const outLocal = e.clock_out_at
-    ? TC.utcToLocalInput(e.clock_out_at)
-    : TC.utcToLocalInput(e.clock_in_at).slice(0, 10) + 'T';
-
   // Any shift they can see, in any period they can open — not only the one they
   // just clocked out of. A period payroll has already signed is still
   // requestable: the request queues, and the manager is told approving it
   // reopens the period. What an employee may never do is change the record
   // themselves, and that has not moved.
-  const canAsk = !TC.isOpen(e) || !!e.clock_out_at;
-  const whyNot = 'You are still on this shift — clock out first, then you can ask for a change.';
-
-  // Read off the break rows themselves rather than the entry's cached column,
-  // so the sheet cannot quote a total that a break added since the last
-  // recompute has already changed. Same arithmetic recompute() does, so the
-  // figure on the sheet is the figure the shift pays.
-  const unpaidBreakMin = brs.reduce(
-    (n, b) => n + (b.paid || !b.end_at ? 0 : (b.raw_minutes || 0)), 0);
+  const { can: canAsk, why: whyNot } = pesCanAsk(e);
 
   res.send(portalPage('Your time', `
     ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
@@ -5004,94 +5135,11 @@ app.get('/portal/clock/entry/:id', (req, res) => {
              your times were wrong you did it twice. Nobody standing in a
              corridor after a double does that; they tell a manager, and the
              record never gets fixed. */''}
-      ${canAsk ? `<button type="button" class="tc-btn tc-btn-go tc-btn-big" data-pes-open>Edit shift</button>`
-        : `<p class="tc-note">${esc(whyNot)}</p>`}
+      ${canAsk ? pesButton(e) : `<p class="tc-note">${esc(whyNot)}</p>`}
       ${corrOpen ? '<p class="tc-note">You already have a request waiting on this shift.</p>' : ''}
     </div>
 
-    ${canAsk ? `
-    <div class="pes" id="pes" hidden>
-      <div class="pes-scrim" data-pes-close></div>
-      <form class="pes-panel" method="post" action="/portal/clock/fix" id="pes-form">
-        <div class="pes-bar">
-          <button type="button" class="pes-back" data-pes-close aria-label="Back">‹</button>
-          <b>Edit shift</b>
-        </div>
-        <input type="hidden" name="entry_id" value="${e.id}">
-        <input type="hidden" name="kind" value="shift_times">
-        <input type="hidden" name="at_in" id="pes-in">
-        <input type="hidden" name="at_out" id="pes-out">
-
-        ${/* Date and time apart, as two things you tap — which is what the
-               phone's own pickers are, and what makes a shift that ends after
-               midnight expressible without explaining anything. */''}
-        <label class="pes-row"><span>Starts</span>
-          <input type="date" id="pes-ind" value="${esc(TC.utcToLocalInput(e.clock_in_at).slice(0, 10))}">
-          <input type="time" id="pes-int" value="${esc(TC.utcToLocalInput(e.clock_in_at).slice(11, 16))}">
-        </label>
-        <label class="pes-row"><span>Ends</span>
-          <input type="date" id="pes-outd" value="${esc(outLocal.slice(0, 10))}">
-          <input type="time" id="pes-outt" value="${esc(outLocal.slice(11, 16))}">
-        </label>
-
-        <div class="pes-total"><span>Total hours<i id="pes-sub"></i></span><b id="pes-tot">—</b></div>
-
-        <label class="pes-note"><span>Add a note <i>optional</i></span>
-          <textarea name="note" maxlength="500" rows="3" placeholder="Attach a note to your request"></textarea></label>
-
-        <label class="pes-row pes-pin"><span>Your PIN</span>
-          <input name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required></label>
-
-        <p class="pes-fine">All requests are sent to your manager for approval. Nothing changes until they say so.</p>
-        <button class="tc-btn tc-btn-go tc-btn-big" type="submit">Send for approval</button>
-      </form>
-    </div>
-    <script>
-    (function () {
-      var lay = document.getElementById('pes'); if (!lay) return;
-      var ind = document.getElementById('pes-ind'), int_ = document.getElementById('pes-int');
-      var outd = document.getElementById('pes-outd'), outt = document.getElementById('pes-outt');
-      var tot = document.getElementById('pes-tot'), sub = document.getElementById('pes-sub');
-      function show(on) {
-        lay.hidden = !on;
-        void lay.offsetHeight;
-        lay.classList.toggle('is-open', on);
-        document.documentElement.style.overflow = on ? 'hidden' : '';
-      }
-      document.addEventListener('click', function (ev) {
-        if (ev.target.closest('[data-pes-open]')) { show(true); count(); }
-        else if (ev.target.closest('[data-pes-close]')) show(false);
-      });
-      var UNPAID = ${unpaidBreakMin};
-      function hm(m) { return Math.floor(m / 60) + 'h ' + (m % 60) + 'm'; }
-      function count() {
-        // The total is worked out here rather than asked for, because it is not
-        // a thing anybody knows — it is a thing the two times mean.
-        //
-        // Unpaid break time comes off it, because that is what the shift pays
-        // (recompute(): payable = raw - unpaid) and this screen must not quote
-        // a bigger number than the one that reaches the cheque. The deduction
-        // is spelled out underneath rather than silently applied.
-        if (!ind.value || !int_.value || !outd.value || !outt.value) { tot.textContent = '—'; return null; }
-        var a = new Date(ind.value + 'T' + int_.value);
-        var b = new Date(outd.value + 'T' + outt.value);
-        var m = Math.round((b - a) / 60000);
-        if (!(m > 0)) { tot.textContent = 'check the times'; sub.textContent = ''; return null; }
-        tot.textContent = hm(Math.max(0, m - UNPAID));
-        sub.textContent = UNPAID ? hm(m) + ' less ' + UNPAID + 'm unpaid break' : '';
-        return m;
-      }
-      [ind, int_, outd, outt].forEach(function (el) { el.addEventListener('change', count); });
-      document.getElementById('pes-form').addEventListener('submit', function (ev) {
-        if (count() === null) { ev.preventDefault(); return; }
-        // Only what actually moved travels. An unchanged end is not a request
-        // to set the end to what it already is.
-        var inNew = ind.value + 'T' + int_.value, outNew = outd.value + 'T' + outt.value;
-        document.getElementById('pes-in').value = inNew === ${JSON.stringify(TC.utcToLocalInput(e.clock_in_at))} ? '' : inNew;
-        document.getElementById('pes-out').value = outNew === ${JSON.stringify(outLocal)} ? '' : outNew;
-      });
-    })();
-    </script>` : ''}`));
+    ${canAsk ? pesSheet(e, brs) + pesScript() : ''}`));
 });
 
 app.post('/portal/clock/fix', (req, res) => {
@@ -5539,6 +5587,7 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
       ${list.length ? list.map((e) => {
         const brs = TC.q.breaks.all(e.id);
         const fact = (k, val) => `<div class="tc-fact"><span>${k}</span><b>${val}</b></div>`;
+        const ask = pesCanAsk(e);
         return `<section class="tsx-daycard">
           <div class="tc-facts">
             ${fact('Clocked in', esc(TC.clockFace(e.clock_in_at)))}
@@ -5549,10 +5598,16 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
             ${fact('Payable', esc(TC.hm(e.payable_minutes)))}
             ${e.edited ? fact('Edited', 'yes') : ''}
           </div>
-          <a class="tc-more" href="/portal/clock/entry/${e.id}">Open or request a fix ›</a>
+          ${/* The edit is HERE, on the shift, not behind a link to a third
+                 screen. Coming from the timesheet to look at a day and finding
+                 the time wrong, the next thing to happen is changing it. */''}
+          ${ask.can ? pesButton(e) : `<p class="tc-note">${esc(ask.why)}</p>`}
+          <a class="tc-more" href="/portal/clock/entry/${e.id}">Shift details and history ›</a>
         </section>`;
       }).join('') : '<p class="tc-note">Nothing recorded on this day.</p>'}
-    </div>`));
+    </div>
+    ${list.filter((e) => pesCanAsk(e).can).map((e) => pesSheet(e, TC.q.breaks.all(e.id))).join('')}
+    ${list.some((e) => pesCanAsk(e).can) ? pesScript() : ''}`));
 });
 app.post('/portal/timesheet/submit', (req, res) => {
   const who = requirePortal(req, res);

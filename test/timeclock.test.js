@@ -1364,7 +1364,9 @@ test('tapping a worked day opens its punches', async () => {
   const html = await text(`/portal/timesheet/day/${day}`, { cookie });
   assert.match(html, /Clocked in/, 'the punches are there');
   assert.match(html, /Position/, 'with the position');
-  assert.match(html, /request a fix/, 'and a way to query it');
+  // The way to query it is the edit itself, on the shift, not a link to a
+  // third screen. (It used to read "Open or request a fix ›".)
+  assert.match(html, /data-pes-open="/, 'and a way to change it, right there');
 });
 
 test('a day belongs to the person who worked it', async () => {
@@ -1545,20 +1547,24 @@ test('the edit sheet offers both ends, dated, with a total that nets the break',
 
   // Four controls, because a shift that ends after midnight cannot be said with
   // two times alone. The dates carry the "next day" without a word of copy.
-  for (const f of ['pes-ind', 'pes-int', 'pes-outd', 'pes-outt']) {
-    assert.match(html, new RegExp(`id="${f}"`), `the sheet has ${f}`);
+  for (const f of ['data-pes-ind', 'data-pes-int', 'data-pes-outd', 'data-pes-outt']) {
+    assert.ok(html.includes(f), `the sheet has ${f}`);
   }
+  // The button must NAME the shift it opens. Merely having the attribute is
+  // what a valueless data-pes-open had, and it opened nothing at all.
+  assert.ok(html.includes(`data-pes-open="${id}"`), 'the button names its shift');
+  assert.ok(html.includes(`data-pes="${id}"`), 'and a sheet answers to that name');
   assert.match(html, /name="kind" value="shift_times"/, 'one kind, not a menu of seven');
   assert.match(html, /name="pin"/, 'the PIN is still asked for');
   assert.match(html, /Send for approval/, 'and the button says what it does');
 
   // The end is dated the NEXT day, unprompted — 8:45pm to 4:20am UTC is an
   // evening shift that finished after midnight.
-  assert.match(html, /id="pes-outd" value="2026-05-08"/, 'the end carries its own date');
+  assert.match(html, /data-pes-outd value="2026-05-08"/, 'the end carries its own date');
 
   // The total the sheet will show must be the total the shift pays. It reads
   // the break rows, so a 30-minute unpaid break comes off before it is shown.
-  assert.match(html, /var UNPAID = 30;/, 'the unpaid break reaches the arithmetic');
+  assert.match(html, /data-unpaid="30"/, 'the unpaid break reaches the arithmetic');
 });
 
 test('the sheet is offered on an approved shift, and the request queues', async () => {
@@ -1582,7 +1588,7 @@ test('the sheet is offered on an approved shift, and the request queues', async 
 
   const cookie = await signIn('3191');
   const html = await text(`/portal/clock/entry/${id}`, { cookie });
-  assert.match(html, /data-pes-open/, 'the sheet is still offered');
+  assert.ok(html.includes(`data-pes-open="${id}"`), 'the sheet is still offered');
 
   const before = db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(id).clock_in_at;
   const res = await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times',
@@ -1647,4 +1653,66 @@ test('a request cannot invert a shift, or land on top of another one', async () 
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND business_date = ?')
     .get(emp, day).n, 2, 'and both shifts survive, unmerged');
   assert.ok(first, 'the afternoon shift is still there');
+});
+
+test('every shift on a day carries its own sheet, and they do not collide', async () => {
+  // Coming from the timesheet, a day is where you land — and a double is two
+  // shifts on it. The sheet is per-shift for that reason: scoped handles, not
+  // ids, so the second sheet's arithmetic is wired to the second shift rather
+  // than silently to the first.
+  const emp = 194;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3194',1500,1)")
+    .run(emp, 'Double Day');
+  const day = '2026-05-11';
+  const mk = (a, b, brk, bs, be) => {
+    const id = db.prepare(`INSERT INTO time_entries
+      (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, unpaid_break_min, payable_minutes)
+      VALUES (?,?,'dinner','server',?,?, 'complete','manager',240,?,?)`)
+      .run(emp, day, a, b, brk, 240 - brk).lastInsertRowid;
+    if (brk) {
+      db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes)
+        VALUES (?,?,?,?,0,?)`).run(id, emp, bs, be, brk);
+    }
+    return id;
+  };
+  const lunch = mk(`${day} 15:00:00`, `${day} 19:00:00`, 0);
+  const dinner = mk(`${day} 22:00:00`, '2026-05-12 02:00:00', 30, `${day} 23:00:00`, `${day} 23:30:00`);
+
+  const cookie = await signIn('3194');
+  const html = await text(`/portal/timesheet/day/${day}`, { cookie });
+
+  // One button and one sheet per shift, each naming its own entry.
+  for (const id of [lunch, dinner]) {
+    assert.ok(html.includes(`data-pes-open="${id}"`), `shift ${id} has its own button`);
+    assert.ok(html.includes(`data-pes="${id}"`), `and its own sheet`);
+  }
+  // Handles are scoped, never ids — two of any id on one page is a broken page.
+  assert.ok(!/id="pes-/.test(html), 'no global ids to collide');
+  // The break belongs to the shift that took it, not to the day.
+  assert.match(html, new RegExp(`data-pes="${dinner}"[\\s\\S]*?data-unpaid="30"`), 'the dinner sheet knows its break');
+  assert.match(html, new RegExp(`data-pes="${lunch}"[\\s\\S]*?data-unpaid="0"`), 'the lunch sheet has none');
+  // One script for the page however many sheets are on it.
+  assert.strictEqual((html.match(/data-pes-open="/g) || []).length, 2, 'two buttons');
+  assert.strictEqual((html.match(/function count\(lay\)/g) || []).length, 1, 'one script');
+
+  // A request from the day view lands on the shift it was opened from, and the
+  // other shift on that day does not move.
+  const wasLunch = db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(lunch).clock_in_at;
+  await post('/portal/clock/fix', { entry_id: String(dinner), kind: 'shift_times', pin: '3194',
+    at_in: `${day}T17:00`, note: 'from the timesheet' }, { cookie });
+  const c = db.prepare('SELECT * FROM time_corrections ORDER BY id DESC').get();
+  assert.strictEqual(c.time_entry_id, dinner, 'filed against the right shift');
+  assert.strictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(lunch).clock_in_at,
+    wasLunch, 'and the other shift on that day is untouched');
+});
+
+test('a day with nothing on it offers no sheet at all', async () => {
+  const emp = 195;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3195',1500,1)")
+    .run(emp, 'Day Off');
+  const cookie = await signIn('3195');
+  const html = await text('/portal/timesheet/day/2026-05-12', { cookie });
+  assert.match(html, /Nothing recorded on this day/);
+  assert.ok(!/data-pes-open/.test(html), 'and no button for a shift that does not exist');
+  assert.ok(!/function count\(lay\)/.test(html), 'nor a script with nothing to drive');
 });
