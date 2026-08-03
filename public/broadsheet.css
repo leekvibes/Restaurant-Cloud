@@ -4451,7 +4451,16 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .tsg-reg, .tsg-ot { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
 .tsg-ot:not(:empty) { color: var(--ink); }
 .tsg-f { display: flex; gap: 4px; flex-wrap: wrap; }
-.tsg-nop { opacity: .78; }
+.tsg-nop { opacity: .9; }
+/* A day with nothing on it is still a day. Quiet, so a fortnight of them does
+   not shout, but present — a ledger that skips dates is one a reviewer cannot
+   check a period against. */
+.tsg-empty { opacity: .55; }
+.tsg-empty:hover { opacity: 1; }
+/* "set start" reads as an invitation rather than a value, because there is no
+   value there yet. */
+.tsg-mk { color: var(--muted); font-style: italic; }
+.tsg-mk:hover { color: var(--ink); font-style: normal; }
 .tsg-open { color: var(--positive); }
 
 /* A cell reads as a value and behaves as a control. No boxes until hover, or

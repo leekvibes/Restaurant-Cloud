@@ -15750,6 +15750,102 @@ app.post('/timeclock/:id/cell', express.json(), (req, res) => {
   }
 });
 
+/**
+ * A time typed onto a day that has no punch yet.
+ *
+ * The grid is a ledger of DAYS, not of punches, and a manager should be able to
+ * put a start and an end on any line of it — a day somebody clocked, a day
+ * whose hours were typed straight onto the shift, and a day with nothing on it
+ * at all. Only the first of those had an entry to edit, so the other two were
+ * dead cells, which is not a ledger, it is a report.
+ *
+ * Typing a time here MAKES the punch. Where the day already carries hours that
+ * were typed on the shift, the punch is created at exactly that length — so the
+ * total the reviewer was looking at does not move underneath them just because
+ * somebody finally said when it happened. That is the whole trick: the hours
+ * were never in doubt, only the times.
+ */
+app.post('/timeclock/day-cell', express.json(), (req, res) => {
+  if (!canWrite()) return res.status(403).json({ error: 'Your account is view-only.' });
+  if (!punchReadable()) return res.status(403).json({ error: 'Correcting a punch needs the time clock or payroll.' });
+  const emp = q.employee.get(Number(req.body.employee_id));
+  const date = String(req.body.date || '');
+  const field = String(req.body.field || '');
+  const value = String(req.body.value || '');
+  if (!emp || !MX.isDate(date)) return res.status(400).json({ error: 'Which day?' });
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return res.status(400).json({ error: 'That is not a time.' });
+
+  const actor = tcActor(req);
+  const st = sheetCovering(emp.id, date);
+  if (st.frozen) {
+    if (req.body.reopen !== true && req.body.reopen !== '1') {
+      return res.status(409).json({ needs_reopen: true, status: st.sheet.status,
+        message: `${TC.dayLabel(date)} is on a timesheet that was ${st.sheet.status}`
+          + `${st.sheet.approved_by ? ` by ${st.sheet.approved_by}` : ''}. `
+          + 'Editing reopens it, and it will need approving again.' });
+    }
+    const sheet = TC.sheetFor(emp.id, st.period, { create: true });
+    const transfer = TC.q.currentTransfer.get(sheet.id);
+    const why = `reopened by ${actor} to correct the timesheet`;
+    db.transaction(() => {
+      TC.q.supersedeApprovals.run({ timesheet_id: sheet.id, by: actor, reason: why });
+      TC.q.reopenSheet.run({ id: sheet.id, status: 'submitted', by: actor, reason: why });
+      TC.q.setTransferState.run({ id: sheet.id, state: transfer ? 'needs_recalculation' : 'not_ready' });
+      TC.logEvent('timesheet', sheet.id, 'reopened', actor, { before: st.sheet.status, after: 'submitted', reason: why });
+    })();
+  }
+
+  // What the day already says, so creating times for it changes nothing else.
+  const already = TC.shiftOnlyHours(emp.id, date, date).filter((x) => x.business_date === date);
+  const carried = already.reduce((a, x) => a + (x.minutes || 0), 0);
+  const from = already[0] || {};
+  const position = allRoles().includes(req.body.position) ? req.body.position
+    : (allRoles().includes(from.role) ? from.role : emp.role);
+  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart
+    : (DAYPARTS.includes(from.daypart) ? from.daypart : DAYPARTS[DAYPARTS.length - 1]);
+
+  const at = TC.localInputToUtc(`${date}T${value}`);
+  let inAt, outAt;
+  if (field === 'in') {
+    inAt = at;
+    outAt = carried ? new Date(Date.parse(at.replace(' ', 'T') + 'Z') + carried * 60000)
+      .toISOString().slice(0, 19).replace('T', ' ') : null;
+  } else if (field === 'out') {
+    if (!carried) {
+      // Nothing to measure back from. Saying so is better than inventing a
+      // start, which would be fiction in a payroll record.
+      return res.status(400).json({ error: 'Set the start first — then the end has something to measure from.' });
+    }
+    outAt = at;
+    inAt = new Date(Date.parse(at.replace(' ', 'T') + 'Z') - carried * 60000)
+      .toISOString().slice(0, 19).replace('T', ' ');
+  } else {
+    return res.status(400).json({ error: 'Nothing to change.' });
+  }
+
+  try {
+    let id;
+    db.transaction(() => {
+      s.getOrIgnore.run(date, daypart);
+      const sh = s.findShift.get(date, daypart);
+      policyForShift(sh);
+      w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
+      id = TC.createEntry({ employee_id: emp.id, shift_id: sh.id, business_date: date,
+        daypart, position, clock_in_at: inAt, clock_out_at: outAt, source: 'manager', created_by: actor });
+      if (!outAt) TC.q.setStatus.run({ id, status: 'missing_punch', by: actor });
+      TC.logEvent('entry', id, 'manager_added', actor,
+        { after: `${TC.clockFace(inAt)} → ${outAt ? TC.clockFace(outAt) : 'no clock-out yet'}`,
+          reason: carried ? `times put on ${TC.hm(carried)} already recorded for this day` : null });
+      tcTouchDates(emp.id, [date], actor, 'a manager put times on this day');
+      TC.syncShiftHours(sh.id, emp.id, actor, { role: position });
+    })();
+    return res.json({ ok: true, id });
+  } catch (err) {
+    if (err instanceof TC.ClockError) return res.status(400).json({ error: err.message });
+    throw err;
+  }
+});
+
 app.post('/timeclock/:id/break', (req, res) => {
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
@@ -16555,10 +16651,12 @@ const tsGridScript = () => `<script>
 
       function save(cellEl, value, reopen) {
         if (busy) return; busy = true; cellEl.classList.add('busy');
+        var mk = cellEl.dataset.new === '1';
         var body = { field: cellEl.dataset.f, value: value };
         if (cellEl.dataset.b) body.break_id = Number(cellEl.dataset.b);
+        if (mk) { body.employee_id = Number(cellEl.dataset.emp); body.date = cellEl.dataset.date; }
         if (reopen) body.reopen = true;
-        fetch('/timeclock/' + cellEl.dataset.e + '/cell', {
+        fetch(mk ? '/timeclock/day-cell' : '/timeclock/' + cellEl.dataset.e + '/cell', {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
         }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
           .then(function (out) {
@@ -16765,61 +16863,102 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 otEnabled: v.otRule.enabled, otExempt: !!emp.ot_exempt,
                 otThreshold: v.otRule.threshold, periodStart: period.start, extra: v.fromShifts,
               });
-              if (!weeks.length) return '<p class="inc-hint">Nothing recorded in this period.</p>';
               const editable = canWrite();
               const cell = (id, field, shown, value, extra = '') => (editable
                 ? `<button type="button" class="tsg-c" data-e="${id}" data-f="${field}" data-v="${esc(value)}"${extra}>${esc(shown)}</button>`
                 : `<span class="tsg-c ro">${esc(shown)}</span>`);
+              const newCell = (date, field, shown) => (editable
+                ? `<button type="button" class="tsg-c tsg-mk" data-new="1" data-emp="${emp.id}" data-date="${date}" data-f="${field}" data-v="">${shown}</button>`
+                : `<span class="tsg-c ro">${shown}</span>`);
               const hhmm = (utc) => TC.utcToLocalInput(utc).slice(11, 16);
 
-              return weeks.map((wk) => `
-                ${weeks.length > 1 ? `<div class="tsg-wk"><span>Week ${wk.index + 1}</span>
-                  <b>${esc(TC.hm(wk.payable))}</b>${wk.overtime ? `<i>${esc(TC.hm(wk.overtime))} OT</i>` : ''}</div>` : ''}
-                ${wk.days.map((d) => {
-                  const rows = d.entries.map((e) => {
-                    const brks = TC.q.breaks.all(e.id);
-                    const bt = TC.breaksOn(e);
-                    const iss = v.issues.filter((i) => i.entryId === e.id);
-                    const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
-                    return `<div class="tsg-r${iss.some((i) => i.blocking) ? ' warn' : ''}" id="e-${e.id}" data-entry="${e.id}">
-                      <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
-                      ${cell(e.id, 'position', posName(e.position) + (e.daypart ? ' · ' + dp(e.daypart) : ''), e.position)}
-                      ${cell(e.id, 'in', TC.clockFace(e.clock_in_at), hhmm(e.clock_in_at))}
-                      ${e.clock_out_at
-                        ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at))
-                        : '<span class="tsg-c ro tsg-open">on the clock</span>'}
-                      ${brks.length
-                        ? `<button type="button" class="tsg-c tsg-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`
-                        : '<span class="tsg-c ro">—</span>'}
-                      <b class="tsg-t">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>
-                      <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
-                      <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
-                      <span class="tsg-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? '<i class="tcm-tag warn">asked</i>' : ''}</span>
-                    </div>
-                    ${brks.length ? `<div class="tsg-brks" data-brks="${e.id}" hidden>
-                      ${brks.map((b) => `<div class="tsg-br">
-                        <span>${b.paid ? 'Paid break' : 'Break'}</span>
-                        ${cell(e.id, 'break_start', TC.clockFace(b.start_at), hhmm(b.start_at), ` data-b="${b.id}"`)}
-                        <span class="tsg-to">to</span>
-                        ${b.end_at ? cell(e.id, 'break_end', TC.clockFace(b.end_at), hhmm(b.end_at), ` data-b="${b.id}"`)
-                          : '<span class="tsg-c ro">running</span>'}
-                        <b>${esc(TC.hm(b.raw_minutes || 0))}</b>
-                      </div>`).join('')}
-                    </div>` : ''}`;
-                  }).join('');
-                  // Hours a shift sheet carries with no punch behind them. Shown
-                  // as what they are — a total somebody recorded — because
-                  // inventing a clock-in here would put fiction in a pay record.
-                  const noPunch = d.extra.map((x) => `<div class="tsg-r tsg-nop">
-                    <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
-                    <span class="tsg-c ro">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
-                    <span class="tsg-c ro" colspan="2">no punch — typed on the shift</span>
-                    <span class="tsg-c ro"></span><span class="tsg-c ro">—</span>
-                    <b class="tsg-t">${esc(TC.hm(x.minutes))}</b>
-                    <span class="tsg-reg"></span><span class="tsg-ot"></span><span class="tsg-f"></span>
-                  </div>`).join('');
-                  return rows + noPunch;
-                }).join('')}`).join('');
+              // Built from the PERIOD, not from the days that happen to have
+              // something on them. A ledger that skips dates is one nobody can
+              // check a fortnight against — and the days with nothing are
+              // exactly the ones a manager opens this to put a shift on.
+              const found = new Map();
+              for (const wk of weeks) for (const d of wk.days) found.set(d.date, d);
+              const allDates = [];
+              for (let t = Date.parse(period.start + 'T00:00:00Z'); t <= Date.parse(period.end + 'T00:00:00Z'); t += 864e5) {
+                allDates.push(new Date(t).toISOString().slice(0, 10));
+              }
+              const weekIndex = (iso) => (Math.floor((Date.parse(iso + 'T00:00:00Z') - Date.parse(period.start + 'T00:00:00Z')) / 864e5) < 7 ? 0 : 1);
+              const totalsFor = new Map(weeks.map((wk) => [wk.index, wk]));
+              const groups = [];
+              for (const iso of allDates) {
+                const wi = weekIndex(iso);
+                const last = groups[groups.length - 1];
+                if (last && last.index === wi) last.dates.push(iso);
+                else groups.push({ index: wi, dates: [iso] });
+              }
+
+              const punchRows = (d) => d.entries.map((e) => {
+                const brks = TC.q.breaks.all(e.id);
+                const bt = TC.breaksOn(e);
+                const iss = v.issues.filter((i2) => i2.entryId === e.id);
+                const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
+                return `<div class="tsg-r${iss.some((i2) => i2.blocking) ? ' warn' : ''}" id="e-${e.id}" data-entry="${e.id}">
+                  <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                  ${cell(e.id, 'position', posName(e.position) + (e.daypart ? ' · ' + dp(e.daypart) : ''), e.position)}
+                  ${cell(e.id, 'in', TC.clockFace(e.clock_in_at), hhmm(e.clock_in_at))}
+                  ${e.clock_out_at
+                    ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at))
+                    : cell(e.id, 'out', 'set end', hhmm(e.clock_in_at))}
+                  ${brks.length
+                    ? `<button type="button" class="tsg-c tsg-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`
+                    : '<span class="tsg-c ro">—</span>'}
+                  <b class="tsg-t">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>
+                  <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
+                  <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
+                  <span class="tsg-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? '<i class="tcm-tag warn">asked</i>' : ''}</span>
+                </div>
+                ${brks.length ? `<div class="tsg-brks" data-brks="${e.id}" hidden>
+                  ${brks.map((b) => `<div class="tsg-br">
+                    <span>${b.paid ? 'Paid break' : 'Break'}</span>
+                    ${cell(e.id, 'break_start', TC.clockFace(b.start_at), hhmm(b.start_at), ` data-b="${b.id}"`)}
+                    <span class="tsg-to">to</span>
+                    ${b.end_at ? cell(e.id, 'break_end', TC.clockFace(b.end_at), hhmm(b.end_at), ` data-b="${b.id}"`)
+                      : '<span class="tsg-c ro">running</span>'}
+                    <b>${esc(TC.hm(b.raw_minutes || 0))}</b>
+                  </div>`).join('')}
+                </div>` : ''}`;
+              }).join('');
+
+              // Hours typed onto the shift with no punch behind them. The total
+              // stands; the times are editable, and typing one MAKES the punch
+              // at exactly that length, so the figure never moves just because
+              // somebody finally said when it happened.
+              const typedRows = (d) => d.extra.map((x) => `<div class="tsg-r tsg-nop">
+                <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                <span class="tsg-c ro">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
+                ${newCell(d.date, 'in', 'set start')}
+                ${newCell(d.date, 'out', 'set end')}
+                <span class="tsg-c ro">—</span>
+                <b class="tsg-t">${esc(TC.hm(x.minutes))}</b>
+                <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
+                <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
+                <span class="tsg-f"><i class="tcm-tag">typed on the shift</i></span>
+              </div>`).join('');
+
+              const emptyRow = (iso) => `<div class="tsg-r tsg-empty">
+                <span class="tsg-d">${esc(TC.dayLabel(iso))}</span>
+                <span class="tsg-c ro">—</span>
+                ${newCell(iso, 'in', 'set start')}
+                <span class="tsg-c ro">—</span>
+                <span class="tsg-c ro">—</span>
+                <b class="tsg-t">—</b><span class="tsg-reg">—</span><span class="tsg-ot">—</span><span class="tsg-f"></span>
+              </div>`;
+
+              return groups.slice().reverse().map((g) => {
+                const wk = totalsFor.get(g.index);
+                return `${groups.length > 1 ? `<div class="tsg-wk"><span>Week ${g.index + 1}</span>
+                  <b>${esc(TC.hm(wk ? wk.payable : 0))}</b>${wk && wk.overtime ? `<i>${esc(TC.hm(wk.overtime))} OT</i>` : ''}</div>` : ''}
+                ${g.dates.slice().reverse().map((iso) => {
+                  const d = found.get(iso);
+                  if (!d) return emptyRow(iso);
+                  return punchRows(d) + typedRows(d);
+                }).join('')}`;
+              }).join('');
             })()}
           </section>
 
