@@ -3036,8 +3036,13 @@ app.get('/tips', (req, res) => {
       { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const body = `
       <div class="tp">
+        ${/* This was <span></span> — a deliberate blank where the back button
+               goes, because at step 3 there is nothing to step back TO. But
+               "nothing to step back to" is not "nowhere to go": the only way
+               off this screen was "Log another shift", and people were closing
+               the app and reopening it to reach the time clock. */''}
         <div class="tp-navbar">
-          <span></span>
+          <a class="tp-back" href="/portal">&lsaquo; Home</a>
           <span class="tp-navt">Recorded</span>
           <span class="tp-count"><b>3</b> / 3</span>
         </div>
@@ -3066,8 +3071,13 @@ app.get('/tips', (req, res) => {
             and your manager can correct anything.</p>
         </div>
 
-        <div class="tp-foot">
-          <a class="tp-go" href="/tips">Log another shift</a>
+        ${/* What somebody actually does next. Clocking out is the other half
+               of closing out a shift, and it was three taps and a relaunch
+               away. Logging another shift is the rarer case, so it is the
+               quieter button. */''}
+        <div class="tp-foot tp-foot-2">
+          <a class="tp-go" href="/portal/clock">Go to the time clock</a>
+          <a class="tp-go2" href="/tips">Log another shift</a>
         </div>
         <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
       </div>`;
@@ -3266,7 +3276,7 @@ function tipsFormPage(emp, opts = {}) {
               only "Not you?", which is a sign-out, not a way back. Somebody who
               opened this from the hub to look at it had no way home that did
               not end their session. */''}
-        <a class="tp-home" href="/portal">&larr; Home</a>
+        <a class="tp-home" href="/portal">&lsaquo; Home</a>
         <a href="/tips">Not you?</a>
       </div>
 
@@ -3561,15 +3571,63 @@ const hrsShort = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$
 // foot of the home; the status-bar inset is reserved on the body now, not here.
 const portalHead = () => '';
 
-/** A sub-page's only chrome: a back link to the hub, and who you are — an
- *  inline crumb, not a bar. */
-const portalSub = (right) => `
+/**
+ * A sub-page's only chrome: where you came from, and where you are.
+ *
+ * One header on every screen, and the left side is a way BACK rather than a
+ * way home. It said "← Home" everywhere, which meant a person three screens
+ * deep — Time clock, Timesheet, a day — had one button and it threw away the
+ * whole trail. Going back to the timesheet meant going home and starting
+ * again, and the screens that had no crumb at all (the tips receipt) meant
+ * closing the app.
+ *
+ * `back` is the natural parent, which is what a cold open or an app relaunch
+ * needs — a real href, so it works with no history at all. When there IS
+ * history from this same site, the script at the foot follows that instead, so
+ * a shift opened from the timesheet goes back to the timesheet and the same
+ * shift opened from your time history goes back to the history.
+ *
+ * @param back  {href, label} — omit only on the hub itself.
+ * @param title the page's own name, in the corner, as a label not a link.
+ */
+const portalTop = (back, title) => `
   <div class="pt-crumb">
-    <a class="pt-back" href="/portal">← Home</a>
-    ${right ? `<span class="pt-who">${right}</span>` : ''}
+    ${back ? `<a class="pt-back" href="${back.href}" data-pt-back>‹ ${esc(back.label)}</a>` : ''}
+    ${title ? `<span class="pt-who">${esc(title)}</span>` : ''}
   </div>`;
 
-const portalPage = (title, body) => layout(title, `<div class="pt">${body}</div>`, { bare: true, staff: true });
+/**
+ * Makes the back link mean "back" when there is somewhere to go back to.
+ *
+ * The href is the parent and always works. This upgrades it to the actual
+ * previous screen when the person arrived from within the portal — same
+ * origin, and there is history to pop. Outside those two conditions it does
+ * nothing and the plain link stands, which is what an app cold-started on this
+ * page needs.
+ */
+const portalBackScript = () => `<script>
+  (function () {
+    var a = document.querySelector('[data-pt-back]');
+    if (!a) return;
+    var sameSite = document.referrer && document.referrer.indexOf(location.origin) === 0;
+    if (!sameSite || history.length <= 1) return;
+    // Not from the page it already points at — going "back" to where you are
+    // is a button that appears to do nothing.
+    if (document.referrer === location.href) return;
+    // The label named the parent, and the click is about to go somewhere else.
+    // A button that says "Time clock" and lands on the timesheet is worse than
+    // one that just says Back.
+    var href = a.getAttribute('href');
+    if (document.referrer.replace(location.origin, '') !== href) a.textContent = '\u2039 Back';
+    a.addEventListener('click', function (ev) { ev.preventDefault(); history.back(); });
+  })();
+</script>`;
+
+const portalPage = (title, body) => layout(title,
+  // Emitted here rather than at eleven call sites, and only when the page
+  // actually has a back link — which is every sub-page and not the hub.
+  `<div class="pt">${body}</div>${body.includes('data-pt-back') ? portalBackScript() : ''}`,
+  { bare: true, staff: true });
 
 // ---------------------------------------------------------------------------
 // What a person earned. Everything here already existed — it is the engine's
@@ -4153,7 +4211,7 @@ app.get('/portal/earnings/:id', (req, res) => {
   const x = earningsFor(emp.id, 400).find((e) => e.shift.id === id);
   if (!x) return res.redirect('/portal/earnings');
   res.send(portalPage('Your shift', `
-    ${portalSub('<a class="pt-back2" href="/portal/earnings">All earnings</a>')}
+    ${portalTop({ href: '/portal/earnings', label: 'Earnings' }, 'Shift pay')}
     <div class="pt-body">
       <h1 class="pt-title">${esc(niceDate(x.shift.date))}</h1>
       <div class="pt-kick"><span>${esc(dp(x.shift.daypart))} service</span></div>
@@ -4217,7 +4275,7 @@ app.get('/portal/earnings', (req, res) => {
   const statCell = ([v, k]) => `<div class="pt-stat"><b>${v}</b><span>${k}</span></div>`;
 
   res.send(portalPage("What you've earned", `
-    ${portalSub('')}
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Earnings')}
     <div class="pt-body">
       <h1 class="pt-title">What you've earned</h1>
       ${last ? `
@@ -4269,9 +4327,9 @@ app.get('/portal/specials', (req, res) => {
       { hour: 'numeric', minute: '2-digit' }) : null;
 
   res.send(portalPage('Specials & 86 board', `
-    ${portalSub(when ? `Updated ${esc(when)}` : '')}
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Specials')}
     <div class="pt-body">
-      <p class="pt-date">${esc(niceDate(today).toUpperCase())}</p>
+      <p class="pt-date">${esc(niceDate(today).toUpperCase())}${when ? ` — UPDATED ${esc(String(when).toUpperCase())}` : ''}</p>
       <h1 class="pt-title">Specials &amp; 86 board</h1>
       <p class="pt-sub">Know these before your shift.</p>
 
@@ -4314,7 +4372,7 @@ app.get('/portal/stock', (req, res) => {
     `${esc(m.item)}${m.resolution ? ` (${esc(m.resolution)} ✓)` : ` (${esc(m.status)})`}`).join(' · ')}</p>` : '';
 
   res.send(portalPage('Report out of stock', `
-    ${portalSub(esc(firstName(emp.name)))}
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Out of stock')}
     <div class="pt-body">
       <h1 class="pt-title">Out of stock</h1>
       <p class="pt-sub">Add everything you're out of or low on — send it all at once.</p>
@@ -4675,7 +4733,7 @@ function clockPage(req, who, opts = {}) {
     </a>`;
 
   return portalPage('Time clock', `
-    ${portalSub('<a class="pt-back2" href="/portal">Portal</a>')}
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Time clock')}
     <div class="pt-body tc-body">
       ${err}${ok}
       ${receipt}
@@ -5172,7 +5230,7 @@ app.get('/portal/clock/entry/:id', (req, res) => {
   const { can: canAsk, why: whyNot } = pesCanAsk(e);
 
   res.send(portalPage('Your time', `
-    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
+    ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'Your shift')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
       <div class="tc-facts">
@@ -5396,7 +5454,7 @@ app.get('/portal/requests', (req, res) => {
     </div>` : '';
 
   res.send(portalPage('My requests', `
-    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
+    ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'My requests')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">My requests</h1>
       ${returned}
@@ -5432,7 +5490,7 @@ app.get('/portal/clock/history', (req, res) => {
       </a>`).join('')}</div>`);
 
   res.send(portalPage('Your time history', `
-    ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
+    ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'Time history')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">Your time</h1>
       ${group('Today', rows.filter((e) => e.business_date === today))}
@@ -5590,9 +5648,9 @@ app.get('/portal/timesheet', (req, res) => {
     issues: '#ts-issues', view: '#ts-state', open: '#ts-sum' };
 
   res.send(portalPage('Timesheet', `
+    ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'Timesheet')}
     <div class="tsx">
       <header class="tsx-top">
-        <a class="tsx-back" href="/portal/clock" aria-label="Back">‹</a>
         <h1 class="tsx-title">Timesheet</h1>
         <details class="tsx-menu">
           <summary aria-label="Actions">•••</summary>
@@ -5710,7 +5768,7 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
   const per = tsPeriodsFor().find((p) => date >= p.start && date <= p.end) || currentPeriod();
 
   res.send(portalPage('Your day', `
-    ${portalSub(`<a class="pt-back2" href="/portal/timesheet?p=${per.start}">Timesheet</a>`)}
+    ${portalTop({ href: `/portal/timesheet?p=${per.start}`, label: 'Timesheet' }, 'Your day')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
       ${list.length ? list.map((e) => {

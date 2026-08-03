@@ -260,7 +260,9 @@ test('any past shift opens to its own full breakdown', async () => {
   const one = await (await asStaff(`/portal/earnings/${id}`, cookie)).text();
   assert.match(one, /You kept|You worked/, 'the shift opens to its breakdown');
   assert.match(one, /Hours worked|Your rate|salaried/, 'with the hours side of it');
-  assert.match(one, /All earnings/, 'and a way back to the list');
+  // The way back is the header's back link now, not a right-hand "All earnings"
+  // link — same destination, same place on every screen.
+  assert.match(one, /<a class="pt-back" href="\/portal\/earnings"/, 'and a way back to the list');
 
   // A shift id that is not theirs (or not real) does not 404 or leak — it just
   // returns them to their own list.
@@ -967,4 +969,88 @@ test('somebody who worked none of the period is not asked to submit one', async 
 
   assert.ok(!db.prepare("SELECT 1 FROM portal_events WHERE kind='timesheet' AND employee_id = ?").get(idle),
     'and were not asked to sign for them');
+});
+
+// ── One header, and a way back from everywhere ───────────────────────────────
+// Screens had grown their own chrome: most said "← Home" whatever the trail,
+// the timesheet had a different header entirely, and the tips receipt had a
+// deliberate blank where a back button goes — so people were closing the app
+// and reopening it to reach the time clock.
+
+test('every portal sub-page wears the same header, with a way back', async () => {
+  const cookie = await signIn('1111');
+  const D2 = require('../src/dates');
+  const today = D2.isoDate(new Date());
+
+  // Every screen a person can reach by tapping. The hub is deliberately absent
+  // — it is where back GOES, so it is the one page without one.
+  const pages = [
+    '/portal/earnings', '/portal/specials', '/portal/stock', '/portal/clock',
+    '/portal/clock/history', '/portal/requests', '/portal/timesheet',
+    `/portal/timesheet/day/${today}`,
+  ];
+
+  const missing = [];
+  for (const p of pages) {
+    const res = await asStaff(p, cookie);
+    assert.strictEqual(res.status, 200, `${p} renders`);
+    const html = await res.text();
+    const crumb = (html.match(/<div class="pt-crumb">([\s\S]*?)<\/div>/) || [])[1];
+    if (!crumb) { missing.push(`${p}: no crumb at all`); continue; }
+    // The back link, and it is the FIRST thing in the header — a back button
+    // somewhere else on the bar is not the one a thumb reaches for.
+    const back = crumb.match(/^\s*<a class="pt-back" href="([^"]+)"[^>]*>\s*‹\s*([^<]+)</);
+    if (!back) { missing.push(`${p}: no leading back link`); continue; }
+    if (!/^\/(portal|tips)/.test(back[1])) missing.push(`${p}: back goes off the portal (${back[1]})`);
+    if (back[1] === p) missing.push(`${p}: back points at itself`);
+    // And the page names itself in the corner.
+    if (!/class="pt-who">/.test(crumb)) missing.push(`${p}: no page name`);
+    // The link works, rather than 404ing on a path somebody mistyped.
+    const target = await asStaff(back[1], cookie);
+    if (target.status !== 200) missing.push(`${p}: back → ${back[1]} answers ${target.status}`);
+  }
+  assert.deepStrictEqual(missing, [], 'every sub-page has a working back link and a name');
+
+  // The hub itself has no crumb — it is the destination, not a stop.
+  const hub = await (await asStaff('/portal', cookie)).text();
+  assert.ok(!/class="pt-crumb"/.test(hub), 'the hub needs no way back to itself');
+
+  // And nothing is still wearing the old timesheet-only header.
+  for (const p of pages) {
+    const html = await (await asStaff(p, cookie)).text();
+    assert.ok(!/class="tsx-back"/.test(html), `${p} does not use the old header`);
+  }
+});
+
+test('the back link follows the trail, not just the parent', async () => {
+  // A shift is reachable from the timesheet, from a day, and from time history.
+  // A static parent is right for a cold open and wrong for all three, so the
+  // page ships the parent as a real href and upgrades it from history — and
+  // relabels itself when the two disagree, because a button that says "Time
+  // clock" and lands on the timesheet is worse than one that says Back.
+  const cookie = await signIn('1111');
+  const html = await (await asStaff('/portal/clock', cookie)).text();
+  assert.match(html, /data-pt-back/, 'the back link is marked for the script');
+  assert.match(html, /history\.back\(\)/, 'and the script is on the page');
+  assert.match(html, /document\.referrer/, 'gated on where they came from');
+  assert.match(html, /history\.length <= 1/, 'and on there being any history');
+  // A cold open has neither, so the plain href has to stand on its own.
+  assert.match(html, /<a class="pt-back" href="\/portal"/, 'the href is a real destination');
+
+  // The hub has no back link, so it must not carry the script either.
+  const hub = await (await asStaff('/portal', cookie)).text();
+  assert.ok(!/history\.back\(\)/.test(hub), 'and the hub ships no back script');
+});
+
+test('the tips receipt lets you out — to the clock, or home', async () => {
+  // This is the one people reported: submit your tips, and the only button was
+  // "Log another shift". Clocking out is the other half of closing out a shift
+  // and it was a relaunch away.
+  const html = await (await fetch(`${BASE}/tips?done=1&cash=40.00&card=25.50&date=2026-07-27`)).text();
+  assert.match(html, /Recorded|Thanks/, 'it is the receipt');
+  assert.match(html, /href="\/portal\/clock"[^>]*>[^<]*time clock/i, 'the clock is one tap');
+  assert.match(html, /class="tp-back" href="\/portal"/, 'and there is a way home in the header');
+  assert.match(html, /href="\/tips"[^>]*>[^<]*another shift/i, 'logging another is still there');
+  // The blank that used to sit where the back button goes.
+  assert.ok(!/<div class="tp-navbar">\s*<span><\/span>/.test(html), 'no empty slot where the way out belongs');
 });

@@ -927,6 +927,13 @@ body.bare {
   border: 0; padding: 4px 2px; text-align: right; max-width: 60%;
   -webkit-appearance: none; appearance: none; }
 
+/* Two actions at the foot of the tips receipt: the one people want (the clock)
+   and the rarer one (another shift), so neither is a guess. */
+.tp-foot-2 { display: grid; gap: 10px; }
+.tp-go2 { display: block; text-align: center; padding: 14px 16px; font: inherit; font-size: 15px;
+  font-weight: 600; color: var(--pt-blue); background: none; border: 1px solid var(--pt-line);
+  text-decoration: none; }
+
 .pes-pin input { font: inherit; font-size: 16px; width: 112px; text-align: center;
   letter-spacing: .18em; padding: 9px 10px; border: 1px solid var(--pt-line);
   background: var(--pt-field); color: var(--pt-ink); border-radius: 0; }
@@ -1021,8 +1028,12 @@ body.bare {
 .tsx { min-height: 100dvh; display: flex; flex-direction: column; }
 .tsx-top { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
 .tsx-back { font-size: 26px; line-height: 1; color: var(--pt-blue); text-decoration: none; width: 32px; }
-.tsx-title { flex: 1 1 auto; text-align: center; font-family: var(--pt-serif, Georgia, serif); font-size: 21px;
+/* Left, like every other page's title. It was centred to sit between a back
+   arrow and the menu; the back arrow moved up into the shared crumb, and a
+   centred title with nothing on its left just looks adrift. */
+.tsx-title { flex: 1 1 auto; text-align: left; font-family: var(--pt-serif, Georgia, serif); font-size: 26px;
   color: var(--pt-ink); margin: 0; font-weight: 500; }
+.pt-crumb + .tsx .tsx-top { padding-top: 10px; }
 .tsx-menu { position: relative; width: 32px; text-align: right; }
 .tsx-menu > summary { list-style: none; cursor: pointer; font-size: 20px; color: var(--pt-ink); letter-spacing: 1px; }
 .tsx-menu > summary::-webkit-details-marker { display: none; }
