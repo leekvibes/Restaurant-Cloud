@@ -253,3 +253,54 @@ test('no write path outside the helpers touches the punch tables', () => {
       + 'or the overlap rules apply to some punches and not others.');
   }
 });
+
+// --- the overtime split, a row at a time -----------------------------------
+
+test('the day that crosses the weekly threshold is the one that splits', () => {
+  // What a reviewer sees on the grid, and the thing that makes a weekly
+  // threshold comprehensible: the early days of a week are regular, and the day
+  // that tips it over comes back part regular and part overtime.
+  const start = '2026-03-01';
+  const mk = (date, mins) => ({ business_date: date, clock_out_at: `${date} 23:00:00`, payable_minutes: mins });
+  const entries = [
+    mk('2026-03-02', 600), mk('2026-03-03', 600), mk('2026-03-04', 600),
+    mk('2026-03-05', 600), mk('2026-03-06', 600),          // 50 hours across five days
+  ];
+  const [week] = TC.splitWeeks(entries, { otEnabled: true, otThreshold: 40, periodStart: start });
+  assert.strictEqual(week.payable, 3000, 'fifty hours in the week');
+  assert.strictEqual(week.overtime, 600, 'ten of them over the forty');
+
+  const byDate = Object.fromEntries(week.days.map((d) => [d.date, d]));
+  assert.strictEqual(byDate['2026-03-02'].overtime, 0, 'Monday is all regular');
+  assert.strictEqual(byDate['2026-03-05'].overtime, 0, 'and so is Thursday, at exactly forty');
+  assert.strictEqual(byDate['2026-03-06'].regular, 0, 'Friday is the day that tipped it');
+  assert.strictEqual(byDate['2026-03-06'].overtime, 600, 'so Friday carries all ten hours of it');
+});
+
+test('adding a day earlier in the week re-splits the days after it', () => {
+  // The behaviour to get right: a shift added on the Wednesday changes what
+  // Friday reads, because the week crossed the threshold sooner. A grid that
+  // only recalculated the row being edited would quietly disagree with payroll.
+  const start = '2026-03-01';
+  const mk = (date, mins) => ({ business_date: date, clock_out_at: `${date} 23:00:00`, payable_minutes: mins });
+  const opts = { otEnabled: true, otThreshold: 40, periodStart: start };
+
+  const before = TC.splitWeeks([mk('2026-03-02', 600), mk('2026-03-03', 600),
+    mk('2026-03-05', 600), mk('2026-03-06', 600)], opts)[0];
+  const fridayBefore = before.days.find((d) => d.date === '2026-03-06');
+  assert.strictEqual(fridayBefore.overtime, 0, 'forty hours exactly — no overtime yet');
+
+  const after = TC.splitWeeks([mk('2026-03-02', 600), mk('2026-03-03', 600),
+    mk('2026-03-04', 300), mk('2026-03-05', 600), mk('2026-03-06', 600)], opts)[0];
+  const fridayAfter = after.days.find((d) => d.date === '2026-03-06');
+  assert.strictEqual(fridayAfter.overtime, 300, 'the added Wednesday pushed five hours of Friday into overtime');
+  assert.strictEqual(fridayAfter.regular, 300, 'and left the other five regular');
+});
+
+test('with overtime switched off, nothing is ever split', () => {
+  const mk = (date, mins) => ({ business_date: date, clock_out_at: `${date} 23:00:00`, payable_minutes: mins });
+  const [week] = TC.splitWeeks([mk('2026-03-02', 900), mk('2026-03-03', 900)],
+    { otEnabled: false, otThreshold: 40, periodStart: '2026-03-01' });
+  assert.strictEqual(week.overtime, 0, 'thirty hours over the threshold, and none of it overtime');
+  assert.strictEqual(week.regular, week.payable, 'it is all regular');
+});

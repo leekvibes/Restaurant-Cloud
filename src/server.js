@@ -15629,6 +15629,127 @@ app.post('/timeclock/:id/edit', (req, res) => {
   res.redirect(punchBack(req, `/timeclock/${e.id}`, 'Correction saved.', `#e-${e.id}`));
 });
 
+/**
+ * One cell of the review grid.
+ *
+ * The whole point of the redesign: a reviewer clicks a time, types, and it is
+ * saved. No form, no drawer, no page, no reason. Everything a manager can
+ * change about a punch comes through here, one field at a time, so the client
+ * has one thing to call and the rules have one place to live.
+ *
+ * Answers JSON, and answers it in three shapes the grid understands:
+ *   ok             — saved; the grid re-reads the period so every total,
+ *                    including the weekly overtime split on OTHER rows, comes
+ *                    from the server rather than being guessed at here
+ *   needs_reopen   — this period is signed; the grid asks once and calls back
+ *                    with reopen=1
+ *   error          — a sentence to show, from the same guards every other path
+ *                    uses (overlap, breaks that would fall outside, and so on)
+ */
+app.post('/timeclock/:id/cell', express.json(), (req, res) => {
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).json({ error: 'That punch no longer exists.' });
+  if (!canWrite()) return res.status(403).json({ error: 'Your account is view-only.' });
+  if (!punchReadable()) return res.status(403).json({ error: 'Correcting a punch needs the time clock or payroll.' });
+
+  const actor = tcActor(req);
+  const field = String(req.body.field || '');
+  const value = String(req.body.value == null ? '' : req.body.value).trim();
+
+  // A signed period is not refused outright any more — it asks. Reopening is
+  // the deliberate act, and doing it from the cell you were about to edit is
+  // the same decision with one fewer screen in the way. It is recorded either
+  // way; what changes is that nobody has to go and find a button first.
+  const st = sheetCovering(e.employee_id, e.business_date);
+  if (st.frozen) {
+    if (req.body.reopen !== true && req.body.reopen !== '1') {
+      return res.status(409).json({ needs_reopen: true, status: st.sheet.status,
+        message: `${TC.dayLabel(e.business_date)} is on a timesheet that was ${st.sheet.status}`
+          + `${st.sheet.approved_by ? ` by ${st.sheet.approved_by}` : ''}. `
+          + 'Editing reopens it, and it will need approving again.' });
+    }
+    const sheet = TC.sheetFor(e.employee_id, st.period, { create: true });
+    const transfer = TC.q.currentTransfer.get(sheet.id);
+    const why = `reopened by ${actor} to correct the timesheet`;
+    db.transaction(() => {
+      TC.q.supersedeApprovals.run({ timesheet_id: sheet.id, by: actor, reason: why });
+      TC.q.reopenSheet.run({ id: sheet.id, status: 'submitted', by: actor, reason: why });
+      TC.q.setTransferState.run({ id: sheet.id, state: transfer ? 'needs_recalculation' : 'not_ready' });
+      TC.logEvent('timesheet', sheet.id, 'reopened', actor, { before: st.sheet.status, after: 'submitted', reason: why });
+      if (transfer) TC.logEvent('timesheet', sheet.id, 'payroll_marked_outdated', actor, { reason: why });
+    })();
+  }
+
+  // A time arrives as wall clock on a known day. An END earlier than the start
+  // means the next morning — which is what somebody typing 2:00 AM at the end
+  // of a nine o'clock shift means, and refusing it would be pedantry about a
+  // shift that half this trade works.
+  const onDay = (day, hhmm) => TC.localInputToUtc(`${day}T${hhmm}`);
+  const dayOf = (utc) => TC.utcToLocalInput(utc).slice(0, 10);
+
+  try {
+    let summary = '';
+    if (field === 'in' || field === 'out') {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return res.status(400).json({ error: 'That is not a time.' });
+      let inAt = e.clock_in_at, outAt = e.clock_out_at;
+      if (field === 'in') {
+        inAt = onDay(dayOf(e.clock_in_at), value);
+        if (outAt && outAt <= inAt) outAt = onDay(dayOf(inAt), TC.utcToLocalInput(outAt).slice(11, 16));
+      } else {
+        outAt = onDay(dayOf(e.clock_in_at), value);
+        if (outAt <= inAt) outAt = onDay(require('./dates').addDays(dayOf(e.clock_in_at), 1), value);
+      }
+      const wasT = `${TC.clockFace(e.clock_in_at)} → ${e.clock_out_at ? TC.clockFace(e.clock_out_at) : 'open'}`;
+      TC.editEntryChecked(e, { in: inAt, out: outAt, daypart: e.daypart, position: e.position, by: actor });
+      TC.logEvent('entry', e.id, field === 'in' ? 'clock_in_corrected' : 'clock_out_corrected', actor,
+        { before: wasT, after: `${TC.clockFace(inAt)} → ${outAt ? TC.clockFace(outAt) : 'open'}` });
+      summary = field === 'in' ? 'clock-in' : 'clock-out';
+    } else if (field === 'position') {
+      if (!allRoles().includes(value)) return res.status(400).json({ error: 'That is not a position.' });
+      TC.editEntryChecked(e, { in: e.clock_in_at, out: e.clock_out_at, daypart: e.daypart, position: value, by: actor });
+      TC.logEvent('entry', e.id, 'position_corrected', actor, { before: e.position, after: value });
+      summary = 'position';
+    } else if (field === 'daypart') {
+      if (!DAYPARTS.includes(value)) return res.status(400).json({ error: 'That is not a service.' });
+      TC.editEntryChecked(e, { in: e.clock_in_at, out: e.clock_out_at, daypart: value, position: e.position, by: actor });
+      TC.logEvent('entry', e.id, 'service_corrected', actor, { before: e.daypart || 'none', after: value });
+      summary = 'service';
+    } else if (field === 'break_start' || field === 'break_end') {
+      const b = TC.q.breakById.get(Number(req.body.break_id));
+      if (!b || b.time_entry_id !== e.id) return res.status(404).json({ error: 'That break is not on this punch.' });
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return res.status(400).json({ error: 'That is not a time.' });
+      let start = b.start_at, end = b.end_at;
+      if (field === 'break_start') start = onDay(dayOf(b.start_at), value);
+      else {
+        end = onDay(dayOf(b.start_at), value);
+        if (end <= start) end = onDay(require('./dates').addDays(dayOf(b.start_at), 1), value);
+      }
+      TC.assertBreakFits(e, b.id, start, end);
+      TC.q.editBreak.run({ id: b.id, start_at: start, end_at: end, paid: b.paid, raw: TC.minutesBetween(start, end) });
+      TC.recompute(TC.q.byId.get(e.id));
+      TC.logEvent('break', b.id, 'manager_edit', actor,
+        { before: `${TC.clockFace(b.start_at)}–${b.end_at ? TC.clockFace(b.end_at) : 'open'}`,
+          after: `${TC.clockFace(start)}–${TC.clockFace(end)}` });
+      summary = 'break';
+    } else {
+      return res.status(400).json({ error: 'Nothing to change.' });
+    }
+
+    // The minutes, then the hours, then the sheet — in the same breath as the
+    // punch, so nothing downstream ever sees the new times against the old total.
+    const moved = TC.q.byId.get(e.id);
+    if (moved.clock_out_at) TC.recompute(moved);
+    const fresh = TC.q.byId.get(e.id);
+    tcTouchTimesheet(e.id, actor, `a manager corrected the ${summary}`, [e.business_date]);
+    TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
+    if (e.shift_id && e.shift_id !== fresh.shift_id) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof TC.ClockError) return res.status(400).json({ error: err.message });
+    throw err;
+  }
+});
+
 app.post('/timeclock/:id/break', (req, res) => {
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();

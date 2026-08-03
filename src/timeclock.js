@@ -1428,6 +1428,73 @@ function totalsFor(entries, opts = {}) {
   return { raw, paid, unpaid, payable, overtime, regular: Math.max(0, payable - overtime) };
 }
 
+/**
+ * A period laid out as weeks and days, with the overtime split shown where it
+ * actually falls.
+ *
+ * totalsFor answers "how much of this period is overtime" for payroll. A
+ * reviewer needs the same rule shown a row at a time: which DAY tipped the week
+ * over, and how that day divides. Both read the same threshold and the same
+ * week boundary, so a screen can never disagree with the pay.
+ *
+ * Allocated chronologically within each week, which is what makes the split
+ * land where somebody expects: the early days of a week are regular, and the
+ * day that crosses the threshold is the one that comes back part regular and
+ * part overtime. Add a shift to the Wednesday and Friday's split changes —
+ * that is not a quirk, it is what a weekly threshold means.
+ */
+function splitWeeks(entries, opts = {}) {
+  const periodStart = opts.periodStart;
+  const extra = opts.extra || [];
+  const otOn = !!opts.otEnabled && !opts.otExempt && !!periodStart;
+  const threshold = (opts.otThreshold || 40) * 60;
+
+  const days = new Map();
+  const bucket = (date) => {
+    if (!days.has(date)) days.set(date, { date, entries: [], extra: [], minutes: 0 });
+    return days.get(date);
+  };
+  for (const e of entries) {
+    const d = bucket(e.business_date);
+    d.entries.push(e);
+    if (e.clock_out_at) d.minutes += e.payable_minutes || 0;
+  }
+  for (const x of extra) {
+    const d = bucket(x.business_date);
+    d.extra.push(x);
+    d.minutes += x.minutes || 0;
+  }
+
+  // The same week boundary totalsFor uses, spelled the same way on purpose —
+  // two expressions that mean the same thing today are two that can stop
+  // meaning the same thing later.
+  const weekOf = (date) => (Math.floor((new Date(date) - new Date(periodStart)) / 86400000) < 7 ? 0 : 1);
+  const weeks = new Map();
+  for (const d of days.values()) {
+    const wk = periodStart ? weekOf(d.date) : 0;
+    if (!weeks.has(wk)) weeks.set(wk, []);
+    weeks.get(wk).push(d);
+  }
+
+  const out = [];
+  for (const [index, list] of [...weeks.entries()].sort((a, b) => a[0] - b[0])) {
+    list.sort((a, b) => a.date.localeCompare(b.date));       // chronological, so the split lands right
+    let used = 0, payable = 0, overtime = 0;
+    for (const d of list) {
+      const before = used, after = used + d.minutes;
+      d.overtime = otOn ? Math.max(0, after - threshold) - Math.max(0, before - threshold) : 0;
+      d.regular = d.minutes - d.overtime;
+      used = after;
+      payable += d.minutes;
+      overtime += d.overtime;
+    }
+    out.push({ index, days: list.slice().reverse(),          // newest first, the way the sheet reads
+      payable, overtime, regular: payable - overtime,
+      start: list[0].date, end: list[list.length - 1].date });
+  }
+  return out.reverse();                                       // newest week first
+}
+
 /** Group a period's entries by business date, newest first. */
 function byDay(entries) {
   const m = new Map();
@@ -1703,7 +1770,7 @@ module.exports = {
   localInputToUtc, utcToLocalInput,
   STATUSES, isOpen, ClockError, DEFAULTS,
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
-  createEntry, editEntryChecked, addBreak, startOpenBreak, punchIntegrity,
+  createEntry, editEntryChecked, addBreak, startOpenBreak, punchIntegrity, splitWeeks,
   sheetCovering, frozenFor, FROZEN_SHEET,
   syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,

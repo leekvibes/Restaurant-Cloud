@@ -1219,3 +1219,118 @@ test('the migration stamps existing hours as legacy and leaves never-set rows to
   after.close();
   fs.rmSync(d2, { recursive: true, force: true });
 });
+
+// ===========================================================================
+// One cell, one click, one save.
+//
+// The review grid's whole promise: a reviewer clicks a time, types, and it is
+// saved — no form, no drawer, no other page, and no reason to type. Everything
+// a manager can change about a punch goes through this one route, so the rules
+// have one place to live and the client has one thing to call.
+// ===========================================================================
+
+const cell = (id, body) => post(`/timeclock/${id}/cell`, null, {
+  'content-type': 'application/json',
+}, JSON.stringify(body));
+
+test('clicking a time and typing a new one saves it, with no reason asked for', async () => {
+  const emp = E.broken;
+  const day = P2.recentPeriods(3)[2].start;
+  const e = await punch(emp, day, '17:00', '23:00');
+
+  const res = await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'in', value: '16:30' }),
+  });
+  assert.strictEqual(res.status, 200);
+  assert.deepStrictEqual(await res.json(), { ok: true });
+
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.strictEqual(after.clock_in_at.slice(11, 16), '20:30', 'the clock-in moved (stored UTC)');
+  // The minutes are recalculated in the same breath. Moving the times and
+  // leaving the total behind is how a screen ends up disagreeing with the pay.
+  const span = (Date.parse(after.clock_out_at.replace(' ', 'T') + 'Z')
+    - Date.parse(after.clock_in_at.replace(' ', 'T') + 'Z')) / 60000;
+  assert.strictEqual(after.payable_minutes, span, 'and the total was recomputed to match');
+  // And it is on the record, without anybody having typed a sentence.
+  const ev = db.prepare("SELECT * FROM time_events WHERE entity='entry' AND entity_id=? AND action='clock_in_corrected'").get(e.id);
+  assert.ok(ev, 'the change is in the audit');
+  assert.ok(ev.actor, 'naming who made it');
+});
+
+test('an end earlier than the start means the next morning', async () => {
+  // Half this trade works a shift that ends after midnight. Typing 2:15 into
+  // the end of a nine o'clock shift means tomorrow, and refusing it as
+  // "before the start" would be pedantry about the normal case.
+  const emp = 181;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4181',1500,1)")
+    .run(emp, 'Overnight Case');
+  const day = P2.recentPeriods(4)[3].start;
+  const e = await punch(emp, day, '21:00', '23:30');
+  await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'out', value: '02:15' }),
+  });
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.ok(after.clock_out_at > after.clock_in_at, 'the end is after the start');
+  // Asserted as a duration, not as a date. The column is UTC and a 9pm shift is
+  // already on the next UTC day before it starts, so comparing stored dates
+  // would pass or fail on the timezone rather than on the behaviour.
+  const mins = (Date.parse(after.clock_out_at.replace(' ', 'T') + 'Z')
+    - Date.parse(after.clock_in_at.replace(' ', 'T') + 'Z')) / 60000;
+  assert.strictEqual(mins, 315, 'five and a quarter hours — it rolled into the next morning');
+});
+
+test('a cell edit is refused by the same guards every other path uses', async () => {
+  const emp = E.sent;
+  const day = P2.recentPeriods(3)[2].start;
+  const a = await punch(emp, day, '09:00', '12:00');
+  await punch(emp, day, '14:00', '18:00');
+  // Dragging the first punch over the second is the thing the overlap rule
+  // exists for, and the grid gets the same refusal in words it can show.
+  const res = await fetch(`${BASE}/timeclock/${a.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'out', value: '16:00' }),
+  });
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.match(body.error, /overlap/i, 'and says why, in a sentence');
+  assert.strictEqual(db.prepare('SELECT clock_out_at FROM time_entries WHERE id = ?').get(a.id).clock_out_at,
+    a.clock_out_at, 'nothing moved');
+});
+
+test('a signed period asks once, then reopens and takes the edit', async () => {
+  // Not a refusal any more. Reopening is still the deliberate act, and it is
+  // still recorded — it just happens from the cell you were already editing,
+  // instead of sending you off to find a button and come back.
+  const emp = 182;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4182',1500,1)")
+    .run(emp, 'Reopen Cell Case');
+  const day = P2.recentPeriods(4)[3].start;
+  const e = await punch(emp, day, '10:00', '15:00');
+  const per = freeze(emp, day, 'approved');
+
+  const asked = await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'in', value: '09:30' }),
+  });
+  assert.strictEqual(asked.status, 409, 'it asks rather than refusing');
+  const q = await asked.json();
+  assert.strictEqual(q.needs_reopen, true);
+  assert.match(q.message, /approved/, 'and explains what it is about to do');
+  assert.match(q.message, /need approving again/, 'including the consequence');
+  assert.strictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(e.id).clock_in_at,
+    e.clock_in_at, 'and nothing changed while it asked');
+
+  const done = await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'in', value: '09:30', reopen: true }),
+  });
+  assert.strictEqual(done.status, 200, 'answering yes carries the edit through');
+  const sheet = db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(emp, per.start);
+  assert.strictEqual(sheet.status, 'submitted', 'the period reopened');
+  assert.match(sheet.reopen_reason, /to correct the timesheet/, 'recording that it did');
+  assert.notStrictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(e.id).clock_in_at,
+    e.clock_in_at, 'and the edit landed');
+  thaw(emp, day);
+});
