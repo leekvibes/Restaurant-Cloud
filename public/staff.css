@@ -921,6 +921,12 @@ body.bare {
   border: 1px solid var(--pt-line); background: var(--pt-field); color: var(--pt-ink); resize: vertical; }
 /* The PIN sits in the sheet's own row rhythm. (.tc-pin styles the input on the
    full-screen clock; on a label it turns the word "PIN" into a giant keypad.) */
+/* Position and service on the add sheet. Native select, so the phone brings
+   its own picker — the same bargain the date and time rows make. */
+.pes-sel { font: inherit; font-size: 16px; color: var(--pt-blue); background: none;
+  border: 0; padding: 4px 2px; text-align: right; max-width: 60%;
+  -webkit-appearance: none; appearance: none; }
+
 .pes-pin input { font: inherit; font-size: 16px; width: 112px; text-align: center;
   letter-spacing: .18em; padding: 9px 10px; border: 1px solid var(--pt-line);
   background: var(--pt-field); color: var(--pt-ink); border-radius: 0; }

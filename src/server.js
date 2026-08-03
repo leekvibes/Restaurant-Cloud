@@ -5026,6 +5026,66 @@ function pesSheet(e, brs) {
     </div>`;
 }
 
+/**
+ * The same sheet, for a shift that was never clocked.
+ *
+ * A night the clock has no record of — forgot to punch in, tablet was down,
+ * called in and nobody set it up — used to have exactly one route: find a
+ * manager. Every request kind edits a punch, and there was no punch to edit.
+ *
+ * Nothing is written when this is sent. It files a request like any other, and
+ * the punch does not exist until a manager approves it.
+ */
+function pesAddSheet(emp, date, positions_, dayparts) {
+  return `
+    <div class="pes" data-pes="new-${esc(date)}" hidden>
+      <div class="pes-scrim" data-pes-close></div>
+      <form class="pes-panel" method="post" action="/portal/clock/add"
+            data-unpaid="0"
+            data-orig-in="" data-orig-out="">
+        <div class="pes-bar">
+          <button type="button" class="pes-back" data-pes-close aria-label="Back">‹</button>
+          <b>Add a shift</b>
+        </div>
+        <input type="hidden" name="at_in" data-pes-in>
+        <input type="hidden" name="at_out" data-pes-out>
+
+        <label class="pes-row"><span>Starts</span>
+          <input type="date" data-pes-ind value="${esc(date)}">
+          <input type="time" data-pes-int>
+        </label>
+        <label class="pes-row"><span>Ends</span>
+          <input type="date" data-pes-outd value="${esc(date)}">
+          <input type="time" data-pes-outt>
+        </label>
+
+        <div class="pes-total"><span>Total hours<i data-pes-sub></i></span><b data-pes-tot>—</b></div>
+
+        <label class="pes-row"><span>Position</span>
+          <select name="position" class="pes-sel" required>
+            ${positions_.map((r) => `<option value="${esc(r)}">${esc(posName(r))}</option>`).join('')}
+          </select></label>
+        <label class="pes-row"><span>Service</span>
+          <select name="daypart" class="pes-sel" required>
+            ${dayparts.map((d) => `<option value="${esc(d)}">${esc(dp(d))}</option>`).join('')}
+          </select></label>
+
+        <label class="pes-note"><span>Add a note <i>optional</i></span>
+          <textarea name="note" maxlength="500" rows="3" placeholder="Say what happened, if it helps"></textarea></label>
+
+        <label class="pes-row pes-pin"><span>Your PIN</span>
+          <input name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required></label>
+
+        <p class="pes-fine">Nothing is added until your manager approves it.</p>
+        <button class="tc-btn tc-btn-go tc-btn-big" type="submit">Send for approval</button>
+      </form>
+    </div>`;
+}
+
+/** The button that opens the add sheet for a given day. */
+const pesAddButton = (date, label = 'Add a shift', cls = 'tc-btn tc-btn-quiet tc-btn-big') =>
+  `<button type="button" class="${cls}" data-pes-open="new-${esc(date)}">${esc(label)}</button>`;
+
 /** One script, however many sheets are on the page. Emit once, at the end. */
 function pesScript() {
   return `<script>
@@ -5226,6 +5286,67 @@ app.post('/portal/clock/fix', (req, res) => {
       { body: reason.slice(0, 140), href: `/timeclock/${e.id}` });
   } catch { /* the request is saved regardless */ }
   res.redirect('/portal/clock?ok=' + encodeURIComponent('Sent to your manager.'));
+});
+
+/**
+ * Ask for a shift that was never clocked.
+ *
+ * The mirror of /portal/clock/fix, and it writes exactly as much to the clock:
+ * nothing. It files a request. The punch is made when a manager approves it,
+ * through the same door a manager typing it in by hand goes through, so it
+ * clears the same overlap check and lands on the same shift row.
+ */
+app.post('/portal/clock/add', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const b = req.body;
+  const at_in = b.at_in ? TC.localInputToUtc(b.at_in) : null;
+  const at_out = b.at_out ? TC.localInputToUtc(b.at_out) : null;
+  const day = at_in ? TC.businessDateOf(at_in, TC.settings().cutoffHour) : null;
+  const back = (p) => res.redirect(`/portal/timesheet/day/${day || TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour)}?` + p);
+  {
+    const g = pinCheck(req, emp, b.pin);
+    if (!g.ok) return back('err=' + encodeURIComponent(g.msg));
+  }
+  if (!at_in || !at_out) return back('err=' + encodeURIComponent('A shift needs a start and an end.'));
+  if (at_out <= at_in) return back('err=' + encodeURIComponent('The end has to be after the start.'));
+  // Their own positions only. The list on the sheet is built from the same
+  // function, so this refuses only a hand-made post.
+  const position = clockPositionsFor(emp).includes(b.position) ? b.position : null;
+  if (!position) return back('err=' + encodeURIComponent('Pick the position you worked.'));
+  const daypart = DAYPARTS.includes(b.daypart) ? b.daypart : null;
+  if (!daypart) return back('err=' + encodeURIComponent('Pick the service you worked.'));
+
+  // Refused here as well as on approval. A request that can never be approved
+  // is worse than no request: it sits in a manager's queue looking like work.
+  try {
+    TC.assertNoEntryOverlap({ employee_id: emp.id, id: 0 }, at_in, at_out);
+  } catch (e) {
+    if (e instanceof TC.ClockError) return back('err=' + encodeURIComponent(e.message));
+    throw e;
+  }
+
+  const reason = String(b.note || '').trim().slice(0, 500);
+  const summary = `${TC.clockFace(at_in)} – ${TC.clockFace(at_out)} · ${posName(position)}`;
+  db.transaction(() => {
+    const info = TC.q.addCorrection.run({
+      time_entry_id: null, employee_id: emp.id, kind: 'new_shift', field: null,
+      original_value: `no shift recorded on ${day}`,
+      proposed_value: summary,
+      reason, requested_by: emp.name,
+    });
+    db.prepare('UPDATE time_corrections SET payload = ? WHERE id = ?').run(
+      JSON.stringify({ in: at_in, out: at_out, position, daypart, business_date: day }),
+      info.lastInsertRowid);
+    TC.logEvent('correction', info.lastInsertRowid, 'requested', emp.name,
+      { after: `add ${summary}`, reason });
+  })();
+  try {
+    PORTAL.adminNotify('timeclock', `${emp.name} asked to add a shift`,
+      { body: `${day} · ${summary}`, href: '/timeclock' });
+  } catch { /* the request is saved regardless */ }
+  back('ok=' + encodeURIComponent('Sent to your manager.'));
 });
 
 /**
@@ -5441,8 +5562,11 @@ app.get('/portal/timesheet', (req, res) => {
     const dt = new Date(d + 'T00:00:00');
     const bad = v.issues.some((i) => list.some((e) => e.id === i.entryId) && i.blocking);
     const isToday = d === todayIso;
+    // A day with nothing on it is still a day you can open — that is where a
+    // shift nobody clocked gets asked for. It was a dead link with
+    // aria-disabled, which is exactly the day somebody most needs to reach.
     return `<a class="tsd${list.length ? '' : ' tsd-none'}${isToday ? ' tsd-today' : ''}${bad ? ' tsd-bad' : ''}"
-      href="${list.length ? `/portal/timesheet/day/${d}` : '#'}"${list.length ? '' : ' aria-disabled="true"'}>
+      href="/portal/timesheet/day/${d}">
       <span class="tsd-d"><b>${dt.getDate()}</b><i>${dt.toLocaleDateString('en-US', { weekday: 'short' })}</i></span>
       <span class="tsd-c"><i>Paid breaks</i><b>${paidBrk ? hm(paidBrk) : '--'}</b></span>
       <span class="tsd-c"><i>Regular</i><b>${mins ? hm(otOn ? Math.max(0, mins) : mins) : '--'}</b></span>
@@ -5578,6 +5702,11 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
   if (!date) return res.redirect('/portal/timesheet');
   const list = TC.q.forEmployeeSince.all(emp.id, date).filter((e) => e.business_date === date);
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  // Shifts they have already asked for on this day and not been answered on.
+  const pend = TC.q.newShiftsFor.all(emp.id).filter((c) => {
+    if (c.decision !== 'pending') return false;
+    try { return JSON.parse(c.payload || '{}').business_date === date; } catch { return false; }
+  });
   const per = tsPeriodsFor().find((p) => date >= p.start && date <= p.end) || currentPeriod();
 
   res.send(portalPage('Your day', `
@@ -5604,10 +5733,22 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
           ${ask.can ? pesButton(e) : `<p class="tc-note">${esc(ask.why)}</p>`}
           <a class="tc-more" href="/portal/clock/entry/${e.id}">Shift details and history ›</a>
         </section>`;
-      }).join('') : '<p class="tc-note">Nothing recorded on this day.</p>'}
+      }).join('') : `<p class="tc-note">Nothing recorded on this day.${pend.length ? '' : ' If you worked it, add it and your manager can approve it.'}</p>`}
+
+      ${/* Already asked for. Shown before the button so nobody files the same
+             night twice, having forgotten they already did. */''}
+      ${pend.length ? `<div class="tc-kick tc-kick-sec">Waiting on your manager</div>
+        <div class="tc-rows">${pend.map((c) => `<div class="tc-row">
+          <span class="tc-row-l"><b>${esc(c.proposed_value || 'a shift')}</b><i>${esc(c.reason || 'no note')}</i></span>
+          <span class="tc-row-r"><b>pending</b></span></div>`).join('')}</div>` : ''}
+
+      ${/* Any day, worked or not. A double that only half-registered needs the
+             other half added just as much as an empty day does. */''}
+      ${pesAddButton(date, list.length ? 'Add another shift' : 'Add a shift')}
     </div>
     ${list.filter((e) => pesCanAsk(e).can).map((e) => pesSheet(e, TC.q.breaks.all(e.id))).join('')}
-    ${list.some((e) => pesCanAsk(e).can) ? pesScript() : ''}`));
+    ${pesAddSheet(emp, date, clockPositionsFor(emp), DAYPARTS)}
+    ${pesScript()}`));
 });
 app.post('/portal/timesheet/submit', (req, res) => {
   const who = requirePortal(req, res);
@@ -6536,23 +6677,27 @@ app.get('/payroll', (req, res) => {
     `<div class="bs-strip-c"><span class="bs-strip-l">${label}</span><span class="bs-stat">${value}</span><span class="bs-strip-s">${sub}</span></div>`;
 
   // --- the roster ------------------------------------------------------------
-  // The overtime columns only render when overtime is switched on — off, the
-  // roster is exactly the table it was, and there is no empty OT column of
-  // zeros to explain.
+  // Week 1 and Week 2 are their own columns whether or not overtime is on. The
+  // split is how a fortnightly period is actually read — who worked which week,
+  // and whether the hours landed evenly — and that question does not depend on
+  // whether anybody is being paid time and a half. It used to be a cramped
+  // "40 + 32" under the total, which is the same two numbers in a place you
+  // cannot scan down.
+  //
+  // The OT column is still conditional: off, an empty column of dashes is a
+  // question with no answer.
   const otCols = ot.enabled;
-  const otHead = otCols
-    ? '<span class="r">Wk 1</span><span class="r">Wk 2</span><span class="r ot">OT</span>' : '';
-  const otCells = (r) => otCols
-    ? `<span class="bs-lr-n subtle">${r.wk1Hours}</span>`
-      + `<span class="bs-lr-n subtle">${r.wk2Hours}</span>`
-      + `<span class="bs-lr-n ot">${r.otHours ? r.otHours : '<span class="bs-em">—</span>'}</span>`
-    : '';
+  const wkHead = '<span class="r">Wk 1</span><span class="r">Wk 2</span>';
+  const otHead = wkHead + (otCols ? '<span class="r ot">OT</span>' : '');
+  const otCells = (r) => `<span class="bs-lr-n subtle">${r.wk1Hours}</span>`
+    + `<span class="bs-lr-n subtle">${r.wk2Hours}</span>`
+    + (otCols ? `<span class="bs-lr-n ot">${r.otHours ? r.otHours : '<span class="bs-em">—</span>'}</span>` : '');
 
   const roster = rows.map((r) => `
-    <a class="bs-lr bs-rrow${otCols ? ' has-ot' : ''}" href="/payroll/${r.employeeId}?from=${from}&to=${to}">
+    <a class="bs-lr bs-rrow has-wk${otCols ? ' has-ot' : ''}" href="/payroll/${r.employeeId}?from=${from}&to=${to}">
       <span class="bs-rr-n">${esc(r.name)}
         <i>${esc(r.roles)} · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
-      <span class="bs-lr-n">${r.hours}${otCols ? '' : `<i>${r.wk1Hours} + ${r.wk2Hours}</i>`}</span>
+      <span class="bs-lr-n">${r.hours}</span>
       ${otCells(r)}
       <span class="bs-lr-n">${money(r.wage)}</span>
       <span class="bs-lr-n muted">${r.cashTips ? money(r.cashTips) : '<span class="bs-em">—</span>'}</span>
@@ -6621,18 +6766,18 @@ app.get('/payroll', (req, res) => {
       <div class="bs-sec-h"><span class="bs-kicker">Everyone who worked</span>
         <span class="bs-sec-note">hours and card tip payout are the two figures Gusto asks for</span></div>
       ${rows.length ? `
-      <div class="bs-lhead bs-rhead${otCols ? ' has-ot' : ''}">
+      <div class="bs-lhead bs-rhead has-wk${otCols ? ' has-ot' : ''}">
         <span>Person</span><span class="r">Hours</span>${otHead}<span class="r">Wages</span>
         <span class="r">Cash tips</span><span class="r">Card payout</span><span class="r">On the check</span><span></span>
       </div>
       <div class="bs-lrows">${roster}</div>
-      <div class="bs-lr bs-rrow bs-rtot${otCols ? ' has-ot' : ''}">
+      <div class="bs-lr bs-rrow bs-rtot has-wk${otCols ? ' has-ot' : ''}">
         <span class="bs-rr-n">Total<i>${totals.shifts} shift${totals.shifts === 1 ? '' : 's'} between them,
           across ${shiftCount} service${shiftCount === 1 ? '' : 's'}</i></span>
-        <span class="bs-lr-n">${totals.hours}${otCols ? '' : `<i>${totals.wk1Hours} + ${totals.wk2Hours}</i>`}</span>
-        ${otCols ? `<span class="bs-lr-n subtle">${totals.wk1Hours}</span>
-          <span class="bs-lr-n subtle">${totals.wk2Hours}</span>
-          <span class="bs-lr-n ot">${totals.otHours || '<span class="bs-em">—</span>'}</span>` : ''}
+        <span class="bs-lr-n">${totals.hours}</span>
+        <span class="bs-lr-n subtle">${totals.wk1Hours}</span>
+        <span class="bs-lr-n subtle">${totals.wk2Hours}</span>
+        ${otCols ? `<span class="bs-lr-n ot">${totals.otHours || '<span class="bs-em">—</span>'}</span>` : ''}
         <span class="bs-lr-n">${money(totals.wage)}</span>
         <span class="bs-lr-n muted">${money(totals.cashTips)}</span>
         <span class="bs-lr-n strong">${money(totals.paycheckTips)}</span>
@@ -15145,9 +15290,9 @@ app.get('/timeclock', (req, res) => {
         <!-- Newest ten. Nothing expires a request and they are decided one at a
              time, so an unbounded list grows forever; the count above is the
              real total, read from the whole set rather than this slice. -->
-        ${pending.slice(0, 10).map((c) => `<a class="tcm-live-r" href="/timeclock/${c.time_entry_id}">
+        ${pending.slice(0, 10).map((c) => `<a class="tcm-live-r" href="${c.time_entry_id ? `/timeclock/${c.time_entry_id}` : `/timeclock/request/${c.id}`}">
           <span class="tcm-dot warn"></span><b>${esc(tcEmpName(c.employee_id))}</b>
-          <span>${esc(c.kind.replace(/_/g, ' '))} — ${esc(String(c.reason).slice(0, 80))}</span><i>open</i></a>`).join('')}
+          <span>${esc(c.kind.replace(/_/g, ' '))} — ${esc(String(c.reason || c.proposed_value || '').slice(0, 80))}</span><i>open</i></a>`).join('')}
         ${pending.length > 10 ? `<p class="inc-hint">${pending.length - 10} more waiting.</p>` : ''}
       </section>` : ''}
 
@@ -16056,6 +16201,78 @@ app.post('/timeclock/:id/delete', (req, res) => {
  * request marked approved that quietly changed nothing, which is the worst of
  * both worlds because everyone believes it was handled.
  */
+/**
+ * A request for a shift that does not exist yet.
+ *
+ * Every other request is reviewed on the entry it would change, which is the
+ * right place — the punch, its breaks, its history, all in front of you. This
+ * one has no entry to stand on, so it gets a page of its own rather than a
+ * link to /timeclock/null.
+ */
+app.get('/timeclock/request/:id', (req, res) => {
+  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const c = TC.q.correctionById.get(Number(req.params.id));
+  if (!c) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such request</h1><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
+  if (c.time_entry_id) return res.redirect(`/timeclock/${c.time_entry_id}`);
+  let p = {};
+  try { p = JSON.parse(c.payload || '{}') || {}; } catch { p = {}; }
+  const w2 = canWrite();
+  const fact = (k, v) => `<div class="inc-fact"><span>${k}</span><b>${v}</b></div>`;
+  const mins = p.in && p.out ? TC.minutesBetween(p.in, p.out) : null;
+
+  res.send(layout('Shift request', `
+    ${flash(req)}
+    <div class="bs-page tcm-page inc-detail">
+      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <div class="inc-rec-head">
+        <div class="inc-rec-title">
+          <div class="inc-rec-line">${esc(tcEmpName(c.employee_id))} · ${esc(tcPosName(p.position))}</div>
+          <h1 class="bs-headline">${p.business_date
+            ? esc(new Date(p.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))
+            : 'A shift'}</h1>
+          <p class="bs-subline">Asked for a shift that was never clocked · request #${c.id}</p>
+        </div>
+        <div class="inc-rec-status">
+          <span class="inc-st inc-st-correction-pending">${esc(c.decision)}</span>
+        </div>
+      </div>
+
+      <section class="bs-panel inc-sec">
+        <div class="bs-sec-h"><span class="bs-kicker">What they are asking for</span></div>
+        <div class="inc-facts">
+          ${fact('Clock in', p.in ? esc(TC.clockFace(p.in)) : '—')}
+          ${fact('Clock out', p.out ? esc(TC.clockFace(p.out)) : '—')}
+          ${fact('Hours', mins != null ? `<b>${esc(TC.hm(mins))}</b>` : '—')}
+          ${fact('Position', esc(tcPosName(p.position)))}
+          ${fact('Service', p.daypart ? esc(dp(p.daypart)) : '—')}
+        </div>
+        ${c.reason ? `<p class="inc-note">“${esc(c.reason)}”</p>` : ''}
+        <p class="bs-fine">${esc(c.requested_by)} · ${esc(TC.stamp(c.requested_at))}</p>
+      </section>
+
+      ${c.decision !== 'pending' ? `<section class="bs-panel inc-sec">
+        <div class="bs-sec-h"><span class="bs-kicker">Decided</span></div>
+        <p>${esc(c.decision)} by ${esc(c.decided_by || 'someone')}${c.decided_at ? ' · ' + esc(TC.stamp(c.decided_at)) : ''}.
+        ${c.apply_error ? `<b>It could not be applied: ${esc(c.apply_error)}</b>` : ''}</p>
+      </section>` : w2 ? `<section class="bs-panel inc-sec">
+        <div class="bs-sec-h"><span class="bs-kicker">Decide</span></div>
+        <p class="bs-fine">Accepting adds the shift — through the same checks as adding a punch by hand,
+          so it is refused if it would overlap one they already have.</p>
+        <div class="inc-acts">
+          <form method="post" action="/timeclock/correction/${c.id}">
+            <input type="hidden" name="decision" value="approved">
+            <button class="bs-btn">Accept and add the shift</button>
+          </form>
+          <form method="post" action="/timeclock/correction/${c.id}">
+            <input type="hidden" name="decision" value="rejected">
+            <input class="bs-input" name="note" placeholder="Why not (optional)" maxlength="200">
+            <button class="bs-btn-sm">Reject</button>
+          </form>
+        </div>
+      </section>` : ''}
+    </div>`));
+});
+
 app.post('/timeclock/correction/:id', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   const c = TC.q.correctionById.get(Number(req.params.id));
@@ -16063,7 +16280,14 @@ app.post('/timeclock/correction/:id', (req, res) => {
   const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
   const actor = tcActor(req);
   const note = String(req.body.note || '').trim().slice(0, 200) || null;
-  const done = (msg) => res.redirect(punchBack(req, `/timeclock/${c.time_entry_id}`, msg, `#e-${c.time_entry_id}`));
+  // A 'new_shift' request has no entry to go back to — until it is approved,
+  // when it has one and that is exactly where a manager wants to land.
+  const done = (msg) => {
+    const eid = TC.q.correctionById.get(c.id).time_entry_id || c.time_entry_id;
+    return res.redirect(eid
+      ? punchBack(req, `/timeclock/${eid}`, msg, `#e-${eid}`)
+      : `/timeclock?msg=${encodeURIComponent(msg)}`);
+  };
   // Decided once, applied once. Without this a double submit — or a back
   // button — would run the change twice and add the same break, or move the
   // same punch again.
@@ -16081,6 +16305,14 @@ app.post('/timeclock/correction/:id', (req, res) => {
   if (decision === 'approved') {
     const target = TC.q.byId.get(c.time_entry_id);
     if (target && tcFrozen(res, target.employee_id, target.business_date, `/timeclock/${c.time_entry_id}`)) return;
+    // Adding a shift to a signed period moves its total exactly as much as
+    // moving one already there. No entry exists yet, so the day comes off the
+    // request itself.
+    if (!target && c.kind === 'new_shift') {
+      let day = null;
+      try { day = JSON.parse(c.payload || '{}').business_date || null; } catch { day = null; }
+      if (day && tcFrozen(res, c.employee_id, day, '/timeclock')) return;
+    }
   }
 
   const settle = () => {
@@ -16144,6 +16376,27 @@ app.post('/timeclock/correction/:id', (req, res) => {
           TC.q.setShift.run({ id: entry.id, shift_id: sh.id });
           db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, entry.id);
         },
+        // A shift nobody clocked, made real. Deliberately the SAME six steps a
+        // manager typing one in by hand takes — find-or-create the service,
+        // apply its policy, put the person on it, then through TC.createEntry
+        // so it clears the same overlap check. Approving a request must not be
+        // a quieter way in than the form.
+        createEntry: (p) => {
+          const bdate = p.business_date || TC.businessDateOf(p.in, TC.settings().cutoffHour);
+          s.getOrIgnore.run(bdate, p.daypart);
+          const sh = s.findShift.get(bdate, p.daypart);
+          policyForShift(sh);
+          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: p.employee_id, role: p.position });
+          const id = TC.createEntry({
+            employee_id: p.employee_id, shift_id: sh.id, business_date: bdate,
+            daypart: p.daypart, position: p.position,
+            clock_in_at: p.in, clock_out_at: p.out || null,
+            source: 'employee', created_by: actor,
+          });
+          tcTouchDates(p.employee_id, [bdate], actor, 'an approved request added a shift');
+          TC.syncShiftHours(sh.id, p.employee_id, actor, { role: p.position });
+          return id;
+        },
       });
       TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
       db.prepare("UPDATE time_corrections SET applied_at = datetime('now'), apply_error = NULL WHERE id = ?").run(c.id);
@@ -16151,7 +16404,11 @@ app.post('/timeclock/correction/:id', (req, res) => {
       // Hours that changed after somebody signed for them are no longer the
       // hours they signed for. The submission stands as a record, but it has to
       // be made again against the new figures.
-      tcTouchTimesheet(c.time_entry_id, actor, `a correction changed the hours — ${summary}`, wasDate ? [wasDate] : []);
+      // Re-read: a 'new_shift' request had no entry id when it was filed, and
+      // has one now. Passing the stale null would leave the period it landed in
+      // still marked as signed for hours that no longer include this shift.
+      const settledId = TC.q.correctionById.get(c.id).time_entry_id || c.time_entry_id;
+      tcTouchTimesheet(settledId, actor, `a correction changed the hours — ${summary}`, wasDate ? [wasDate] : []);
       // An approved correction that never reaches the shift is a correction the
       // employee is not paid for. Both ends again — see the edit route.
       const moved = TC.q.byId.get(c.time_entry_id);
@@ -18152,6 +18409,53 @@ function runAdminSweep() {
   } catch (e) { console.error('[sweep] documents', e && e.message); }
 }
 
+/**
+ * Tell people their timesheet is waiting to be signed.
+ *
+ * A pay period ends on a Sunday night and nobody is thinking about it. The
+ * submit button is correctly hidden until the period is over, so the one
+ * moment it appears is the one moment nobody is looking — and payroll spends
+ * Monday chasing signatures by text.
+ *
+ * Two reminders, and only two. The first the day the period ends; the second
+ * two days later if it is still unsigned, because a single notification that
+ * lands while a phone is off is not a reminder. A third would be nagging, and
+ * a reminder people turn off is worse than none.
+ *
+ * periodToSign is the same function the portal's own banner uses, so what the
+ * notification says and what the page shows can never disagree — including
+ * that it stays quiet for anyone with no hours in the period, and for anyone
+ * whose sheet is already submitted, approved or locked.
+ */
+function runStaffSweep() {
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  for (const emp of q.allEmployees.all()) {
+    try {
+      const p = periodToSign(emp, today);
+      if (!p) continue;
+      const v = tsView(emp, p);
+      const hrs = TC.hm(v.totals.payable);
+      const href = `/portal/timesheet?p=${p.start}`;
+      const key = `ts_remind:${emp.id}:${p.start}`;
+      // The first one.
+      if (PORTAL.notifyOnce(key, 'timesheet', 'Your timesheet is ready to submit',
+        { body: `${labelFor(p)} · ${hrs}. Check it and send it to your manager.`,
+          employeeId: emp.id, href })) continue;
+      // The second, two days after the FIRST WAS SENT — not two days after the
+      // period ended. Those are the same date until a deploy, a restart or an
+      // outage delays the first, and then measuring from the period would fire
+      // both within a day of each other, which is the nagging this avoids.
+      const sentAt = PORTAL.notifiedAt(key);
+      if (sentAt && isoDate(new Date(sentAt.replace(' ', 'T') + 'Z')) <= addDays(today, -2)) {
+        PORTAL.notifyOnce(`ts_remind2:${emp.id}:${p.start}`, 'timesheet',
+          'Your timesheet is still unsigned',
+          { body: `${labelFor(p)} · ${hrs}. Payroll needs this one.`,
+            employeeId: emp.id, href });
+      }
+    } catch (e) { console.error('[sweep] timesheet reminder', emp.id, e && e.message); }
+  }
+}
+
 // Run it at most once per calendar day. Kept in memory, not a table: on a
 // restart it simply runs again at boot, and adminNotifyOnce makes that a no-op
 // for anything already announced.
@@ -18162,6 +18466,7 @@ function maybeRunDailySweep() {
     if (day === lastSweepDay) return;
     lastSweepDay = day;
     runAdminSweep();
+    runStaffSweep();
   } catch (e) { console.error('[sweep]', e && e.message); }
 }
 
@@ -18212,7 +18517,10 @@ app.listen(PORT, () => {
   // A test hook: run the sweep once, synchronously, at boot. Lets a test seed
   // the conditions and assert the alerts without waiting on the timer (which is
   // off under the backfill-skip flag tests use anyway).
-  if (process.env.ZWIN_SWEEP_NOW === '1') { try { runAdminSweep(); } catch (e) { console.error('[sweep] boot', e && e.message); } }
+  if (process.env.ZWIN_SWEEP_NOW === '1') {
+    try { runAdminSweep(); } catch (e) { console.error('[sweep] boot', e && e.message); }
+    try { runStaffSweep(); } catch (e) { console.error('[sweep] boot staff', e && e.message); }
+  }
 });
 
 module.exports = app;

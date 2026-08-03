@@ -1927,6 +1927,13 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-rhead.has-ot, .bs-rrow.has-ot {
   grid-template-columns: minmax(110px, 1fr) 60px 48px 48px 52px 86px 86px 94px 102px 20px;
 }
+/* Wk 1 and Wk 2 without OT. The split is how a fortnightly period is read — who
+   worked which week — and that is worth a column whether or not anybody is on
+   time and a half. Nine columns: Person · Hours · Wk 1 · Wk 2 · Wages ·
+   Cash tips · Card payout · On the check · (spacer). */
+.bs-rhead.has-wk:not(.has-ot), .bs-rrow.has-wk:not(.has-ot) {
+  grid-template-columns: minmax(110px, 1fr) 64px 54px 54px 92px 92px 100px 108px 20px;
+}
 .bs-lr-n.subtle { color: var(--muted); }
 .bs-lr-n.ot, .bs-rhead .r.ot { color: var(--warning); }
 .bs-lr-n.big { font-size: 16px; font-weight: 700; color: var(--headline); }
@@ -2004,6 +2011,12 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   /* Cash tips fold away first — reference only, never typed into anything. */
   .bs-rhead:not(.has-ot), .bs-rrow:not(.has-ot) { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
   .bs-rhead:not(.has-ot) > :nth-child(4), .bs-rrow:not(.has-ot) > :nth-child(4) { display: none; }
+  /* The week columns and cash tips fold, so a tablet reads
+     Person · Hours · Wages · Card · Take-home. */
+  .bs-rhead.has-wk:not(.has-ot), .bs-rrow.has-wk:not(.has-ot) { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(3), .bs-rrow.has-wk:not(.has-ot) > :nth-child(3),
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(4), .bs-rrow.has-wk:not(.has-ot) > :nth-child(4),
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(6), .bs-rrow.has-wk:not(.has-ot) > :nth-child(6) { display: none; }
   /* With OT on, the OT-detail columns (Wk 1, Wk 2, OT) and cash tips fold, so a
      tablet still reads Person · Hours · Wages · Card · Take-home. */
   .bs-rhead.has-ot, .bs-rrow.has-ot { grid-template-columns: 1fr 84px 100px 112px 116px 24px; }
@@ -2019,6 +2032,12 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-rhead:not(.has-ot), .bs-rrow:not(.has-ot) { grid-template-columns: 1fr 62px 108px 16px; }
   .bs-rhead:not(.has-ot) > :nth-child(3), .bs-rrow:not(.has-ot) > :nth-child(3),
   .bs-rhead:not(.has-ot) > :nth-child(5), .bs-rrow:not(.has-ot) > :nth-child(5) { display: none; }
+  .bs-rhead.has-wk:not(.has-ot), .bs-rrow.has-wk:not(.has-ot) { grid-template-columns: 1fr 62px 108px 16px; }
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(3), .bs-rrow.has-wk:not(.has-ot) > :nth-child(3),
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(4), .bs-rrow.has-wk:not(.has-ot) > :nth-child(4),
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(5), .bs-rrow.has-wk:not(.has-ot) > :nth-child(5),
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(6), .bs-rrow.has-wk:not(.has-ot) > :nth-child(6),
+  .bs-rhead.has-wk:not(.has-ot) > :nth-child(7), .bs-rrow.has-wk:not(.has-ot) > :nth-child(7) { display: none; }
   .bs-rhead.has-ot, .bs-rrow.has-ot { grid-template-columns: 1fr 62px 108px 16px; }
   .bs-rhead.has-ot > :nth-child(3), .bs-rrow.has-ot > :nth-child(3),
   .bs-rhead.has-ot > :nth-child(4), .bs-rrow.has-ot > :nth-child(4),

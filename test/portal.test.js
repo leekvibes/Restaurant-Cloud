@@ -868,3 +868,103 @@ test("the portal breaks a shift down the way that night's email does", async () 
   assert.strictEqual(grab('Card tips') + grab('Cash tips'), grab('Total tips collected'),
     'card plus cash is what was collected');
 });
+
+test('when a period ends, the people who owe a timesheet are told — twice at most', async () => {
+  // The submit button is hidden while a period is running, so the one moment it
+  // appears is a Sunday night when nobody is looking. Payroll then spends
+  // Monday chasing signatures by text. This is the thing that stops that.
+  const P2 = require('../src/periods');
+  const D2 = require('../src/dates');
+  const per = P2.recentPeriods(2)[1];              // the one that has just ended
+  const day = D2.addDays(per.start, 2);
+
+  const owes = db.prepare("SELECT id FROM employees WHERE pin = '1111'").get().id;   // Bella
+  db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',480,480)`)
+    .run(owes, day, `${day} 17:00:00`, `${D2.addDays(day, 1)} 01:00:00`);
+
+  const serverPath = path.join(__dirname, '..', 'src', 'server.js');
+  const sweepOnce = async (port) => {
+    const s = spawn(process.execPath, [serverPath], {
+      env: { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
+        ZWIN_SKIP_BACKFILL: '1', ZWIN_SWEEP_NOW: '1', PORT: String(port) }, stdio: 'ignore' });
+    for (let i = 0; i < 90; i++) {
+      try { await fetch(`http://127.0.0.1:${port}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    s.kill();
+    await new Promise((r) => setTimeout(r, 200));
+  };
+  const remindersFor = (id) => db.prepare(
+    "SELECT * FROM portal_events WHERE kind='timesheet' AND employee_id = ? ORDER BY id").all(id);
+
+  await sweepOnce(PORT + 63);
+  const first = remindersFor(owes);
+  assert.strictEqual(first.length, 1, 'one reminder, to the person who owes one');
+  assert.match(first[0].title, /ready to submit/i, 'saying what to do');
+  assert.match(first[0].href, /^\/portal\/timesheet\?p=/, 'and linking to the page with the button');
+  assert.match(first[0].body, /\d/, 'with the hours in it');
+
+  // Addressed to that person, not broadcast to the floor. Somebody else's
+  // hours are nobody else's business.
+  assert.ok(!db.prepare("SELECT 1 FROM portal_events WHERE kind='timesheet' AND employee_id IS NULL").get(),
+    'nothing went to everyone');
+
+  // The sweep re-checks the same state every day by design. A reminder that
+  // fires every time is a reason to turn notifications off.
+  await sweepOnce(PORT + 64);
+  assert.strictEqual(remindersFor(owes).length, 1, 'a second sweep the same day says nothing new');
+
+  // Two days on, still unsigned: one more, and only one. Backdate the record of
+  // the first message rather than the period, because that is what the spacing
+  // is measured from — a deploy that delayed the first must not bunch them up.
+  db.prepare("UPDATE staff_notified SET created_at = datetime('now','-3 days') WHERE key LIKE 'ts_remind:%'").run();
+  await sweepOnce(PORT + 67);
+  const second = remindersFor(owes);
+  assert.strictEqual(second.length, 2, 'a follow-up, once it has been sitting there');
+  assert.match(second[1].title, /still unsigned/i, 'and it says so plainly');
+
+  // Never a third, however long it sits.
+  db.prepare("UPDATE staff_notified SET created_at = datetime('now','-30 days')").run();
+  await sweepOnce(PORT + 68);
+  assert.strictEqual(remindersFor(owes).length, 2, 'two is the most anybody gets');
+
+  // And once it is signed, it stops — even with every record of having been
+  // told wiped, which is the strongest form of the claim: it is the SHEET that
+  // makes it quiet, not the memory of having sent something.
+  const beforeSigning = remindersFor(owes).length;
+  db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status, submitted_at)
+    VALUES (?,?,?,'submitted', datetime('now'))
+    ON CONFLICT(employee_id, period_start) DO UPDATE SET status='submitted'`)
+    .run(owes, per.start, per.end);
+  db.prepare('DELETE FROM staff_notified').run();          // as if nothing had been sent
+  await sweepOnce(PORT + 65);
+  assert.strictEqual(remindersFor(owes).length, beforeSigning, 'a submitted sheet is not chased');
+});
+
+test('somebody who worked none of the period is not asked to submit one', async () => {
+  // The reminder reads periodToSign, the same function the portal banner uses,
+  // so it is quiet for anyone with no hours — being told to sign an empty
+  // timesheet is how people learn to ignore the notification.
+  const P2 = require('../src/periods');
+  const per = P2.recentPeriods(2)[1];
+  const idle = db.prepare("INSERT INTO employees (name, role, pin, hourly_rate_cents, active) VALUES ('Idle Hands','server','7742',1500,1)").run().lastInsertRowid;
+  assert.strictEqual(db.prepare(
+    'SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND business_date BETWEEN ? AND ?')
+    .get(idle, per.start, per.end).n, 0, 'they worked nothing');
+
+  const serverPath = path.join(__dirname, '..', 'src', 'server.js');
+  const s = spawn(process.execPath, [serverPath], {
+    env: { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
+      ZWIN_SKIP_BACKFILL: '1', ZWIN_SWEEP_NOW: '1', PORT: String(PORT + 66) }, stdio: 'ignore' });
+  for (let i = 0; i < 90; i++) {
+    try { await fetch(`http://127.0.0.1:${PORT + 66}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+  await new Promise((r) => setTimeout(r, 400));
+  s.kill();
+  await new Promise((r) => setTimeout(r, 200));
+
+  assert.ok(!db.prepare("SELECT 1 FROM portal_events WHERE kind='timesheet' AND employee_id = ?").get(idle),
+    'and were not asked to sign for them');
+});

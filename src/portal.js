@@ -196,6 +196,14 @@ CREATE TABLE IF NOT EXISTS admin_notified (
   key        TEXT PRIMARY KEY,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- The same idea for staff. Separate from the admin table because the two are
+-- decided by different code and a key collision between them would silence a
+-- notification nobody could then explain.
+CREATE TABLE IF NOT EXISTS staff_notified (
+  key        TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 // Which positions hand in tips at the end of a shift.
@@ -351,6 +359,9 @@ const q = {
   adminPushCountFor: db.prepare('SELECT COUNT(*) n FROM admin_push WHERE uid = @uid'),
   adminFiredHas: db.prepare('SELECT 1 FROM admin_notified WHERE key = ?'),
   adminFiredAdd: db.prepare('INSERT OR IGNORE INTO admin_notified (key) VALUES (?)'),
+  staffFiredHas: db.prepare('SELECT 1 FROM staff_notified WHERE key = ?'),
+  staffFiredAt: db.prepare('SELECT created_at FROM staff_notified WHERE key = ?'),
+  staffFiredAdd: db.prepare('INSERT OR IGNORE INTO staff_notified (key) VALUES (?)'),
 };
 
 /**
@@ -517,6 +528,31 @@ function adminNotifyOnce(key, kind, title, opts = {}) {
   return true;
 }
 
+/**
+ * Tell one person something, at most once for a given situation.
+ *
+ * The staff twin of adminNotifyOnce. A reminder that fires every time a sweep
+ * runs is not a reminder, it is a reason to turn notifications off — and the
+ * sweep re-checks the same state every day by design. The key is the caller's
+ * (e.g. `ts_remind:14:2026-07-19`). Never throws.
+ */
+/**
+ * When a given notification was sent, or null. Lets a caller space a follow-up
+ * off the first message rather than off the situation that caused it — which
+ * is the difference between "two days later" and "the next time the sweep runs
+ * after a late deploy".
+ */
+function notifiedAt(key) {
+  try { return (q.staffFiredAt.get(key) || {}).created_at || null; } catch { return null; }
+}
+
+function notifyOnce(key, kind, title, opts = {}) {
+  try { if (q.staffFiredHas.get(key)) return false; } catch { /* fall through and still try */ }
+  try { q.staffFiredAdd.run(key); } catch { /* best effort — worst case it repeats */ }
+  notify(kind, title, opts);
+  return true;
+}
+
 /** Store (or refresh) a device's push subscription for an admin account. */
 function saveAdminPush(uid, subscription) {
   try {
@@ -620,5 +656,6 @@ function shapeFor(position) {
 module.exports = {
   q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify,
   savePush, sendPush, sendTest, VAPID_PUBLIC, pushEnabled: pushOn,
+  notifyOnce, notifiedAt,
   adminNotify, adminNotifyOnce, saveAdminPush, sendAdminPush, sendAdminTest,
 };

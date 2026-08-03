@@ -263,8 +263,8 @@ test('every ledger heading has as many cells as its rows', async () => {
 
   const range = `from=${span.a}&to=${span.b}`;
   const pairs = [
-    [`/payroll?${range}`, 'the payroll roster', /<div class="bs-lhead bs-rhead">[\s\S]*?<\/div>/,
-      /<a class="bs-lr bs-rrow" href[\s\S]*?<\/a>/g],
+    [`/payroll?${range}`, 'the payroll roster', /<div class="bs-lhead bs-rhead[^"]*">[\s\S]*?<\/div>/,
+      /<a class="bs-lr bs-rrow[^"]*" href[\s\S]*?<\/a>/g],
     [`/sales?r=custom&${range}`, 'the sales day ledger', /<div class="bs-shead bs-dayhead">[\s\S]*?<\/div>/,
       /<summary class="bs-sr">[\s\S]*?<\/summary>/g],
   ];
@@ -833,16 +833,25 @@ test('payroll keeps every column on the web, shows take-home on mobile', async (
   const P = require('../src/periods');
   const cur = P.currentPeriod();
   const html = await (await fetch(`${BASE}/payroll?from=${cur.start}&to=${cur.end}`, { redirect: 'manual' })).text();
-  const head = (html.match(/class="bs-lhead bs-rhead">([\s\S]*?)<\/div>/) || [])[1] || '';
+  const head = (html.match(/class="bs-lhead bs-rhead[^"]*">([\s\S]*?)<\/div>/) || [])[1] || '';
   assert.match(head, /Cash tips/, 'the web keeps the cash-tips column');
   assert.match(head, /Card payout/, 'and card payout');
   assert.match(head, /On the check/, 'and the take-home column');
   assert.match(html, /class="bs-lr-n strong bs-takehome"/, 'take-home is tagged for the phone to promote');
 
-  // At the phone breakpoint: card payout (5th cell) is hidden, take-home stays
-  // and is promoted.
+  // Week 1 and Week 2 are columns whether or not overtime is switched on. The
+  // fixture runs with it off, so this is the case that used to hide them behind
+  // a cramped "40 + 32" under the Hours figure.
+  assert.match(head, /Wk 1/, 'the week split is a column');
+  assert.match(head, /Wk 2/, 'both halves of it');
+  assert.ok(!/>OT</.test(head), 'and no OT column while overtime is off');
+  assert.match(html, /class="bs-lhead bs-rhead has-wk"/, 'the layout says which shape it is');
+
+  // At the phone breakpoint everything between the name and the take-home
+  // folds away — the week columns included, since they are a web reading.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
-  assert.match(css, /\.bs-rrow(:not\(\.has-ot\))? > :nth-child\(5\)[^}]*display: none/, 'card payout folds away on a phone');
+  assert.match(css, /\.bs-rrow\.has-wk:not\(\.has-ot\) > :nth-child\(7\)[^}]*display: none/,
+    'card payout folds away on a phone');
   assert.match(css, /\.bs-rrow \.bs-takehome \{[^}]*font-size/, 'and take-home is promoted there');
 
   // The how-it-works explainer is still gone.
@@ -1125,4 +1134,35 @@ test('the grid editor lives on the pages that host a grid, not in the fragment',
     const html = await (await fetch(BASE + host)).text();
     assert.ok(html.includes(marker), `${host} hosts a grid, so it must carry the editor`);
   }
+});
+
+test('the roster grid declares exactly as many columns as it renders cells', async () => {
+  // The failure this exists to catch is silent and ugly: add a column to the
+  // markup, forget the grid-template-columns, and every cell after it slides
+  // one place left — Wages under "Cash tips", a real number under the wrong
+  // heading, on the page somebody pays people from.
+  //
+  // Two shapes to keep honest, because Week 1 and Week 2 are columns whether
+  // or not overtime is on, and OT adds a tenth on top of that.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const declared = (selector) => {
+    const re = new RegExp(String.raw`\.bs-rhead${selector}[^{]*\{\s*\n?\s*grid-template-columns:([^;]+);`);
+    const m = css.match(re);
+    assert.ok(m, `${selector || '(base)'} declares a column template`);
+    return m[1].trim().split(/\s+(?![^(]*\))/).length;
+  };
+
+  const P = require('../src/periods');
+  const cur = P.currentPeriod();
+  const html = await (await fetch(`${BASE}/payroll?from=${cur.start}&to=${cur.end}`, { redirect: 'manual' })).text();
+  const head = (html.match(/class="bs-lhead bs-rhead[^"]*">([\s\S]*?)<\/div>/) || [])[1] || '';
+  const rendered = directChildren(head);
+  assert.ok(rendered > 1, 'the header rendered cells to count');
+
+  // The fixture runs with overtime off, so what is on screen is the has-wk shape.
+  assert.strictEqual(rendered, declared('\\.has-wk:not\\(\\.has-ot\\)'),
+    'the weeks-without-overtime grid matches its cells');
+  // And the OT shape is one wider — the same header plus the OT column.
+  assert.strictEqual(rendered + 1, declared('\\.has-ot'),
+    'and the overtime grid is exactly one column wider');
 });

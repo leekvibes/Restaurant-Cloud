@@ -591,6 +591,13 @@ const q = {
   decideCorrection: db.prepare(`UPDATE time_corrections SET decision = @decision, decided_by = @by,
     decided_at = datetime('now'), decision_note = @note WHERE id = @id`),
   correctionById: db.prepare('SELECT * FROM time_corrections WHERE id = ?'),
+  // A 'new_shift' request has no entry when it is filed — it is asking for one
+  // to exist. Once approved and created, this ties the two together so the
+  // entry's history says where it came from and the request says what it made.
+  linkCorrection: db.prepare('UPDATE time_corrections SET time_entry_id = @entry WHERE id = @id'),
+  // Requests waiting on a shift that does not exist yet, for the one person.
+  newShiftsFor: db.prepare(`SELECT * FROM time_corrections
+    WHERE employee_id = ? AND kind = 'new_shift' AND time_entry_id IS NULL ORDER BY id`),
 
   addEvent: db.prepare(`INSERT INTO time_events (entity, entity_id, action, actor, before_val, after_val, reason)
     VALUES (@entity, @entity_id, @action, @actor, @before_val, @after_val, @reason)`),
@@ -1010,11 +1017,39 @@ function addBreak(entry, f) {
  * @param opts.relink          (entry, businessDate, daypart, position) → shiftId
  */
 function applyCorrection(c, actor, opts = {}) {
+  let payload = {};
+  try { payload = JSON.parse(c.payload || '{}') || {}; } catch { payload = {}; }
+
+  // A shift nobody clocked.
+  //
+  // Somebody worked a night the clock has no record of — they forgot to punch
+  // in, or the tablet was down, or they were called in and nobody set it up.
+  // Until now the only route was to find a manager, because every request kind
+  // here edits a punch and there was no punch to edit. This one asks for the
+  // punch itself, and it goes through the same door a manager typing it in
+  // uses: the entry does not exist until a manager approves, and when it is
+  // made it clears the same overlap check as every other punch.
+  if (c.kind === 'new_shift') {
+    if (typeof opts.createEntry !== 'function') {
+      throw new ClockError('This deployment cannot add a shift from a request.');
+    }
+    if (c.time_entry_id) throw new ClockError('That shift has already been added.');
+    const inAt = payload.in, outAt = payload.out || null;
+    if (!inAt) throw new ClockError('That request did not say when the shift started.');
+    if (outAt && outAt <= inAt) throw new ClockError('The clock-out has to be after the clock-in.');
+    // The same guard a brand new punch clears — id 0 matches no row, so this is
+    // checked against every other punch this person has.
+    assertNoEntryOverlap({ employee_id: c.employee_id, id: 0 }, inAt, outAt);
+    const id = opts.createEntry({ ...payload, employee_id: c.employee_id });
+    q.linkCorrection.run({ id: c.id, entry: id });
+    logEvent('entry', id, 'created_from_request', actor,
+      { after: `${inAt} → ${outAt || 'open'}`, reason: `approved request #${c.id}: ${c.reason}` });
+    return `shift added ${clockFace(inAt)}${outAt ? ' – ' + clockFace(outAt) : ''}`;
+  }
+
   const entry = q.byId.get(c.time_entry_id);
   if (!entry) throw new ClockError('That time entry no longer exists.');
   if (entry.status === 'locked') throw new ClockError('That entry is locked — reopen it first.');
-  let payload = {};
-  try { payload = JSON.parse(c.payload || '{}') || {}; } catch { payload = {}; }
 
   const note = (action, before, after) => {
     logEvent('entry', entry.id, action, actor, { before, after, reason: `approved correction #${c.id}: ${c.reason}` });

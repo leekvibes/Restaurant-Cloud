@@ -1691,8 +1691,10 @@ test('every shift on a day carries its own sheet, and they do not collide', asyn
   // The break belongs to the shift that took it, not to the day.
   assert.match(html, new RegExp(`data-pes="${dinner}"[\\s\\S]*?data-unpaid="30"`), 'the dinner sheet knows its break');
   assert.match(html, new RegExp(`data-pes="${lunch}"[\\s\\S]*?data-unpaid="0"`), 'the lunch sheet has none');
+  // Two edit buttons, plus the one that adds another shift to the same day.
+  assert.strictEqual((html.match(/data-pes-open="/g) || []).length, 3, 'two edits and an add');
+  assert.strictEqual((html.match(/data-pes-open="new-/g) || []).length, 1, 'one of which adds');
   // One script for the page however many sheets are on it.
-  assert.strictEqual((html.match(/data-pes-open="/g) || []).length, 2, 'two buttons');
   assert.strictEqual((html.match(/function count\(lay\)/g) || []).length, 1, 'one script');
 
   // A request from the day view lands on the shift it was opened from, and the
@@ -1706,13 +1708,176 @@ test('every shift on a day carries its own sheet, and they do not collide', asyn
     wasLunch, 'and the other shift on that day is untouched');
 });
 
-test('a day with nothing on it offers no sheet at all', async () => {
+test('a day with nothing on it offers the add sheet, and nothing to edit', async () => {
   const emp = 195;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3195',1500,1)")
     .run(emp, 'Day Off');
   const cookie = await signIn('3195');
-  const html = await text('/portal/timesheet/day/2026-05-12', { cookie });
+  const day = '2026-05-12';
+  const html = await text(`/portal/timesheet/day/${day}`, { cookie });
   assert.match(html, /Nothing recorded on this day/);
-  assert.ok(!/data-pes-open/.test(html), 'and no button for a shift that does not exist');
-  assert.ok(!/function count\(lay\)/.test(html), 'nor a script with nothing to drive');
+  // Exactly one button, and it is the one that asks for a shift. There is
+  // nothing to edit on a day with no punches — an edit sheet here would be a
+  // sheet wired to a shift that does not exist.
+  assert.strictEqual((html.match(/data-pes-open="/g) || []).length, 1, 'one button');
+  assert.ok(html.includes(`data-pes-open="new-${day}"`), 'and it adds');
+});
+
+// ── A shift nobody clocked ───────────────────────────────────────────────────
+// Forgot to punch in, tablet was down, called in and nobody set it up. Every
+// other request kind edits a punch; this one asks for the punch itself. What
+// must stay true is that it is still a REQUEST — nothing reaches the clock
+// until a manager approves, and approving goes through the same door as a
+// manager typing it in by hand.
+
+test('asking for a shift writes nothing, and approving it makes one', async () => {
+  const emp = 196;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3196',1500,1)")
+    .run(emp, 'Never Clocked');
+  const day = '2026-05-13';
+  const cookie = await signIn('3196');
+
+  const res = await post('/portal/clock/add', { pin: '3196', position: 'server', daypart: 'dinner',
+    at_in: `${day}T17:00`, at_out: `${day}T23:30`, note: 'tablet was down' }, { cookie });
+  assert.strictEqual(res.status, 302);
+
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND kind = 'new_shift'").get(emp);
+  assert.ok(c, 'a request was filed');
+  assert.strictEqual(c.time_entry_id, null, 'against no entry, because there is none');
+  assert.strictEqual(c.decision, 'pending');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(emp).n, 0,
+    'and the clock is untouched — this is a request, not an edit');
+
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  const e = db.prepare('SELECT * FROM time_entries WHERE employee_id = ?').get(emp);
+  assert.ok(e, 'now there is a punch');
+  assert.strictEqual(e.raw_minutes, 390, 'six and a half hours');
+  assert.strictEqual(e.payable_minutes, 390);
+  assert.strictEqual(e.business_date, day);
+  assert.strictEqual(e.position, 'server');
+  assert.ok(e.shift_id, 'landed on the service, not floating free');
+
+  // The hours reached the shift row — which is the payroll basis AND the
+  // tip-split weight. An entry that never gets there pays nobody.
+  const wr = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?').get(e.shift_id, emp);
+  assert.ok(wr, 'the person is on the shift');
+  assert.strictEqual(wr.hours, 6.5, 'with the hours');
+  assert.strictEqual(wr.hours_source, 'clock');
+
+  // The request now points at what it made, and the history says where it came from.
+  assert.strictEqual(db.prepare('SELECT time_entry_id FROM time_corrections WHERE id = ?').get(c.id).time_entry_id, e.id);
+  const acts = db.prepare("SELECT action FROM time_events WHERE entity='entry' AND entity_id=?").all(e.id).map((x) => x.action);
+  assert.ok(acts.includes('created_from_request'), 'the entry knows it came from a request');
+});
+
+test('rejecting a shift request creates nothing at all', async () => {
+  const emp = 197;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3197',1500,1)")
+    .run(emp, 'Turned Down');
+  const cookie = await signIn('3197');
+  await post('/portal/clock/add', { pin: '3197', position: 'server', daypart: 'dinner',
+    at_in: '2026-05-14T17:00', at_out: '2026-05-14T22:00' }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND kind='new_shift'").get(emp);
+
+  await post(`/timeclock/correction/${c.id}`, { decision: 'rejected', note: 'you were not in' });
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(emp).n, 0,
+    'no punch was made');
+  const after = db.prepare('SELECT decision, time_entry_id FROM time_corrections WHERE id = ?').get(c.id);
+  assert.strictEqual(after.decision, 'rejected');
+  assert.strictEqual(after.time_entry_id, null, 'and nothing to link it to');
+});
+
+test('a shift request that would double-count is refused, twice over', async () => {
+  const emp = 198;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3198',1500,1)")
+    .run(emp, 'Already There');
+  const day = '2026-05-15';
+  db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',240,240)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 23:00:00`);
+
+  const cookie = await signIn('3198');
+  // Refused where it is typed, so it never becomes a manager's problem.
+  const res = await post('/portal/clock/add', { pin: '3198', position: 'server', daypart: 'dinner',
+    at_in: `${day}T16:30`, at_out: `${day}T20:00` }, { cookie });
+  assert.match(decodeURIComponent(res.headers.get('location')), /overlap/i, 'it says why');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_corrections WHERE employee_id=? AND kind='new_shift'").get(emp).n, 0,
+    'and nothing was filed');
+
+  // And refused again on approval, for anything that got filed before the
+  // clashing punch existed. Filed clean, then the punch moves under it.
+  const other = '2026-05-16';
+  await post('/portal/clock/add', { pin: '3198', position: 'server', daypart: 'dinner',
+    at_in: `${other}T17:00`, at_out: `${other}T22:00` }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id=? AND kind='new_shift'").get(emp);
+  assert.ok(c, 'that one was taken');
+  db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',120,120)`)
+    .run(emp, other, `${other} 22:00:00`, `${other} 23:59:00`);   // now it clashes
+
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  const after = db.prepare('SELECT decision, apply_error, time_entry_id FROM time_corrections WHERE id = ?').get(c.id);
+  assert.ok(after.apply_error, 'the approval refused it');
+  assert.match(after.apply_error, /overlap/i);
+  assert.strictEqual(after.time_entry_id, null, 'and made no punch');
+});
+
+test('a shift cannot be added into a period payroll has signed', async () => {
+  // The widest way into a signed period would be adding hours rather than
+  // moving them. Adding five next to the eight on a signed sheet moves the
+  // total exactly as much as editing the eight.
+  const emp = 199;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3199',1500,1)")
+    .run(emp, 'Signed Off');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const day = D2.addDays(per.start, 4);
+  const cookie = await signIn('3199');
+  await post('/portal/clock/add', { pin: '3199', position: 'server', daypart: 'dinner',
+    at_in: `${day}T17:00`, at_out: `${day}T22:00` }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id=? AND kind='new_shift'").get(emp);
+  assert.ok(c, 'the request is taken — a signed period is still requestable');
+
+  db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)
+    VALUES (?,?,?,'approved') ON CONFLICT(employee_id, period_start) DO UPDATE SET status='approved'`)
+    .run(emp, per.start, per.end);
+
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(emp).n, 0,
+    'but approving it does not slip a shift into a signed period');
+  assert.strictEqual(db.prepare('SELECT decision FROM time_corrections WHERE id = ?').get(c.id).decision, 'pending',
+    'it stays pending until the period is reopened');
+});
+
+test('a shift request can only name a position that person actually works', async () => {
+  const emp = 200;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3200',1500,1)")
+    .run(emp, 'Not A Chef');
+  const cookie = await signIn('3200');
+  const res = await post('/portal/clock/add', { pin: '3200', position: 'manager', daypart: 'dinner',
+    at_in: '2026-05-17T17:00', at_out: '2026-05-17T22:00' }, { cookie });
+  assert.match(decodeURIComponent(res.headers.get('location')), /position/i, 'refused, by name');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_corrections WHERE employee_id=?").get(emp).n, 0);
+});
+
+test('an empty day is reachable from the timesheet, and offers the add sheet', async () => {
+  const emp = 201;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3201',1500,1)")
+    .run(emp, 'Blank Day');
+  const cookie = await signIn('3201');
+  const day = '2026-05-18';
+  const html = await text(`/portal/timesheet/day/${day}`, { cookie });
+  assert.match(html, /Nothing recorded on this day/);
+  assert.ok(html.includes(`data-pes-open="new-${day}"`), 'with a way to add one');
+  assert.ok(html.includes(`data-pes="new-${day}"`), 'and a sheet behind it');
+  assert.match(html, /name="position"/, 'asking which position');
+  assert.match(html, /name="daypart"/, 'and which service');
+
+  // The timesheet must LINK to that day. It used to be a dead href="#", which
+  // is exactly the day somebody most needs to reach.
+  const ts = await text('/portal/timesheet', { cookie });
+  assert.ok(!/href="#"[^>]*aria-disabled/.test(ts), 'no dead day rows');
+  assert.match(ts, /href="\/portal\/timesheet\/day\//, 'days are links');
 });
