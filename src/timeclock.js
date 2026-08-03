@@ -1028,6 +1028,45 @@ function applyCorrection(c, actor, opts = {}) {
   };
 
   switch (c.kind) {
+    // One request, both ends of the shift.
+    //
+    // Every other kind here changes exactly one thing, which is why asking an
+    // employee to fix a shift meant choosing a field first and filing twice
+    // when both were wrong. This carries whichever of the two they changed —
+    // start only, end only, or both — and applies them together, so the shift
+    // is never briefly half-corrected and the manager approves one thing
+    // rather than two halves of one thing.
+    case 'shift_times': {
+      const inAt = payload.in || entry.clock_in_at;
+      const outAt = payload.out !== undefined ? payload.out : entry.clock_out_at;
+      if (!inAt) throw new ClockError('That request did not include a time to set.');
+      if (outAt && outAt <= inAt) throw new ClockError('The clock-out has to be after the clock-in.');
+      // Validated as one move, not two: checking the new start against the OLD
+      // end would refuse a shift being dragged wholesale to another evening.
+      assertNoEntryOverlap(entry, inAt, outAt);
+      for (const b of q.breaks.all(entry.id)) {
+        if (b.start_at < inAt) throw new ClockError('A recorded break would fall before that clock-in — fix the break first.');
+        if (outAt && b.end_at && b.end_at > outAt) throw new ClockError('A recorded break would run past that clock-out — fix the break first.');
+        if (outAt && !b.end_at) throw new ClockError('A break is still open on this entry — close it first.');
+      }
+      const moved = [];
+      if (payload.in && payload.in !== entry.clock_in_at) {
+        note('clock_in_corrected', entry.clock_in_at, payload.in);
+        moved.push(`clock-in ${clockFace(entry.clock_in_at)} → ${clockFace(payload.in)}`);
+      }
+      if (payload.out !== undefined && payload.out !== entry.clock_out_at) {
+        note('clock_out_corrected', entry.clock_out_at || 'open', payload.out);
+        moved.push(`clock-out ${entry.clock_out_at ? clockFace(entry.clock_out_at) : 'missing'} → ${clockFace(payload.out)}`);
+      }
+      if (!moved.length) throw new ClockError('That request does not change anything.');
+      db.prepare("UPDATE time_entries SET clock_in_at = ?, clock_out_at = ?, status = CASE WHEN ? IS NULL THEN status ELSE 'complete' END WHERE id = ?")
+        .run(inAt, outAt, outAt, entry.id);
+      // The trading day comes from the clock-in, so moving it can move the day,
+      // and the pay period with it. Re-filed through the same find-or-create
+      // every path uses.
+      if (opts.relink) opts.relink(q.byId.get(entry.id));
+      return finish(moved.join(' · '));
+    }
     case 'missing_in':
     case 'wrong_in': {
       const at = payload.at;

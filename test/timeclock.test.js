@@ -310,14 +310,16 @@ test('clocking out writes the hours onto the shift; an open punch does not', () 
 
 // --- corrections and audit -------------------------------------------------
 
-test('an employee correction needs the PIN and a reason, and never edits the punch', async () => {
+test('an employee correction needs the PIN, and never edits the punch', async () => {
   const cookie = await signIn('3111');
   const done = entriesOf(EMP.solo).filter((e) => e.status === 'complete')[0];
   const original = done.clock_in_at;
 
+  // The note is optional now. On the sheet somebody actually uses it reads
+  // "attach a note to your request" — somewhere to say something useful, not a
+  // field standing between them and sending it. What identifies the request is
+  // the time they are asking for, and that is still required.
   const at = require('../src/timeclock').utcToLocalInput(done.clock_out_at);
-  await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', at_out: at, reason: '', pin: '3111' }, { cookie });
-  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE time_entry_id = ?').get(done.id).n, 0, 'no reason, no request');
 
   await post('/portal/clock/fix', { entry_id: done.id, kind: 'wrong_out', at_out: at, reason: 'left at 10.15', pin: '0000' }, { cookie });
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE time_entry_id = ?').get(done.id).n, 0, 'wrong PIN, no request');
@@ -1453,4 +1455,69 @@ test('reopening writes its own line rather than demanding one', async () => {
   assert.strictEqual(s.status, 'submitted', 'it reopens anyway');
   assert.match(s.reopen_reason, /to correct the timesheet/, 'having written its own line');
   assert.match(s.reopen_reason, /Reopen Case|reopened by/, 'that names who did it');
+});
+
+test('one request carries both ends of a shift, and lands together', async () => {
+  // Every other correction kind changes exactly one thing, which is why fixing
+  // a shift meant choosing a field first and filing twice when both were wrong.
+  // This carries whichever ends were changed and applies them in one move — so
+  // the shift is never briefly half-corrected, and the manager approves one
+  // thing rather than two halves of one thing.
+  const emp = 188;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3188',1500,1)")
+    .run(emp, 'Both Ends');
+  const day = '2026-05-04';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',300,300)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 02:00:00`.replace(day, '2026-05-05')).lastInsertRowid;
+
+  const cookie = await signIn('3188');
+  const res = await post('/portal/clock/fix', {
+    entry_id: String(id), kind: 'shift_times', pin: '3188',
+    at_in: `${day}T16:30`, at_out: `${day}T23:15`,          // both ends, no note
+  }, { cookie });
+  assert.strictEqual(res.status, 302);
+
+  const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(id);
+  assert.ok(c, 'a request was filed');
+  assert.strictEqual(c.kind, 'shift_times');
+  assert.ok(!c.reason, 'and the note really was optional');
+  const payload = JSON.parse(c.payload);
+  assert.ok(payload.in && payload.out, 'carrying both ends');
+
+  // Approving applies both, in one transaction.
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(id);
+  assert.strictEqual(e.clock_in_at, payload.in, 'the start moved');
+  assert.strictEqual(e.clock_out_at, payload.out, 'and the end moved with it');
+  assert.strictEqual(e.payable_minutes, 405, 'six and three quarter hours, recalculated');
+
+  // Both halves are in the history, not one.
+  const acts = db.prepare("SELECT action FROM time_events WHERE entity='entry' AND entity_id=?").all(id).map((x) => x.action);
+  assert.ok(acts.includes('clock_in_corrected'), 'the start is in the audit');
+  assert.ok(acts.includes('clock_out_corrected'), 'and so is the end');
+});
+
+test('a request can move just one end, and leaves the other alone', async () => {
+  const emp = 189;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3189',1500,1)")
+    .run(emp, 'One End');
+  const day = '2026-05-06';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',300,300)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 23:00:00`).lastInsertRowid;
+  const was = db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(id).clock_in_at;
+
+  const cookie = await signIn('3189');
+  await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3189',
+    at_out: `${day}T20:30`, note: 'stayed late' }, { cookie });   // end only
+  const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(id);
+  assert.deepStrictEqual(Object.keys(JSON.parse(c.payload)), ['out'], 'only the end travelled');
+
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(id);
+  assert.strictEqual(e.clock_in_at, was, 'the start is untouched');
+  assert.strictEqual(e.clock_out_at.slice(11, 16), '00:30', 'and the end moved');
 });

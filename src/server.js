@@ -5051,16 +5051,37 @@ app.post('/portal/clock/fix', (req, res) => {
     const g = pinCheck(req, emp, req.body.pin);
     if (!g.ok) return back('err=' + encodeURIComponent(g.msg));
   }
-  const reason = String(req.body.reason || '').trim().slice(0, 500);
-  if (!reason) return back('err=1');
-  const KINDS = ['missing_in', 'missing_out', 'wrong_in', 'wrong_out', 'break', 'missing_break', 'wrong_position', 'wrong_service', 'other'];
+  // The note is optional. On the sheet somebody actually uses, it reads "attach
+  // a note to your request" — a place to say something useful, not a field
+  // standing between them and sending it. What identifies the request is the
+  // times, and those are required.
+  // Empty rather than null: the column is NOT NULL and has been since the table
+  // was made, and rebuilding a live table to record the absence of a sentence
+  // is not a trade worth making. Empty reads as "no note" everywhere it matters.
+  const reason = String(req.body.reason || req.body.note || '').trim().slice(0, 500);
+  const KINDS = ['shift_times', 'missing_in', 'missing_out', 'wrong_in', 'wrong_out', 'break', 'missing_break', 'wrong_position', 'wrong_service', 'other'];
   const kind = KINDS.includes(req.body.kind) ? req.body.kind : 'other';
 
   // Turn the form into something approval can ACT on. Times arrive as local
   // wall clock and are stored as UTC here, once, so applying later is exact.
   const b = req.body;
   let payload = null, summary = null;
-  if (kind === 'wrong_in' || kind === 'missing_in') {
+  if (kind === 'shift_times') {
+    // Both ends in one request. Either may be left alone — start only, end
+    // only, or both — and whichever came through is what the manager approves,
+    // together, in one go.
+    const at_in = b.at_in ? TC.localInputToUtc(b.at_in) : null;
+    const at_out = b.at_out ? TC.localInputToUtc(b.at_out) : null;
+    if (!at_in && !at_out) return back('err=' + encodeURIComponent('Change a time before sending it.'));
+    if (at_in && at_out && at_out <= at_in) {
+      return back('err=' + encodeURIComponent('The end has to be after the start.'));
+    }
+    payload = {};
+    const bits = [];
+    if (at_in) { payload.in = at_in; bits.push(`starts ${TC.clockFace(at_in)}`); }
+    if (at_out) { payload.out = at_out; bits.push(`ends ${TC.clockFace(at_out)}`); }
+    summary = bits.join(' · ');
+  } else if (kind === 'wrong_in' || kind === 'missing_in') {
     const at = TC.localInputToUtc(b.at_in);
     if (!at) return back('err=1');
     payload = { at }; summary = `clock-in → ${TC.clockFace(at)}`;
