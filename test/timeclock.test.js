@@ -1521,3 +1521,130 @@ test('a request can move just one end, and leaves the other alone', async () => 
   assert.strictEqual(e.clock_in_at, was, 'the start is untouched');
   assert.strictEqual(e.clock_out_at.slice(11, 16), '00:30', 'and the end moved');
 });
+
+// ── The employee's own screen ────────────────────────────────────────────────
+// The route tests above prove the request works. These prove the SHEET works —
+// that the thing a person actually taps offers both times, shows a total that
+// agrees with the pay, and is offered on every shift they can see rather than
+// only the one they just left.
+
+test('the edit sheet offers both ends, dated, with a total that nets the break', async () => {
+  const emp = 190;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3190',1500,1)")
+    .run(emp, 'Sheet Reader');
+  const day = '2026-05-07';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, unpaid_break_min, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',455,30,425)`)
+    .run(emp, day, `${day} 20:45:00`, '2026-05-08 04:20:00').lastInsertRowid;
+  db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes)
+    VALUES (?,?,?,?,0,30)`).run(id, emp, `${day} 23:00:00`, `${day} 23:30:00`);
+
+  const cookie = await signIn('3190');
+  const html = await text(`/portal/clock/entry/${id}`, { cookie });
+
+  // Four controls, because a shift that ends after midnight cannot be said with
+  // two times alone. The dates carry the "next day" without a word of copy.
+  for (const f of ['pes-ind', 'pes-int', 'pes-outd', 'pes-outt']) {
+    assert.match(html, new RegExp(`id="${f}"`), `the sheet has ${f}`);
+  }
+  assert.match(html, /name="kind" value="shift_times"/, 'one kind, not a menu of seven');
+  assert.match(html, /name="pin"/, 'the PIN is still asked for');
+  assert.match(html, /Send for approval/, 'and the button says what it does');
+
+  // The end is dated the NEXT day, unprompted — 8:45pm to 4:20am UTC is an
+  // evening shift that finished after midnight.
+  assert.match(html, /id="pes-outd" value="2026-05-08"/, 'the end carries its own date');
+
+  // The total the sheet will show must be the total the shift pays. It reads
+  // the break rows, so a 30-minute unpaid break comes off before it is shown.
+  assert.match(html, /var UNPAID = 30;/, 'the unpaid break reaches the arithmetic');
+});
+
+test('the sheet is offered on an approved shift, and the request queues', async () => {
+  // "Employees never directly modify approved records; they send a request."
+  // The screen has to stay open on a signed-off period for that to mean
+  // anything — otherwise the only way to fix a mistake payroll already passed
+  // is to find a manager, which is the thing this replaces.
+  const emp = 191;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3191',1500,1)")
+    .run(emp, 'Locked Period');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const day = D2.addDays(per.start, 3);
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',300,300)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 23:00:00`).lastInsertRowid;
+  db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)
+    VALUES (?,?,?,'approved') ON CONFLICT(employee_id, period_start) DO UPDATE SET status='approved'`)
+    .run(emp, per.start, per.end);
+
+  const cookie = await signIn('3191');
+  const html = await text(`/portal/clock/entry/${id}`, { cookie });
+  assert.match(html, /data-pes-open/, 'the sheet is still offered');
+
+  const before = db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(id).clock_in_at;
+  const res = await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times',
+    pin: '3191', at_in: `${day}T16:00`, note: 'started earlier' }, { cookie });
+  assert.strictEqual(res.status, 302, 'the request is taken');
+
+  const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(id);
+  assert.strictEqual(c.decision, 'pending', 'and it waits');
+  assert.strictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(id).clock_in_at,
+    before, 'the approved record did not move an inch');
+});
+
+test('the sheet is withheld while the shift is still running', async () => {
+  const emp = 192;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3192',1500,1)")
+    .run(emp, 'Still On');
+  const day = '2026-05-09';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, status, source)
+    VALUES (?,?,'dinner','server',?, 'active','employee')`)
+    .run(emp, day, `${day} 21:00:00`).lastInsertRowid;
+
+  const cookie = await signIn('3192');
+  const html = await text(`/portal/clock/entry/${id}`, { cookie });
+  assert.ok(!/data-pes-open/.test(html), 'no edit button on a shift in progress');
+  assert.match(html, /clock out first/i, 'and it says why');
+});
+
+test('a request cannot invert a shift, or land on top of another one', async () => {
+  const emp = 193;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3193',1500,1)")
+    .run(emp, 'Bad Times');
+  const day = '2026-05-10';
+  const mk = (a, b) => db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',120,120)`).run(emp, day, a, b).lastInsertRowid;
+  const first = mk(`${day} 15:00:00`, `${day} 17:00:00`);
+  const second = mk(`${day} 21:00:00`, `${day} 23:00:00`);
+
+  const cookie = await signIn('3193');
+
+  // End before start. Refused where it is typed, so nothing is ever filed for a
+  // manager to read, puzzle over and reject. (The sheet's own arithmetic says
+  // "check the times" and will not submit either — this is the second layer,
+  // for anything that reaches the route without going through the screen.)
+  const bad = await post('/portal/clock/fix', { entry_id: String(second), kind: 'shift_times',
+    pin: '3193', at_in: `${day}T18:00`, at_out: `${day}T16:00` }, { cookie });
+  assert.strictEqual(bad.status, 302);
+  assert.match(decodeURIComponent(bad.headers.get('location')), /end has to be after the start/i,
+    'and it says which way round they go');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE time_entry_id = ?')
+    .get(second).n, 0, 'nothing was filed');
+
+  // Dragged back over the afternoon shift.
+  await post('/portal/clock/fix', { entry_id: String(second), kind: 'shift_times', pin: '3193',
+    at_in: `${day}T11:30`, at_out: `${day}T14:00` }, { cookie });
+  let d = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(second);
+  await post(`/timeclock/correction/${d.id}`, { decision: 'approved' });
+  d = db.prepare('SELECT * FROM time_corrections WHERE id = ?').get(d.id);
+  assert.ok(d.apply_error, 'the overlap was refused too');
+  assert.match(d.apply_error, /overlap/i, 'naming the reason');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND business_date = ?')
+    .get(emp, day).n, 2, 'and both shifts survive, unmerged');
+  assert.ok(first, 'the afternoon shift is still there');
+});

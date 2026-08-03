@@ -4955,7 +4955,30 @@ app.get('/portal/clock/entry/:id', (req, res) => {
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   const brs = TC.q.breaks.all(e.id);
   const corr = TC.q.correctionsFor.all(e.id);
+  const corrOpen = corr.some((c) => c.decision === 'pending');
   const fact = (k, v) => `<div class="tc-fact"><span>${k}</span><b>${v}</b></div>`;
+
+  // What the sheet opens with. An unfinished shift has no end to show, so it
+  // offers the clock-in's own day and leaves the time blank rather than
+  // inventing one.
+  const outLocal = e.clock_out_at
+    ? TC.utcToLocalInput(e.clock_out_at)
+    : TC.utcToLocalInput(e.clock_in_at).slice(0, 10) + 'T';
+
+  // Any shift they can see, in any period they can open — not only the one they
+  // just clocked out of. A period payroll has already signed is still
+  // requestable: the request queues, and the manager is told approving it
+  // reopens the period. What an employee may never do is change the record
+  // themselves, and that has not moved.
+  const canAsk = !TC.isOpen(e) || !!e.clock_out_at;
+  const whyNot = 'You are still on this shift — clock out first, then you can ask for a change.';
+
+  // Read off the break rows themselves rather than the entry's cached column,
+  // so the sheet cannot quote a total that a break added since the last
+  // recompute has already changed. Same arithmetic recompute() does, so the
+  // figure on the sheet is the figure the shift pays.
+  const unpaidBreakMin = brs.reduce(
+    (n, b) => n + (b.paid || !b.end_at ? 0 : (b.raw_minutes || 0)), 0);
 
   res.send(portalPage('Your time', `
     ${portalSub('<a class="pt-back2" href="/portal/clock">Time clock</a>')}
@@ -4974,70 +4997,101 @@ app.get('/portal/clock/entry/:id', (req, res) => {
         <div class="tc-rows">${corr.map((c) => `<div class="tc-row"><span class="tc-row-l"><b>${esc(c.kind.replace(/_/g, ' '))}</b><i>${esc(c.reason)}</i></span>
           <span class="tc-row-r"><b>${esc(c.decision)}</b></span></div>`).join('')}</div>` : ''}
 
-      <div class="tc-kick tc-kick-sec">Something wrong?</div>
-      ${/* The request is structured, not a sentence: a manager approving it
-             should APPLY it, and prose cannot be applied. Each kind reveals
-             exactly the field it needs and nothing else. */''}
-      <form method="post" action="/portal/clock/fix" class="tc-form tc-fix" id="fixform">
+      ${/* One button, one sheet.
+             What was here asked somebody to pick which KIND of thing was wrong
+             from seven options, then filled in whichever of nine fields that
+             choice revealed, and required a sentence explaining it. If both
+             your times were wrong you did it twice. Nobody standing in a
+             corridor after a double does that; they tell a manager, and the
+             record never gets fixed. */''}
+      ${canAsk ? `<button type="button" class="tc-btn tc-btn-go tc-btn-big" data-pes-open>Edit shift</button>`
+        : `<p class="tc-note">${esc(whyNot)}</p>`}
+      ${corrOpen ? '<p class="tc-note">You already have a request waiting on this shift.</p>' : ''}
+    </div>
+
+    ${canAsk ? `
+    <div class="pes" id="pes" hidden>
+      <div class="pes-scrim" data-pes-close></div>
+      <form class="pes-panel" method="post" action="/portal/clock/fix" id="pes-form">
+        <div class="pes-bar">
+          <button type="button" class="pes-back" data-pes-close aria-label="Back">‹</button>
+          <b>Edit shift</b>
+        </div>
         <input type="hidden" name="entry_id" value="${e.id}">
-        <label class="tc-field"><span>What needs fixing?</span>
-          <select name="kind" id="fixkind" required>
-            <option value="wrong_in">Clock-in time is wrong</option>
-            <option value="wrong_out">Clock-out time is wrong${e.clock_out_at ? '' : ' / missing'}</option>
-            <option value="missing_break">A break is missing</option>
-            ${brs.length ? '<option value="break">A break time is wrong</option>' : ''}
-            <option value="wrong_position">Wrong position</option>
-            <option value="wrong_service">Wrong service</option>
-            <option value="other">Something else</option>
-          </select></label>
+        <input type="hidden" name="kind" value="shift_times">
+        <input type="hidden" name="at_in" id="pes-in">
+        <input type="hidden" name="at_out" id="pes-out">
 
-        <div class="tc-fixfield" data-for="wrong_in">
-          <label class="tc-field"><span>It should have been</span>
-            <input type="datetime-local" name="at_in" value="${esc(TC.utcToLocalInput(e.clock_in_at))}"></label></div>
-        <div class="tc-fixfield" data-for="wrong_out" hidden>
-          <label class="tc-field"><span>It should have been</span>
-            <input type="datetime-local" name="at_out" value="${esc(TC.utcToLocalInput(e.clock_out_at) || TC.utcToLocalInput(e.clock_in_at))}"></label></div>
-        <div class="tc-fixfield" data-for="missing_break" hidden>
-          <label class="tc-field"><span>Break started</span><input type="datetime-local" name="brk_start"></label>
-          <label class="tc-field"><span>Break ended</span><input type="datetime-local" name="brk_end"></label></div>
-        ${brs.length ? `<div class="tc-fixfield" data-for="break" hidden>
-          <label class="tc-field"><span>Which break</span><select name="break_id">
-            ${brs.map((b) => `<option value="${b.id}">${esc(TC.clockFace(b.start_at))}–${b.end_at ? esc(TC.clockFace(b.end_at)) : 'open'}</option>`).join('')}
-          </select></label>
-          <label class="tc-field"><span>It should have started</span><input type="datetime-local" name="bfix_start"></label>
-          <label class="tc-field"><span>and ended</span><input type="datetime-local" name="bfix_end"></label></div>` : ''}
-        <div class="tc-fixfield" data-for="wrong_position" hidden>
-          <label class="tc-field"><span>It should have been</span><select name="position">
-            ${clockPositionsFor(emp).map((r) => `<option value="${esc(r)}"${r === e.position ? ' selected' : ''}>${esc(posName(r))}</option>`).join('')}
-          </select></label></div>
-        <div class="tc-fixfield" data-for="wrong_service" hidden>
-          <label class="tc-field"><span>It should have been</span><select name="daypart">
-            ${DAYPARTS.map((d) => `<option value="${d}"${d === e.daypart ? ' selected' : ''}>${dp(d)}</option>`).join('')}
-          </select></label></div>
-        <div class="tc-fixfield" data-for="other" hidden>
-          <label class="tc-field"><span>What should it say?</span>
-            <input name="proposed" maxlength="200" placeholder="Describe it and your manager will sort it out"></label></div>
+        ${/* Date and time apart, as two things you tap — which is what the
+               phone's own pickers are, and what makes a shift that ends after
+               midnight expressible without explaining anything. */''}
+        <label class="pes-row"><span>Starts</span>
+          <input type="date" id="pes-ind" value="${esc(TC.utcToLocalInput(e.clock_in_at).slice(0, 10))}">
+          <input type="time" id="pes-int" value="${esc(TC.utcToLocalInput(e.clock_in_at).slice(11, 16))}">
+        </label>
+        <label class="pes-row"><span>Ends</span>
+          <input type="date" id="pes-outd" value="${esc(outLocal.slice(0, 10))}">
+          <input type="time" id="pes-outt" value="${esc(outLocal.slice(11, 16))}">
+        </label>
 
-        <label class="tc-field"><span>What happened? <i>required</i></span>
-          <textarea name="reason" rows="3" required maxlength="500" placeholder="A sentence is plenty."></textarea></label>
-        <label class="tc-field"><span>Your PIN</span>
-          <input class="tc-pin" name="pin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••" required></label>
-        <button class="tc-btn tc-btn-go" type="submit" data-once>Send to your manager</button>
+        <div class="pes-total"><span>Total hours<i id="pes-sub"></i></span><b id="pes-tot">—</b></div>
+
+        <label class="pes-note"><span>Add a note <i>optional</i></span>
+          <textarea name="note" maxlength="500" rows="3" placeholder="Attach a note to your request"></textarea></label>
+
+        <label class="pes-row pes-pin"><span>Your PIN</span>
+          <input name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required></label>
+
+        <p class="pes-fine">All requests are sent to your manager for approval. Nothing changes until they say so.</p>
+        <button class="tc-btn tc-btn-go tc-btn-big" type="submit">Send for approval</button>
       </form>
-      <p class="tc-note">Your original times are never changed by a request — your manager sees both, and approving it puts your time right.</p>
     </div>
     <script>
-      (function () {
-        var k = document.getElementById('fixkind');
-        function show() {
-          document.querySelectorAll('.tc-fixfield').forEach(function (d) {
-            d.hidden = d.getAttribute('data-for') !== k.value;
-          });
-        }
-        k.addEventListener('change', show); show();
-      })();
-      document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});
-    </script>`));
+    (function () {
+      var lay = document.getElementById('pes'); if (!lay) return;
+      var ind = document.getElementById('pes-ind'), int_ = document.getElementById('pes-int');
+      var outd = document.getElementById('pes-outd'), outt = document.getElementById('pes-outt');
+      var tot = document.getElementById('pes-tot'), sub = document.getElementById('pes-sub');
+      function show(on) {
+        lay.hidden = !on;
+        void lay.offsetHeight;
+        lay.classList.toggle('is-open', on);
+        document.documentElement.style.overflow = on ? 'hidden' : '';
+      }
+      document.addEventListener('click', function (ev) {
+        if (ev.target.closest('[data-pes-open]')) { show(true); count(); }
+        else if (ev.target.closest('[data-pes-close]')) show(false);
+      });
+      var UNPAID = ${unpaidBreakMin};
+      function hm(m) { return Math.floor(m / 60) + 'h ' + (m % 60) + 'm'; }
+      function count() {
+        // The total is worked out here rather than asked for, because it is not
+        // a thing anybody knows — it is a thing the two times mean.
+        //
+        // Unpaid break time comes off it, because that is what the shift pays
+        // (recompute(): payable = raw - unpaid) and this screen must not quote
+        // a bigger number than the one that reaches the cheque. The deduction
+        // is spelled out underneath rather than silently applied.
+        if (!ind.value || !int_.value || !outd.value || !outt.value) { tot.textContent = '—'; return null; }
+        var a = new Date(ind.value + 'T' + int_.value);
+        var b = new Date(outd.value + 'T' + outt.value);
+        var m = Math.round((b - a) / 60000);
+        if (!(m > 0)) { tot.textContent = 'check the times'; sub.textContent = ''; return null; }
+        tot.textContent = hm(Math.max(0, m - UNPAID));
+        sub.textContent = UNPAID ? hm(m) + ' less ' + UNPAID + 'm unpaid break' : '';
+        return m;
+      }
+      [ind, int_, outd, outt].forEach(function (el) { el.addEventListener('change', count); });
+      document.getElementById('pes-form').addEventListener('submit', function (ev) {
+        if (count() === null) { ev.preventDefault(); return; }
+        // Only what actually moved travels. An unchanged end is not a request
+        // to set the end to what it already is.
+        var inNew = ind.value + 'T' + int_.value, outNew = outd.value + 'T' + outt.value;
+        document.getElementById('pes-in').value = inNew === ${JSON.stringify(TC.utcToLocalInput(e.clock_in_at))} ? '' : inNew;
+        document.getElementById('pes-out').value = outNew === ${JSON.stringify(outLocal)} ? '' : outNew;
+      });
+    })();
+    </script>` : ''}`));
 });
 
 app.post('/portal/clock/fix', (req, res) => {

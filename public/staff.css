@@ -870,6 +870,64 @@ body.bare {
    is wrong, there is simply something to do — and it is a link to the screen
    where the button lives, because saying "ready to submit" on a page with no
    submit button is the bug this exists to end. */
+/* --- the employee's edit sheet -------------------------------------------
+   Up from the bottom, like every other sheet on this phone. Two rows, a total
+   that works itself out, somewhere to say something if there is something to
+   say, and one button. What it replaced asked which of seven kinds of thing
+   was wrong before it would show you a field. */
+.pes { position: fixed; inset: 0; z-index: 90; display: flex; align-items: flex-end; justify-content: center; }
+.pes[hidden] { display: none; }
+.pes-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.4); opacity: 0; transition: opacity .25s ease; }
+.pes.is-open .pes-scrim { opacity: 1; }
+.pes-panel {
+  position: relative; width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto;
+  background: var(--pt-page); padding: 0 18px 26px;
+  transform: translateY(100%); transition: transform .3s cubic-bezier(.22,.8,.28,1);
+}
+.pes.is-open .pes-panel { transform: none; }
+@media (prefers-reduced-motion: reduce) { .pes-panel, .pes-scrim { transition: none; } .pes-panel { transform: none; } }
+
+.pes-bar { display: flex; align-items: center; gap: 12px; padding: 16px 0 14px;
+  position: sticky; top: 0; background: inherit; }
+.pes-bar b { font-size: 19px; color: var(--pt-ink); }
+.pes-back { background: none; border: 0; font: inherit; font-size: 26px; line-height: 1;
+  color: var(--pt-blue); cursor: pointer; padding: 0 4px; }
+
+/* Date and time side by side, each its own tap. The phone brings its own
+   picker for both, which is the one control everybody already knows. */
+.pes-row { display: flex; align-items: center; gap: 10px; padding: 15px 0;
+  border-bottom: 1px solid var(--pt-line); }
+.pes-row > span:first-child { flex: 1; font-size: 16px; color: var(--pt-ink); }
+.pes-row input { font: inherit; font-size: 16px; color: var(--pt-blue); background: none;
+  border: 0; padding: 4px 2px; text-align: right; }
+.pes-row input[type="date"] { max-width: 148px; }
+.pes-row input[type="time"] { max-width: 128px; }
+@media (max-width: 380px) {
+  .pes-row { flex-wrap: wrap; }
+  .pes-row > span:first-child { flex: 1 0 100%; margin-bottom: 4px; }
+}
+
+.pes-total { display: flex; align-items: baseline; justify-content: space-between;
+  padding: 16px 0; border-bottom: 1px solid var(--pt-line); }
+.pes-total span { display: grid; gap: 2px; font-size: 16px; font-weight: 600; color: var(--pt-ink); }
+/* The break deduction, spelled out under the total rather than silently taken. */
+.pes-total i { font-style: normal; font-size: 12px; font-weight: 400; color: var(--pt-muted); }
+.pes-total b { font-family: var(--mono, ui-monospace, monospace); font-size: 17px; color: var(--pt-ink); }
+
+.pes-note { display: block; padding: 16px 0 4px; }
+.pes-note > span { display: block; font-size: 14px; color: var(--pt-body); margin-bottom: 7px; }
+.pes-note i { font-style: normal; color: var(--pt-muted); }
+.pes-note textarea { width: 100%; font: inherit; font-size: 15px; padding: 11px 12px;
+  border: 1px solid var(--pt-line); background: var(--pt-field); color: var(--pt-ink); resize: vertical; }
+/* The PIN sits in the sheet's own row rhythm. (.tc-pin styles the input on the
+   full-screen clock; on a label it turns the word "PIN" into a giant keypad.) */
+.pes-pin input { font: inherit; font-size: 16px; width: 112px; text-align: center;
+  letter-spacing: .18em; padding: 9px 10px; border: 1px solid var(--pt-line);
+  background: var(--pt-field); color: var(--pt-ink); border-radius: 0; }
+.pes-pin input::placeholder { letter-spacing: .18em; color: var(--pt-muted); }
+
+.pes-fine { font-size: 12.5px; color: var(--pt-muted); line-height: 1.5; margin: 14px 0 16px; }
+
 .ts-awaiting { display: block; text-decoration: none; padding: 14px; margin: 16px 0;
   border-left: 3px solid var(--pt-green); background: var(--pt-field); }
 .ts-awaiting b { display: block; color: var(--pt-ink); font-size: 15px; }
