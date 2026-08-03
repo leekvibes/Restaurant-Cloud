@@ -15169,6 +15169,21 @@ const sheetCovering = TC.sheetCovering;
  *
  * @returns true if the write was refused and a response has already been sent.
  */
+/**
+ * The same question tcFrozen answers, without a response to write.
+ *
+ * Bulk approval needs to honour the freeze exactly as a single approval does,
+ * and it cannot redirect per request. Both call this, so there is one answer to
+ * "is this day signed for" rather than two that can drift.
+ */
+function frozenWhy(employeeId, businessDate) {
+  if (!employeeId || !businessDate) return null;
+  const st = sheetCovering(employeeId, businessDate);
+  if (!st.frozen) return null;
+  const who = st.sheet.approved_by ? ` by ${st.sheet.approved_by}` : '';
+  return `${TC.dayLabel(businessDate)} is on a timesheet already ${st.sheet.status}${who} — reopen it first`;
+}
+
 function tcFrozen(res, employeeId, businessDate, backTo) {
   if (!employeeId || !businessDate) return false;
   const st = sheetCovering(employeeId, businessDate);
@@ -15388,16 +15403,17 @@ app.get('/timeclock', (req, res) => {
         ${openEnded.length > 10 ? `<p class="inc-hint">${openEnded.length - 10} more.</p>` : ''}
       </section>` : ''}
 
+      ${/* A pointer, not the queue. This panel WAS the queue — ten of them,
+             each linking away to a different person's entry — which is why
+             requests felt like they lived nowhere. They live on /requests now;
+             this says how many and gets you there. */''}
       ${pending.length ? `<section class="bs-panel tcm-pending">
         <div class="bs-sec-h"><span class="bs-kicker">Correction requests</span>
           <span class="bs-sec-note">${pending.length} waiting</span></div>
-        <!-- Newest ten. Nothing expires a request and they are decided one at a
-             time, so an unbounded list grows forever; the count above is the
-             real total, read from the whole set rather than this slice. -->
-        ${pending.slice(0, 10).map((c) => `<a class="tcm-live-r" href="${c.time_entry_id ? `/timeclock/${c.time_entry_id}` : `/timeclock/request/${c.id}`}">
+        ${pending.slice(0, 3).map((c) => `<a class="tcm-live-r" href="/timeclock/requests?id=${c.id}">
           <span class="tcm-dot warn"></span><b>${esc(tcEmpName(c.employee_id))}</b>
-          <span>${esc(c.kind.replace(/_/g, ' '))} — ${esc(String(c.reason || c.proposed_value || '').slice(0, 80))}</span><i>open</i></a>`).join('')}
-        ${pending.length > 10 ? `<p class="inc-hint">${pending.length - 10} more waiting.</p>` : ''}
+          <span>${esc(reqKind(c))} — ${esc(String(c.reason || c.proposed_value || '').slice(0, 60))}</span><i>open</i></a>`).join('')}
+        <p class="inc-hint"><a class="bs-act" href="/timeclock/requests">Review all ${pending.length} →</a></p>
       </section>` : ''}
 
       <form class="tcm-filters" method="get" action="/timeclock">
@@ -15426,6 +15442,10 @@ app.get('/timeclock', (req, res) => {
         <!-- Carries the filters, so the spreadsheet is what is on the screen. -->
         <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
         <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
+        ${/* Never absent. With nothing waiting it still reads "View requests",
+               so "are there any?" is a question you can go and answer rather
+               than infer from a panel that is not on the page. */''}
+        ${reqPill(pending.length)}
         <!-- The Timesheets button used to sit here, unguarded, and 403'd for
              anybody without the payroll area. The tab strip above carries that
              link now, and filters it by what the account can actually open. -->
@@ -15761,6 +15781,418 @@ app.post('/timeclock/new', (req, res) => {
   res.redirect(punchBack(req, `/timeclock/${id}`, 'Punch added.', `#e-${id}`));
 });
 
+// ---------------------------------------------------------------------------
+// REQUESTS — one place they live.
+//
+// They used to live nowhere: a panel on the Today tab that vanished when the
+// queue was empty, capped at ten, every row a link AWAY to the individual entry
+// it belonged to. So "are there any requests?" had no answer you could go and
+// read — an empty queue and a broken page looked identical — and working
+// through three of them meant three different people's entry pages.
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide one request. The whole of it — the freeze check, the application, the
+ * audit — in one function, so the single-decision route and the decide-all
+ * route cannot drift into two different sets of rules. Approving in bulk must
+ * not be a quieter way in than approving one at a time.
+ *
+ * @returns {ok, msg, entryId} — ok false means nothing was written and `msg`
+ *          says why, which is what both callers show.
+ */
+function decideCorrection(c, decision, actor, note) {
+  const entryId = () => (TC.q.correctionById.get(c.id) || {}).time_entry_id || c.time_entry_id;
+  // Decided once, applied once. Without this a double submit — or a back
+  // button — would run the change twice and add the same break, or move the
+  // same punch again.
+  if (c.decision !== 'pending') return { ok: false, msg: 'That request was already decided.', entryId: entryId() };
+
+  const settle = () => {
+    const stillOpen = TC.q.correctionsFor.all(c.time_entry_id).some((x) => x.id !== c.id && x.decision === 'pending');
+    const e = TC.q.byId.get(c.time_entry_id);
+    if (!e) return;
+    if (stillOpen) {
+      // Applying one request must not clear the flag while another is waiting —
+      // the badge is how a manager finds the entry that still needs them.
+      if (e.status !== 'correction_pending') TC.q.setStatus.run({ id: e.id, status: 'correction_pending', by: actor });
+    } else if (e.status === 'correction_pending') {
+      TC.q.setStatus.run({ id: e.id, status: e.clock_out_at ? 'complete' : 'active', by: actor });
+    }
+  };
+
+  if (decision === 'rejected') {
+    // A rejection touches the punch, never. It is only a decision.
+    db.transaction(() => {
+      TC.q.decideCorrection.run({ id: c.id, decision, by: actor, note });
+      TC.logEvent('correction', c.id, 'rejected', actor, { reason: note });
+      settle();
+    })();
+    return { ok: true, msg: 'Request rejected — the entry is unchanged.', entryId: entryId() };
+  }
+
+  // The freeze. Approving a request is not a smaller act than editing the punch
+  // by hand — it rewrites the same clock-in, the same break, the same hours —
+  // and this was the widest way into a signed period: an employee files a fix
+  // after the sheet is locked, a manager works the queue days later and clicks
+  // Approve, and the punch moves under a signature given for different hours.
+  {
+    const target = TC.q.byId.get(c.time_entry_id);
+    let why = target ? frozenWhy(target.employee_id, target.business_date) : null;
+    // Adding a shift to a signed period moves its total exactly as much as
+    // moving one already there. No entry exists yet, so the day comes off the
+    // request itself.
+    if (!target && c.kind === 'new_shift') {
+      let day = null;
+      try { day = JSON.parse(c.payload || '{}').business_date || null; } catch { day = null; }
+      why = day ? frozenWhy(c.employee_id, day) : null;
+    }
+    if (why) return { ok: false, msg: why, entryId: entryId() };
+  }
+
+  if (c.kind === 'other') {
+    // Nothing machine-applicable to do. Accepting it means "seen, and handled
+    // by hand" — the manual edit is audited on its own. Left unresolvable it
+    // would block the employee's timesheet forever.
+    db.transaction(() => {
+      TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
+      TC.logEvent('correction', c.id, 'acknowledged', actor,
+        { reason: note || 'handled by hand — see the entry history' });
+      settle();
+    })();
+    return { ok: true, entryId: entryId(),
+      msg: 'Marked handled. Make any change on the entry itself so the reason travels with it.' };
+  }
+
+  // Captured BEFORE the correction runs. Three kinds re-parent the entry —
+  // a wrong clock-in that crosses the cutoff, a wrong service, a wrong position
+  // — and once it has moved there is no way left to ask where it came from.
+  const entryBefore = TC.q.byId.get(c.time_entry_id);
+  const wasShiftId = entryBefore ? entryBefore.shift_id : null;
+  const wasDate = entryBefore ? entryBefore.business_date : null;
+
+  try {
+    let summary = '';
+    db.transaction(() => {
+      summary = TC.applyCorrection(c, actor, {
+        validPositions: allRoles(),
+        validDayparts: DAYPARTS,
+        // Re-link through the one find-or-create every path uses, so moving a
+        // service can never mint a second shift for it.
+        relink: (entry) => {
+          if (!entry.daypart) return;
+          const bdate = TC.businessDateOf(entry.clock_in_at, TC.settings().cutoffHour);
+          s.getOrIgnore.run(bdate, entry.daypart);
+          const sh = s.findShift.get(bdate, entry.daypart);
+          policyForShift(sh);
+          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: entry.employee_id, role: entry.position });
+          TC.q.setShift.run({ id: entry.id, shift_id: sh.id });
+          db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, entry.id);
+        },
+        // A shift nobody clocked, made real. Deliberately the SAME six steps a
+        // manager typing one in by hand takes — find-or-create the service,
+        // apply its policy, put the person on it, then through TC.createEntry
+        // so it clears the same overlap check.
+        createEntry: (pay) => {
+          const bdate = pay.business_date || TC.businessDateOf(pay.in, TC.settings().cutoffHour);
+          s.getOrIgnore.run(bdate, pay.daypart);
+          const sh = s.findShift.get(bdate, pay.daypart);
+          policyForShift(sh);
+          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: pay.employee_id, role: pay.position });
+          const id = TC.createEntry({
+            employee_id: pay.employee_id, shift_id: sh.id, business_date: bdate,
+            daypart: pay.daypart, position: pay.position,
+            clock_in_at: pay.in, clock_out_at: pay.out || null,
+            source: 'employee', created_by: actor,
+          });
+          tcTouchDates(pay.employee_id, [bdate], actor, 'an approved request added a shift');
+          TC.syncShiftHours(sh.id, pay.employee_id, actor, { role: pay.position });
+          return id;
+        },
+      });
+      TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
+      db.prepare("UPDATE time_corrections SET applied_at = datetime('now'), apply_error = NULL WHERE id = ?").run(c.id);
+      TC.logEvent('correction', c.id, 'approved_and_applied', actor, { after: summary, reason: note });
+      // Hours that changed after somebody signed for them are no longer the
+      // hours they signed for. The submission stands as a record, but it has to
+      // be made again against the new figures.
+      //
+      // entryId() is re-read rather than closed over: a 'new_shift' request had
+      // no entry when it was filed and has one now, and the stale null would
+      // leave the period it landed in still marked as signed for hours that no
+      // longer include this shift.
+      tcTouchTimesheet(entryId(), actor, `a correction changed the hours — ${summary}`, wasDate ? [wasDate] : []);
+      // An approved correction that never reaches the shift is a correction the
+      // employee is not paid for. Both ends again — see the edit route.
+      const moved = TC.q.byId.get(entryId());
+      if (moved) {
+        TC.syncShiftHours(moved.shift_id, moved.employee_id, actor, { role: moved.position });
+        if (wasShiftId && wasShiftId !== moved.shift_id) {
+          TC.syncShiftHours(wasShiftId, moved.employee_id, actor);
+        }
+      }
+      settle();
+    })();
+    return { ok: true, msg: `Approved and applied — ${summary}.`, entryId: entryId() };
+  } catch (err) {
+    // Nothing was written: the transaction rolled back. Say what stopped it and
+    // leave the request where a manager can still act on it.
+    const msg = err instanceof TC.ClockError ? err.message : 'That change could not be applied.';
+    try { db.prepare('UPDATE time_corrections SET apply_error = ? WHERE id = ?').run(msg.slice(0, 300), c.id); } catch { /* best effort */ }
+    return { ok: false, msg: `${msg} The request is still open.`, entryId: entryId() };
+  }
+}
+
+/** What they asked for, in words. */
+const REQ_KIND = {
+  new_shift: 'Added a shift', shift_times: 'Changed shift times',
+  missing_in: 'Forgotten clock-in', wrong_in: 'Clock-in time',
+  missing_out: 'Forgotten clock-out', wrong_out: 'Clock-out time',
+  break: 'Break time', missing_break: 'Missing break',
+  wrong_position: 'Position', wrong_service: 'Service', other: 'Something else',
+};
+const reqKind = (c) => REQ_KIND[c.kind] || String(c.kind).replace(/_/g, ' ');
+
+/** Unpaid break minutes on an entry, from the break rows themselves. */
+const reqUnpaid = (entryId) => TC.q.breaks.all(entryId)
+  .reduce((n, b) => n + (b.paid || !b.end_at ? 0 : (b.raw_minutes || 0)), 0);
+
+/**
+ * The shift as it stands against the shift as asked for.
+ *
+ * The heart of the review screen. A request used to be a sentence — "clock-in
+ * 4:45 PM → 4:15 PM" — which tells you what moved but not what the shift
+ * becomes, so deciding meant opening the entry in another tab and doing the
+ * arithmetic. These are the same fields twice, side by side, and the total is
+ * worked out both ways: the question a manager is actually answering is "what
+ * will this shift be if I say yes".
+ *
+ * An added shift is the same shape with an empty left column, which is exactly
+ * what it is — there is no shift yet.
+ */
+function reqDiff(c) {
+  let p = {};
+  try { p = JSON.parse(c.payload || '{}') || {}; } catch { p = {}; }
+  const e = c.time_entry_id ? TC.q.byId.get(c.time_entry_id) : null;
+  const rows = [];
+  const face = (v) => (v ? TC.clockFace(v) : '—');
+  const add = (label, now, want) => rows.push({ label, now, want, changed: now !== want });
+
+  // The times either side of the decision, so the totals below are honest.
+  let inNow = e ? e.clock_in_at : null, outNow = e ? e.clock_out_at : null;
+  let inWant = inNow, outWant = outNow;
+  let unpaidNow = e ? reqUnpaid(e.id) : 0, unpaidWant = unpaidNow;
+
+  if (c.kind === 'new_shift') {
+    inNow = outNow = null; unpaidNow = 0;
+    inWant = p.in || null; outWant = p.out || null; unpaidWant = 0;
+    add('Date', '—', p.business_date ? TC.dayLabel(p.business_date) : '—');
+    add('Clock in', '—', face(inWant));
+    add('Clock out', '—', face(outWant));
+    add('Position', '—', p.position ? tcPosName(p.position) : '—');
+    add('Service', '—', p.daypart ? dp(p.daypart) : '—');
+  } else if (c.kind === 'shift_times') {
+    if (p.in) inWant = p.in;
+    if (p.out !== undefined) outWant = p.out;
+    add('Clock in', face(inNow), face(inWant));
+    add('Clock out', face(outNow), face(outWant));
+  } else if (c.kind === 'wrong_in' || c.kind === 'missing_in') {
+    inWant = p.at || inNow;
+    add('Clock in', face(inNow), face(inWant));
+  } else if (c.kind === 'wrong_out' || c.kind === 'missing_out') {
+    outWant = p.at || outNow;
+    add('Clock out', face(outNow), face(outWant));
+  } else if (c.kind === 'missing_break') {
+    const mins = p.start && p.end ? TC.minutesBetween(p.start, p.end) : 0;
+    if (!p.paid) unpaidWant = unpaidNow + mins;
+    add('Breaks', unpaidNow ? `${TC.hm(unpaidNow)} unpaid` : 'none',
+      `${TC.hm(unpaidWant)} unpaid — adds ${face(p.start)}–${face(p.end)}`);
+  } else if (c.kind === 'break') {
+    const b = p.break_id ? TC.q.breaks.all(e ? e.id : 0).find((x) => x.id === p.break_id) : null;
+    const was = b && b.end_at ? TC.minutesBetween(b.start_at, b.end_at) : 0;
+    const now = p.start && p.end ? TC.minutesBetween(p.start, p.end) : 0;
+    if (b && !b.paid) unpaidWant = Math.max(0, unpaidNow - was + now);
+    add('Break', b ? `${face(b.start_at)}–${face(b.end_at)}` : '—', `${face(p.start)}–${face(p.end)}`);
+  } else if (c.kind === 'wrong_position') {
+    add('Position', e ? tcPosName(e.position) : '—', p.position ? tcPosName(p.position) : '—');
+  } else if (c.kind === 'wrong_service') {
+    add('Service', e && e.daypart ? dp(e.daypart) : '—', p.daypart ? dp(p.daypart) : '—');
+  }
+
+  // What the shift pays, both ways. Nothing machine-applicable means nothing to
+  // project, so 'other' shows no total rather than a made-up one.
+  if (c.kind !== 'other') {
+    const pay = (a, b, unpaid) => (a && b ? Math.max(0, TC.minutesBetween(a, b) - unpaid) : null);
+    const nowMin = e && e.clock_out_at ? (e.payable_minutes != null ? e.payable_minutes : pay(inNow, outNow, unpaidNow)) : pay(inNow, outNow, unpaidNow);
+    const wantMin = pay(inWant, outWant, unpaidWant);
+    add('Total hours', nowMin == null ? '—' : TC.hm(nowMin), wantMin == null ? '—' : TC.hm(wantMin));
+  }
+  return rows;
+}
+
+/**
+ * The control that opens the queue — and never disappears.
+ *
+ * Two states, and the quiet one matters most: with nothing waiting it still
+ * reads "View requests", so a manager can go and SEE that there is nothing.
+ * Rendering nothing at zero, which is what the old panel did, makes an empty
+ * queue and a broken page look exactly the same.
+ */
+const reqPill = (n) => (n
+  ? `<a class="bs-req-pill on" href="/timeclock/requests"><b>${n}</b> Request${n === 1 ? '' : 's'}</a>`
+  : '<a class="bs-req-pill" href="/timeclock/requests">View requests</a>');
+
+/**
+ * The queue. Every request, in one place, decided from here.
+ */
+app.get('/timeclock/requests', (req, res) => {
+  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const tab = req.query.tab === 'history' ? 'history' : 'pending';
+  const pending = TC.q.pendingCorrections.all();
+  const history = db.prepare(`SELECT * FROM time_corrections
+    WHERE decision <> 'pending' ORDER BY COALESCE(decided_at, requested_at) DESC, id DESC LIMIT 100`).all();
+  const rows = tab === 'history' ? history : pending;
+  const sel = rows.find((c) => String(c.id) === String(req.query.id)) || rows[0] || null;
+  const w2 = canWrite();
+
+  // Grouped by the day it was ASKED, newest first — which is how a queue is
+  // read. Grouping by the day worked would sort a request filed this morning
+  // about last Tuesday under last Tuesday, where nobody is looking.
+  const groups = [];
+  for (const c of rows) {
+    const day = String(c.requested_at || '').slice(0, 10);
+    if (!groups.length || groups[groups.length - 1].day !== day) groups.push({ day, list: [] });
+    groups[groups.length - 1].list.push(c);
+  }
+  const today = isoDate(startOfToday());
+  const groupLabel = (d) => (d === today ? 'Today' : d === addDays(today, -1) ? 'Yesterday' : TC.dayLabel(d));
+
+  const listRow = (c) => `<a class="bs-req-r${sel && c.id === sel.id ? ' on' : ''}"
+      href="/timeclock/requests?tab=${tab}&id=${c.id}">
+      <span class="bs-req-who">${esc(tcEmpName(c.employee_id))}</span>
+      <span class="bs-req-what">${esc(reqKind(c))}</span>
+      ${tab === 'history' ? `<span class="bs-req-st ${esc(c.decision)}">${esc(c.decision)}</span>` : ''}
+    </a>`;
+
+  const empty = (what) => `<div class="bs-req-none"><span class="bs-req-tick">✓</span><p>${esc(what)}</p></div>`;
+
+  // --- the detail ----------------------------------------------------------
+  const detail = !sel ? empty(tab === 'history' ? 'Nothing decided yet' : 'No requests') : (() => {
+    const diff = reqDiff(sel);
+    const e = sel.time_entry_id ? TC.q.byId.get(sel.time_entry_id) : null;
+    const when = e ? TC.dayLabel(e.business_date)
+      : (() => { try { return TC.dayLabel(JSON.parse(sel.payload || '{}').business_date); } catch { return ''; } })();
+    return `
+      <div class="bs-req-head">
+        <div>
+          <div class="bs-req-name">${esc(tcEmpName(sel.employee_id))}</div>
+          <div class="bs-req-sub">${esc(reqKind(sel))}${when ? ' · ' + esc(when) : ''} · asked ${esc(TC.stamp(sel.requested_at))}</div>
+        </div>
+        ${sel.decision === 'pending' && w2 ? `<div class="bs-req-acts">
+          <form method="post" action="/timeclock/correction/${sel.id}">
+            <input type="hidden" name="decision" value="rejected">
+            <input type="hidden" name="back" value="/timeclock/requests?tab=${tab}">
+            <button class="bs-btn-no">Decline</button>
+          </form>
+          <form method="post" action="/timeclock/correction/${sel.id}">
+            <input type="hidden" name="decision" value="approved">
+            <input type="hidden" name="back" value="/timeclock/requests?tab=${tab}">
+            <button class="bs-btn-yes">Approve</button>
+          </form>
+        </div>` : `<span class="bs-req-st ${esc(sel.decision)}">${esc(sel.decision)}</span>`}
+      </div>
+
+      ${sel.reason ? `<p class="bs-req-note">“${esc(sel.reason)}”</p>` : ''}
+
+      ${/* The shift now, and the shift if you say yes. Two columns rather than
+             a sentence, because "clock-in 4:45 PM → 4:15 PM" tells you what
+             moved and not what the shift becomes — and what it becomes is the
+             thing being approved. */''}
+      ${diff.length ? `<div class="bs-req-cmp">
+        <div class="bs-req-ch"><span></span><span>Now</span><span>Requested</span></div>
+        ${diff.map((r) => `<div class="bs-req-cr${r.changed ? ' moved' : ''}">
+          <span class="bs-req-cl">${esc(r.label)}</span>
+          <span class="bs-req-cn">${esc(r.now)}</span>
+          <span class="bs-req-cw">${esc(r.want)}</span>
+        </div>`).join('')}
+      </div>` : `<p class="bs-fine">${esc(sel.proposed_value || 'Nothing machine-applicable — make the change on the entry itself.')}</p>`}
+
+      ${sel.apply_error ? `<p class="bs-req-err">It could not be applied: ${esc(sel.apply_error)}</p>` : ''}
+      ${sel.decision !== 'pending' ? `<p class="bs-fine">${esc(sel.decision)} by ${esc(sel.decided_by || 'someone')}${
+        sel.decided_at ? ' · ' + esc(TC.stamp(sel.decided_at)) : ''}${sel.decision_note ? ` — ${esc(sel.decision_note)}` : ''}</p>` : ''}
+      ${e ? `<p class="bs-fine"><a class="bs-act" href="/timeclock/${e.id}">Open the entry and its history →</a></p>` : ''}`;
+  })();
+
+  res.send(layout('Requests', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <div class="bs-head">
+        <div><h1 class="bs-headline">Requests</h1>
+          <p class="bs-subline">What your staff have asked you to put right.</p></div>
+      </div>
+
+      <nav class="pa-tabs">
+        <a class="pa-tab${tab === 'pending' ? ' on' : ''}" href="/timeclock/requests">Pending (${pending.length})</a>
+        <a class="pa-tab${tab === 'history' ? ' on' : ''}" href="/timeclock/requests?tab=history">History</a>
+      </nav>
+
+      <div class="bs-req-wrap">
+        <aside class="bs-req-list">
+          ${rows.length ? groups.map((g) => `<div class="bs-req-day">${esc(groupLabel(g.day))}</div>
+            ${g.list.map(listRow).join('')}`).join('')
+            : empty(tab === 'history' ? 'Nothing decided yet' : 'No requests')}
+          ${tab === 'pending' && rows.length > 1 && w2 ? `<form class="bs-req-all" method="post" action="/timeclock/requests/all">
+            <input type="hidden" name="decision" value="approved">
+            <button class="bs-btn-sm">Approve all ${rows.length}</button>
+          </form>` : ''}
+        </aside>
+        <section class="bs-req-pane">${detail}</section>
+      </div>
+    </div>`));
+});
+
+/**
+ * Decide the whole queue at once.
+ *
+ * One at a time through the same route a single decision takes, so every one
+ * clears the same freeze check and the same overlap guard. Anything refused
+ * stays pending with its reason — silently skipping the two that could not be
+ * applied is how a manager comes to believe a queue is clear when it is not.
+ */
+app.post('/timeclock/requests/all', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
+  const actor = tcActor(req);
+  const pending = TC.q.pendingCorrections.all();
+  let done = 0;
+  const stuck = [];
+  for (const c of pending) {
+    try {
+      const r = decideCorrection(c, decision, actor, null);
+      if (r.ok) done += 1; else stuck.push(`${tcEmpName(c.employee_id)}: ${r.why}`);
+    } catch (e) { stuck.push(`${tcEmpName(c.employee_id)}: ${e.message}`); }
+  }
+  const msg = stuck.length
+    ? `${done} done. ${stuck.length} could not be: ${stuck.slice(0, 2).join('; ')}${stuck.length > 2 ? '…' : ''}`
+    : `${done} request${done === 1 ? '' : 's'} ${decision}.`;
+  res.redirect('/timeclock/requests?msg=' + encodeURIComponent(msg));
+});
+
+/**
+ * The one-request page folds into the queue.
+ *
+ * It was built when a request with no entry had nowhere to be reviewed. That
+ * is what /timeclock/requests is for now, and two screens showing one request
+ * two ways is how they drift apart. Kept as a redirect because notifications
+ * already sent point here.
+ */
+app.get('/timeclock/request/:id', (req, res) =>
+  res.redirect(`/timeclock/requests?id=${Number(req.params.id) || ''}`));
+
+// Declared BEFORE /timeclock/:id. Express matches in order, so with the
+// parameter route first "requests" is read as an id, Number('requests') is NaN,
+// and the queue 404s — the same trap /payroll/:employeeId and /payroll/export
+// fell into further up this file.
 app.get('/timeclock/:id', (req, res) => {
   // Payroll may read a punch too: a reviewer cannot clear a blocker they
   // are not allowed to look at.
@@ -16305,233 +16737,18 @@ app.post('/timeclock/:id/delete', (req, res) => {
  * request marked approved that quietly changed nothing, which is the worst of
  * both worlds because everyone believes it was handled.
  */
-/**
- * A request for a shift that does not exist yet.
- *
- * Every other request is reviewed on the entry it would change, which is the
- * right place — the punch, its breaks, its history, all in front of you. This
- * one has no entry to stand on, so it gets a page of its own rather than a
- * link to /timeclock/null.
- */
-app.get('/timeclock/request/:id', (req, res) => {
-  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
-  const c = TC.q.correctionById.get(Number(req.params.id));
-  if (!c) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such request</h1><a class="bs-back" href="/timeclock">← Time clock</a></div>'));
-  if (c.time_entry_id) return res.redirect(`/timeclock/${c.time_entry_id}`);
-  let p = {};
-  try { p = JSON.parse(c.payload || '{}') || {}; } catch { p = {}; }
-  const w2 = canWrite();
-  const fact = (k, v) => `<div class="inc-fact"><span>${k}</span><b>${v}</b></div>`;
-  const mins = p.in && p.out ? TC.minutesBetween(p.in, p.out) : null;
-
-  res.send(layout('Shift request', `
-    ${flash(req)}
-    <div class="bs-page tcm-page inc-detail">
-      <a class="bs-back" href="/timeclock">← Time clock</a>
-      <div class="inc-rec-head">
-        <div class="inc-rec-title">
-          <div class="inc-rec-line">${esc(tcEmpName(c.employee_id))} · ${esc(tcPosName(p.position))}</div>
-          <h1 class="bs-headline">${p.business_date
-            ? esc(new Date(p.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))
-            : 'A shift'}</h1>
-          <p class="bs-subline">Asked for a shift that was never clocked · request #${c.id}</p>
-        </div>
-        <div class="inc-rec-status">
-          <span class="inc-st inc-st-correction-pending">${esc(c.decision)}</span>
-        </div>
-      </div>
-
-      <section class="bs-panel inc-sec">
-        <div class="bs-sec-h"><span class="bs-kicker">What they are asking for</span></div>
-        <div class="inc-facts">
-          ${fact('Clock in', p.in ? esc(TC.clockFace(p.in)) : '—')}
-          ${fact('Clock out', p.out ? esc(TC.clockFace(p.out)) : '—')}
-          ${fact('Hours', mins != null ? `<b>${esc(TC.hm(mins))}</b>` : '—')}
-          ${fact('Position', esc(tcPosName(p.position)))}
-          ${fact('Service', p.daypart ? esc(dp(p.daypart)) : '—')}
-        </div>
-        ${c.reason ? `<p class="inc-note">“${esc(c.reason)}”</p>` : ''}
-        <p class="bs-fine">${esc(c.requested_by)} · ${esc(TC.stamp(c.requested_at))}</p>
-      </section>
-
-      ${c.decision !== 'pending' ? `<section class="bs-panel inc-sec">
-        <div class="bs-sec-h"><span class="bs-kicker">Decided</span></div>
-        <p>${esc(c.decision)} by ${esc(c.decided_by || 'someone')}${c.decided_at ? ' · ' + esc(TC.stamp(c.decided_at)) : ''}.
-        ${c.apply_error ? `<b>It could not be applied: ${esc(c.apply_error)}</b>` : ''}</p>
-      </section>` : w2 ? `<section class="bs-panel inc-sec">
-        <div class="bs-sec-h"><span class="bs-kicker">Decide</span></div>
-        <p class="bs-fine">Accepting adds the shift — through the same checks as adding a punch by hand,
-          so it is refused if it would overlap one they already have.</p>
-        <div class="inc-acts">
-          <form method="post" action="/timeclock/correction/${c.id}">
-            <input type="hidden" name="decision" value="approved">
-            <button class="bs-btn">Accept and add the shift</button>
-          </form>
-          <form method="post" action="/timeclock/correction/${c.id}">
-            <input type="hidden" name="decision" value="rejected">
-            <input class="bs-input" name="note" placeholder="Why not (optional)" maxlength="200">
-            <button class="bs-btn-sm">Reject</button>
-          </form>
-        </div>
-      </section>` : ''}
-    </div>`));
-});
 
 app.post('/timeclock/correction/:id', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   const c = TC.q.correctionById.get(Number(req.params.id));
   if (!c) return res.status(404).end();
   const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
-  const actor = tcActor(req);
-  const note = String(req.body.note || '').trim().slice(0, 200) || null;
-  // A 'new_shift' request has no entry to go back to — until it is approved,
-  // when it has one and that is exactly where a manager wants to land.
-  const done = (msg) => {
-    const eid = TC.q.correctionById.get(c.id).time_entry_id || c.time_entry_id;
-    return res.redirect(eid
-      ? punchBack(req, `/timeclock/${eid}`, msg, `#e-${eid}`)
-      : `/timeclock?msg=${encodeURIComponent(msg)}`);
-  };
-  // Decided once, applied once. Without this a double submit — or a back
-  // button — would run the change twice and add the same break, or move the
-  // same punch again.
-  if (c.decision !== 'pending') return done('That request was already decided.');
-
-  // The freeze, checked here rather than in tcCanEdit above, because at that
-  // point the route has not read the correction and so has no punch and no day
-  // to check. Approving a request is not a smaller act than editing the punch
-  // by hand — it rewrites the same clock-in, the same break, the same hours —
-  // and this was the widest way into a signed period: an employee files a fix
-  // after the sheet is locked, a manager works through the pending queue days
-  // later and clicks Approve, and the punch moves under a signature given for
-  // different hours. Rejecting stays available, because refusing a request
-  // changes no hours and leaving it pending would block the next period.
-  if (decision === 'approved') {
-    const target = TC.q.byId.get(c.time_entry_id);
-    if (target && tcFrozen(res, target.employee_id, target.business_date, `/timeclock/${c.time_entry_id}`)) return;
-    // Adding a shift to a signed period moves its total exactly as much as
-    // moving one already there. No entry exists yet, so the day comes off the
-    // request itself.
-    if (!target && c.kind === 'new_shift') {
-      let day = null;
-      try { day = JSON.parse(c.payload || '{}').business_date || null; } catch { day = null; }
-      if (day && tcFrozen(res, c.employee_id, day, '/timeclock')) return;
-    }
-  }
-
-  const settle = () => {
-    const stillOpen = TC.q.correctionsFor.all(c.time_entry_id).some((x) => x.id !== c.id && x.decision === 'pending');
-    const e = TC.q.byId.get(c.time_entry_id);
-    if (!e) return;
-    if (stillOpen) {
-      // Applying one request must not clear the flag while another is waiting —
-      // the badge is how a manager finds the entry that still needs them.
-      if (e.status !== 'correction_pending') TC.q.setStatus.run({ id: e.id, status: 'correction_pending', by: actor });
-    } else if (e.status === 'correction_pending') {
-      TC.q.setStatus.run({ id: e.id, status: e.clock_out_at ? 'complete' : 'active', by: actor });
-    }
-  };
-
-  if (decision === 'rejected') {
-    // A rejection touches the punch, never. It is only a decision.
-    db.transaction(() => {
-      TC.q.decideCorrection.run({ id: c.id, decision, by: actor, note });
-      TC.logEvent('correction', c.id, 'rejected', actor, { reason: note });
-      settle();
-    })();
-    return done('Request rejected — the entry is unchanged.');
-  }
-
-  if (c.kind === 'other') {
-    // Nothing machine-applicable to do. Accepting it means "seen, and handled
-    // by hand" — the manual edit is audited on its own. Left unresolvable it
-    // would block the employee's timesheet forever.
-    db.transaction(() => {
-      TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
-      TC.logEvent('correction', c.id, 'acknowledged', actor,
-        { reason: note || 'handled by hand — see the entry history' });
-      settle();
-    })();
-    return done('Marked handled. Make any change on the entry itself so the reason travels with it.');
-  }
-
-  // Captured BEFORE the correction runs. Three kinds re-parent the entry —
-  // a wrong clock-in that crosses the cutoff, a wrong service, a wrong position
-  // — and once it has moved there is no way left to ask where it came from.
-  const entryBefore = TC.q.byId.get(c.time_entry_id);
-  const wasShiftId = entryBefore ? entryBefore.shift_id : null;
-  const wasDate = entryBefore ? entryBefore.business_date : null;
-
-  try {
-    let summary = '';
-    db.transaction(() => {
-      summary = TC.applyCorrection(c, actor, {
-        validPositions: allRoles(),
-        validDayparts: DAYPARTS,
-        // Re-link through the one find-or-create every path uses, so moving a
-        // service can never mint a second shift for it.
-        relink: (entry) => {
-          if (!entry.daypart) return;
-          const bdate = TC.businessDateOf(entry.clock_in_at, TC.settings().cutoffHour);
-          s.getOrIgnore.run(bdate, entry.daypart);
-          const sh = s.findShift.get(bdate, entry.daypart);
-          policyForShift(sh);
-          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: entry.employee_id, role: entry.position });
-          TC.q.setShift.run({ id: entry.id, shift_id: sh.id });
-          db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, entry.id);
-        },
-        // A shift nobody clocked, made real. Deliberately the SAME six steps a
-        // manager typing one in by hand takes — find-or-create the service,
-        // apply its policy, put the person on it, then through TC.createEntry
-        // so it clears the same overlap check. Approving a request must not be
-        // a quieter way in than the form.
-        createEntry: (p) => {
-          const bdate = p.business_date || TC.businessDateOf(p.in, TC.settings().cutoffHour);
-          s.getOrIgnore.run(bdate, p.daypart);
-          const sh = s.findShift.get(bdate, p.daypart);
-          policyForShift(sh);
-          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: p.employee_id, role: p.position });
-          const id = TC.createEntry({
-            employee_id: p.employee_id, shift_id: sh.id, business_date: bdate,
-            daypart: p.daypart, position: p.position,
-            clock_in_at: p.in, clock_out_at: p.out || null,
-            source: 'employee', created_by: actor,
-          });
-          tcTouchDates(p.employee_id, [bdate], actor, 'an approved request added a shift');
-          TC.syncShiftHours(sh.id, p.employee_id, actor, { role: p.position });
-          return id;
-        },
-      });
-      TC.q.decideCorrection.run({ id: c.id, decision: 'approved', by: actor, note });
-      db.prepare("UPDATE time_corrections SET applied_at = datetime('now'), apply_error = NULL WHERE id = ?").run(c.id);
-      TC.logEvent('correction', c.id, 'approved_and_applied', actor, { after: summary, reason: note });
-      // Hours that changed after somebody signed for them are no longer the
-      // hours they signed for. The submission stands as a record, but it has to
-      // be made again against the new figures.
-      // Re-read: a 'new_shift' request had no entry id when it was filed, and
-      // has one now. Passing the stale null would leave the period it landed in
-      // still marked as signed for hours that no longer include this shift.
-      const settledId = TC.q.correctionById.get(c.id).time_entry_id || c.time_entry_id;
-      tcTouchTimesheet(settledId, actor, `a correction changed the hours — ${summary}`, wasDate ? [wasDate] : []);
-      // An approved correction that never reaches the shift is a correction the
-      // employee is not paid for. Both ends again — see the edit route.
-      const moved = TC.q.byId.get(c.time_entry_id);
-      if (moved) {
-        TC.syncShiftHours(moved.shift_id, moved.employee_id, actor, { role: moved.position });
-        if (wasShiftId && wasShiftId !== moved.shift_id) {
-          TC.syncShiftHours(wasShiftId, moved.employee_id, actor);
-        }
-      }
-      settle();
-    })();
-    return done(`Approved and applied — ${summary}.`);
-  } catch (err) {
-    // Nothing was written: the transaction rolled back. Say what stopped it and
-    // leave the request where a manager can still act on it.
-    const msg = err instanceof TC.ClockError ? err.message : 'That change could not be applied.';
-    try { db.prepare('UPDATE time_corrections SET apply_error = ? WHERE id = ?').run(msg.slice(0, 300), c.id); } catch { /* best effort */ }
-    return done(`Not applied — ${msg} The request is still open.`);
-  }
+  const r = decideCorrection(c, decision, tcActor(req),
+    String(req.body.note || '').trim().slice(0, 200) || null);
+  const msg = r.ok ? r.msg : `Not applied — ${r.msg}`;
+  return res.redirect(r.entryId
+    ? punchBack(req, `/timeclock/${r.entryId}`, msg, `#e-${r.entryId}`)
+    : punchBack(req, '/timeclock', msg));
 });
 
 // ===========================================================================
@@ -16844,6 +17061,9 @@ app.get('/payroll/timesheets', (req, res) => {
           <input type="date" name="to" value="${esc(period.end)}" aria-label="To">
           <button class="bs-btn-sm" type="submit">Show</button>
         </form>
+        ${/* Where the reference puts it: in the timesheets toolbar, because
+               that is where somebody is when they notice a shift is wrong. */''}
+        ${reqPill(TC.q.pendingCorrections.all().length)}
       </nav>
       ${custom
         ? '<p class="tsm-counts">Overtime is only calculated for official pay periods.</p>'

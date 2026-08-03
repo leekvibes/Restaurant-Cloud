@@ -1979,3 +1979,154 @@ test('a period with hours on the sheets is one the portal asks you to sign', asy
   const html = await text('/portal/timesheet', { cookie });
   assert.match(html, /ready to submit/i, 'the portal says the period wants signing');
 });
+
+// ── The requests queue ───────────────────────────────────────────────────────
+// They used to live nowhere: a panel on the Today tab that vanished when the
+// queue was empty, every row a link away to one person's entry. So "are there
+// any?" had no answer you could go and read, and working three of them meant
+// three different screens.
+
+test('the way in never disappears — "View requests" at zero, a count above it', async () => {
+  db.prepare("UPDATE time_corrections SET decision = 'approved' WHERE decision = 'pending'").run();
+  let html = await text('/timeclock');
+  assert.match(html, /class="bs-req-pill"[^>]*>View requests</,
+    'with nothing waiting it still offers a way to look');
+  assert.ok(!/bs-req-pill on/.test(html), 'and is not shouting');
+
+  // A panel that is simply absent makes "nothing waiting" and "the page is
+  // broken" look identical, which is the whole reason this exists.
+  const emp = 205;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3205',1500,1)")
+    .run(emp, 'Queue One');
+  const day = '2026-05-20';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',300,300)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 23:00:00`).lastInsertRowid;
+  const cookie = await signIn('3205');
+  await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3205',
+    at_in: `${day}T16:00`, note: 'started earlier' }, { cookie });
+
+  html = await text('/timeclock');
+  assert.match(html, /class="bs-req-pill on"[^>]*><b>1<\/b> Request</, 'one waiting, and it says so');
+  // On the timesheets toolbar too — where somebody is when they notice.
+  assert.match(await text('/payroll/timesheets'), /class="bs-req-pill on"/, 'both toolbars carry it');
+});
+
+test('the queue shows the shift now against the shift as asked for', async () => {
+  const emp = 206;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3206',1500,1)")
+    .run(emp, 'Side By Side');
+  const day = '2026-05-21';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',240,240)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 01:00:00`.replace(day, '2026-05-22')).lastInsertRowid;
+  const cookie = await signIn('3206');
+  await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3206',
+    at_in: `${day}T16:00`, at_out: `${day}T23:30`, note: 'in early, out late' }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND decision='pending'").get(emp);
+
+  const html = await text(`/timeclock/requests?id=${c.id}`);
+  // Both columns, and a header that says which is which — the point is that a
+  // manager can see what the shift BECOMES, not just what moved.
+  assert.match(html, /<span>Now<\/span><span>Requested<\/span>/, 'two columns, labelled');
+  assert.match(html, /bs-req-cr moved/, 'and the rows that changed are marked');
+  assert.match(html, /Clock in/, 'the clock-in is compared');
+  assert.match(html, /Clock out/, 'and the clock-out');
+  // The total, worked out BOTH ways: 4:00pm–11:30pm is 7h30m against the 4h
+  // that is on the clock now. This is the figure a manager is really deciding
+  // about, and it was not on the old screen at all.
+  assert.match(html, /Total hours/, 'and what it will pay');
+  assert.match(html, /4h 0m[\s\S]*?7h 30m/, 'before and after');
+  assert.match(html, /Decline[\s\S]*?Approve/, 'decided from here, without opening the entry');
+});
+
+test('an added shift is the same two columns with an empty left', async () => {
+  const emp = 207;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3207',1500,1)")
+    .run(emp, 'Nothing Yet');
+  const cookie = await signIn('3207');
+  await post('/portal/clock/add', { pin: '3207', position: 'server', daypart: 'dinner',
+    at_in: '2026-05-23T17:00', at_out: '2026-05-23T23:00', note: 'tablet down' }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND kind='new_shift'").get(emp);
+
+  const html = await text(`/timeclock/requests?id=${c.id}`);
+  assert.match(html, /Added a shift/, 'named for what it is');
+  assert.match(html, /<span>Now<\/span><span>Requested<\/span>/, 'the same shape as an edit');
+  assert.match(html, /6h 0m/, 'with the hours it would add');
+  // There is no shift yet, so the left column is empty rather than absent —
+  // which is what "Original times 00:00" means on the reference.
+  const cmp = (html.match(/<div class="bs-req-cmp">[\s\S]*?<\/div>\s*<\/div>/) || [''])[0];
+  assert.ok((cmp.match(/class="bs-req-cn">—</g) || []).length >= 4, 'an empty Now column, not a missing one');
+});
+
+test('the empty queue is a screen you can read, and history keeps what was decided', async () => {
+  db.prepare("UPDATE time_corrections SET decision = 'approved', decided_by = 'Owner', decided_at = datetime('now') WHERE decision = 'pending'").run();
+  const html = await text('/timeclock/requests');
+  assert.match(html, /Pending \(0\)/, 'the count is zero and still shown');
+  assert.match(html, /No requests/, 'and says so rather than rendering nothing');
+  assert.match(html, /bs-req-tick/, 'with the same tick the reference uses');
+
+  const hist = await text('/timeclock/requests?tab=history');
+  assert.match(hist, /bs-req-r/, 'history has what was decided');
+  assert.match(hist, /bs-req-st approved/, 'and how it went');
+});
+
+test('approving the whole queue clears the same bars as approving one', async () => {
+  // The risk of a bulk action is that it becomes a quieter way in. Every one
+  // goes through decideCorrection, the same function a single Approve calls,
+  // so the freeze and the overlap guard apply — and anything refused stays
+  // pending WITH its reason, because silently skipping the two that failed is
+  // how a manager comes to believe a queue is clear when it is not.
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const mk = (id, pin, name, day, frozen) => {
+    db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+      .run(id, name, pin);
+    const eid = db.prepare(`INSERT INTO time_entries
+      (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+      VALUES (?,?,'dinner','server',?,?, 'complete','manager',240,240)`)
+      .run(id, day, `${day} 21:00:00`, `${day} 23:00:00`).lastInsertRowid;
+    if (frozen) {
+      db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)
+        VALUES (?,?,?,'approved') ON CONFLICT(employee_id, period_start) DO UPDATE SET status='approved'`)
+        .run(id, per.start, per.end);
+    }
+    return eid;
+  };
+  db.prepare("UPDATE time_corrections SET decision='approved' WHERE decision='pending'").run();
+
+  const okDay = '2026-05-25';
+  const freeDay = D2.addDays(per.start, 5);
+  const eOk = mk(208, '3208', 'Bulk Fine', okDay, false);
+  const eNo = mk(209, '3209', 'Bulk Frozen', freeDay, true);
+
+  for (const [pin, eid, day] of [['3208', eOk, okDay], ['3209', eNo, freeDay]]) {
+    const ck = await signIn(pin);
+    await post('/portal/clock/fix', { entry_id: String(eid), kind: 'shift_times', pin,
+      at_in: `${day}T16:00`, note: 'earlier' }, { ck: 1, cookie: ck });
+  }
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_corrections WHERE decision='pending'").get().n, 2,
+    'two waiting, one of them on a signed period');
+
+  const res = await post('/timeclock/requests/all', { decision: 'approved' });
+  assert.strictEqual(res.status, 302);
+  const msg = decodeURIComponent(res.headers.get('location'));
+  assert.match(msg, /1 done/, 'the clean one went through');
+  assert.match(msg, /could not be/i, 'and the blocked one is reported, not swallowed');
+  assert.match(msg, /Bulk Frozen/, 'by name');
+
+  assert.strictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(eOk).clock_in_at.slice(11, 16),
+    '20:00', 'the clean punch moved');
+  assert.strictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(eNo).clock_in_at.slice(11, 16),
+    '21:00', 'the signed one did not');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_corrections WHERE decision='pending'").get().n, 1,
+    'and it is still in the queue to be dealt with');
+});
+
+test('the old one-request URL still lands somewhere real', async () => {
+  const res = await get('/timeclock/request/7');
+  assert.strictEqual(res.status, 302, 'it redirects');
+  assert.match(res.headers.get('location'), /\/timeclock\/requests\?id=7/, 'into the queue, on that request');
+});
