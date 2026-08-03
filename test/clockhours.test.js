@@ -592,12 +592,14 @@ test('an edit made inside the review lands, recalculates, and comes back to the 
   const min = () => db.prepare('SELECT payable_minutes m FROM time_entries WHERE id = ?').get(e.id).m;
   assert.strictEqual(min(), 300);
 
-  // The workspace offers the editor in the row rather than a link away.
+  // The review is a grid now: a row per punch, and every editable value a cell
+  // you click and type into rather than a drawer you open.
   const page = await text(back);
   assert.match(page, new RegExp(`id="e-${e.id}"`), 'the row is addressable');
-  assert.match(page, /class="ts-ebody"/, 'and opens an editor in place');
-  assert.match(page, /Add\s*<\/span>\s*<span class="ts-er-w">a session somebody forgot/,
-    'with a way to add a session nobody clocked');
+  assert.match(page, /class="tsg-h"/, 'with the ledger columns above it');
+  assert.match(page, new RegExp(`data-e="${e.id}" data-f="in"`), 'the clock-in is a cell you can edit');
+  assert.match(page, new RegExp(`data-e="${e.id}" data-f="out"`), 'and so is the clock-out');
+  assert.match(page, new RegExp(`data-e="${e.id}" data-f="position"`), 'and the position they worked');
 
   const r = await post(`/timeclock/${e.id}/edit`, {
     back, in: `${day}T17:00`, out: `${day}T23:30`, position: 'server', daypart: 'dinner', reason: 'stayed to close',

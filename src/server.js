@@ -16577,7 +16577,8 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   // gets with scripting off, what a bookmark opens, and what the tests read.
   const body = `
     ${req.query.frag === '1' ? '' : flash(req)}
-    <div class="bs-page tcm-page inc-detail">
+    <div class="bs-page tcm-page inc-detail" id="tsg-root">
+      <script>window.POSITIONS = ${JSON.stringify(allRoles().map((r2) => ({ slug: r2, name: posName(r2) })))};</script>
       <!-- Stays put while the ledger scrolls. Who, which period, where it
            stands, the one thing to do about it, and the way to the next person
            are the whole job — losing them at the bottom of a long timesheet is
@@ -16610,6 +16611,84 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
         </div>
       </div>
 
+      <section class="bs-panel tsg-sheet">
+            ${/* The review grid.
+                  One row per punch, the columns a reviewer actually reconciles
+                  against, and every editable value a button you click and type
+                  into. No drawer, no second page, no reason to write. The
+                  Regular and Overtime columns come from splitWeeks, which
+                  allocates a week chronologically — so the day that crosses the
+                  threshold is the one that reads as part regular and part
+                  overtime, and editing an earlier day re-splits the later ones.
+                  Position, not "type": it is the thing that differs shift to
+                  shift here, and the thing that decides the wage. */''}
+            <div class="tsg-h" role="row">
+              <span>Date</span><span>Position</span><span>Start</span><span>End</span>
+              <span>Breaks</span><span>Total</span><span>Regular</span><span>OT</span><span></span>
+            </div>
+            ${(() => {
+              const weeks = TC.splitWeeks(v.entries, {
+                otEnabled: v.otRule.enabled, otExempt: !!emp.ot_exempt,
+                otThreshold: v.otRule.threshold, periodStart: period.start, extra: v.fromShifts,
+              });
+              if (!weeks.length) return '<p class="inc-hint">Nothing recorded in this period.</p>';
+              const editable = canWrite();
+              const cell = (id, field, shown, value, extra = '') => (editable
+                ? `<button type="button" class="tsg-c" data-e="${id}" data-f="${field}" data-v="${esc(value)}"${extra}>${esc(shown)}</button>`
+                : `<span class="tsg-c ro">${esc(shown)}</span>`);
+              const hhmm = (utc) => TC.utcToLocalInput(utc).slice(11, 16);
+
+              return weeks.map((wk) => `
+                ${weeks.length > 1 ? `<div class="tsg-wk"><span>Week ${wk.index + 1}</span>
+                  <b>${esc(TC.hm(wk.payable))}</b>${wk.overtime ? `<i>${esc(TC.hm(wk.overtime))} OT</i>` : ''}</div>` : ''}
+                ${wk.days.map((d) => {
+                  const rows = d.entries.map((e) => {
+                    const brks = TC.q.breaks.all(e.id);
+                    const bt = TC.breaksOn(e);
+                    const iss = v.issues.filter((i) => i.entryId === e.id);
+                    const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
+                    return `<div class="tsg-r${iss.some((i) => i.blocking) ? ' warn' : ''}" id="e-${e.id}" data-entry="${e.id}">
+                      <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                      ${cell(e.id, 'position', posName(e.position) + (e.daypart ? ' · ' + dp(e.daypart) : ''), e.position)}
+                      ${cell(e.id, 'in', TC.clockFace(e.clock_in_at), hhmm(e.clock_in_at))}
+                      ${e.clock_out_at
+                        ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at))
+                        : '<span class="tsg-c ro tsg-open">on the clock</span>'}
+                      ${brks.length
+                        ? `<button type="button" class="tsg-c tsg-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`
+                        : '<span class="tsg-c ro">—</span>'}
+                      <b class="tsg-t">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>
+                      <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
+                      <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
+                      <span class="tsg-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? '<i class="tcm-tag warn">asked</i>' : ''}</span>
+                    </div>
+                    ${brks.length ? `<div class="tsg-brks" data-brks="${e.id}" hidden>
+                      ${brks.map((b) => `<div class="tsg-br">
+                        <span>${b.paid ? 'Paid break' : 'Break'}</span>
+                        ${cell(e.id, 'break_start', TC.clockFace(b.start_at), hhmm(b.start_at), ` data-b="${b.id}"`)}
+                        <span class="tsg-to">to</span>
+                        ${b.end_at ? cell(e.id, 'break_end', TC.clockFace(b.end_at), hhmm(b.end_at), ` data-b="${b.id}"`)
+                          : '<span class="tsg-c ro">running</span>'}
+                        <b>${esc(TC.hm(b.raw_minutes || 0))}</b>
+                      </div>`).join('')}
+                    </div>` : ''}`;
+                  }).join('');
+                  // Hours a shift sheet carries with no punch behind them. Shown
+                  // as what they are — a total somebody recorded — because
+                  // inventing a clock-in here would put fiction in a pay record.
+                  const noPunch = d.extra.map((x) => `<div class="tsg-r tsg-nop">
+                    <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                    <span class="tsg-c ro">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
+                    <span class="tsg-c ro" colspan="2">no punch — typed on the shift</span>
+                    <span class="tsg-c ro"></span><span class="tsg-c ro">—</span>
+                    <b class="tsg-t">${esc(TC.hm(x.minutes))}</b>
+                    <span class="tsg-reg"></span><span class="tsg-ot"></span><span class="tsg-f"></span>
+                  </div>`).join('');
+                  return rows + noPunch;
+                }).join('')}`).join('');
+            })()}
+          </section>
+
       <div class="inc-cols">
         <div class="inc-main">
           <section class="bs-panel inc-sec">
@@ -16627,150 +16706,16 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               ${fact('Worked', esc(TC.hm(v.totals.raw)))}
               ${fact('Unpaid break', esc(TC.hm(v.totals.unpaid)))}
               ${v.otRule.enabled && !emp.ot_exempt ? fact('Regular / overtime', `${esc(TC.hm(v.totals.regular))} / ${esc(TC.hm(v.totals.overtime))}`) : ''}
-              ${fact('On the shifts', `${entered}h`)}
+              ${/* Summed from a float column, so it arrives as 69.36666666666666
+                    unless it is rounded. Three decimals is what syncShiftHours
+                    writes and what this figure is being compared against. */''}
+              ${fact('On the shifts', `${Math.round(entered * 1000) / 1000}h`)}
               ${overridden && Math.abs(variance) >= 0.01 ? fact('Override', `<span class="${variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${variance > 0 ? '+' : ''}${variance}h clocked vs entered</span>`) : ''}
             </div>
             <p class="perf-foot">These are the clock's figures beside what each shift is carrying. They agree unless somebody typed over them, and a difference here is the size of that override.</p>
           </section>
 
-          <section class="bs-panel inc-sec">
-            <div class="bs-sec-h"><span class="bs-kicker">Days</span></div>
-            ${v.entries.length || v.fromShifts.length ? (() => {
-              // Grouped into weeks when the period spans more than one, with a
-              // weekly total — the figure a reviewer checks against overtime,
-              // and the reason the boundary has to be the same one the overtime
-              // calculation uses. Period-offset weeks, matching totalsFor.
-              // Oldest first. byDay hands back newest-first, which suits a
-              // history feed and not a payroll ledger: reviewing a period runs
-              // forward through it, and reversed the week headings read
-              // "Week 2" above "Week 1".
-              // Punched days and shift-only days on one spine. A day can hold
-              // both — clocked into dinner, written onto cafe by hand — so they
-              // merge by date rather than one replacing the other.
-              const byDate = new Map(TC.byDay(v.entries).map(([d, l]) => [d, { punches: l, shifts: [] }]));
-              for (const sh of v.fromShifts) {
-                const slot = byDate.get(sh.business_date)
-                  || byDate.set(sh.business_date, { punches: [], shifts: [] }).get(sh.business_date);
-                slot.shifts.push(sh);
-              }
-              const days = [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-                .map(([d, both]) => [d, both.punches, both.shifts]);
-              const weekOf = (d) => Math.floor(
-                (Date.parse(d + 'T00:00:00Z') - Date.parse(period.start + 'T00:00:00Z')) / 864e5 / 7);
-              const weeks = [];
-              for (const [date, list, shifts] of days) {
-                const w = weekOf(date);
-                const last = weeks[weeks.length - 1];
-                if (last && last.w === w) last.days.push([date, list, shifts]);
-                else weeks.push({ w, days: [[date, list, shifts]] });
-              }
-              const dayMin = (list, shifts) => list.reduce((a, e) => a + (e.payable_minutes || 0), 0)
-                + (shifts || []).reduce((a, x) => a + x.minutes, 0);
-              const brk = (e) => {
-                const b = TC.breaksOn(e);
-                return b.unpaid || b.paid
-                  ? `${TC.hm(b.unpaid)}${b.paid ? ` +${TC.hm(b.paid)} paid` : ''}` : '—';
-              };
-              return weeks.map((wk) => `
-                ${weeks.length > 1 ? `<div class="ts-wk-h"><span>Week ${wk.w + 1}</span>
-                  <b>${esc(TC.hm(wk.days.reduce((a, [, l, sh]) => a + dayMin(l, sh), 0)))}</b></div>` : ''}
-                ${wk.days.map(([date, list, shifts]) => `
-                <div class="ts-mday" id="d-${date}">
-                  <div class="ts-mday-h">${esc(TC.dayLabel(date))}
-                    <b>${esc(TC.hm(dayMin(list, shifts)))}</b></div>
-                  ${list.map((e) => {
-                    const iss = v.issues.filter((i) => i.entryId === e.id);
-                    const blocking = iss.some((i) => i.blocking);
-                    const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
-                    const inner = `<span class="ts-er-t">${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>open</i>'}</span>
-                      <span class="ts-er-w">${esc(posName(e.position))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
-                      <span class="ts-er-b">${brk(e)}</span>
-                      <span class="ts-er-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? `<i class="tcm-tag warn">${corr} fix</i>` : ''}${blocking ? '<i class="tcm-tag warn">issue</i>' : ''}</span>
-                      <b class="ts-er-h">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>`;
-                    const frozen = ['approved', 'locked', 'finalized'].includes(v.sheet.status);
-                    // Opens in place. Sending a reviewer to another page in the
-                    // middle of a period loses their place, their filters and
-                    // the person they were halfway through checking.
-                    return `<details class="bs-srow ts-erow" id="e-${e.id}">
-                      <summary class="ts-mrow${blocking ? ' warn' : ''}">${inner}</summary>
-                      <div class="ts-ebody">
-                        ${!canWrite() ? '<p class="inc-hint">Your account is view-only.</p>'
-                        : frozen ? `<p class="inc-hint">This period was ${esc(v.sheet.status)}. Reopen it to change the times — the signature would otherwise stop describing the hours it signed for.</p>`
-                        : `
-                        <form class="bs-inline" method="post" action="/timeclock/${e.id}/edit">
-                          <input type="hidden" name="back" value="${esc(backTo)}">
-                          <label class="bs-pill"><span>In</span><input type="datetime-local" name="in" value="${esc(TC.utcToLocalInput(e.clock_in_at))}" required></label>
-                          <label class="bs-pill"><span>Out</span><input type="datetime-local" name="out" value="${esc(TC.utcToLocalInput(e.clock_out_at))}"></label>
-                          <label class="bs-pill"><span>Position</span><select name="position">
-                            ${allRoles().map((r2) => `<option value="${esc(r2)}"${r2 === e.position ? ' selected' : ''}>${esc(posName(r2))}</option>`).join('')}</select></label>
-                          <label class="bs-pill"><span>Service</span><select name="daypart">
-                            ${DAYPARTS.map((d2) => `<option value="${d2}"${d2 === e.daypart ? ' selected' : ''}>${dp(d2)}</option>`).join('')}</select></label>
-                          <label class="bs-pill wide"><span>Reason</span><input name="reason" required maxlength="300" placeholder="Kept forever"></label>
-                          <button class="bs-btn" type="submit">Save</button>
-                          <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
-                        </form>
-                        ${TC.q.breaks.all(e.id).map((b) => `<form class="ts-brk" method="post" action="/timeclock/break/${b.id}/delete">
-                          <input type="hidden" name="back" value="${esc(backTo)}">
-                          <span>${esc(TC.clockFace(b.start_at))} – ${b.end_at ? esc(TC.clockFace(b.end_at)) : 'open'}${b.paid ? ' · paid' : ''}</span>
-                          <input name="reason" required maxlength="300" placeholder="Why remove it">
-                          <button type="submit">Remove</button>
-                        </form>`).join('')}
-                        <form class="bs-inline" method="post" action="/timeclock/${e.id}/break">
-                          <input type="hidden" name="back" value="${esc(backTo)}">
-                          <label class="bs-pill"><span>Break from</span><input type="datetime-local" name="start" required></label>
-                          <label class="bs-pill"><span>to</span><input type="datetime-local" name="end" required></label>
-                          <label class="bs-pill"><span>Paid?</span><select name="paid"><option value="0">Unpaid</option><option value="1">Paid</option></select></label>
-                          <label class="bs-pill wide"><span>Reason</span><input name="reason" required maxlength="300"></label>
-                          <button class="bs-btn-sm" type="submit">Add break</button>
-                        </form>
-                        <form class="bs-inline-rm" method="post" action="/timeclock/${e.id}/delete"
-                              onsubmit="return confirm('Delete this punch for good? The hours come off the shift. The record that it existed is kept.')">
-                          <input type="hidden" name="back" value="${esc(backTo)}">
-                          <input name="reason" required maxlength="300" placeholder="Why it should not exist">
-                          <button type="submit">Delete this punch</button>
-                        </form>`}
-                      </div>
-                    </details>`;
-                  }).join('')}
-                  <!-- Hours from the shift sheet, with no punch behind them.
-                       Shown as what they are: a total somebody recorded, with
-                       no times, because none were. Inventing a clock-in here
-                       would put fiction in a payroll record. -->
-                  ${(shifts || []).map((x) => `<div class="ts-mrow ts-mrow-sh">
-                    <span class="ts-er-t">no punch</span>
-                    <span class="ts-er-w">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
-                    <span class="ts-er-b">—</span>
-                    <span class="ts-er-f"><i class="tcm-tag">from the shift</i></span>
-                    <b class="ts-er-h">${esc(TC.hm(x.minutes))}</b>
-                  </div>`).join('')}
-                </div>`).join('')}`).join('');
-            })()
-              : '<p class="inc-hint">Nothing recorded.</p>'}
-
-            ${canWrite() && !['approved', 'locked', 'finalized'].includes(v.sheet.status) ? `
-            <details class="bs-srow ts-erow ts-add">
-              <summary class="ts-mrow"><span class="ts-er-t">+ Add</span>
-                <span class="ts-er-w">a session somebody forgot to clock</span>
-                <span class="ts-er-b"></span><span class="ts-er-f"></span><b class="ts-er-h"></b></summary>
-              <div class="ts-ebody">
-                <form class="bs-inline" method="post" action="/timeclock/new">
-                  <input type="hidden" name="employee_id" value="${emp.id}">
-                  <input type="hidden" name="back" value="${esc(backTo)}">
-                  <label class="bs-pill"><span>In</span><input type="datetime-local" name="in" required></label>
-                  <label class="bs-pill"><span>Out</span><input type="datetime-local" name="out"></label>
-                  <label class="bs-pill"><span>Position</span><select name="position">
-                    ${allRoles().map((r2) => `<option value="${esc(r2)}">${esc(posName(r2))}</option>`).join('')}</select></label>
-                  <label class="bs-pill"><span>Service</span><select name="daypart">
-                    ${DAYPARTS.map((d2) => `<option value="${d2}">${dp(d2)}</option>`).join('')}</select></label>
-                  <label class="bs-pill wide"><span>Reason</span><input name="reason" required maxlength="300"
-                    placeholder="Why this is being added by hand"></label>
-                  <button class="bs-btn" type="submit">Add the session</button>
-                </form>
-                <p class="inc-hint">It lands on the shift for the day it starts, and the day's hours are
-                  worked out again. Leaving the clock-out empty records somebody still on shift.</p>
-              </div>
-            </details>` : ''}
-          </section>
+          
 
           ${v.corrections.length ? `<section class="bs-panel inc-sec">
             <div class="bs-sec-h"><span class="bs-kicker">Fixes ${esc(firstName(emp.name))} has asked for</span>
@@ -16922,7 +16867,119 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
           </section>` : ''}
         </aside>
       </div>
-    </div>`;
+    </div>
+    <script>
+    (function () {
+      // Click a cell, type, done.
+      //
+      // Delegated from the container, because this markup arrives by fetch —
+      // the sheet re-reads the whole fragment after every save, so anything
+      // bound to individual cells would be bound to elements that no longer
+      // exist. Re-reading rather than patching in place is deliberate: an edit
+      // changes the day, the week and the period, and can re-split overtime on
+      // OTHER rows. Only the server knows all of that, so it is asked.
+      var root = document.getElementById('tsg-root');
+      if (!root || !window.fetch) return;               // no JS: the page still reads
+      var busy = false;
+
+      function reload() {
+        var url = location.pathname + location.search;
+        return fetch(url + (url.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+          .then(function (html) {
+            var host = document.getElementById('tso-body') || root.parentNode;
+            host.innerHTML = html;
+          })
+          .catch(function () { location.reload(); });
+      }
+      function say(msg) {
+        var had = root.querySelector('.tsg-err'); if (had) had.remove();
+        if (!msg) return;
+        var p = document.createElement('p'); p.className = 'tsg-err'; p.textContent = msg;
+        var sheet = root.querySelector('.tsg-sheet'); if (sheet) sheet.insertBefore(p, sheet.firstChild);
+      }
+
+      var open = null;                                   // the cell being edited
+      function cancel() {
+        if (!open) return;
+        open.el.textContent = open.text;
+        open.el.classList.remove('busy');
+        open = null;
+      }
+
+      function save(cellEl, value, reopen) {
+        if (busy) return; busy = true; cellEl.classList.add('busy');
+        var body = { field: cellEl.dataset.f, value: value };
+        if (cellEl.dataset.b) body.break_id = Number(cellEl.dataset.b);
+        if (reopen) body.reopen = true;
+        fetch('/timeclock/' + cellEl.dataset.e + '/cell', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
+          .then(function (out) {
+            busy = false;
+            if (out.s === 200) { say(''); open = null; return reload(); }
+            // A signed period asks once, right here, rather than sending
+            // somebody off to reopen it and come back to the cell they were in.
+            if (out.s === 409 && out.j.needs_reopen) {
+              // Escaped twice on purpose: this sits inside a server-side
+              // template literal, so a single backslash-n would be a real
+              // newline in the JavaScript that reaches the browser — which
+              // ends the string mid-line and takes the whole script with it.
+              if (confirm(out.j.message + '\\n\\nReopen it and make this change?')) return save(cellEl, value, true);
+              return cancel();
+            }
+            say(out.j.error || 'That did not save.');
+            cancel();
+          })
+          .catch(function () { busy = false; say('That did not save — check your connection.'); cancel(); });
+      }
+
+      root.addEventListener('click', function (ev) {
+        var bk = ev.target.closest && ev.target.closest('.tsg-bk');
+        if (bk) {                                        // breaks keep their own times, under the row
+          var panel = root.querySelector('[data-brks="' + bk.dataset.brk + '"]');
+          if (panel) panel.hidden = !panel.hidden;
+          return;
+        }
+        var c = ev.target.closest && ev.target.closest('.tsg-c');
+        if (!c || c.classList.contains('ro') || (open && c === open.el)) return;
+        cancel();
+        var field = c.dataset.f, text = c.textContent, input;
+        if (field === 'position') {
+          input = document.createElement('select');
+          (window.POSITIONS || []).forEach(function (p) {
+            var o = document.createElement('option');
+            o.value = p.slug; o.textContent = p.name; o.selected = p.slug === c.dataset.v;
+            input.appendChild(o);
+          });
+        } else {
+          // A native time control: the system wheel on a phone, typeable on a
+          // desktop, and shown AM/PM or 24-hour by the browser's own locale
+          // rather than by us guessing which one somebody reads.
+          input = document.createElement('input');
+          input.type = 'time'; input.value = c.dataset.v;
+        }
+        input.className = 'tsg-in';
+        open = { el: c, text: text };
+        c.textContent = ''; c.appendChild(input);
+        input.focus();
+
+        var done = false;
+        function commit() {
+          if (done) return; done = true;
+          var v = input.value;
+          if (!v || v === c.dataset.v) return cancel();
+          save(c, v, false);
+        }
+        input.addEventListener('keydown', function (e2) {
+          if (e2.key === 'Enter') { e2.preventDefault(); commit(); }
+          if (e2.key === 'Escape') { done = true; cancel(); }
+        });
+        input.addEventListener('blur', commit);
+        if (field === 'position') input.addEventListener('change', commit);
+      });
+    })();
+    </script>`;
 
   if (req.query.frag === '1') {
     res.set('Cache-Control', 'no-store');

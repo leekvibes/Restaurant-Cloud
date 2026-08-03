@@ -356,7 +356,22 @@ test('every inline script the server emits actually parses', async () => {
   // the guard it replaced is now a plain string compare for the same reason.
   const broken = [];
   let scripts = 0;
-  for (const p of ['/', '/shifts', '/sales', '/payroll', '/cash', '/costs']) {
+  // The list is the point. A syntax error in an inline script kills every
+  // handler on that page and shows nothing in the UI — the page simply stops
+  // responding — so a page missing from here is a page where that ships. The
+  // timesheet review was missing, and a '\n' inside a server-side template
+  // literal reached the browser as a real newline, ended a string mid-line,
+  // and took the whole click-to-edit grid down with it.
+  const pages = ['/', '/shifts', '/sales', '/payroll', '/cash', '/costs',
+    '/timeclock', '/payroll/timesheets', '/c/invoices', '/c/expenses'];
+  // Plus one employee's review, which is where most of the client code lives.
+  {
+    const d2 = new (require('better-sqlite3'))(DB, { readonly: true });
+    const e2 = d2.prepare('SELECT id FROM employees LIMIT 1').get();
+    d2.close();
+    if (e2) pages.push(`/payroll/timesheets/${e2.id}`);
+  }
+  for (const p of pages) {
     const res = await fetch(`${BASE}${p}`, { redirect: 'manual' });
     if (res.status !== 200) continue;
     const html = await res.text();

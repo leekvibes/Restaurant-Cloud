@@ -4425,6 +4425,73 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    filters and both scroll positions for nothing — there is nothing to restore,
    because nothing was lost. With scripting off the rows stay ordinary links to
    the full page, which is also what a bookmark opens. */
+/* --- the review grid ------------------------------------------------------
+   A ledger you read across, not a stack of cards you open one at a time. The
+   columns are what a reviewer reconciles: when they started, when they
+   stopped, what came off for breaks, and how the day divides between regular
+   and overtime. Everything editable is a button that looks like text until you
+   want it, which is what keeps a dense grid from reading as a form. */
+.tsg-sheet { padding: 0; overflow-x: auto; }
+.tsg-h, .tsg-r {
+  display: grid;
+  grid-template-columns: minmax(96px,1fr) minmax(120px,1.3fr) minmax(88px,.9fr) minmax(88px,.9fr)
+                         minmax(70px,.7fr) minmax(70px,.7fr) minmax(70px,.7fr) minmax(64px,.6fr) minmax(56px,.6fr);
+  align-items: center; gap: 4px; min-width: 720px;
+}
+.tsg-h {
+  padding: 9px 14px; border-bottom: 1.5px solid var(--rule-heavy);
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); position: sticky; top: 0; background: var(--paper); z-index: 2;
+}
+.tsg-r { padding: 3px 14px; border-bottom: 1px dotted var(--rule); }
+.tsg-r.warn { box-shadow: inset 3px 0 0 var(--danger); }
+.tsg-r:hover { background: var(--surface-2, var(--panel)); }
+.tsg-d { font-size: 13px; color: var(--headline); font-weight: 600; }
+.tsg-t { font-family: var(--mono); font-size: 13.5px; }
+.tsg-reg, .tsg-ot { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.tsg-ot:not(:empty) { color: var(--ink); }
+.tsg-f { display: flex; gap: 4px; flex-wrap: wrap; }
+.tsg-nop { opacity: .78; }
+.tsg-open { color: var(--positive); }
+
+/* A cell reads as a value and behaves as a control. No boxes until hover, or
+   the grid looks like a form to fill in rather than a record to check. */
+.tsg-c {
+  font: inherit; font-size: 13px; text-align: left; color: var(--ink);
+  background: none; border: 1px solid transparent; padding: 6px 7px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tsg-c:hover, .tsg-c:focus-visible { border-color: var(--rule); background: var(--paper); }
+.tsg-c.ro { cursor: default; color: var(--muted); border-color: transparent; background: none; }
+.tsg-c.busy { opacity: .5; }
+/* What replaces a cell while it is being edited. Native time and select
+   controls on purpose: on a phone that is the system wheel, and on a desktop
+   it types. Both render AM/PM from the browser's own locale. */
+.tsg-in { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--accent);
+  background: var(--paper); color: var(--ink); width: 100%; max-width: 130px; }
+
+.tsg-wk {
+  display: flex; align-items: baseline; gap: 10px; padding: 11px 14px 7px;
+  border-bottom: 1px solid var(--rule); background: var(--panel);
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+}
+.tsg-wk b { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--headline); letter-spacing: 0; }
+.tsg-wk i { font-style: normal; font-size: 11px; color: var(--ink); letter-spacing: 0; }
+
+/* Breaks keep their real start and end. They live under the row they belong
+   to rather than in a column, because a shift can hold more than one and a
+   single number would be a summary of something the record actually knows. */
+.tsg-brks { padding: 2px 14px 8px 110px; border-bottom: 1px dotted var(--rule); background: var(--panel); }
+.tsg-br { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 2px 0; }
+.tsg-br > span:first-child { min-width: 88px; color: var(--muted); }
+.tsg-to { color: var(--muted); }
+.tsg-br b { margin-left: auto; font-family: var(--mono); }
+
+.tsg-err { margin: 0; padding: 9px 14px; background: var(--danger-bg); color: var(--danger);
+  font-size: 13px; border-bottom: 1px solid var(--rule); }
+
+@media (max-width: 700px) { .tsg-brks { padding-left: 14px; } }
+
 /* --- the employee timesheet, as a sheet ---------------------------------
    It comes up from the bottom. A side panel reads as "somewhere else"; a
    sheet reads as "this row, opened", which is what it is — you are still on
