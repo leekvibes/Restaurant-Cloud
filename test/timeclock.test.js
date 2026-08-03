@@ -1516,7 +1516,10 @@ test('a request can move just one end, and leaves the other alone', async () => 
   await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3189',
     at_out: `${day}T20:30`, note: 'stayed late' }, { cookie });   // end only
   const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(id);
-  assert.deepStrictEqual(Object.keys(JSON.parse(c.payload)), ['out'], 'only the end travelled');
+  // `was` is provenance — the shift as it stood when they asked — and rides
+  // alongside. What was REQUESTED is still just the end.
+  const asked = Object.keys(JSON.parse(c.payload)).filter((k) => k !== 'was');
+  assert.deepStrictEqual(asked, ['out'], 'only the end travelled');
 
   await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
   const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(id);
@@ -2030,7 +2033,7 @@ test('the queue shows the shift now against the shift as asked for', async () =>
   const html = await text(`/timeclock/requests?id=${c.id}`);
   // Both columns, and a header that says which is which — the point is that a
   // manager can see what the shift BECOMES, not just what moved.
-  assert.match(html, /<span>Now<\/span><span>Requested<\/span>/, 'two columns, labelled');
+  assert.match(html, /<span>Original<\/span><span>Requested<\/span>/, 'two columns, labelled');
   assert.match(html, /bs-req-cr moved/, 'and the rows that changed are marked');
   assert.match(html, /Clock in/, 'the clock-in is compared');
   assert.match(html, /Clock out/, 'and the clock-out');
@@ -2053,7 +2056,7 @@ test('an added shift is the same two columns with an empty left', async () => {
 
   const html = await text(`/timeclock/requests?id=${c.id}`);
   assert.match(html, /Added a shift/, 'named for what it is');
-  assert.match(html, /<span>Now<\/span><span>Requested<\/span>/, 'the same shape as an edit');
+  assert.match(html, /<span>Original<\/span><span>Requested<\/span>/, 'the same shape as an edit');
   assert.match(html, /6h 0m/, 'with the hours it would add');
   // There is no shift yet, so the left column is empty rather than absent —
   // which is what "Original times 00:00" means on the reference.
@@ -2129,4 +2132,74 @@ test('the old one-request URL still lands somewhere real', async () => {
   const res = await get('/timeclock/request/7');
   assert.strictEqual(res.status, 302, 'it redirects');
   assert.match(res.headers.get('location'), /\/timeclock\/requests\?id=7/, 'into the queue, on that request');
+});
+
+test('history keeps the original, not the shift the approval made', async () => {
+  // The bug this exists to stop: the "before" column read the LIVE entry, so
+  // the moment a request was approved the entry HELD the requested times and
+  // both columns showed the same figures. What somebody actually asked to
+  // change was gone from the record the instant it was granted — which is the
+  // one moment you most want it kept.
+  const emp = 210;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3210',1500,1)")
+    .run(emp, 'Kept Record');
+  const day = '2026-05-27';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',240,240)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 23:00:00`).lastInsertRowid;
+
+  const cookie = await signIn('3210');
+  await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3210',
+    at_in: `${day}T16:00`, at_out: `${day}T22:00`, note: 'forgot to clock out' }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND decision='pending'").get(emp);
+
+  // The original is kept WITH the request, not inferred from the entry later.
+  const was = JSON.parse(c.payload).was;
+  assert.strictEqual(was.in, `${day} 21:00:00`, 'the shift as it stood is on the request');
+  assert.strictEqual(was.out, `${day} 23:00:00`);
+
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  const after = db.prepare('SELECT clock_in_at, clock_out_at FROM time_entries WHERE id = ?').get(id);
+  assert.strictEqual(after.clock_in_at, `${day} 20:00:00`, 'the entry took the requested times');
+
+  // And the history STILL shows what it was against what was asked for.
+  const html = await text(`/timeclock/requests?tab=history&id=${c.id}`);
+  assert.match(html, /<span>Original<\/span><span>Requested<\/span>/, 'the column says Original, not Now');
+  assert.match(html, /5:00 PM/, 'the original clock-in is still there');
+  assert.match(html, /4:00 PM/, 'and the requested one');
+  assert.match(html, /bs-req-cr moved/, 'still marked as a change');
+  // The two columns must not have collapsed into the same figures.
+  const cmp = (html.match(/<div class="bs-req-cmp">[\s\S]*?<\/div>\s*<\/div>/) || [''])[0];
+  const inRow = (cmp.match(/Clock in<\/span>\s*<span class="bs-req-cn">([^<]+)<\/span>\s*<span class="bs-req-cw">([^<]+)</) || []);
+  assert.ok(inRow[1] && inRow[2] && inRow[1] !== inRow[2],
+    `the columns still differ (got ${inRow[1]} vs ${inRow[2]})`);
+  // Totals too: 2h before, 6h asked for.
+  assert.match(html, /2h 0m[\s\S]*?6h 0m/, 'and what it paid before against what it will pay');
+});
+
+test('a request whose shift moved under it says so before you approve', async () => {
+  const emp = 211;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3211',1500,1)")
+    .run(emp, 'Moved Under');
+  const day = '2026-05-28';
+  const id = db.prepare(`INSERT INTO time_entries
+    (employee_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, raw_minutes, payable_minutes)
+    VALUES (?,?,'dinner','server',?,?, 'complete','manager',240,240)`)
+    .run(emp, day, `${day} 21:00:00`, `${day} 23:00:00`).lastInsertRowid;
+  const cookie = await signIn('3211');
+  await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3211',
+    at_out: `${day}T20:30`, note: 'stayed later' }, { cookie });
+  const c = db.prepare("SELECT * FROM time_corrections WHERE employee_id = ? AND decision='pending'").get(emp);
+
+  // Quiet while it still matches.
+  assert.ok(!/changed since this was asked/.test(await text(`/timeclock/requests?id=${c.id}`)),
+    'nothing to say while the shift is as they left it');
+
+  // A manager moves the punch while the request waits. Approving lands on the
+  // entry as it stands NOW, so that is worth knowing first.
+  db.prepare("UPDATE time_entries SET clock_in_at = ? WHERE id = ?").run(`${day} 19:30:00`, id);
+  const html = await text(`/timeclock/requests?id=${c.id}`);
+  assert.match(html, /changed since this was asked/i, 'it warns');
+  assert.match(html, /3:30 PM/, 'and says what it reads now');
 });

@@ -5334,8 +5334,21 @@ app.post('/portal/clock/fix', (req, res) => {
       proposed_value: summary,
       reason, requested_by: emp.name,
     });
+    // The shift as it stood when they asked, kept with the request.
+    //
+    // Without this the review screen had to read the LIVE entry for its
+    // "before" column — which is the requested value the moment the request is
+    // approved, so both columns collapsed into the same thing and what they
+    // originally asked to change was gone from the record. A request is a
+    // statement about a shift at a point in time; it has to carry that shift.
+    const was = {
+      in: e.clock_in_at, out: e.clock_out_at,
+      position: e.position, daypart: e.daypart,
+      unpaid: TC.q.breaks.all(e.id).reduce(
+        (n, b) => n + (b.paid || !b.end_at ? 0 : (b.raw_minutes || 0)), 0),
+    };
     db.prepare('UPDATE time_corrections SET payload = ? WHERE id = ?')
-      .run(payload ? JSON.stringify(payload) : null, info.lastInsertRowid);
+      .run(JSON.stringify({ ...(payload || {}), was }), info.lastInsertRowid);
     TC.q.setStatus.run({ id: e.id, status: 'correction_pending', by: emp.name });
     TC.logEvent('correction', info.lastInsertRowid, 'requested', emp.name, { after: summary, reason });
   })();
@@ -15977,10 +15990,28 @@ function reqDiff(c) {
   const face = (v) => (v ? TC.clockFace(v) : '—');
   const add = (label, now, want) => rows.push({ label, now, want, changed: now !== want });
 
-  // The times either side of the decision, so the totals below are honest.
-  let inNow = e ? e.clock_in_at : null, outNow = e ? e.clock_out_at : null;
+  // THE ORIGINAL — the shift as it stood when they asked, not as it stands now.
+  //
+  // Reading the live entry here was wrong in the one case that matters most:
+  // once a request is approved the entry HAS the requested times, so both
+  // columns showed the same figures and the thing they actually asked to
+  // change had vanished from the record. History has to say what it was.
+  //
+  // Newer requests carry `was` (captured at filing). Older ones have only
+  // original_value, which this file has always written as "<in> → <out>" — so
+  // it is parsed rather than lost. The live entry is the last resort, for rows
+  // that predate both.
+  const legacy = (() => {
+    const m = /^(\S+ \S+)\s*→\s*(\S+ \S+|open)$/.exec(String(c.original_value || ''));
+    return m ? { in: m[1], out: m[2] === 'open' ? null : m[2] } : null;
+  })();
+  const was = p.was || legacy || (e ? { in: e.clock_in_at, out: e.clock_out_at,
+    position: e.position, daypart: e.daypart, unpaid: reqUnpaid(e.id) } : {});
+
+  let inNow = was.in || null, outNow = was.out || null;
   let inWant = inNow, outWant = outNow;
-  let unpaidNow = e ? reqUnpaid(e.id) : 0, unpaidWant = unpaidNow;
+  let unpaidNow = was.unpaid != null ? was.unpaid : (e ? reqUnpaid(e.id) : 0);
+  let unpaidWant = unpaidNow;
 
   if (c.kind === 'new_shift') {
     inNow = outNow = null; unpaidNow = 0;
@@ -16013,16 +16044,19 @@ function reqDiff(c) {
     if (b && !b.paid) unpaidWant = Math.max(0, unpaidNow - was + now);
     add('Break', b ? `${face(b.start_at)}–${face(b.end_at)}` : '—', `${face(p.start)}–${face(p.end)}`);
   } else if (c.kind === 'wrong_position') {
-    add('Position', e ? tcPosName(e.position) : '—', p.position ? tcPosName(p.position) : '—');
+    add('Position', was.position ? tcPosName(was.position) : '—', p.position ? tcPosName(p.position) : '—');
   } else if (c.kind === 'wrong_service') {
-    add('Service', e && e.daypart ? dp(e.daypart) : '—', p.daypart ? dp(p.daypart) : '—');
+    add('Service', was.daypart ? dp(was.daypart) : '—', p.daypart ? dp(p.daypart) : '—');
   }
 
   // What the shift pays, both ways. Nothing machine-applicable means nothing to
   // project, so 'other' shows no total rather than a made-up one.
   if (c.kind !== 'other') {
     const pay = (a, b, unpaid) => (a && b ? Math.max(0, TC.minutesBetween(a, b) - unpaid) : null);
-    const nowMin = e && e.clock_out_at ? (e.payable_minutes != null ? e.payable_minutes : pay(inNow, outNow, unpaidNow)) : pay(inNow, outNow, unpaidNow);
+    // Both worked out the same way, from the same two pairs of times — so the
+    // left column is what the shift paid before they asked, not whatever the
+    // entry's cached payable happens to say after an approval rewrote it.
+    const nowMin = pay(inNow, outNow, unpaidNow);
     const wantMin = pay(inWant, outWant, unpaidWant);
     add('Total hours', nowMin == null ? '—' : TC.hm(nowMin), wantMin == null ? '—' : TC.hm(wantMin));
   }
@@ -16108,7 +16142,7 @@ app.get('/timeclock/requests', (req, res) => {
              moved and not what the shift becomes — and what it becomes is the
              thing being approved. */''}
       ${diff.length ? `<div class="bs-req-cmp">
-        <div class="bs-req-ch"><span></span><span>Now</span><span>Requested</span></div>
+        <div class="bs-req-ch"><span></span><span>Original</span><span>Requested</span></div>
         ${diff.map((r) => `<div class="bs-req-cr${r.changed ? ' moved' : ''}">
           <span class="bs-req-cl">${esc(r.label)}</span>
           <span class="bs-req-cn">${esc(r.now)}</span>
@@ -16116,6 +16150,21 @@ app.get('/timeclock/requests', (req, res) => {
         </div>`).join('')}
       </div>` : `<p class="bs-fine">${esc(sel.proposed_value || 'Nothing machine-applicable — make the change on the entry itself.')}</p>`}
 
+      ${/* The left column is the shift as it was WHEN THEY ASKED. If somebody
+             has moved it since and this is still waiting, that matters: the
+             approval lands on the entry as it stands now, not as it stood
+             then. */''}
+      ${(() => {
+        if (sel.decision !== 'pending' || !e) return '';
+        let was = null;
+        try { was = (JSON.parse(sel.payload || '{}') || {}).was || null; } catch { was = null; }
+        if (!was || !was.in) return '';
+        if (was.in === e.clock_in_at && (was.out || null) === (e.clock_out_at || null)) return '';
+        return `<p class="bs-req-err">The shift has been changed since this was asked —
+          it now reads ${esc(TC.clockFace(e.clock_in_at))} to
+          ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : 'still open'}.
+          Approving applies the requested times to it as it stands.</p>`;
+      })()}
       ${sel.apply_error ? `<p class="bs-req-err">It could not be applied: ${esc(sel.apply_error)}</p>` : ''}
       ${sel.decision !== 'pending' ? `<p class="bs-fine">${esc(sel.decision)} by ${esc(sel.decided_by || 'someone')}${
         sel.decided_at ? ' · ' + esc(TC.stamp(sel.decided_at)) : ''}${sel.decision_note ? ` — ${esc(sel.decision_note)}` : ''}</p>` : ''}
