@@ -1025,7 +1025,12 @@ body.bare {
 }
 
 /* --- Full-screen timesheet: period navigation, weeks, day rows ----------- */
-.tsx { min-height: 100dvh; display: flex; flex-direction: column; }
+/* Fills what is left, rather than claiming a screen of its own. .pt is already
+   a 100dvh flex column and this sits inside it — so once the shared crumb was
+   added above, "crumb + a full screen" made every timesheet taller than the
+   phone. The page opened already scrolled, which slid the crumb up under the
+   status bar and put the title behind the clock. */
+.tsx { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .tsx-top { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
 .tsx-back { font-size: 26px; line-height: 1; color: var(--pt-blue); text-decoration: none; width: 32px; }
 /* Left, like every other page's title. It was centred to sit between a back

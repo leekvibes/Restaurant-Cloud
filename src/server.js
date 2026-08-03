@@ -5537,7 +5537,11 @@ const periodToSign = (emp, today) => {
     const sh = TC.sheetFor(emp.id, p);
     if (['approved', 'locked', 'finalized'].includes(sh.status)) continue;
     if (sh.status === 'submitted' && !sh.resubmit_needed) continue;
-    if (!TC.q.entriesInPeriod.all(emp.id, p.start, p.end).length) continue;
+    // Hours are hours, whether a punch or a shift sheet carries them. Asking
+    // only about punches meant somebody whose whole period was entered by a
+    // manager was never told to sign it and never shown the button.
+    if (!TC.q.entriesInPeriod.all(emp.id, p.start, p.end).length
+        && !TC.shiftOnlyHours(emp.id, p.start, p.end).length) continue;
     return p;
   }
   return null;
@@ -5583,10 +5587,18 @@ app.get('/portal/timesheet', (req, res) => {
   const period = periods[idx] || currentPeriod();
   const v = tsView(emp, period);
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  // Rounded FIRST, which the shared TC.hm does and this local copy did not.
+  //
+  // Hours carried on the shift sheets are decimal, and decimal hours times 60
+  // is rarely a whole number of minutes: 99.56 hours is 5973.6 minutes, and
+  // `5973.6 % 60` is 33.600000000000364. This printed "99:33.600000000000364"
+  // at the top of somebody's timesheet — the "big decimal number" that started
+  // this. Fractional minutes are deliberate upstream (rounding every row before
+  // summing accumulates error); they are meant to be rounded once, here.
   const hm = (m) => {
     if (!m) return '--';
-    const h = Math.floor(m / 60), mm = m % 60;
-    return `${h}:${String(mm).padStart(2, '0')}`;
+    const t = Math.max(0, Math.round(m));
+    return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
   };
 
   // A period is submittable once it has finished. Signing for hours you are
@@ -5594,15 +5606,25 @@ app.get('/portal/timesheet', (req, res) => {
   const ended = todayIso >= period.end;
   const blocking = v.issues.filter((i) => i.blocking);
   const submitted = v.sheet.status === 'submitted' && !v.sheet.resubmit_needed;
-  const canSubmit = ended && v.entries.length > 0 && !blocking.length
+  const worked = v.entries.length > 0 || v.fromShifts.length > 0;
+  const canSubmit = ended && worked && !blocking.length
     && !submitted && !['approved', 'locked'].includes(v.sheet.status);
 
   // --- every day of the period, grouped into weeks -------------------------
+  //
+  // Punches AND hours carried on the shift sheets with no punch behind them.
+  // The total at the top has always counted both (tsView passes fromShifts to
+  // totalsFor as `extra`), and this map counted only the first — so anybody
+  // whose hours were entered on shifts rather than clocked saw a full period
+  // total above fourteen rows of "--". Ninety-nine hours from nowhere.
   const byDate = new Map();
-  for (const e of v.entries) {
-    if (!byDate.has(e.business_date)) byDate.set(e.business_date, []);
-    byDate.get(e.business_date).push(e);
-  }
+  const push = (d, row) => {
+    if (!byDate.has(d)) byDate.set(d, []);
+    byDate.get(d).push(row);
+  };
+  for (const e of v.entries) push(e.business_date, { minutes: e.payable_minutes || 0,
+    paid: e.paid_break_min || 0, id: e.id });
+  for (const x of v.fromShifts) push(x.business_date, { minutes: x.minutes || 0, paid: 0, id: null });
   const days = [];
   for (let d = period.end; d >= period.start; d = addDays(d, -1)) days.push(d);
   const weeks = [];
@@ -5615,10 +5637,10 @@ app.get('/portal/timesheet', (req, res) => {
   const otOn = v.otRule.enabled && !emp.ot_exempt;
   const dayRow = (d) => {
     const list = byDate.get(d) || [];
-    const mins = list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
-    const paidBrk = list.reduce((a, e) => a + (e.paid_break_min || 0), 0);
+    const mins = list.reduce((a, e) => a + (e.minutes || 0), 0);
+    const paidBrk = list.reduce((a, e) => a + (e.paid || 0), 0);
     const dt = new Date(d + 'T00:00:00');
-    const bad = v.issues.some((i) => list.some((e) => e.id === i.entryId) && i.blocking);
+    const bad = v.issues.some((i) => list.some((e) => e.id != null && e.id === i.entryId) && i.blocking);
     const isToday = d === todayIso;
     // A day with nothing on it is still a day you can open — that is where a
     // shift nobody clocked gets asked for. It was a dead link with
@@ -5713,9 +5735,9 @@ app.get('/portal/timesheet', (req, res) => {
         ${weeks.map((w) => `
           <div class="tsx-week">${w.days.map(dayRow).join('')}</div>
           <div class="tsx-wtot">Week total ${hm(w.days.reduce((a, d) => a
-            + (byDate.get(d) || []).reduce((x, e) => x + (e.payable_minutes || 0), 0), 0))}</div>`).join('')}
+            + (byDate.get(d) || []).reduce((x, e) => x + (e.minutes || 0), 0), 0))}</div>`).join('')}
 
-        ${!v.entries.length ? '<p class="tc-note">No time recorded in this period.</p>' : ''}
+        ${!worked ? '<p class="tc-note">No time recorded in this period.</p>' : ''}
         ${canSubmit ? `<button class="tc-btn tc-btn-go tc-btn-big tsx-submit" type="button"
           onclick="document.getElementById('ts-sheet').hidden=false">Submit timesheet</button>` : ''}
         ${!ended ? '<p class="tc-note">This period is still running. You can submit it once it ends on '
@@ -5759,6 +5781,11 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
   const date = MX.isDate(req.params.date) ? req.params.date : null;
   if (!date) return res.redirect('/portal/timesheet');
   const list = TC.q.forEmployeeSince.all(emp.id, date).filter((e) => e.business_date === date);
+  // Hours the shift sheets carry with no punch behind them. The timesheet row
+  // for this day counts them, so opening the day has to show them — otherwise
+  // tapping "8:00" lands on "Nothing recorded on this day", which is the page
+  // calling its own total a lie.
+  const sheetOnly = TC.shiftOnlyHours(emp.id, date, date);
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
   // Shifts they have already asked for on this day and not been answered on.
   const pend = TC.q.newShiftsFor.all(emp.id).filter((c) => {
@@ -5791,7 +5818,26 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
           ${ask.can ? pesButton(e) : `<p class="tc-note">${esc(ask.why)}</p>`}
           <a class="tc-more" href="/portal/clock/entry/${e.id}">Shift details and history ›</a>
         </section>`;
-      }).join('') : `<p class="tc-note">Nothing recorded on this day.${pend.length ? '' : ' If you worked it, add it and your manager can approve it.'}</p>`}
+      }).join('') : ''}
+
+      ${/* Hours from the shift sheet. There is no punch to edit and no times
+             to show, because nobody clocked — what exists is a number a
+             manager put on the shift. It is shown for what it is, and the way
+             to change it is the same request as anything else. */''}
+      ${sheetOnly.map((x) => `<section class="tsx-daycard">
+        <div class="tc-facts">
+          <div class="tc-fact"><span>Hours</span><b>${esc(TC.hm(Math.round(x.minutes)))}</b></div>
+          <div class="tc-fact"><span>Position</span><b>${esc(posName(x.role))}</b></div>
+          <div class="tc-fact"><span>Service</span><b>${x.daypart ? esc(dp(x.daypart)) : '—'}</b></div>
+          <div class="tc-fact"><span>Recorded</span><b>${x.hours_source === 'manager' ? 'By your manager' : 'On the shift sheet'}</b></div>
+        </div>
+        <p class="tc-note">No clock-in was recorded for this one. If the hours are wrong,
+          add the shift you actually worked and your manager can put it right.</p>
+      </section>`).join('')}
+
+      ${!list.length && !sheetOnly.length
+        ? `<p class="tc-note">Nothing recorded on this day.${pend.length ? '' : ' If you worked it, add it and your manager can approve it.'}</p>`
+        : ''}
 
       ${/* Already asked for. Shown before the button so nobody files the same
              night twice, having forgotten they already did. */''}

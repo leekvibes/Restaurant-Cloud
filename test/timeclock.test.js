@@ -1881,3 +1881,101 @@ test('an empty day is reachable from the timesheet, and offers the add sheet', a
   assert.ok(!/href="#"[^>]*aria-disabled/.test(ts), 'no dead day rows');
   assert.match(ts, /href="\/portal\/timesheet\/day\//, 'days are links');
 });
+
+// ── Hours that live on the shift sheets, not on a punch ──────────────────────
+// Anyone whose hours a manager entered on the shift rather than clocking has no
+// time_entries at all. The period total counted those hours; everything else on
+// the timesheet asked only about punches. The result was a full period total
+// above fourteen rows of "--", no submit button, and days that opened onto
+// "Nothing recorded".
+
+test('shift-sheet hours show on the day they were worked, not just in the total', async () => {
+  const emp = 202;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3202',1500,1)")
+    .run(emp, 'Sheet Hours');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const days = [0, 1, 2].map((i) => D2.addDays(per.start, i));
+  for (const day of days) {
+    db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'dinner','open')").run(day);
+    const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day);
+    db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
+      VALUES (?,?,'server',8,'manager')
+      ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 8, hours_source = 'manager'`).run(sh.id, emp);
+  }
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(emp).n, 0,
+    'not a single punch — the whole point');
+
+  const cookie = await signIn('3202');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+
+  // Twenty-four hours, and they are on three days rather than nowhere.
+  assert.match(html, /24:00/, 'the period total is there');
+  const dayTotals = [...html.matchAll(/class="tsd-c tsd-tot"><i>Total<\/i><b>([^<]+)<\/b>/g)].map((m) => m[1]);
+  assert.ok(dayTotals.length >= 14, `the period rendered its days (got ${dayTotals.length})`);
+  const worked = dayTotals.filter((t) => t !== '--');
+  assert.strictEqual(worked.length, 3, 'three days carry hours');
+  assert.deepStrictEqual([...new Set(worked)], ['8:00'], 'eight hours each');
+  assert.ok(!/No time recorded in this period/.test(html), 'and it does not claim there is nothing');
+
+  // The button. Requiring a punch meant a person whose whole period was typed
+  // in by a manager could never sign it — which is what "I tried to submit and
+  // nothing happened" was.
+  assert.match(html, /Submit timesheet/, 'and they can actually submit it');
+
+  // Opening the day shows the hours rather than "Nothing recorded on this day",
+  // which would be the page calling its own total a lie.
+  const day = await text(`/portal/timesheet/day/${days[0]}`, { cookie });
+  assert.match(day, /8h 0m/, 'the day shows what it carries');
+  assert.match(day, /No clock-in was recorded/, 'and says why there are no times');
+  assert.ok(!/Nothing recorded on this day/.test(day), 'not "nothing recorded"');
+});
+
+test('decimal shift hours never print as a run-on decimal', async () => {
+  // work.hours is decimal and decimal hours times 60 is rarely a whole number
+  // of minutes: 99.56 hours is 5973.6 minutes, and 5973.6 % 60 is
+  // 33.600000000000364. The timesheet's own hm() did not round before
+  // formatting, so somebody's period total read "99:33.600000000000364".
+  const emp = 203;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3203',1500,1)")
+    .run(emp, 'Odd Decimal');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  for (const i of [0, 1, 2]) {
+    const day = D2.addDays(per.start, i);
+    db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'dinner','open')").run(day);
+    const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day);
+    db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
+      VALUES (?,?,'server',7.33,'manager')
+      ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 7.33`).run(sh.id, emp);
+  }
+  const cookie = await signIn('3203');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+
+  // Nowhere on the page: a clock figure with a fractional minute after it.
+  const runOn = html.match(/\d+:\d\d\.\d+/g);
+  assert.strictEqual(runOn, null, `no run-on decimals (found ${runOn && runOn.join(', ')})`);
+  // 7.33h is 439.8 minutes, which rounds to 7:20 rather than 7:19.8.
+  assert.match(html, /7:20/, 'rounded to the nearest minute');
+});
+
+test('a period with hours on the sheets is one the portal asks you to sign', async () => {
+  // periodToSign drives the "ready to submit" banner AND the reminder that goes
+  // out when a period ends. Asking only about punches meant the people most
+  // likely to forget were the ones never told.
+  const emp = 204;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3204',1500,1)")
+    .run(emp, 'Ask Me');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const day = D2.addDays(per.start, 1);
+  db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'cafe','open')").run(day);
+  const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'cafe'").get(day);
+  db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
+    VALUES (?,?,'server',6,'manager')
+    ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 6`).run(sh.id, emp);
+
+  const cookie = await signIn('3204');
+  const html = await text('/portal/timesheet', { cookie });
+  assert.match(html, /ready to submit/i, 'the portal says the period wants signing');
+});
