@@ -216,3 +216,29 @@ test('who and when moved into the masthead rather than being dropped', () => {
   const p = E.periodEmail(periodRow, periodCtx).html;
   assert.match(p, /Rosa Diaz · Jul 4 – Jul 17/);
 });
+
+// --- overtime, in the one document the person being paid actually reads ------
+
+test('the pay period email states overtime when there is any', () => {
+  // otHours and otPay were computed, put on the payroll roster and written into
+  // the Excel export — and left out of the email. A bigger-than-usual Wages
+  // figure arrived with nothing anywhere saying why.
+  const withOt = { ...periodRow, hours: 46, wk1Hours: 46, wk2Hours: 0,
+    otHours: 6, otPay: 6600, wage: 50600, takeHome: 61278 };
+  const html = E.periodEmail(withOt, periodCtx).html;
+
+  assert.match(html, /Of that, overtime/, 'the hours say how many were overtime');
+  assert.match(html, /6 hrs/, 'and how many');
+  assert.match(html, /Includes \$66\.00 of overtime pay/, 'and the wages line says what it is worth');
+  // It still leads with the figure they came for.
+  assert.match(html, /Total on this check/);
+});
+
+test('and says nothing about overtime when there is none', () => {
+  // Silent for everybody the rule does not apply to — off entirely, or exempt.
+  // A "Overtime: 0 hrs" line on a barista's summary is a question with no
+  // answer.
+  const html = E.periodEmail(periodRow, periodCtx).html;
+  assert.ok(!/overtime/i.test(html), 'no overtime line at all');
+  assert.match(html, /Total hours/, 'the rest of it is unchanged');
+});

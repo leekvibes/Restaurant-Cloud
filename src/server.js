@@ -6633,12 +6633,23 @@ function periodSendBlock(from, to, rows) {
         ${done.sent_count} ${done.sent_count === 1 ? 'person' : 'people'}. Sending again gives everyone a
         second email — only do it if the numbers have changed since.</p>` : '';
 
+  // Said before the button, not discovered after it. With no mail account this
+  // writes preview files and nothing reaches anybody — which used to be a
+  // one-line flash you saw once, against a "sent" record that then said
+  // otherwise for good.
+  const mail = mailStatus();
+  const mailNote = mail.ready ? '' : `<p class="bs-note"><b>Mail is not connected.</b>
+    ${esc(mail.problem || '')} Pressing send writes preview files to <code>/previews</code> so you can
+    check them, and the period stays marked as not sent — because nobody has been told anything.
+    <a class="bs-act" href="/email">Set up email →</a></p>`;
+
   return `
     ${checks}
     <section class="bs-panel">
     <div class="bs-sec-h"><span class="bs-kicker">Send the summary</span></div>
     <p class="bs-note">One email each with their hours, wages and card tips for
       <b>${esc(labelFor(p))}</b>. It restates the shift emails they already got — it is not extra pay.</p>
+    ${mailNote}
     ${sentNote}
     <form class="bs-sendrow" method="post" action="/payroll/send"
       onsubmit="return confirm('Email the ${esc(labelFor(p))} summary to ${recipients} ${recipients === 1 ? 'person' : 'people'}?')">
@@ -6703,7 +6714,15 @@ app.post('/payroll/send', async (req, res) => {
   if (!emails.length) return back('Nobody in this period to email.', true);
 
   const out = await sendEmails(emails);
-  markSent(from, to, out.sent || out.previewed);
+  // Recorded only when mail actually left the building.
+  //
+  // This counted previews too, so on a deploy with no mail account the period
+  // was marked sent, the panel then read "Already sent to 7 people", and the
+  // daily sweep's "Payroll not sent" alert went quiet — for a fortnight nobody
+  // had been told about. The flash said "previews were written instead", but
+  // that is a sentence you see once against a record that contradicts it
+  // forever.
+  if (out.sent) markSent(from, to, out.sent);
 
   // And on their phone, not only in their inbox.
   //
@@ -6711,7 +6730,7 @@ app.post('/payroll/send', async (req, res) => {
   // address on file — they are exactly the people who otherwise hear nothing
   // at all, and the portal is where they can now read the same figures.
   const label = labelFor({ start: from, end: to });
-  for (const e of emails) {
+  for (const e of out.sent ? emails : []) {
     if (!e.employeeId) continue;
     try {
       PORTAL.notify('earnings', `Your pay summary for ${label} is ready`,

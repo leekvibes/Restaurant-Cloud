@@ -301,9 +301,18 @@ function periodEmail(r, ctx) {
   body += line('Shifts worked', String(r.shifts), { border: false });
   body += line('Total hours', String(r.hours));
   if (r.wk1Hours || r.wk2Hours) body += hint(`Week 1: ${r.wk1Hours} hrs · Week 2: ${r.wk2Hours} hrs`);
+  // Overtime, said out loud.
+  //
+  // otHours and otPay were computed, shown on the payroll roster and written
+  // into the Excel export, and left out of the one document the person being
+  // paid actually reads — so a bigger-than-usual Wages figure arrived with no
+  // explanation. Non-zero only when the rule is on and they are not exempt,
+  // so this is silent for everybody it does not apply to.
+  if (r.otHours) body += line('Of that, overtime', `${r.otHours} hrs`);
 
   body += section('On your paycheck');
   body += line('Wages', fmt(r.wage), { border: false });
+  if (r.otPay) body += hint(`Includes ${fmt(r.otPay)} of overtime pay.`);
   body += line('Card tips', fmt(r.paycheckTips));
   body += line('Total on this check', fmt(r.takeHome), { strong: true, color: GREEN });
 

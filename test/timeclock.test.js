@@ -2315,15 +2315,21 @@ test('sending payroll tells everybody it was built for, email or not', async () 
   db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
     VALUES (?,?,'server',7,'manager') ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 7`).run(sh.id, emp);
 
-  const before = db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n;
-  await post('/payroll/send', { from: per.start, to: per.end });
-  const ev = db.prepare("SELECT * FROM portal_events WHERE employee_id = ? ORDER BY id DESC").get(emp);
+  // The notification loop runs over the emails that were BUILT, not over the
+  // people who have an address — which is the whole point, since somebody with
+  // no address is exactly who hears nothing otherwise. Asserted on the builder
+  // because the harness has no mail account, and a send that only wrote
+  // previews deliberately tells nobody anything.
+  const { aggregatePayroll } = require('../src/reports');
+  const { buildPeriodEmails } = require('../src/email');
+  const { rows } = aggregatePayroll(per.start, per.end);
+  const built = buildPeriodEmails(rows, { from: per.start, to: per.end },
+    new Map(rows.map((r) => [r.employeeId, { email: r.email }])));
 
-  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n,
-    before + 1, 'they were told');
-  // Somebody with no address is exactly the person who hears nothing otherwise.
-  assert.match(ev.title, /pay summary/i);
-  assert.match(ev.href, /\/portal\/earnings\?p=/, 'and can go and read the figures');
+  const mine = built.find((e) => e.employeeId === emp);
+  assert.ok(mine, 'they are in the set the notification loop walks');
+  assert.ok(!mine.to, 'with no address to send to');
+  assert.ok(built.every((e) => e.employeeId), 'and every entry carries who it is for');
 });
 
 test('the pay period on their own page is the one the email states', async () => {
@@ -2351,4 +2357,43 @@ test('the pay period on their own page is the one the email states', async () =>
   assert.match(html, /\$200\.00/, 'the figure matches the aggregation the email uses');
   // The arrows reach earlier periods rather than stranding them on one.
   assert.match(html, /class="pp-arrow[^"]*" *\n? *href="\/portal\/earnings\?p=/, 'and they can look back');
+});
+
+test('a preview run is not a send — nothing is recorded and nobody is told', async () => {
+  // Mail is not configured in the test harness, so /payroll/send writes preview
+  // files. That used to be recorded as a send: the period was marked, the panel
+  // then read "Already sent to N people", and the daily sweep's "Payroll not
+  // sent" alert went quiet — for a fortnight nobody had been told about. The
+  // flash said "previews were written instead", but that is a sentence you see
+  // once against a record that contradicts it forever.
+  const emp = 218;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3218',1500,1)")
+    .run(emp, 'Preview Only');
+  const D2 = require('../src/dates');
+  const per = P.recentPeriods(2)[1];
+  const day = D2.addDays(per.start, 7);
+  db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'dinner','open')").run(day);
+  const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day);
+  db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hours_source)
+    VALUES (?,?,'server',8,'manager') ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = 8`).run(sh.id, emp);
+
+  db.prepare('DELETE FROM period_sends WHERE period_start = ?').run(per.start);
+  const before = db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n;
+
+  const res = await post('/payroll/send', { from: per.start, to: per.end });
+  assert.strictEqual(res.status, 302);
+  assert.match(decodeURIComponent(res.headers.get('location')), /previews were written/i,
+    'it says what it actually did');
+
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM period_sends WHERE period_start = ?').get(per.start).n, 0,
+    'and records no send, because there was none');
+  // Nor tells anybody their summary is ready when it has not gone anywhere.
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM portal_events WHERE employee_id = ?").get(emp).n,
+    before, 'and nobody was told');
+
+  // The page says so before you press it, rather than after.
+  const html = await text(`/payroll?from=${per.start}&to=${per.end}`);
+  assert.match(html, /Mail is not connected/, 'the panel warns first');
+  assert.match(html, /stays marked as not sent/, 'and says what that means');
+  assert.ok(!/Already sent/.test(html), 'and does not claim otherwise');
 });
