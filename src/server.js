@@ -6064,10 +6064,18 @@ app.post('/portal/timesheet/submit', (req, res) => {
   const period = tsPeriodsFor().find((p) => p.start === req.body.period);
   if (!period) return res.redirect('/portal/timesheet?err=' + encodeURIComponent('That pay period is not open for submission.'));
   const back = (p) => res.redirect(`/portal/timesheet?p=${period.start}&` + p);
-  {
-    const g = pinCheck(req, emp, req.body.pin);
-    if (!g.ok) return back('err=' + encodeURIComponent(g.msg));
-  }
+
+  // No PIN. This route demanded one and the sheet has never had a field for
+  // it, so every submission from the portal was rejected with "That PIN did
+  // not match." and no timesheet row was written — nobody could sign a period
+  // at all. Each attempt also counted against that person's PIN rate-limit
+  // bucket, so trying twice could lock them out of the portal.
+  //
+  // Dropped rather than added, by decision: requirePortal above has already
+  // proved who this is from the cookie, and the confirmation below is what
+  // makes this a signature rather than a save. The staleness check further
+  // down is the guard that actually matters — it refuses a signature given for
+  // figures that have since moved.
   if (req.body.confirm !== '1') return back('err=' + encodeURIComponent('Tick the box to confirm the hours.'));
 
   // Validated again on the server: the page may have been open while something

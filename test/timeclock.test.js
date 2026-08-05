@@ -602,6 +602,10 @@ const P = require('../src/periods');
 const T2 = require('../src/timeclock');
 const sheetOf = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(empId, start);
 /** Submit the way the form does: carrying the totals the page displayed. */
+// `pin` is accepted and ignored — the route no longer asks for one, and the
+// argument is left in place so the twelve call sites below did not all have to
+// change. Nothing here sends it: the whole point is that these tests now post
+// what the sheet posts.
 async function submitSheet(empId, pin, per, extra = {}, cookie) {
   // What the PAGE shows, which is punches plus any hours the shift sheets carry
   // that no punch accounts for. Computing it without those signed a figure the
@@ -610,7 +614,7 @@ async function submitSheet(empId, pin, per, extra = {}, cookie) {
   const seen = T2.totalsFor(T2.q.entriesInPeriod.all(empId, per.start, per.end),
     { extra: T2.shiftOnlyHours(empId, per.start, per.end) }).payable;
   return post('/portal/timesheet/submit',
-    { period: per.start, confirm: '1', pin, seen: String(seen), ...extra }, { cookie });
+    { period: per.start, confirm: '1', seen: String(seen), ...extra }, { cookie });
 }
 /**
  * The period these tests work in: the most recent one that has FINISHED.
@@ -691,14 +695,61 @@ test('a clean timesheet submits, with the totals it showed', async () => {
   assert.strictEqual(snap.payable, 480, 'the totals they agreed to are kept');
 });
 
-test('submitting needs the PIN and the confirmation', async () => {
+test('submitting needs the confirmation, and no PIN', async () => {
+  // The PIN was dropped by decision. It had never worked: the route demanded
+  // one and the sheet has no field for it, so every submission from the portal
+  // was refused with "That PIN did not match." and nothing was written — and
+  // each attempt counted against that person's PIN rate-limit bucket.
+  //
+  // The cookie already proves who this is. The tick box is what makes it a
+  // signature rather than a save, so that is what stays.
   const per = curPeriod();
   const cookie = await signIn('3222');
   seedInPeriod(EMP.multi, 2, '10:00', '14:00');
-  await submitSheet(EMP.multi, '0000', per, {}, cookie);
-  assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted', 'wrong PIN, no signature');
-  await post('/portal/timesheet/submit', { period: per.start, pin: '3222' }, { cookie });
-  assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted', 'unticked box, no signature');
+
+  // No PIN in the payload at all — exactly what the sheet sends.
+  await post('/portal/timesheet/submit', { period: per.start, seen: '0' }, { cookie });
+  assert.notStrictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted',
+    'unticked box, no signature');
+
+  await submitSheet(EMP.multi, null, per, {}, cookie);
+  assert.strictEqual((sheetOf(EMP.multi, per.start) || {}).status, 'submitted',
+    'and with the box ticked it goes through, PIN or no PIN');
+});
+
+test('the submit sheet posts everything the route needs', async () => {
+  // The guard that was missing. Every submit test passed a `pin` the sheet
+  // does not have, so they all exercised a payload the UI never sends and the
+  // real one was broken for as long as the PIN check existed.
+  //
+  // This reads the fields out of the rendered form and posts THOSE — so a route
+  // that starts asking for something the sheet does not carry fails here.
+  const emp = 219;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3219',1500,1)")
+    .run(emp, 'Form Payload');
+  const per = curPeriod();
+  seedInPeriod(emp, 3, '09:00', '17:00');
+  const cookie = await signIn('3219');
+
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  const sheet = (html.match(/id="ts-sheet"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(sheet, 'the submit sheet is on the page');
+
+  // Every name=value the form carries, as a browser would send it.
+  const body = {};
+  for (const m of sheet.matchAll(/name="([a-z_]+)"(?:\s+value="([^"]*)")?/g)) {
+    body[m[1]] = m[2] !== undefined ? m[2] : '';
+  }
+  assert.ok('period' in body && 'seen' in body, 'it carries the period and the figure it was drawn with');
+  assert.ok(!('pin' in body), 'and no PIN — the route must not ask for one');
+  body.confirm = '1';                       // the one thing the person does
+  delete body._csrf;                        // supplied by post()
+
+  const res = await post('/portal/timesheet/submit', body, { cookie });
+  assert.strictEqual(res.status, 302);
+  const where = decodeURIComponent(res.headers.get('location'));
+  assert.ok(!/err=/.test(where), `the form's own fields are enough (got ${where})`);
+  assert.strictEqual((sheetOf(emp, per.start) || {}).status, 'submitted', 'and the signature landed');
 });
 
 test('a manager can return a submitted timesheet, with a reason', async () => {
