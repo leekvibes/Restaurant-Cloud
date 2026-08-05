@@ -4713,68 +4713,28 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 
 body.bs { background: var(--paper); }
 
-/* --- the sidebar: navy-charcoal in both themes --------------------------- */
+/* --- the sidebar: COLOUR ONLY --------------------------------------------
+   Every rule that draws the sidebar lives further up this file and is left
+   exactly as it was — structure, placement, open and closed states,
+   expand/collapse, active-item shape, dimensions, spacing, icons, labels,
+   animation and navigation organisation are all untouched.
+
+   The only change is which colours those rules resolve to. Re-mapping the
+   tokens inside .bs-side does that and nothing else: no geometry can move,
+   because no geometry is declared here. --ac (per-module accent) is
+   deliberately not remapped — it is module identity and already reads on a
+   dark ground. */
 .bs-side {
-  background: var(--nav-bg);
-  border-right: 0;
-  box-shadow: inset -1px 0 0 var(--nav-rule);
+  --band-bg:    var(--nav-bg);
+  --band-line:  var(--nav-rule);
+  --band-hover: var(--nav-bg-2);
+  --band-div:   var(--nav-rule);
+  --band-label: var(--nav-muted);
+  --secondary:  var(--nav-muted);
+  --muted:      var(--nav-muted);
+  --faint:      var(--nav-muted);
+  --ink:        var(--nav-ink);
 }
-.bs-side-nav { padding: var(--s-2) 0 var(--s-3); }
-.bs-side-h {
-  color: var(--nav-muted); opacity: .72;
-  font-size: 10px; letter-spacing: .13em;
-  padding: var(--s-4) var(--s-4) var(--s-1);
-}
-.bs-side-i {
-  color: var(--nav-muted);
-  margin: 1px var(--s-2); padding: 8px var(--s-3);
-  border-radius: var(--r-md);
-  font-size: 13.5px; font-weight: 500;
-}
-.bs-side-i:hover { background: var(--nav-bg-2); color: var(--nav-ink); }
-.bs-side-ic { color: inherit; opacity: .82; }
-.bs-side-i.on {
-  background: var(--nav-bg-2); color: var(--nav-ink); font-weight: 600;
-}
-.bs-side-i.on .bs-side-ic { opacity: 1; }
-/* The accent bar sits inside the pill's radius rather than on the panel edge. */
-.bs-side-i.on::before {
-  left: 0; top: 8px; bottom: 8px; width: 3px;
-  border-radius: 0 var(--r-sm) var(--r-sm) 0;
-  background: var(--nav-on);
-}
-.bs-side-tag {
-  color: var(--nav-muted); border-color: var(--nav-rule);
-  border-radius: var(--r-sm);
-}
-.bs-side-gi { color: var(--nav-muted); }
-.bs-side-gi.on, .bs-side-gi:hover { color: var(--nav-ink); background: var(--nav-bg-2); }
-
-/* The account, at the foot of the sidebar — where the mockup puts it. */
-.bs-side-foot { border-top: 1px solid var(--nav-rule); padding: var(--s-2); }
-.bs-side-acct {
-  display: flex; align-items: center; gap: var(--s-3);
-  width: 100%; padding: var(--s-2) var(--s-3);
-  border: 0; border-radius: var(--r-md); background: none; cursor: pointer;
-  color: var(--nav-ink); font: inherit; text-align: left; text-decoration: none;
-}
-.bs-side-acct:hover { background: var(--nav-bg-2); }
-.bs-side-av {
-  flex: none; width: 30px; height: 30px; border-radius: var(--r-full);
-  display: grid; place-items: center; background: var(--nav-bg-2);
-  color: var(--nav-ink); font-size: 12px; font-weight: 600;
-}
-.bs-side-who { display: grid; gap: 1px; min-width: 0; flex: 1; }
-.bs-side-who b { font-size: 13px; font-weight: 600; color: var(--nav-ink);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bs-side-who i { font-style: normal; font-size: 11px; color: var(--nav-muted); }
-.bs-side-acct .bs-side-cv { color: var(--nav-muted); font-size: 11px; flex: none; }
-.bs-side .bs-side-pin { color: var(--nav-muted); }
-.bs-side .bs-side-pin:hover { background: var(--nav-bg-2); color: var(--nav-ink); }
-
-/* Collapsed rail keeps the account as just an avatar. */
-html.rc-collapsed .bs-side-who, html.rc-collapsed .bs-side-cv { display: none; }
-html.rc-collapsed .bs-side-acct { justify-content: center; padding: var(--s-2); }
 
 /* --- masthead ------------------------------------------------------------ */
 .bs-masthead {
@@ -4782,10 +4742,6 @@ html.rc-collapsed .bs-side-acct { justify-content: center; padding: var(--s-2); 
   border-bottom: 1px solid var(--rule);
   box-shadow: none;
 }
-/* The account chip lives in the sidebar on desktop; the masthead keeps it for
-   mobile, where there is no sidebar to hold it. */
-@media (min-width: 901px) { .bs-masthead .bs-acct { display: none; } }
-@media (max-width: 900px) { .bs-side-foot .bs-side-acct { display: none; } }
 
 /* --- page header --------------------------------------------------------- */
 .zw-head {

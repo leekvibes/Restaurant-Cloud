@@ -63,6 +63,25 @@ whole app onto the new palette.
 Sampled from the mockup: the sidebar ground is `#1B2732`, the active pill
 `#343E49`.
 
+**Colour only.** The sidebar's structure, placement, open and closed states,
+expand/collapse, active-item shape, dimensions, spacing, icons, labels,
+animation, account placement and navigation organisation are unchanged from
+before the redesign. The change is implemented as a token re-map scoped to
+`.bs-side` — it declares no geometry, so none can move:
+
+```css
+.bs-side {
+  --band-bg: var(--nav-bg);  --band-hover: var(--nav-bg-2);
+  --band-line: var(--nav-rule);  --band-div: var(--nav-rule);
+  --band-label: var(--nav-muted);  --secondary: var(--nav-muted);
+  --muted: var(--nav-muted);  --faint: var(--nav-muted);  --ink: var(--nav-ink);
+}
+```
+
+`--ac` (the per-module accent that colours the 3px active bar) is deliberately
+NOT remapped: it is module identity, and it already reads on a dark ground.
+The account stays in the masthead.
+
 | Token | Value |
 |---|---|
 | `--nav-bg` | `#1b2733` |
@@ -314,10 +333,8 @@ Search · chips · dropdowns · date range · right-aligned actions. Chips are
 └──────────┴──────────────────────────────────────────────┘
 ```
 
-- Sidebar `--nav-bg`, fixed, full height, own scroll, collapsible to 64px
-  (icon only) with state in `localStorage`.
-- Group headers `--nav-muted` mono kickers. Active item: `--primary-soft` at
-  8% + a 3px `--nav-on` left bar.
+- Sidebar `--nav-bg`, 210px, collapsible to 48px with state in
+  `localStorage.rc_nav` — all exactly as it already was. Only the colours moved.
 - **Retire the band nav (`.bs-band`).** Sidebar + bottom bar is enough; the
   band is a third system for the middle widths and its group panel duplicates
   the sidebar's.

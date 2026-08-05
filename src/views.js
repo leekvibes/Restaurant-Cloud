@@ -456,14 +456,6 @@ const SECTION_ICON = {
   Team: 'staff',
 };
 
-/** The signed-in account, named the same way wherever it is shown. */
-const acctName = () => (currentViewUser() && currentViewUser().name) || 'Owner';
-const acctRole = () => {
-  const u = currentViewUser();
-  if (u && u.role === 'viewer') return 'View only';
-  return u && u.master ? 'Owner' : 'Manager';
-};
-
 function sideNav(path) {
   const allowed = (g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) });
   const groups = SECTIONS.map(allowed).filter((g) => g.links.length);
@@ -495,14 +487,6 @@ function sideNav(path) {
         <button type="button" class="bs-side-i bs-side-pin" id="bs-rail-pin" onclick="rcNav()"
           aria-label="Collapse or expand the menu" data-tip="Expand / collapse · ⌘B">
           <span class="bs-side-ic">${icon('pin')}</span><span class="bs-side-lb">Collapse</span></button>
-        ${/* The account sits at the foot of the sidebar, as the mockup has it.
-              The masthead keeps its own chip for mobile, where there is no
-              sidebar to hold this — CSS shows exactly one of the two. */''}
-        <a class="bs-side-acct" href="/settings" data-tip="${esc(acctName())}">
-          <span class="bs-side-av">${esc(initialsOf(currentViewUser()))}</span>
-          <span class="bs-side-who"><b>${esc(acctName())}</b><i>${esc(acctRole())}</i></span>
-          <span class="bs-side-cv" aria-hidden="true">▸</span>
-        </a>
       </div>
     </aside>`;
 }
