@@ -413,73 +413,13 @@ function masthead(path) {
     </header>`;
 }
 
-function navRow(path) {
-  const allowed = (g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) });
-  const groups = SECTIONS.map(allowed).filter((g) => g.links.length);
+// The band navigation is gone. It was a third navigation system — a
+// horizontal strip with its own hover-expand group panel — that duplicated
+// every link in the sidebar, and navRow() had already stopped being called.
+// The sidebar covers desktop; the bottom bar and its Index sheet cover mobile.
+// No route lost a way in: see docs/ZWIN-UI-MAP.md.
 
-  const home = groups.find((g) => !g.title);
-  const front = FRONT_ROW.map((t) => groups.find((g) => g.title === t)).filter(Boolean);
-  const named = FRONT_ROW_NAMED.map((t) => groups.find((g) => g.title === t)).filter(Boolean);
-  const onFront = new Set([...FRONT_ROW, ...FRONT_ROW_NAMED]);
-  const rest = groups.filter((g) => g.title && !onFront.has(g.title));
 
-  const link = ([href, , label, , , tag]) =>
-    `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${tag ? ` <span class="bs-colhead">${esc(tag)}</span>` : ''}</a>`;
-
-  const sep = '<span class="bs-nav-sep"></span>';
-  const frontHtml = [
-    home ? home.links.map(([href, , label]) => `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label === 'Dashboard' ? 'Front page' : label)}</a>`).join('') : '',
-    ...front.map((g) => g.links.map(link).join('')),
-    // A named group is one tab. Its pages are reachable through the sub-nav
-    // that appears once you are inside it.
-    ...named.map((g) => {
-      const inside = g.links.some(([href]) => navOn(href, path));
-      return `<a href="${g.links[0][0]}"${inside ? ' class="on"' : ''}>${esc(g.title)}</a>`;
-    }),
-  ].filter(Boolean).join(sep);
-
-  const overflow = rest.length ? `
-    <details class="bs-more">
-      <summary aria-label="More sections">More <span aria-hidden="true">▾</span></summary>
-      <div class="bs-more-pop">
-        ${rest.map((g) => `<div class="bs-more-grp">${esc(g.title)}</div>${g.links.map(link).join('')}`).join('')}
-      </div>
-    </details>` : '';
-
-  // ---- the expanded state -------------------------------------------------
-  // The same tabs, reflowed under their group names. Everything is visible
-  // once open, so there is no "More" here.
-  const GROUPS = [
-    ['Overview', home ? home.links.map(([href, , label]) => [href, label === 'Dashboard' ? 'Front page' : label]) : []],
-    ...[...front, ...named, ...rest].map((g) => [g.title, g.links.map(([href, , label, , , tag]) => [href, label, tag])]),
-  ].filter(([, links]) => links.length);
-
-  const groupHtml = GROUPS.map(([title, links]) => `
-    <div class="bs-bandg">
-      <span class="bs-bandg-t">${esc(title)}</span>
-      <span class="bs-bandg-l">${links.map(([href, label, tag]) =>
-        `<a href="${href}"${navOn(href, path) ? ' class="on"' : ''}>${esc(label)}${
-          tag ? ` <span class="bs-colhead">${esc(tag)}</span>` : ''}</a>`).join('')}</span>
-    </div>`).join('');
-
-  // One hover container holding both layouts. The band grows and shrinks in
-  // flow — it never floats over the page, so nothing underneath moves out of
-  // reach while it is open.
-  return `
-    <nav class="bs-band" id="bs-band" aria-label="Sections">
-      <button type="button" class="bs-band-tap" id="bs-band-tap" aria-expanded="false"
-        aria-controls="bs-band-x" aria-label="Show section groups"></button>
-      <div class="bs-band-c">
-        <div class="bs-nav-scroll">${frontHtml}</div>${overflow}
-      </div>
-      <div class="bs-band-x" id="bs-band-x">${groupHtml}</div>
-    </nav>`;
-}
-
-/**
- * The group you are inside, and its siblings. Only drawn for a group that has
- * more than one page — a sub-nav with one tab is a rule with nothing under it.
- */
 function subNav(path) {
   const g = groupFor(path);
   if (!g || !g.title) return '';
@@ -516,6 +456,14 @@ const SECTION_ICON = {
   Team: 'staff',
 };
 
+/** The signed-in account, named the same way wherever it is shown. */
+const acctName = () => (currentViewUser() && currentViewUser().name) || 'Owner';
+const acctRole = () => {
+  const u = currentViewUser();
+  if (u && u.role === 'viewer') return 'View only';
+  return u && u.master ? 'Owner' : 'Manager';
+};
+
 function sideNav(path) {
   const allowed = (g) => ({ ...g, links: g.links.filter(([href]) => navAllowed(href)) });
   const groups = SECTIONS.map(allowed).filter((g) => g.links.length);
@@ -547,6 +495,14 @@ function sideNav(path) {
         <button type="button" class="bs-side-i bs-side-pin" id="bs-rail-pin" onclick="rcNav()"
           aria-label="Collapse or expand the menu" data-tip="Expand / collapse · ⌘B">
           <span class="bs-side-ic">${icon('pin')}</span><span class="bs-side-lb">Collapse</span></button>
+        ${/* The account sits at the foot of the sidebar, as the mockup has it.
+              The masthead keeps its own chip for mobile, where there is no
+              sidebar to hold this — CSS shows exactly one of the two. */''}
+        <a class="bs-side-acct" href="/settings" data-tip="${esc(acctName())}">
+          <span class="bs-side-av">${esc(initialsOf(currentViewUser()))}</span>
+          <span class="bs-side-who"><b>${esc(acctName())}</b><i>${esc(acctRole())}</i></span>
+          <span class="bs-side-cv" aria-hidden="true">▸</span>
+        </a>
       </div>
     </aside>`;
 }
@@ -806,52 +762,8 @@ function head(title, opts = {}) {
     </script>`;
 }
 
-const bandScript = `<script>
-(function () {
-  var band = document.getElementById('bs-band');
-  if (!band) return;
-  var tap = document.getElementById('bs-band-tap');
-  var timer = null;
-  var OPEN_AFTER = 120;   // a cursor crossing the band should not flick it open
-  var CLOSE_AFTER = 200;  // a diagonal move to a far group should not snap it shut
+// bandScript went with the band it drove.
 
-  function set(open) {
-    band.classList.toggle('open', open);
-    if (tap) tap.setAttribute('aria-expanded', open ? 'true' : 'false');
-  }
-  function schedule(open) {
-    clearTimeout(timer);
-    timer = setTimeout(function () { set(open); }, open ? OPEN_AFTER : CLOSE_AFTER);
-  }
-
-  // mouseenter/mouseleave, not :hover. They fire on the band's real boundary
-  // and do not re-evaluate as the box resizes, so the open state cannot chase
-  // its own layout — which is what made it twitch.
-  var fine = window.matchMedia('(hover: hover) and (pointer: fine)');
-  if (fine.matches) {
-    band.addEventListener('mouseenter', function () { schedule(true); });
-    band.addEventListener('mouseleave', function () { schedule(false); });
-  }
-
-  // No hover on a touch screen, so a tap toggles and a tap outside shuts it.
-  if (tap) tap.addEventListener('click', function () {
-    clearTimeout(timer);
-    set(!band.classList.contains('open'));
-  });
-  document.addEventListener('click', function (e) {
-    if (!band.contains(e.target)) { clearTimeout(timer); set(false); }
-  });
-
-  // Tabbing in opens it, so a keyboard reaches every section without a cursor.
-  band.addEventListener('focusin', function () { clearTimeout(timer); set(true); });
-  band.addEventListener('focusout', function () {
-    setTimeout(function () { if (!band.contains(document.activeElement)) set(false); }, 0);
-  });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { clearTimeout(timer); set(false); }
-  });
-})();
-</script>`;
 
 const swScript = `<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>`;
 
@@ -1077,4 +989,4 @@ function flash(req) {
 // navAllowed is the one gate the sidebar and the routes both read, so it is
 // exported rather than reimplemented per page — a second copy is how a link
 // ends up visible to somebody who gets a 403 when they follow it.
-module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed };
+module.exports = { layout, flash, esc, money, dp, RESTAURANT, APP_NAME, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed, currentPath };

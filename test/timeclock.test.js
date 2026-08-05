@@ -1160,7 +1160,12 @@ test('the portal hub offers one time-clock entry, not two', async () => {
   const cookie = await signIn('3111');
   const hub = await text('/portal', { cookie });
   assert.match(hub, /Time clock/, 'the clock is on the hub');
-  assert.ok(!/href="\/portal\/timesheet"/.test(hub), 'and the timesheet is not a second destination');
+  // Scoped to the hub's own action rows. The shell's bottom nav carries a
+  // Timesheet tab on every screen — that is persistent chrome, not a second
+  // destination competing with the clock in the list of things to do here.
+  const rows = (hub.match(/<div class="pt-rows">[\s\S]*?<\/div>\s*<\/div>/) || [''])[0];
+  assert.ok(rows, 'the hub rendered its action rows');
+  assert.ok(!/href="\/portal\/timesheet"/.test(rows), 'and the timesheet is not a second destination');
 });
 
 test('the hub tile says where the person stands', async () => {

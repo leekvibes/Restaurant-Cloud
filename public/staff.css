@@ -407,20 +407,28 @@ body.bare {
    below 44px if it can be tapped, and nothing depends on hover.
    =========================================================================== */
 .pt {
-  --pt-page: #f4ead9;
-  --pt-field: #fffdf9;
-  --pt-ink: #1f1d1a;
-  --pt-body: #3a382f;
-  --pt-second: #5c5647;
-  --pt-muted: #77705f;
-  --pt-faint: #a89f8a;
-  --pt-blue: #2451c9;
-  --pt-amber: #8a4a10;
-  --pt-red: #9a2c1d;
-  --pt-green: #1a7a3c;
-  --pt-line: #cabfa4;
-  --pt-hair: #e3d7bf;
-  --pt-dot: #cfc2a6;
+  /* Portal tokens, sampled from the approved mockup. Same names as before, so
+     this is a value swap: every portal screen moves without being touched. */
+  --pt-page: #f6f7f9;   /* off-white ground */
+  --pt-field: #ffffff;  /* white surfaces */
+  --pt-ink: #0f172a;
+  --pt-body: #3d4653;
+  --pt-second: #4d5866;
+  --pt-muted: #667085;
+  --pt-faint: #98a2b3;
+  --pt-blue: #0b57d0;
+  --pt-amber: #b25a09;
+  --pt-red: #b3261e;
+  --pt-green: #16863a;
+  --pt-line: #e3e7ec;
+  --pt-hair: #edf0f4;
+  --pt-dot: #d5dae1;
+  /* Tinted state grounds — the mockup's Working / On break / Clocked out banners. */
+  --pt-ok-soft: #e9f7ec;
+  --pt-warn-soft: #fdf3e2;
+  --pt-info-soft: #e8f0fb;
+  --pt-r: 12px;         /* portal radius: friendlier than the owner side */
+  --pt-tap: 48px;
   background: var(--pt-page);
   color: var(--pt-body);
   min-height: 100vh;
@@ -1145,3 +1153,136 @@ body.bare {
   letter-spacing: 0; text-transform: none; font-family: inherit; }
 .pt-allnote { margin-top: 18px; }
 .pt-allnote a { color: var(--pt-blue); text-decoration: none; font-weight: 500; }
+
+/* ===========================================================================
+   ZWIN PORTAL SHELL — Phase 1.
+   Appended so it overrides the rules above without deleting anything a portal
+   screen still depends on. No portal SCREEN is redesigned in this phase.
+   =========================================================================== */
+
+/* --- chrome: white header on the off-white ground ------------------------ */
+.pt-crumb {
+  background: var(--pt-field);
+  border-bottom: 1px solid var(--pt-line);
+  padding: calc(var(--s-3, 12px) + env(safe-area-inset-top)) 20px 12px;
+  position: sticky; top: 0; z-index: 30;
+}
+.pt-back, .pt-back2 { min-height: 44px; display: inline-flex; align-items: center; }
+.pt-top { border-bottom: 1px solid var(--pt-line); background: var(--pt-field); }
+
+/* --- surfaces ------------------------------------------------------------ */
+.pt-body { background: var(--pt-page); }
+.tsx-daycard, .tc-facts, .pt-stats, .tsx-sum, .tc-sheet {
+  background: var(--pt-field);
+  border: 1px solid var(--pt-line);
+  border-radius: var(--pt-r);
+}
+.tc-fact, .tc-row, .tsd { border-color: var(--pt-hair); }
+.tc-btn { border-radius: var(--pt-r); min-height: var(--pt-tap); }
+.tc-btn-go { background: var(--pt-blue); border-color: var(--pt-blue); }
+
+/* --- bottom navigation --------------------------------------------------- */
+/* The portal had none: the hub WAS the navigation, so the timesheet was two
+   taps from the time clock via home. Five slots, every one of them a screen
+   that already existed. */
+.pt-tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  background: var(--pt-field);
+  border-top: 1px solid var(--pt-line);
+  padding-bottom: env(safe-area-inset-bottom);
+  max-width: 460px; margin: 0 auto;
+  box-shadow: 0 -1px 3px rgba(16, 24, 40, .05);
+}
+.pt-tabs > a, .pt-more > summary {
+  display: grid; justify-items: center; align-content: center; gap: 3px;
+  min-height: 56px; padding: 7px 2px 6px;
+  color: var(--pt-muted); text-decoration: none;
+  font-size: 10.5px; font-weight: 500; line-height: 1.2; text-align: center;
+  list-style: none; cursor: pointer;
+}
+.pt-more > summary::-webkit-details-marker { display: none; }
+.pt-tab-g { font-size: 17px; line-height: 1; }
+.pt-tabs > a.on { color: var(--pt-blue); font-weight: 600; }
+.pt-tabs > a.on .pt-tab-g { transform: translateY(-1px); }
+
+/* The More sheet rises from the bar. */
+.pt-more { position: relative; }
+.pt-more[open] > summary { color: var(--pt-blue); }
+.pt-more-p {
+  position: absolute; right: 0; bottom: calc(100% + 1px);
+  width: min(260px, 78vw);
+  background: var(--pt-field); border: 1px solid var(--pt-line);
+  border-radius: var(--pt-r) var(--pt-r) 0 0;
+  box-shadow: 0 -8px 24px rgba(16, 24, 40, .14);
+  display: grid; padding: 6px;
+}
+.pt-more-p a {
+  padding: 13px 14px; min-height: var(--pt-tap); display: flex; align-items: center;
+  color: var(--pt-ink); text-decoration: none; font-size: 15px;
+  border-radius: 8px;
+}
+.pt-more-p a:active { background: var(--pt-page); }
+
+/* Room for the bar, so nothing sits under it.
+   Reserved on the LAST child rather than as container padding: .pt is a
+   min-height:100dvh flex column, so padding there is swallowed by the flex
+   sizing and the footer still ran under the bar by its own safe-area inset. */
+.pt.has-tabs { padding-bottom: 0; }
+.pt.has-tabs > :last-child { margin-bottom: calc(60px + env(safe-area-inset-bottom)); }
+.pt.has-tabs .pt-foot { border-top: 1px solid var(--pt-line); }
+
+/* Portal headings are sans, like the rest of the approved direction. */
+.pt-hi, .pt-title, .tc-h, .tsx-title, .pt-huge {
+  font-family: var(--sans, 'Geist', system-ui, sans-serif);
+  letter-spacing: -.015em;
+}
+.pt-hi { font-size: 27px; font-weight: 650; }
+.pt-title, .tc-h { font-size: 25px; font-weight: 650; }
+
+/* --- sheet foundation (the .pes sheet is the reference; this generalises it) */
+.pt-sheet { position: fixed; inset: 0; z-index: 90; display: flex; align-items: flex-end; justify-content: center; }
+.pt-sheet[hidden] { display: none; }
+.pt-sheet-scrim { position: absolute; inset: 0; background: rgba(9, 12, 17, .45); opacity: 0; transition: opacity .25s ease; }
+.pt-sheet.is-open .pt-sheet-scrim { opacity: 1; }
+.pt-sheet-panel {
+  position: relative; width: 100%; max-width: 460px; max-height: 92vh; overflow-y: auto;
+  background: var(--pt-field); border-radius: var(--pt-r) var(--pt-r) 0 0;
+  padding: 0 18px calc(26px + env(safe-area-inset-bottom));
+  transform: translateY(100%); transition: transform .3s cubic-bezier(.22,.8,.28,1);
+}
+.pt-sheet.is-open .pt-sheet-panel { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .pt-sheet-panel, .pt-sheet-scrim { transition: none; }
+  .pt-sheet-panel { transform: none; }
+}
+
+/* --- toast --------------------------------------------------------------- */
+.pt-toasts {
+  position: fixed; left: 50%; transform: translateX(-50%); z-index: 120;
+  bottom: calc(70px + env(safe-area-inset-bottom));
+  width: min(420px, calc(100vw - 28px)); display: grid; gap: 8px; pointer-events: none;
+}
+.pt-toast {
+  background: var(--pt-ink); color: #fff; border-radius: var(--pt-r);
+  padding: 13px 16px; font-size: 14px; box-shadow: 0 8px 24px rgba(16, 24, 40, .22);
+  pointer-events: auto;
+}
+.pt-toast.ok { background: var(--pt-green); }
+.pt-toast.bad { background: var(--pt-red); }
+
+/* --- skeleton + empty ---------------------------------------------------- */
+.pt-skel { background: var(--pt-hair); border-radius: 6px; height: 14px; margin-bottom: 9px; }
+.pt-empty { display: grid; justify-items: center; gap: 8px; padding: 44px 20px; text-align: center; }
+.pt-empty-ic {
+  width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%;
+  background: var(--pt-page); border: 1px solid var(--pt-line); color: var(--pt-faint); font-size: 19px;
+}
+.pt-empty h3 { margin: 0; font-size: 16px; font-weight: 600; color: var(--pt-ink); }
+.pt-empty p { margin: 0; font-size: 14px; color: var(--pt-muted); max-width: 34ch; }
+
+/* --- status banner tints (Working / On break / Clocked out) -------------- */
+.pt-state { border-radius: var(--pt-r); padding: 14px 16px; display: grid; gap: 2px; }
+.pt-state.ok { background: var(--pt-ok-soft); }
+.pt-state.warn { background: var(--pt-warn-soft); }
+.pt-state.idle { background: var(--pt-page); border: 1px solid var(--pt-line); }

@@ -12,105 +12,164 @@
 
 :root,
 :root[data-theme="day"] {
-  --paper:        #f7eee0;
-  --surface:      #fffdf8;
-  --ink:          #1f1d1a;
-  --body:         #443f33;
-  --secondary:    #5c5647;
-  --muted:        #77705f;
-  --faint:        #a89f8a;
+  /* =====================================================================
+     ZWIN TOKENS — sampled from the approved mockup (docs/ZWIN-DESIGN-SYSTEM.md).
+     Token NAMES are unchanged from the warm-paper era so this is a value swap,
+     not a rename: nothing downstream has to be touched to move the whole app.
+     ===================================================================== */
 
-  --rule-heavy:   #1f1d1a;
-  --rule:         #ddd0b8;
-  --rule-light:   #e5dac2;
-  --rule-dotted:  #cfc2a6;
-  --field-border: #d8d5cb;
+  /* --- ground and surfaces ---------------------------------------------- */
+  --paper:        #f6f7f9;   /* app background — off-white, very slightly cool */
+  --surface:      #ffffff;   /* cards, panels, tables */
+  --surface-2:    #f9fafb;   /* table headers, recessed rows, zebra */
+  --surface-3:    #f1f3f5;   /* hover, pressed */
 
-  --accent:       #2451c9;
-  --accent-hover: #173a9e;
-  --accent-fill:  rgba(36, 81, 201, .12);
-  --warning:      #9a5b12;
-  --positive:     #1a7a3c;
-  --danger:       #9a2c1d;
+  /* --- ink --------------------------------------------------------------- */
+  --headline:     #0f172a;
+  --ink:          #16202c;
+  --body:         #3d4653;
+  --secondary:    #4d5866;
+  --muted:        #667085;
+  --faint:        #98a2b3;
 
-  --btn-bg:       #1f1d1a;
-  --btn-ink:      #f7eee0;
-  --row-hover:    #f6f4ee;
-  --mb-sel:       #efe4d1;   /* the selected month in the shifts browser */
-  --stripe:       #ebdfc6;   /* every other ledger line — a browner cream, sitting
-                                between --tp-panel and --rule-light so it reads as
-                                a shade of the paper and never as a hairline */
+  /* --- rules ------------------------------------------------------------- */
+  --rule-heavy:   #0f172a;
+  --rule:         #e3e7ec;
+  --rule-light:   #edf0f4;
+  --rule-dotted:  #dbe0e7;
+  --field-border: #d5dae1;
 
-  /* --- section framing -------------------------------------------------- */
-  /* The handoff draws these on a #f4ead9 page and specifies #f8f0e2 for the
-     panel — a 4/6/9 step lighter. Our paper is #f7eee0, so the literal value
-     would be a 1/2/2 step and effectively invisible. The RELATIONSHIP is what
-     the pattern is, so it is carried over onto the paper we actually have. */
-  --panel:        #fbf4e9;
-  --panel-line:   #e2d6bd;
-  --panel-up:     #fffdf8;
-  --panel-up-line:#c7ba9e;
-  --panel-lift:   0 4px 16px rgba(31, 29, 26, .09);
+  /* --- semantic ---------------------------------------------------------- */
+  --accent:       #0b57d0;   /* strong primary blue, from the mockup buttons */
+  --accent-hover: #08429e;
+  --accent-fill:  rgba(11, 87, 208, .10);
+  --primary-soft: #e8f0fb;   /* selected row, primary tint */
+  --warning:      #b25a09;   /* attention — amber */
+  --warning-soft: #fdeadb;
+  --positive:     #16863a;   /* success — green */
+  --ok:           #16863a;
+  --ok-soft:      #dcf3e1;
+  --danger:       #b3261e;   /* blocking only */
+  --danger-soft:  #fdeceb;
+  --amber:        #b25a09;
+  --warn:         #b25a09;
 
-  /* --- the two nav strips ------------------------------------------------ */
-  --util-bg:      #f9f1e4;
-  --band-bg:      #efe4d1;
-  --band-line:    #ddd0b8;
-  --band-hover:   #e6d9c2;
-  --band-div:     #cdbfa2;
-  --chip-line:    #cabfa4;
-  --chip-fill:    #fffdf9;
-  --band-label:   #b0a58c;
-  --pop-shadow:   4px 4px 0 rgba(23, 23, 26, .12);
+  /* --- the sidebar owns its own scale: dark in BOTH themes --------------- */
+  --nav-bg:       #1b2733;
+  --nav-bg-2:     #28323f;   /* active pill, hover */
+  --nav-ink:      #eef2f7;
+  --nav-muted:    #93a1b3;
+  --nav-rule:     #26313e;
+  --nav-on:       #4b8bf5;
+
+  /* --- controls ---------------------------------------------------------- */
+  --btn-bg:       #0b57d0;
+  --btn-ink:      #ffffff;
+  --row-hover:    #f6f8fa;
+  --mb-sel:       #e8f0fb;
+  --stripe:       #f8fafc;
+
+  /* --- panels ------------------------------------------------------------ */
+  --panel:        #ffffff;
+  --panel-line:   #e3e7ec;
+  --panel-up:     #ffffff;
+  --panel-up-line:#d5dae1;
+  --panel-lift:   0 1px 2px rgba(16, 24, 40, .05);
+
+  /* --- retired warm-nav tokens, remapped so nothing referencing them breaks */
+  --util-bg:      #f9fafb;
+  --band-bg:      #f1f3f5;
+  --band-line:    #e3e7ec;
+  --band-hover:   #edf0f4;
+  --band-div:     #dbe0e7;
+  --chip-line:    #d5dae1;
+  --chip-fill:    #ffffff;
+  --band-label:   #98a2b3;
+  --pop-shadow:   0 4px 12px rgba(16, 24, 40, .08);
+
+  /* --- elevation --------------------------------------------------------- */
+  --sh-sm:        0 1px 2px rgba(16, 24, 40, .05);
+  --sh-md:        0 4px 12px rgba(16, 24, 40, .08);
+  --sh-lg:        0 12px 32px rgba(16, 24, 40, .14);
+
+  /* --- radius ------------------------------------------------------------ */
+  --r-sm:         4px;
+  --r-md:         8px;
+  --r-lg:         12px;
+  --r-full:       999px;
+
+  /* --- spacing (4px base) ------------------------------------------------ */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 20px; --s-6: 24px; --s-7: 32px; --s-8: 40px;
+
+  /* --- touch ------------------------------------------------------------- */
+  --tap:          44px;   /* owner mobile minimum */
+  --tap-lg:       48px;   /* staff portal minimum */
 }
+
 
 :root[data-theme="night"] {
-  --paper:        #191815;
-  --surface:      #211f1b;
-  --ink:          #eae6d9;
-  --headline:     #f3f0e6;
-  --body:         #c8c2b0;
-  --secondary:    #b3ad9c;
-  --muted:        #8f8a7a;
-  --faint:        #6f6a5c;
+  /* Night, on the same token names. The sidebar is NOT inverted — it is dark
+     in both themes by design, so its scale is defined once above. */
+  --paper:        #14181e;
+  --surface:      #1b2027;
+  --surface-2:    #222831;
+  --surface-3:    #2a313b;
 
-  --rule-heavy:   #eae6d9;
-  --rule:         #35332c;
-  --rule-light:   #2e2c25;
-  --rule-dotted:  #403d33;
-  --field-border: #35332c;
+  --headline:     #f2f5f9;
+  --ink:          #e4e9ef;
+  --body:         #c0c8d2;
+  --secondary:    #adb6c2;
+  --muted:        #8b95a3;
+  --faint:        #69727f;
 
-  --accent:       #8fa8ff;
-  --accent-hover: #b3c4ff;
-  --accent-fill:  rgba(143, 168, 255, .10);
-  --warning:      #d9a05b;
-  --positive:     #5fc389;
-  --danger:       #e08573;
+  --rule-heavy:   #e4e9ef;
+  --rule:         #2d343e;
+  --rule-light:   #262c35;
+  --rule-dotted:  #353d48;
+  --field-border: #333b45;
 
-  /* The primary button inverts: cream ground, dark text. */
-  --btn-bg:       #eae6d9;
-  --btn-ink:      #191815;
-  --row-hover:    #22201c;
-  --mb-sel:       #2a271e;   /* the selected month in the shifts browser */
-  --stripe:       #26231c;   /* the same step, warm side, going lighter */
-  /* Night needs no reinterpretation — our page, surface and rule already are
-     the values the handoff asks for. */
-  --panel:        #211f1b;
-  --panel-line:   #35332c;
-  --panel-up:     #26241d;
-  --panel-up-line:#4a4636;
-  --panel-lift:   0 4px 16px rgba(0, 0, 0, .35);
+  --accent:       #6f9dfa;
+  --accent-hover: #93b6fc;
+  --accent-fill:  rgba(111, 157, 250, .12);
+  --primary-soft: #182640;
+  --warning:      #dd9a4a;
+  --warning-soft: #2c2011;
+  --positive:     #46b76a;
+  --ok:           #46b76a;
+  --ok-soft:      #112617;
+  --danger:       #e5776c;
+  --danger-soft:  #2b1614;
+  --amber:        #dd9a4a;
+  --warn:         #dd9a4a;
 
-  --util-bg:      #211e17;
-  --band-bg:      #26241d;
-  --band-line:    #3d392d;
-  --band-hover:   #2f2c22;
-  --band-div:     #46422f;
-  --chip-line:    #46422f;
-  --chip-fill:    #26241d;
-  --band-label:   #7d7867;
-  --pop-shadow:   4px 4px 0 rgba(0, 0, 0, .35);
+  --btn-bg:       #3b7ae4;
+  --btn-ink:      #ffffff;
+  --row-hover:    #232a33;
+  --mb-sel:       #182640;
+  --stripe:       #1f252d;
+
+  --panel:        #1b2027;
+  --panel-line:   #2d343e;
+  --panel-up:     #222831;
+  --panel-up-line:#3a424e;
+  --panel-lift:   0 1px 2px rgba(0, 0, 0, .4);
+
+  --util-bg:      #1b2027;
+  --band-bg:      #222831;
+  --band-line:    #2d343e;
+  --band-hover:   #2a313b;
+  --band-div:     #353d48;
+  --chip-line:    #333b45;
+  --chip-fill:    #222831;
+  --band-label:   #69727f;
+  --pop-shadow:   0 4px 12px rgba(0, 0, 0, .45);
+
+  --sh-sm:        0 1px 2px rgba(0, 0, 0, .35);
+  --sh-md:        0 4px 12px rgba(0, 0, 0, .45);
+  --sh-lg:        0 12px 32px rgba(0, 0, 0, .55);
 }
+
 
 :root { --headline: var(--ink); }
 
@@ -585,52 +644,54 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
    scaffolding: every line here can go once its page has been redesigned.
    ======================================================================== */
 :root[data-theme="day"] {
-  --bg:        #f7eee0;
-  --surface:   #fffdf8;
-  --surface-2: #f4ead9;
-  --surface-3: #efe4d0;
-  --ink:       #1f1d1a;
-  --ink-2:     #443f33;
-  --muted:     #77705f;
-  --faint:     #a89f8a;
-  --line:      #e5dac2;
-  --line-2:    #ddd0b8;
-  --primary:   #2451c9;
-  --primary-hover: #173a9e;
-  --primary-700:   #173a9e;
-  --primary-50:  #edf0fb;
-  --primary-100: #dde4f7;
-  --primary-200: #c3cff0;
-  --ok:   #1a7a3c;  --ok-bg:   #e4f0e6;
-  --warn: #9a5b12;  --warn-bg: #f6ead6;
-  --amber:#9a5b12;  --amber-bg:#f6ead6;
-  --danger:#9a2c1d; --danger-bg:#f7e3df;
-  --ring: 0 0 0 3px rgba(36, 81, 201, .15);
+  --bg:        #f6f7f9;
+  --surface:   #ffffff;
+  --surface-2: #f9fafb;
+  --surface-3: #f1f3f5;
+  --ink:       #16202c;
+  --ink-2:     #3d4653;
+  --muted:     #667085;
+  --faint:     #98a2b3;
+  --line:      #e3e7ec;
+  --line-2:    #d5dae1;
+  --primary:   #0b57d0;
+  --primary-hover: #08429e;
+  --primary-700:   #08429e;
+  --primary-50:  #eff5ff;
+  --primary-100: #e8f0fb;
+  --primary-200: #cfe0f8;
+  --ok:   #16863a;  --ok-bg:   #dcf3e1;
+  --warn: #b25a09;  --warn-bg: #fdeadb;
+  --amber:#b25a09;  --amber-bg:#fdeadb;
+  --danger:#b3261e; --danger-bg:#fdeceb;
+  --ring: 0 0 0 3px rgba(11, 87, 208, .18);
 }
 
+
 :root[data-theme="night"] {
-  --bg:        #191815;
-  --surface:   #211f1b;
-  --surface-2: #1f1d1a;
-  --surface-3: #262420;
-  --ink:       #f3f0e6;
-  --ink-2:     #c8c2b0;
-  --muted:     #8f8a7a;
-  --faint:     #6f6a5c;
-  --line:      #2e2c25;
-  --line-2:    #35332c;
-  --primary:   #8fa8ff;
-  --primary-hover: #b3c4ff;
-  --primary-700:   #b3c4ff;
-  --primary-50:  #21242e;
-  --primary-100: #262a36;
-  --primary-200: #2f3543;
-  --ok:   #5fc389;  --ok-bg:   #1c2a22;
-  --warn: #d9a05b;  --warn-bg: #2b2419;
-  --amber:#d9a05b;  --amber-bg:#2b2419;
-  --danger:#e08573; --danger-bg:#2e1f1c;
-  --ring: 0 0 0 3px rgba(143, 168, 255, .18);
+  --bg:        #14181e;
+  --surface:   #1b2027;
+  --surface-2: #222831;
+  --surface-3: #2a313b;
+  --ink:       #e4e9ef;
+  --ink-2:     #c0c8d2;
+  --muted:     #8b95a3;
+  --faint:     #69727f;
+  --line:      #2d343e;
+  --line-2:    #333b45;
+  --primary:   #6f9dfa;
+  --primary-hover: #93b6fc;
+  --primary-700:   #93b6fc;
+  --primary-50:  #182640;
+  --primary-100: #1d2e4d;
+  --primary-200: #24395e;
+  --ok:   #46b76a;  --ok-bg:   #112617;
+  --warn: #dd9a4a;  --warn-bg: #2c2011;
+  --amber:#dd9a4a;  --amber-bg:#2c2011;
+  --danger:#e5776c; --danger-bg:#2b1614;
+  --ring: 0 0 0 3px rgba(111, 157, 250, .25);
 }
+
 
 /* A few places in the old sheet name a colour outright rather than reading a
    token. In night mode those are the ones that come out white-on-white. */
@@ -2213,25 +2274,8 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
 .bs-masthead { background: var(--util-bg); border-bottom: 1px solid var(--band-line); }
 
 /* --- the band ------------------------------------------------------------ */
-.bs-band {
-  position: relative;
-  background: var(--band-bg);
-  border-bottom: 1px solid var(--band-line);
-}
-.bs-band-c { display: flex; align-items: center; padding: 8px var(--gutter); }
-.bs-band .bs-nav-scroll { display: flex; align-items: center; flex: 1; min-width: 0;
-  overflow-x: auto; scrollbar-width: none; gap: 2px; }
-.bs-band .bs-nav-scroll::-webkit-scrollbar { display: none; }
-.bs-band a {
-  padding: 6px 12px; font-size: 13px; font-weight: 500; color: var(--secondary);
-  white-space: nowrap; border-bottom: 0;
-}
-.bs-band a:hover { background: var(--band-hover); color: var(--ink); }
 /* The active tab is a filled chip — in both states, so moving between them
    never loses your place. No underline; the fill IS the state. */
-.bs-band a.on { background: var(--ink); color: var(--paper); font-weight: 600; }
-.bs-band a.on:hover { background: var(--ink); color: var(--paper); }
-.bs-band .bs-nav-sep { width: 1px; height: 14px; background: var(--band-div); margin: 0 9px; flex-shrink: 0; }
 
 /* --- expand / collapse --------------------------------------------------- */
 /*
@@ -2249,8 +2293,6 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
  * only ever goes up: 58 → 169. The collapsed row fades in place rather than
  * shrinking, and never leaves a gap to fall through.
  */
-.bs-band { display: grid; }
-.bs-band-c, .bs-band-x { grid-area: 1 / 1; }
 
 /* Restated here, after the display:grid above. The phone hide lives in the
    900px block far earlier in this file, and `display: grid` is the same
@@ -2261,15 +2303,8 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
   .bs-band { display: none; }
 }
 
-.bs-band-c { transition: opacity .16s ease; }
 .bs-band.open .bs-band-c { opacity: 0; pointer-events: none; }
 
-.bs-band-x {
-  max-height: 0; opacity: 0; overflow: hidden;
-  padding: 0 var(--gutter);
-  pointer-events: none;
-  transition: max-height .26s ease, opacity .18s ease, padding .26s ease;
-}
 .bs-band.open .bs-band-x {
   max-height: 240px; opacity: 1; padding: 12px var(--gutter) 16px;
   pointer-events: auto;
@@ -2287,21 +2322,12 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    second one (Team, Tasks & logs) sat alone against the left edge, reading as
    a mistake rather than a continuation. Centring each line balances it under
    the row above. */
-.bs-band-x { display: flex; gap: 40px 44px; flex-wrap: wrap; justify-content: center; }
-.bs-bandg { display: grid; gap: 6px; align-content: start; }
 /* The group names carry the whole structure of the expanded state, so they
    read as headings rather than as fine print: heavier, a shade larger, and in
    the muted ink rather than the faint tan they started in. */
-.bs-bandg-t {
-  font-family: var(--mono); font-size: 10.5px; font-weight: 700;
-  letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
-}
-.bs-bandg-l { display: flex; gap: 2px; flex-wrap: wrap; }
-.bs-bandg-l a { padding: 5px 11px; }
 
 /* No hover on a touch screen, so a tap on the band toggles it. The button
    covers the strip only while collapsed; once open the tabs need the clicks. */
-.bs-band-tap { display: none; }
 @media (hover: none) {
   .bs-band-tap {
     display: block; position: absolute; inset: 0; z-index: 2;
@@ -4678,3 +4704,256 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .bs-req-acts form { flex: 1; }
   .bs-btn-yes, .bs-btn-no { width: 100%; padding: 12px; }
 }
+
+/* ===========================================================================
+   ZWIN SHELL — Phase 1. Owner desktop + owner mobile.
+   Appended so it overrides the older rules above without deleting anything a
+   feature page still depends on. Feature pages are not touched in this phase.
+   =========================================================================== */
+
+body.bs { background: var(--paper); }
+
+/* --- the sidebar: navy-charcoal in both themes --------------------------- */
+.bs-side {
+  background: var(--nav-bg);
+  border-right: 0;
+  box-shadow: inset -1px 0 0 var(--nav-rule);
+}
+.bs-side-nav { padding: var(--s-2) 0 var(--s-3); }
+.bs-side-h {
+  color: var(--nav-muted); opacity: .72;
+  font-size: 10px; letter-spacing: .13em;
+  padding: var(--s-4) var(--s-4) var(--s-1);
+}
+.bs-side-i {
+  color: var(--nav-muted);
+  margin: 1px var(--s-2); padding: 8px var(--s-3);
+  border-radius: var(--r-md);
+  font-size: 13.5px; font-weight: 500;
+}
+.bs-side-i:hover { background: var(--nav-bg-2); color: var(--nav-ink); }
+.bs-side-ic { color: inherit; opacity: .82; }
+.bs-side-i.on {
+  background: var(--nav-bg-2); color: var(--nav-ink); font-weight: 600;
+}
+.bs-side-i.on .bs-side-ic { opacity: 1; }
+/* The accent bar sits inside the pill's radius rather than on the panel edge. */
+.bs-side-i.on::before {
+  left: 0; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--nav-on);
+}
+.bs-side-tag {
+  color: var(--nav-muted); border-color: var(--nav-rule);
+  border-radius: var(--r-sm);
+}
+.bs-side-gi { color: var(--nav-muted); }
+.bs-side-gi.on, .bs-side-gi:hover { color: var(--nav-ink); background: var(--nav-bg-2); }
+
+/* The account, at the foot of the sidebar — where the mockup puts it. */
+.bs-side-foot { border-top: 1px solid var(--nav-rule); padding: var(--s-2); }
+.bs-side-acct {
+  display: flex; align-items: center; gap: var(--s-3);
+  width: 100%; padding: var(--s-2) var(--s-3);
+  border: 0; border-radius: var(--r-md); background: none; cursor: pointer;
+  color: var(--nav-ink); font: inherit; text-align: left; text-decoration: none;
+}
+.bs-side-acct:hover { background: var(--nav-bg-2); }
+.bs-side-av {
+  flex: none; width: 30px; height: 30px; border-radius: var(--r-full);
+  display: grid; place-items: center; background: var(--nav-bg-2);
+  color: var(--nav-ink); font-size: 12px; font-weight: 600;
+}
+.bs-side-who { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.bs-side-who b { font-size: 13px; font-weight: 600; color: var(--nav-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bs-side-who i { font-style: normal; font-size: 11px; color: var(--nav-muted); }
+.bs-side-acct .bs-side-cv { color: var(--nav-muted); font-size: 11px; flex: none; }
+.bs-side .bs-side-pin { color: var(--nav-muted); }
+.bs-side .bs-side-pin:hover { background: var(--nav-bg-2); color: var(--nav-ink); }
+
+/* Collapsed rail keeps the account as just an avatar. */
+html.rc-collapsed .bs-side-who, html.rc-collapsed .bs-side-cv { display: none; }
+html.rc-collapsed .bs-side-acct { justify-content: center; padding: var(--s-2); }
+
+/* --- masthead ------------------------------------------------------------ */
+.bs-masthead {
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+  box-shadow: none;
+}
+/* The account chip lives in the sidebar on desktop; the masthead keeps it for
+   mobile, where there is no sidebar to hold it. */
+@media (min-width: 901px) { .bs-masthead .bs-acct { display: none; } }
+@media (max-width: 900px) { .bs-side-foot .bs-side-acct { display: none; } }
+
+/* --- page header --------------------------------------------------------- */
+.zw-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--s-4); flex-wrap: wrap; margin-bottom: var(--s-5);
+}
+.zw-head-t { min-width: 0; display: grid; gap: 3px; }
+.zw-back {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 13px; font-weight: 500; color: var(--accent); text-decoration: none;
+  margin-bottom: var(--s-1);
+}
+.zw-title { font-size: 24px; font-weight: 600; letter-spacing: -.01em; color: var(--headline); margin: 0; }
+.zw-sub { font-size: 13.5px; color: var(--muted); margin: 0; }
+.zw-head-a { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+
+/* --- surfaces ------------------------------------------------------------ */
+.zw-card {
+  background: var(--surface); border: 1px solid var(--rule);
+  border-radius: var(--r-md); box-shadow: var(--sh-sm);
+}
+.zw-card-p { padding: var(--s-4); }
+.zw-divider { height: 1px; background: var(--rule-light); border: 0; margin: var(--s-4) 0; }
+
+/* --- buttons ------------------------------------------------------------- */
+.zw-btn, .zw-btn-2, .zw-btn-danger, .zw-btn-ok {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px var(--s-4); border-radius: var(--r-md);
+  font: inherit; font-size: 13.5px; font-weight: 600; line-height: 1.2;
+  cursor: pointer; text-decoration: none; border: 1px solid transparent;
+  min-height: 38px; white-space: nowrap;
+}
+.zw-btn { background: var(--accent); color: #fff; }
+.zw-btn:hover { background: var(--accent-hover); }
+.zw-btn-2 { background: var(--surface); color: var(--ink); border-color: var(--rule); }
+.zw-btn-2:hover { background: var(--surface-3); }
+.zw-btn-ok { background: var(--ok); color: #fff; }
+.zw-btn-danger { background: var(--danger); color: #fff; }
+.zw-btn:disabled, .zw-btn-2:disabled { opacity: .55; cursor: default; }
+.zw-btn-sm { min-height: 32px; padding: 6px var(--s-3); font-size: 12.5px; }
+.zw-ibtn {
+  display: inline-grid; place-items: center; width: 34px; height: 34px;
+  border: 1px solid var(--rule); border-radius: var(--r-md);
+  background: var(--surface); color: var(--body); cursor: pointer;
+}
+.zw-ibtn:hover { background: var(--surface-3); color: var(--ink); }
+.zw-btn:focus-visible, .zw-btn-2:focus-visible, .zw-ibtn:focus-visible,
+.zw-btn-ok:focus-visible, .zw-btn-danger:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* --- status badge -------------------------------------------------------- */
+.zw-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: var(--r-full);
+  font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  background: var(--surface-2); color: var(--muted);
+}
+.zw-badge.ok { background: var(--ok-soft); color: var(--ok); }
+.zw-badge.warn { background: var(--warning-soft); color: var(--warning); }
+.zw-badge.bad { background: var(--danger-soft); color: var(--danger); }
+.zw-badge.info { background: var(--primary-soft); color: var(--accent); }
+
+/* --- empty state --------------------------------------------------------- */
+.zw-empty { display: grid; justify-items: center; gap: var(--s-2); padding: var(--s-8) var(--s-4); text-align: center; }
+.zw-empty-ic { width: 40px; height: 40px; display: grid; place-items: center;
+  border-radius: var(--r-full); background: var(--surface-2); color: var(--faint); font-size: 18px; }
+.zw-empty h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
+.zw-empty p { margin: 0; font-size: 13.5px; color: var(--muted); max-width: 42ch; }
+
+/* --- loading skeleton ---------------------------------------------------- */
+.zw-skel { background: var(--surface-2); border-radius: var(--r-sm); position: relative; overflow: hidden; }
+.zw-skel::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent);
+  animation: zw-shimmer 1.3s infinite;
+}
+.zw-skel-line { height: 12px; margin-bottom: 8px; }
+@keyframes zw-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .zw-skel::after { animation: none; } }
+
+/* --- toast --------------------------------------------------------------- */
+.zw-toasts {
+  position: fixed; z-index: 200; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--s-5) + env(safe-area-inset-bottom)); display: grid; gap: var(--s-2);
+  width: min(420px, calc(100vw - 32px)); pointer-events: none;
+}
+.zw-toast {
+  display: flex; align-items: flex-start; gap: var(--s-3);
+  background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+  border-radius: var(--r-md); box-shadow: var(--sh-md); padding: var(--s-3) var(--s-4);
+  font-size: 13.5px; color: var(--ink); pointer-events: auto;
+}
+.zw-toast.ok { border-left-color: var(--ok); }
+.zw-toast.bad { border-left-color: var(--danger); }
+
+/* --- owner mobile -------------------------------------------------------- */
+@media (max-width: 900px) {
+  .bs-bottom {
+    background: var(--surface); border-top: 1px solid var(--rule);
+    box-shadow: 0 -1px 3px rgba(16, 24, 40, .04);
+  }
+  .bs-bottom a, .bs-bottom summary { min-height: var(--tap); color: var(--muted); }
+  .bs-bottom a.on { color: var(--accent); }
+  .zw-title { font-size: 21px; }
+  .zw-head { margin-bottom: var(--s-4); }
+}
+
+/* --- shared primitives, brought onto the mockup ---------------------------
+   These are chrome, not feature-page layout: every page inherits them, so they
+   move in the shell phase rather than page by page. */
+
+/* Sans headlines. The serif was the warm-paper era's voice; the approved
+   direction is a clean operations SaaS. Sizes come from the type scale. */
+.bs-headline {
+  font-family: var(--sans);
+  font-size: 24px; font-weight: 600; letter-spacing: -.01em;
+  color: var(--headline);
+}
+.bs-greet { font-family: var(--sans); }
+.bs-subline { font-size: 13.5px; color: var(--muted); }
+
+/* Buttons */
+.bs-btn {
+  background: var(--accent); color: #fff; border: 1px solid transparent;
+  border-radius: var(--r-md); padding: 9px var(--s-4);
+  font-family: var(--sans); font-size: 13.5px; font-weight: 600;
+  min-height: 38px; box-shadow: none;
+}
+.bs-btn:hover { background: var(--accent-hover); }
+.bs-btn-sm, .bs-btn-quiet {
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--rule); border-radius: var(--r-md);
+  padding: 7px var(--s-3); font-family: var(--sans); font-size: 12.5px; font-weight: 500;
+  min-height: 34px; box-shadow: none;
+}
+.bs-btn-sm:hover, .bs-btn-quiet:hover { background: var(--surface-3); }
+.bs-btn:focus-visible, .bs-btn-sm:focus-visible, .bs-btn-quiet:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* Inputs */
+.bs-input, .tcm-filters input, .tcm-filters select,
+input[type="date"], input[type="time"], input[type="search"], select {
+  border-radius: var(--r-sm); border-color: var(--field-border);
+  background: var(--surface); font-family: var(--sans);
+}
+
+/* Tab strip */
+.pa-tabs { gap: 2px; border-bottom: 1px solid var(--rule); }
+.pa-tab {
+  background: none; color: var(--muted); border: 0;
+  border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 10px var(--s-4); font-size: 13.5px; font-weight: 500;
+}
+.pa-tab:hover { color: var(--ink); }
+.pa-tab.on {
+  background: none; color: var(--accent); font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* Panels sit on white with a hairline, not a tinted card. */
+.bs-panel {
+  background: var(--surface); border: 1px solid var(--rule);
+  border-radius: var(--r-md); box-shadow: var(--sh-sm);
+}
+.bs-strip { padding: 0; }
+
+/* The requests pill: give it room and the pill radius. */
+.bs-req-pill { padding: 7px 14px; line-height: 1.2; }
+.bs-req-pill.on b { min-width: 18px; height: 18px; }

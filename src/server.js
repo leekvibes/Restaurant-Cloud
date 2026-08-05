@@ -11,7 +11,7 @@ const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
 const DUPES = require('./dupes');
-const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed } = require('./views');
+const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed, currentPath } = require('./views');
 const { mountModules, MODULES, pagesOf } = require('./modules');
 const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
@@ -3551,9 +3551,23 @@ function portalWho(emp) {
 }
 
 /** Sends anyone without a live cookie back to the PIN screen. */
+/**
+ * The shape of the person currently being served, for the shell to read.
+ *
+ * The bottom nav is rendered by portalPage(), which has no `who` — and a nav
+ * that offers a cook "Submit sales or tips" contradicts the hub, which
+ * deliberately withholds that row, and the route, which redirects them away
+ * from it. So requirePortal records the shape as it resolves it, and the shell
+ * filters against the same answer rather than a second guess.
+ *
+ * Per-request: set on every portal request before the page renders.
+ */
+let portalShape = null;
+
 function requirePortal(req, res) {
   const emp = portalUser(req);
-  if (emp) return portalWho(emp);
+  if (emp) { const who = portalWho(emp); portalShape = who.shape; return who; }
+  portalShape = null;
   res.redirect('/tips?err=1&msg=' + encodeURIComponent(
     'That timed out — enter your PIN again. Nothing you sent was lost.'));
   return null;
@@ -3623,10 +3637,59 @@ const portalBackScript = () => `<script>
   })();
 </script>`;
 
-const portalPage = (title, body) => layout(title,
+/**
+ * The portal's bottom navigation.
+ *
+ * New in the shell phase. The portal had none: the hub WAS the navigation, so
+ * reaching the timesheet from the time clock meant going home first. Five
+ * slots, all of which already exist — nothing here is a new feature.
+ *
+ * `More` is a <details> sheet, like the owner side's Index, so it works with
+ * JavaScript off and holds the screens that do not earn a permanent slot.
+ */
+const PT_TABS = [
+  ['/portal', 'Home', '⌂'],
+  ['/portal/clock', 'Time clock', '◷'],
+  ['/portal/timesheet', 'Timesheet', '▤'],
+  ['/portal/earnings', 'Pay', '❖'],
+];
+const PT_MORE = [
+  ['/portal/notifications', 'Notifications'],
+  ['/portal/requests', 'My requests'],
+  ['/portal/clock/history', 'Time history'],
+  ['/portal/specials', 'Specials & 86 board'],
+  ['/portal/stock', 'Report out of stock'],
+  // Only for the positions that hand tips in. A cook is not offered this on
+  // the hub and is redirected away from the route; the nav agrees.
+  ['/portal/tips', 'Submit sales or tips', (sh) => !!(sh && sh.tips)],
+  ['/portal/out', 'Sign out'],
+];
+
+const ptOn = (href, path) => (href === '/portal' ? path === '/portal' : path.startsWith(href));
+
+function portalTabs(path) {
+  const tabs = PT_TABS.map(([href, label, g]) =>
+    `<a href="${href}"${ptOn(href, path) ? ' class="on"' : ''}>
+      <span class="pt-tab-g" aria-hidden="true">${g}</span><span>${esc(label)}</span></a>`).join('');
+  return `
+    <nav class="pt-tabs" aria-label="Sections">
+      ${tabs}
+      <details class="pt-more">
+        <summary><span class="pt-tab-g" aria-hidden="true">⋯</span><span>More</span></summary>
+        <div class="pt-more-p">
+          ${PT_MORE.filter(([, , when]) => (when ? when(portalShape) : true))
+            .map(([href, label]) => `<a href="${href}">${esc(label)}</a>`).join('')}
+        </div>
+      </details>
+    </nav>`;
+}
+
+const portalPage = (title, body, opts = {}) => layout(title,
   // Emitted here rather than at eleven call sites, and only when the page
   // actually has a back link — which is every sub-page and not the hub.
-  `<div class="pt">${body}</div>${body.includes('data-pt-back') ? portalBackScript() : ''}`,
+  `<div class="pt${opts.noTabs ? '' : ' has-tabs'}">${body}</div>${
+    body.includes('data-pt-back') ? portalBackScript() : ''}${
+    opts.noTabs ? '' : portalTabs(currentPath())}`,
   { bare: true, staff: true });
 
 // ---------------------------------------------------------------------------

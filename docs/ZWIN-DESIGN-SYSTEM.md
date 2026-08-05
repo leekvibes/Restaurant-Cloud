@@ -3,17 +3,14 @@
 Foundation for the redesign. Written 2026-08-04, before any feature page is
 touched.
 
-> **Note on the visual target.** The approved mockup image did not reach me —
-> nothing arrived in the message and there is no image file in the project.
-> Everything below is derived from the written direction (off-white ground,
-> white surfaces, navy-charcoal sidebar, blue primary, green success, amber
-> attention, red blocking, clean sans, tabular numerals, subtle borders and
-> shadows, compact polished layouts, clear mobile hierarchy). **Re-attach the
-> mockup before implementation** so exact hues, radii and shadow depths can be
-> matched rather than inferred.
+> **Visual target: the approved mockup, received and sampled.**
+> Every colour below was read off the image with a dominant-colour sampler
+> rather than guessed. Implemented in `public/broadsheet.css` (`:root`) and
+> `public/staff.css` (`.pt`) — Phase 0/1 shipped.
 
-Nothing here is implemented yet. This is the contract the components will be
-built against.
+Phases 0 and 1 are implemented: tokens, the two owner shells and the portal
+shell. Everything under Components is still the contract the feature-page work
+will be built against.
 
 ---
 
@@ -35,59 +32,85 @@ built against.
 
 ## 2. Colour tokens
 
-Token *names* are kept from the current stylesheet wherever possible so the
-migration is a value change, not a rename. Values below are proposals to be
-confirmed against the mockup.
+Token *names* are kept from the previous stylesheet, so the migration was a
+value change and not a rename — no feature page had to be touched to move the
+whole app onto the new palette.
 
-### Neutrals — the ground
+### Neutrals — the ground  · **implemented**
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| `--page` | `#f6f7f9` | `#14161a` | App background (off-white) |
-| `--surface` | `#ffffff` | `#1c1f24` | Cards, panels, tables |
-| `--surface-2` | `#f9fafb` | `#22262c` | Recessed rows, table headers, zebra |
-| `--surface-3` | `#f1f3f5` | `#2a2f36` | Hover, pressed |
-| `--rule` | `#e4e7eb` | `#31363e` | Panel borders |
-| `--rule-light` | `#eef0f3` | `#282d34` | Row dividers, hairlines |
+| `--paper` | `#f6f7f9` | `#14181e` | App background (off-white) |
+| `--surface` | `#ffffff` | `#1b2027` | Cards, panels, tables |
+| `--surface-2` | `#f9fafb` | `#222831` | Table headers, recessed rows |
+| `--surface-3` | `#f1f3f5` | `#2a313b` | Hover, pressed |
+| `--rule` | `#e3e7ec` | `#2d343e` | Panel borders |
+| `--rule-light` | `#edf0f4` | `#262c35` | Row dividers |
+| `--field-border` | `#d5dae1` | `#333b45` | Inputs |
 
 ### Ink
 
-| Token | Light | Dark | Use |
-|---|---|---|---|
-| `--headline` | `#0f1419` | `#f2f4f7` | Headings, key figures |
-| `--ink` | `#1a1f26` | `#e6e9ee` | Body strong |
-| `--body` | `#3d444d` | `#c2c8d0` | Body |
-| `--muted` | `#6b7280` | `#8f97a3` | Labels, meta |
-| `--faint` | `#9aa1ab` | `#6b7280` | Placeholders, disabled |
-
-### The sidebar — its own scale, because it is dark in both themes
-
-| Token | Value | Use |
+| Token | Light | Dark |
 |---|---|---|
-| `--nav-bg` | `#161b26` | Sidebar ground (deep navy-charcoal) |
-| `--nav-bg-2` | `#1e2430` | Sidebar group header, hover |
-| `--nav-ink` | `#e8ebf0` | Active label |
-| `--nav-muted` | `#8b94a5` | Inactive label |
-| `--nav-rule` | `#252b38` | Sidebar dividers |
-| `--nav-on` | `#2f6df6` | Active item accent bar |
+| `--headline` | `#0f172a` | `#f2f5f9` |
+| `--ink` | `#16202c` | `#e4e9ef` |
+| `--body` | `#3d4653` | `#c0c8d2` |
+| `--muted` | `#667085` | `#8b95a3` |
+| `--faint` | `#98a2b3` | `#69727f` |
 
-### Semantic
+### The sidebar — one scale, dark in BOTH themes
 
-| Token | Light | Dark | Use |
+Sampled from the mockup: the sidebar ground is `#1B2732`, the active pill
+`#343E49`.
+
+| Token | Value |
+|---|---|
+| `--nav-bg` | `#1b2733` |
+| `--nav-bg-2` | `#28323f` (active pill, hover) |
+| `--nav-ink` | `#eef2f7` |
+| `--nav-muted` | `#93a1b3` |
+| `--nav-rule` | `#26313e` |
+| `--nav-on` | `#4b8bf5` (3px active bar) |
+
+### Semantic — sampled from the mockup's own controls
+
+| Token | Light | Dark | Sampled from |
 |---|---|---|---|
-| `--primary` | `#2563eb` | `#4b83f7` | Primary buttons, links, active nav |
-| `--primary-ink` | `#ffffff` | `#0b0e13` | Text on primary |
-| `--primary-soft` | `#eff5ff` | `#16233c` | Selected rows, primary-tinted fills |
-| `--ok` | `#15803d` | `#3fae68` | Approved, sent, healthy |
-| `--ok-soft` | `#effaf3` | `#12281c` | Success backgrounds |
-| `--warning` | `#b45309` | `#d98324` | Needs attention, pending, requests pill |
-| `--warning-soft` | `#fff8ed` | `#2a1f10` | Attention backgrounds |
-| `--danger` | `#b3261e` | `#e5675e` | Blocking, declined, destructive |
-| `--danger-soft` | `#fdf1f0` | `#2c1614` | Blocking backgrounds |
+| `--accent` | `#0b57d0` | `#6f9dfa` | "Add time" / "Clock out" — `#0151D2` / `#034FCE` |
+| `--accent-hover` | `#08429e` | `#93b6fc` | — |
+| `--primary-soft` | `#e8f0fb` | `#182640` | selected table row — `#E3EEF8` |
+| `--ok` / `--positive` | `#16863a` | `#46b76a` | Approve button — `#199A2C` |
+| `--ok-soft` | `#dcf3e1` | `#112617` | Approved badge — `#DBF2DE` |
+| `--warning` | `#b25a09` | `#dd9a4a` | On-break / End-break — `#EE7F04` |
+| `--warning-soft` | `#fdeadb` | `#2c2011` | Needs-review badge — `#FCE6DA` |
+| `--danger` | `#b3261e` | `#e5776c` | blocking only |
+| `--danger-soft` | `#fdeceb` | `#2b1614` | |
 
-**Rule:** red is for *blocking* only — a refusal, a destructive act, a figure
-that cannot be paid. Amber carries everything that merely needs a look. The
-current dashboard over-uses red for both.
+**Rule:** red is for *blocking* only. Amber carries everything that merely
+needs a look.
+
+### Portal tokens (`.pt`) — implemented in `staff.css`
+
+`--pt-page #f6f7f9` · `--pt-field #ffffff` · `--pt-ink #0f172a` ·
+`--pt-body #3d4653` · `--pt-muted #667085` · `--pt-blue #0b57d0` ·
+`--pt-green #16863a` · `--pt-amber #b25a09` · `--pt-red #b3261e` ·
+`--pt-line #e3e7ec` · `--pt-hair #edf0f4` · `--pt-r 12px` · `--pt-tap 48px`
+Plus the three state tints from the mockup's status banners:
+`--pt-ok-soft #e9f7ec` (Working) · `--pt-warn-soft #fdf3e2` (On break) ·
+`--pt-info-soft #e8f0fb`.
+
+### Radius, shadow, spacing, touch — implemented
+
+`--r-sm 4px` · `--r-md 8px` · `--r-lg 12px` · `--r-full 999px`
+`--sh-sm 0 1px 2px rgba(16,24,40,.05)` · `--sh-md 0 4px 12px rgba(16,24,40,.08)`
+· `--sh-lg 0 12px 32px rgba(16,24,40,.14)`
+`--s-1 4px` … `--s-8 40px` · `--tap 44px` (owner mobile) · `--tap-lg 48px` (portal)
+
+### Typography — implemented
+
+Headlines moved from serif to `--sans`: `.bs-headline` 24px/600/−.01em,
+portal `.pt-hi` 27px/650 and `.pt-title`/`.tc-h` 25px/650. Figures keep
+`--mono` with tabular numerals.
 
 ### Accents (module identity, already in `nav.js`)
 

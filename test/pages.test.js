@@ -640,23 +640,29 @@ test('urgency is a hairline, never a fill', () => {
   }
 });
 
-test('the panel rests flat and only lifts where hover is real', () => {
+test('the panel carries the system elevation, not an invented one', () => {
   const css = stripComments(fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8'));
 
-  // Resting state: no shadow, radius 0. The frame alone has to carry the
-  // separation on touch and in print.
+  // This test used to assert the opposite — no shadow at rest, radius 0 —
+  // because the warm-paper design leaned on the frame alone. The approved
+  // mockup uses a bordered white card with a 1px/5% lift and an 8px radius, so
+  // the RULE changed. What has not changed is that the value must come from a
+  // token: a hand-rolled rgba() on one panel is how a system drifts.
   // EVERY rule whose selector is exactly .bs-panel, joined — there is more
-  // than one (the second re-anchors --stripe for ledgers inside a frame), and
-  // keeping only the last checked the wrong block: a resting shadow added to
-  // the first one sailed straight through.
+  // than one, and checking only the last checks the wrong block.
   const rest = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
     .filter((m) => m[1].trim() === '.bs-panel').map((m) => m[2]).join(';');
   assert.ok(rest.length, '.bs-panel exists');
-  // Drop the transition value before looking: it names box-shadow so the lift
-  // animates, which is not the same as having one at rest.
   const decls = rest.replace(/transition\s*:[^;]*;?/g, '');
-  assert.ok(!/box-shadow\s*:/.test(decls), 'no shadow at rest');
-  assert.ok(!/border-radius:\s*[1-9]/.test(rest), 'radius stays 0');
+  const shadows = [...decls.matchAll(/box-shadow\s*:\s*([^;]+)/g)].map((m) => m[1].trim());
+  assert.ok(shadows.length, 'the panel has a resting elevation');
+  for (const v of shadows) {
+    assert.match(v, /var\(--/, `the shadow comes from a token, not "${v}"`);
+  }
+  const radii = [...rest.matchAll(/border-radius\s*:\s*([^;]+)/g)].map((m) => m[1].trim());
+  for (const v of radii) {
+    assert.match(v, /var\(--r-|^0/, `the radius comes from a token, not "${v}"`);
+  }
 
   // The lift lives behind a hover query, or a tap latches it on a phone.
   // translateY, not just `transform` — the reduced-motion block also names
