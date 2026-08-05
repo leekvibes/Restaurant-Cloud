@@ -654,3 +654,120 @@ time clock ──→ work.hours ────┤       work.hours is BOTH the pay
 - **`aggregatePayroll`** is called by: the payroll roster, the drill-down,
   the Excel export, the emails, and now the portal pay card. One function,
   five surfaces — this is why they cannot disagree.
+
+
+---
+
+## 6. PHASE 2A AUDIT — Employee Portal Time Clock
+
+Added 2026-08-05. Read-only audit of everything reachable from `/portal/clock`.
+No code, CSS or schema changed.
+
+### 6.1 Screens and their states
+
+| # | Screen | Route | Reached by |
+|---|---|---|---|
+| 1 | Time clock home | `/portal/clock` | Hub row · bottom-nav tab · after every punch |
+| 2 | Clock-out receipt | `/portal/clock?done=:id` | Redirect after clock-out only |
+| 3 | Shift detail | `/portal/clock/entry/:id` | "Earlier today" row · history row · day card · issue link · notification |
+| 4 | Edit-shift sheet | *(no route)* | "Edit shift" on #3 or #7 |
+| 5 | Add-shift sheet | *(no route)* | "Add a shift" on #7 |
+| 6 | Timesheet | `/portal/timesheet?p=` | Clock shortcut · bottom-nav tab |
+| 7 | Day detail | `/portal/timesheet/day/:date` | Tapping any day row on #6 |
+| 8 | Submit sheet | *(no route)* | ••• menu → Submit timesheet |
+| 9 | My requests | `/portal/requests` | Clock shortcut · ••• menu · More |
+| 10 | Time history | `/portal/clock/history` | "Your time history ›" · ••• menu · More |
+| 11 | Clock-out PIN sheet | *(no route)* | Clock out, when `pinAtOut` is on |
+
+**Time clock home — six card states**, all from `clockStatus(emp)`:
+
+| State | Condition | Shows | Actions |
+|---|---|---|---|
+| Clocked out | no active entry, ≥1 position | date, "You are clocked out", position + service pickers | Clock in |
+| Working | active, `status != on_break` | live counter (server-anchored), in-time, position · service, unpaid break so far | Start break · Clock out |
+| Still clocked in | active and over `tc_long_shift` | as above + `.tc-stale` warning | as above |
+| On break | `status = on_break` | live break counter, break start + paid/unpaid, secondary on-the-clock counter | End break |
+| No position | `clockPositionsFor(emp)` empty | "No position is assigned to you" | none — blocked |
+| Receipt | `?done=:id` | payable, in/out/break/position/service | "Something's wrong" · "Done" |
+
+One position → hidden input + a read-only `.tc-fixed` row. Two or more → a
+`<select>`. Service is always a `<select>`, defaulted by `suggestDaypart()`.
+
+**Always below the card:** Worked today (live, minute-resolution) · Timesheet
+shortcut with a badge (`Sent back` / `Submit again` / `Needs a fix` /
+`Ready to submit`) · My requests shortcut with a count · Earlier today rows ·
+Your time history link.
+
+### 6.2 What each flow requires
+
+| Flow | PIN | Note | Confirm | Result |
+|---|---|---|---|---|
+| Clock in | no | — | — | writes immediately |
+| Start / end break | no | — | — | writes immediately |
+| Clock out | **only if `pinAtOut`** | — | — | writes, then receipt |
+| Edit shift | **yes** | optional | — | `shift_times` request, queued |
+| Add shift | **yes** | optional | — | `new_shift` request, queued |
+| Submit timesheet | **route demands it, sheet does not collect it** | optional | required checkbox | **fails — see 6.4** |
+
+### 6.3 Validation already enforced
+
+- Clock in: position must be theirs (`clockPositionsFor`), service must be in
+  `DAYPARTS`, refused if already active, overlap-checked via `TC.createEntry`.
+- Edit: inverted times refused at the route *and* blocked client-side
+  ("check the times"); overlap refused on approval; frozen period queues.
+- Add: both times required, end after start, own position only, service valid,
+  overlap refused at filing *and* again on approval.
+- Submit: refused while the period is still running, if already submitted, if
+  any blocking issue exists, or if the hours changed while the page was open
+  (`seen` vs `totals.payable`).
+
+### 6.4 BLOCKING DEFECT — timesheet submission cannot succeed
+
+`POST /portal/timesheet/submit` calls `pinCheck(req, emp, req.body.pin)`.
+The submit sheet (`#ts-sheet`) posts only `period`, `seen`, `confirm`, `note`
+— **there is no PIN input in it.** `pinMatches(emp, undefined)` is false, so
+every submission is rejected with *"That PIN did not match."* and no
+`timesheets` row is written.
+
+Reproduced against a genuinely submittable period: the sheet renders, the POST
+redirects to `?err=That PIN did not match.`, and no row lands.
+
+Second-order harm: `pinCheck` calls `GUARD.failed()` on mismatch, so each
+attempt counts against that employee's PIN rate-limit bucket. Somebody trying
+a few times can lock themselves out of the portal.
+
+Origin: the PIN check arrived with the "Staff PINs stop being guessable"
+hardening; the sheet never had the field. Pre-existing, not introduced by the
+redesign.
+
+**Consequence:** no employee has ever been able to sign a timesheet from the
+portal, and the end-of-period reminders ask them to do something impossible.
+
+### 6.5 Other findings
+
+1. **Two ways to reach the same shift, styled differently** — `.tc-row`
+   (clock home, history) and `.tsx-daycard` (day detail) show the same entry.
+2. **Shift detail lists raw request kinds** — `c.kind.replace(/_/g,' ')` prints
+   "shift times", not "Changed shift times". The manager's queue has a proper
+   label map (`REQ_KIND`); the employee's screen does not.
+3. **No audit history for the employee.** `Edited: yes — see the history with
+   your manager` is a dead end: `time_events` exists for the entry but is never
+   shown to them.
+4. **Break editing is unreachable from the portal.** `break` and
+   `missing_break` correction kinds exist and `applyCorrection` handles them,
+   but no portal screen files one — the edit sheet only carries the two times.
+5. **Position and service cannot be corrected from the portal.**
+   `wrong_position` / `wrong_service` kinds exist server-side with no UI.
+6. **The timesheet has its own header** (`.tsx-top` + `•••`) while every other
+   portal screen uses `portalTop`.
+7. **Actions are buried in a `•••` menu** — Submit, Review issues, View
+   submission, Time history, My requests all live behind it.
+8. **Two period selectors in one product** — `.tsx-per` (timesheet) and
+   `.pp-nav` (pay card) do the same job differently.
+9. **No loading state anywhere.** Every action is a full form POST + redirect.
+10. **Success is a querystring banner** (`?ok=`), which survives a refresh and
+    can be shared or re-triggered.
+11. **The clock-out PIN sheet is a plain `hidden` div**, not the `.pes` bottom
+    sheet the edit/add flows use — two sheet idioms in one screen.
+12. **Receipt hides the card.** After clocking out the whole clock state is
+    replaced; "Done" is a link back to the same URL without the query.
