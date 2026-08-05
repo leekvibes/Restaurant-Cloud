@@ -771,3 +771,43 @@ portal, and the end-of-period reminders ask them to do something impossible.
     sheet the edit/add flows use — two sheet idioms in one screen.
 12. **Receipt hides the card.** After clocking out the whole clock state is
     replaced; "Done" is a link back to the same URL without the query.
+
+---
+
+## 7. PHASE 2B — Employee Portal Time Clock, redesigned
+
+Shipped. Seven screens and overlays; the rest of the portal is untouched.
+
+### 7.1 What changed on each screen
+
+| # | Screen | Was | Is |
+|---|--------|-----|-----|
+| 1 | `/portal/clock` | Four states, four different layouts | One `.tcc` card, four tones. Status word → live figure → facts → actions, always in that order |
+| 2 | Clock-out receipt | Its own layout, replacing the page | The same card, tinted green, laid over the page it belongs to. Rows and shortcuts stay |
+| 3 | `/portal/clock/entry/:id` | Payable buried in a fact grid; `edited: yes — see the history with your manager` | Payable first; real audit history in plain English; request state as a word |
+| 4 | Edit-shift sheet | Two times only | Two times + `More changes` (position, service, breaks), all in ONE request |
+| 5 | Add-shift sheet | No break | Optional break, folded away; validated at the door |
+| 6 | Submit-timesheet sheet | Bespoke overlay, inline `onclick`, float `seen` | Shared `.pes` bottom sheet; `seen` is a 16-hex digest |
+| 7 | Clock-out confirmation | A PIN prompt, behind a setting | Figures + Cancel/Confirm. No PIN, and no setting that can bring one back |
+
+### 7.2 Routes: no additions, no removals, no renames
+
+Every route in §2 is unchanged. `/portal/clock/fix` accepts more fields on the
+`shift_times` kind; `/portal/clock/add` accepts an optional break. Both are
+additive — an older payload still posts and still works.
+
+### 7.3 Retired
+
+- **`tc_pin_out`** — the setting, its checkbox on `/timeclock/settings`, its
+  branch in `/portal/clock/out`, and the `#tc-outsheet` PIN sheet. Posting
+  `pin_out=1` now does nothing. `TC.settings().pinAtOut` is `undefined`.
+- **`.pt.has-tabs > :last-child`** — the tab-bar reservation hung off whichever
+  element happened to be last, so any page that appended a sheet, a toast or a
+  `<script>` after its body lost its bottom spacing. Now on `.pt.has-tabs`.
+
+### 7.4 Still Phase 2C
+
+Timesheet (`/portal/timesheet`), Day detail (`/portal/timesheet/day/:date`),
+Requests (`/portal/requests`), Time history (`/portal/clock/history`). The edit
+and add sheets already appear on the day-detail page and were upgraded there
+too — the sheets are Phase 2B, the pages around them are not.

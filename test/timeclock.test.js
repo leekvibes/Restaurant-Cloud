@@ -148,22 +148,28 @@ test('the clocked-in screen offers no PIN box by default', async () => {
   await post('/portal/clock/out', {}, { cookie });
 });
 
-test('a restaurant that wants the PIN back can still have it', async () => {
-  // The step is gone, not deleted — switched on, it guards the punch again.
+test('clocking out never asks for a PIN, and nothing can turn that back on', async () => {
+  // The setting used to exist and default to off. Phase 2B retired it, so this
+  // asserts the retirement rather than the switch: posting the old field name
+  // must not resurrect the prompt, and a wrong PIN must not stop the punch,
+  // because nothing is reading one.
   await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
     pin_out: '1', pin_fix: '1', require_service: '1', alerts: '1' });
   const cookie = await signIn('3111');
   await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
-  await post('/portal/clock/out', { pin: '0000' }, { cookie });
-  assert.ok(activeOf(EMP.solo), 'a wrong PIN leaves them on the clock');
   const html = await text('/portal/clock', { cookie });
-  assert.match(html, /Enter your PIN to clock out/, 'and the prompt is back on screen');
-  await post('/portal/clock/out', { pin: '3111' }, { cookie });
-  assert.ok(!activeOf(EMP.solo), 'the right one closes it');
-  // Back to the default for everything after this.
+  assert.doesNotMatch(html, /Enter your PIN to clock out/, 'no PIN prompt on the clock screen');
+  assert.doesNotMatch(html, /name="pin"/, 'and no PIN field anywhere on it');
+  // The confirmation sheet is what makes it deliberate, and it carries the
+  // figures rather than a challenge.
+  assert.match(html, /data-pes="clockout"/, 'the confirmation sheet is there');
+  assert.match(html, /Confirm clock out/, 'with the action spelled out');
+  await post('/portal/clock/out', { pin: '0000' }, { cookie });
+  assert.ok(!activeOf(EMP.solo), 'a wrong PIN is simply ignored — the punch closes');
   await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
     pin_fix: '1', require_service: '1', alerts: '1' });
-  assert.strictEqual(require('../src/timeclock').settings().pinAtOut, false);
+  assert.strictEqual(require('../src/timeclock').settings().pinAtOut, undefined,
+    'the setting is gone, not merely off');
 });
 
 test('an open break blocks clock-out until it is ended', async () => {
@@ -188,7 +194,7 @@ test('multiple sessions in one day are separate entries', () => {
 test('an employee with several positions must choose one, and only their own', async () => {
   const cookie = await signIn('3222');
   const page = await text('/portal/clock', { cookie });
-  assert.match(page, /Which position are you working/, 'they are asked');
+  assert.match(page, /<select name="position"/, 'they are asked');
   assert.match(page, /value="busser"/, 'their extra position is offered');
   assert.ok(!/value="kitchen"/.test(page), 'a position they do not hold is not');
 
@@ -607,14 +613,22 @@ const sheetOf = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE emp
 // change. Nothing here sends it: the whole point is that these tests now post
 // what the sheet posts.
 async function submitSheet(empId, pin, per, extra = {}, cookie) {
-  // What the PAGE shows, which is punches plus any hours the shift sheets carry
-  // that no punch accounts for. Computing it without those signed a figure the
-  // employee was never shown, and the submit route rightly refused it — the
-  // signature belongs to the hours that were on screen.
-  const seen = T2.totalsFor(T2.q.entriesInPeriod.all(empId, per.start, per.end),
-    { extra: T2.shiftOnlyHours(empId, per.start, per.end) }).payable;
+  // The staleness token is READ OFF THE PAGE, not recomputed here.
+  //
+  // This used to recompute the figure the server would compare against, which
+  // meant every submit test agreed with the server by construction and none of
+  // them proved the form carries what the route wants. That is exactly how a
+  // route asking for a PIN the sheet never rendered survived twelve tests. Now
+  // the helper opens the timesheet, takes the value out of the rendered form,
+  // and posts that — so if the sheet and the route ever disagree again, all of
+  // these fail rather than none.
+  //
+  // A sheet that is not there yields no token, and that is correct: those
+  // cases are refused by an earlier check than staleness anyway.
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  const seen = (html.match(/name="seen" value="([^"]*)"/) || [])[1] || '';
   return post('/portal/timesheet/submit',
-    { period: per.start, confirm: '1', seen: String(seen), ...extra }, { cookie });
+    { period: per.start, confirm: '1', seen, ...extra }, { cookie });
 }
 /**
  * The period these tests work in: the most recent one that has FINISHED.
@@ -732,7 +746,7 @@ test('the submit sheet posts everything the route needs', async () => {
   const cookie = await signIn('3219');
 
   const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
-  const sheet = (html.match(/id="ts-sheet"[\s\S]*?<\/form>/) || [''])[0];
+  const sheet = (html.match(/data-pes="submit"[\s\S]*?<\/form>/) || [''])[0];
   assert.ok(sheet, 'the submit sheet is on the page');
 
   // Every name=value the form carries, as a browser would send it.
@@ -1475,8 +1489,9 @@ test('a finished period is submittable, and the portal says where', async () => 
   // including the hours it was drawn with — the route compares them against the
   // live total so a signature can never land on figures that moved while the
   // page was open.
-  const seen = (finished.match(/name="seen" value="(\d+)"/) || [])[1];
+  const seen = (finished.match(/name="seen" value="([^"]+)"/) || [])[1];
   assert.ok(seen, 'the form carries the hours being signed for');
+  assert.match(seen, /^[0-9a-f]{16}$/, 'as a fixed-width digest, not a float');
   const res = await post('/portal/timesheet/submit',
     { period: done.start, pin: '3186', confirm: '1', seen }, { cookie });
   assert.strictEqual(res.status, 302);
@@ -2452,4 +2467,572 @@ test('a preview run is not a send — nothing is recorded and nobody is told', a
   assert.match(html, /Mail is not connected/, 'the panel warns first');
   assert.match(html, /stays marked as not sent/, 'and says what that means');
   assert.ok(!/Already sent/.test(html), 'and does not claim otherwise');
+});
+
+// ===========================================================================
+// PHASE 2B — the employee time clock, redesigned.
+//
+// One status card with four states, a clock-out that asks for confirmation
+// rather than a PIN, an edit sheet that carries the whole shift in one
+// request, and a submit token that is a digest rather than a float.
+//
+// These are deliberately assertions about the RENDERED page and the payload it
+// posts, not about internal helpers. The bug that started this phase — a route
+// demanding a field the sheet never drew — was invisible to every test that
+// built its own payload, and that is the class of bug this block exists to
+// catch.
+// ===========================================================================
+
+const lastCorr = () => db.prepare('SELECT * FROM time_corrections ORDER BY id DESC').get();
+const payloadOf = (c) => JSON.parse(c.payload || '{}');
+
+test('2B: clocked out — the card says so and asks only what it must', async () => {
+  const cookie = await signIn('3111');           // one position, service not required
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
+    pin_fix: '1', alerts: '1' });                // require_service off
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /class="tcc tcc-off"/, 'the neutral state');
+  assert.match(html, /Clocked out</, 'named');
+  assert.ok(!/<select name="position"/.test(html), 'one position is not a question');
+  assert.ok(!/<select name="daypart"/.test(html), 'and neither is the service when it is not required');
+  assert.match(html, /name="position" value="server"/, 'both travel as hidden fields');
+  assert.match(html, /name="daypart" value="/, 'so the route still gets what it validates');
+  assert.match(html, />Clock in</, 'one primary action');
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
+    pin_fix: '1', require_service: '1', alerts: '1' });
+});
+
+test('2B: working — live counter, the facts, and both actions in the open', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /class="tcc tcc-on"/, 'the green state');
+  assert.match(html, />Working</, 'named');
+  assert.match(html, /class="tcc-clock" data-since="\d+" data-now="\d+"/,
+    'the counter is anchored to the server clock, not the phone');
+  assert.match(html, /Position<\/span><b>Server/, 'position on the card');
+  assert.match(html, /Service<\/span><b>/, 'service on the card');
+  assert.match(html, /data-pes-open="clockout"[^>]*>Clock out/, 'clock out is primary');
+  assert.match(html, /tc-btn-quiet[^>]*>Start break/, 'start break is the quiet one');
+  assert.ok(!/tsx-menu/.test(html), 'and nothing important hides in a three-dot menu');
+});
+
+test('2B: the clock-out sheet shows what is being recorded, and asks for no PIN', async () => {
+  const cookie = await signIn('3111');           // still on the clock from above
+  const html = await text('/portal/clock', { cookie });
+  const sheet = (html.match(/data-pes="clockout"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(sheet, 'the sheet is on the page');
+  for (const label of ['Clocked in', 'Clocking out', 'Break', 'Position', 'Service', 'Payable']) {
+    assert.ok(sheet.includes(`<span>${label}</span>`), `it shows ${label}`);
+  }
+  assert.match(sheet, />Cancel</, 'cancel');
+  assert.match(sheet, />Confirm clock out</, 'and confirm');
+  assert.ok(!/name="pin"/.test(sheet), 'and no PIN field');
+  // The two figures that would go stale are computed at look-time, not at
+  // render-time — the sheet can sit unopened for an hour.
+  assert.match(sheet, /data-live-face/, 'the clock-out time is live');
+  assert.match(sheet, /data-live-mins data-base="-?\d+"/, 'and so is the payable total');
+  await post('/portal/clock/out', {}, { cookie });
+  assert.ok(!activeOf(EMP.solo), 'and it closes the punch with no PIN at all');
+});
+
+test('2B: clocking out twice does not open or close anything a second time', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const before = entriesOf(EMP.solo).length;
+  const r1 = await post('/portal/clock/out', {}, { cookie });
+  const r2 = await post('/portal/clock/out', {}, { cookie });
+  assert.strictEqual(r1.status, 302);
+  assert.strictEqual(r2.status, 302);
+  assert.match(decodeURIComponent(r2.headers.get('location')), /already clocked out/,
+    'the second is answered plainly, not with an error');
+  assert.strictEqual(entriesOf(EMP.solo).length, before, 'and no extra entry exists');
+});
+
+test('2B: a shift left open past the threshold is amber, and still clocks out', async () => {
+  // Its own employee: back-dating a punch twenty hours across somebody else's
+  // day is exactly what the overlap trigger exists to refuse.
+  const emp = 239;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3239',1500,1)")
+    .run(emp, 'Forgot To Leave');
+  const cookie = await signIn('3239');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  // Back-dated past the long-shift threshold, the way a forgotten clock-out is.
+  const a = activeOf(emp);
+  db.prepare("UPDATE time_entries SET clock_in_at = datetime('now','-20 hours') WHERE id = ?").run(a.id);
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /class="tcc tcc-warn"/, 'amber, not red — they are not blocked');
+  assert.match(html, />Still clocked in</, 'named for what it is');
+  assert.match(html, /over 16 hours/, 'with the threshold spelled out');
+  assert.match(html, /data-pes-open="clockout"/, 'and clocking out is still right there');
+  await post('/portal/clock/out', {}, { cookie });
+  assert.ok(!activeOf(emp), 'it closes');
+});
+
+test('2B: on break — break duration ticks, payable is quoted as of the break', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  await post('/portal/clock/break/start', {}, { cookie });
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /class="tcc tcc-break"/, 'the amber state');
+  assert.match(html, />On break</, 'named');
+  assert.match(html, /class="tcc-clock" data-since=/, 'the break duration is the live figure');
+  assert.match(html, /Payable so far<\/span>/, 'payable so far is shown');
+  assert.match(html, /paused while you are on an unpaid break/,
+    'and it says why that figure is not moving');
+  assert.match(html, />End break</, 'one primary action');
+  await post('/portal/clock/break/end', {}, { cookie });
+  await post('/portal/clock/out', {}, { cookie });
+});
+
+test('2B: the receipt is a receipt — the same page, with what was recorded', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const res = await post('/portal/clock/out', {}, { cookie });
+  const id = (decodeURIComponent(res.headers.get('location')).match(/done=(\d+)/) || [])[1];
+  assert.ok(id, 'the clock-out lands on the receipt');
+  const html = await text(`/portal/clock?done=${id}`, { cookie });
+  assert.match(html, /class="tcc tcc-done"/, 'the receipt uses the same card');
+  for (const label of ['Clocked in', 'Clocked out', 'Break', 'Position', 'Service']) {
+    assert.ok(html.includes(`<div class="tcc-f"><span>${label}</span>`), `it shows ${label}`);
+  }
+  assert.match(html, />Done</, 'done');
+  assert.match(html, new RegExp(`href="/portal/clock/entry/${id}">Something's wrong`),
+    "and Something's wrong goes straight to the shift, not to a form");
+  assert.match(html, /class="tc-shorts"/, 'the rest of the page is still there');
+});
+
+// --- shift detail ----------------------------------------------------------
+
+test('2B: shift detail shows the shift, and its history in plain English', async () => {
+  const emp = 220;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3220',1500,1)")
+    .run(emp, 'Detail Reader');
+  const eid = seedInPeriod(emp, 4, '10:00', '18:00');
+  T2.logEvent('entry', eid, 'clock_in', 'Detail Reader', { after: 'x' });
+  T2.logEvent('entry', eid, 'clock_out_corrected', 'Boss',
+    { before: T2.localInputToUtc('2026-01-01T17:00'), after: T2.localInputToUtc('2026-01-01T18:00') });
+  const cookie = await signIn('3220');
+  const html = await text(`/portal/clock/entry/${eid}`, { cookie });
+  assert.match(html, /class="tcd-tot"><b>8h 0m<\/b>/, 'the payable total, first');
+  for (const label of ['Clocked in', 'Clocked out', 'Breaks', 'Position', 'Service']) {
+    assert.ok(html.includes(`<div class="tc-fact"><span>${label}</span>`), `it shows ${label}`);
+  }
+  assert.match(html, />History</, 'the history section exists');
+  assert.match(html, />Clocked in</, 'with events named for people');
+  assert.match(html, />Clock-out changed</, 'not clock_out_corrected');
+  assert.ok(!/clock_out_corrected/.test(html), 'the raw action never reaches the page');
+  assert.ok(!/see the history with your manager/.test(html),
+    'and the page no longer tells them to go and ask someone');
+  assert.match(html, /data-pes-open="\d+"/, 'and Edit shift is there');
+});
+
+test('2B: a request on the shift reads as a state, not a database value', async () => {
+  const emp = 221;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3221',1500,1)")
+    .run(emp, 'State Reader');
+  const eid = seedInPeriod(emp, 5, '10:00', '18:00');
+  const cookie = await signIn('3221');
+  const day = db.prepare('SELECT business_date FROM time_entries WHERE id = ?').get(eid).business_date;
+  await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', at_out: `${day}T19:00`, pin: '3221' }, { cookie });
+  const html = await text(`/portal/clock/entry/${eid}`, { cookie });
+  assert.match(html, />Changed shift times</, 'the kind, in words');
+  assert.match(html, /tcd-st-pending">Waiting</, 'and the decision, in words');
+  assert.ok(!/shift_times/.test(html.replace(/name="kind" value="shift_times"/g, '')),
+    'the raw kind is not printed anywhere it is read');
+});
+
+// --- the edit sheet: one request, whatever moved --------------------------
+
+/** Post an edit exactly as the sheet does, and hand back the request it made. */
+async function edit(cookie, eid, fields, pin) {
+  const r = await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', pin, ...fields }, { cookie });
+  return { res: r, corr: lastCorr() };
+}
+
+test('2B: the edit sheet renders both ends, More changes, and the PIN', async () => {
+  const emp = 222;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3222x',1500,1)")
+    .run(emp, 'Sheet Reader');
+  db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+    .run(emp, 'busser', 1400);
+  const eid = seedInPeriod(emp, 6, '10:00', '18:00');
+  const d6 = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes, created_by)
+    VALUES (?,?,?,?,0,30,'test')`)
+    .run(eid, emp, T2.localInputToUtc(`${d6}T13:00`), T2.localInputToUtc(`${d6}T13:30`));
+  const cookie = await signIn('3222x');
+  const html = await text(`/portal/clock/entry/${eid}`, { cookie });
+  const sheet = (html.match(/data-pes="\d+"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(sheet, 'the sheet is rendered');
+  // The default view: two times and a total. No "what kind of problem is this?"
+  assert.match(sheet, /data-pes-ind/, 'start date');
+  assert.match(sheet, /data-pes-int/, 'start time');
+  assert.match(sheet, /data-pes-outd/, 'end date');
+  assert.match(sheet, /data-pes-outt/, 'end time');
+  assert.match(sheet, /data-pes-tot/, 'the recalculated total');
+  assert.ok(!/name="kind"[^>]*>\s*<option/.test(sheet), 'no correction-type picker');
+  assert.match(sheet, /name="kind" value="shift_times"/, 'the kind is fixed, not chosen');
+  // The fold.
+  assert.match(sheet, /<details class="pes-more">/, 'More changes exists');
+  assert.match(sheet, /More changes/, 'and is named for what it holds');
+  assert.match(sheet, /<select name="position"/, 'position, for somebody who has two');
+  assert.match(sheet, /<select name="daypart"/, 'service');
+  assert.match(sheet, /name="brk_id" value="\d+"/, 'the break already on the shift');
+  assert.match(sheet, /name="brk_id" value=""/, 'and a row to add one');
+  assert.match(sheet, /name="pin"/, 'editing still asks for the PIN');
+  assert.match(sheet, />Send for approval</, 'and it is a request, not a save');
+});
+
+test('2B: editing the start only files one request that moves only the start', async () => {
+  const emp = 223;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3223',1500,1)")
+    .run(emp, 'Start Only');
+  const eid = seedInPeriod(emp, 7, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3223');
+  const { corr } = await edit(cookie, eid, { at_in: `${day}T09:00` }, '3223');
+  const p = payloadOf(corr);
+  assert.strictEqual(corr.kind, 'shift_times');
+  assert.ok(p.in, 'the start travels');
+  assert.strictEqual(p.out, undefined, 'the untouched end does not');
+  await decide(corr.id, 'approved');
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid);
+  assert.strictEqual(T2.clockFace(e.clock_in_at), '9:00 AM', 'the start moved');
+  assert.strictEqual(T2.clockFace(e.clock_out_at), '6:00 PM', 'the end did not');
+  assert.strictEqual(e.payable_minutes, 540, 'and the hours are recomputed');
+});
+
+test('2B: editing the end only does the mirror of that', async () => {
+  const emp = 224;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3224',1500,1)")
+    .run(emp, 'End Only');
+  const eid = seedInPeriod(emp, 8, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3224');
+  const { corr } = await edit(cookie, eid, { at_out: `${day}T19:30` }, '3224');
+  const p = payloadOf(corr);
+  assert.strictEqual(p.in, undefined, 'the untouched start does not travel');
+  assert.ok(p.out, 'the end does');
+  await decide(corr.id, 'approved');
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid);
+  assert.strictEqual(T2.clockFace(e.clock_in_at), '10:00 AM');
+  assert.strictEqual(T2.clockFace(e.clock_out_at), '7:30 PM');
+  assert.strictEqual(e.payable_minutes, 570);
+});
+
+test('2B: both ends in ONE request, applied together', async () => {
+  const emp = 225;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3225',1500,1)")
+    .run(emp, 'Both Ends');
+  const eid = seedInPeriod(emp, 9, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3225');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n;
+  const { corr } = await edit(cookie, eid, { at_in: `${day}T09:00`, at_out: `${day}T19:00` }, '3225');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n,
+    before + 1, 'one request, not two');
+  await decide(corr.id, 'approved');
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid);
+  assert.strictEqual(T2.clockFace(e.clock_in_at), '9:00 AM');
+  assert.strictEqual(T2.clockFace(e.clock_out_at), '7:00 PM');
+  assert.strictEqual(e.payable_minutes, 600, 'ten hours, in one move');
+});
+
+test('2B: More changes — position, service and a break ride in the same request', async () => {
+  const emp = 226;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3226',1500,1)")
+    .run(emp, 'Everything At Once');
+  db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+    .run(emp, 'busser', 1400);
+  const eid = seedInPeriod(emp, 10, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3226');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n;
+  const { corr } = await edit(cookie, eid, {
+    at_out: `${day}T19:00`,
+    position: 'busser', daypart: 'dinner',
+    brk_id: '', brk_start: `${day}T13:00`, brk_end: `${day}T13:30`,
+  }, '3226');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n,
+    before + 1, 'four changes, one request — this is the whole point of the fold');
+  const p = payloadOf(corr);
+  assert.ok(p.out && p.position === 'busser' && p.daypart === 'dinner' && p.breaks.length === 1,
+    'and the envelope carries all four');
+  await decide(corr.id, 'approved');
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid);
+  assert.strictEqual(T2.clockFace(e.clock_out_at), '7:00 PM', 'the end moved');
+  assert.strictEqual(e.position, 'busser', 'the position changed');
+  assert.strictEqual(e.daypart, 'dinner', 'the service changed');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(eid).n, 1,
+    'the break was added');
+  assert.strictEqual(e.payable_minutes, 510, 'nine hours less the thirty-minute unpaid break');
+});
+
+test('2B: correcting an existing break changes it rather than adding another', async () => {
+  const emp = 227;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3227',1500,1)")
+    .run(emp, 'Break Fixer');
+  const eid = seedInPeriod(emp, 11, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const bid = db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes, created_by)
+    VALUES (?,?,?,?,0,60,'test')`).run(eid, emp, T2.localInputToUtc(`${day}T13:00`), T2.localInputToUtc(`${day}T14:00`)).lastInsertRowid;
+  T2.recompute(db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid));
+  const cookie = await signIn('3227');
+  const { corr } = await edit(cookie, eid,
+    { brk_id: String(bid), brk_start: `${day}T13:00`, brk_end: `${day}T13:30` }, '3227');
+  assert.strictEqual(payloadOf(corr).breaks[0].id, bid, 'it names the break it means');
+  await decide(corr.id, 'approved');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(eid).n, 1,
+    'still one break');
+  const b = db.prepare('SELECT * FROM time_breaks WHERE id = ?').get(bid);
+  assert.strictEqual(b.raw_minutes, 30, 'and it is the shorter one');
+  assert.strictEqual(db.prepare('SELECT payable_minutes p FROM time_entries WHERE id = ?').get(eid).p, 450,
+    'the half hour they got back is paid');
+});
+
+test('2B: a shift and its break moving together is not refused', async () => {
+  // The combined edit that a single-field request could never express: somebody
+  // clocked in an hour late and took their break an hour late with it. Checking
+  // the stored break against the new punch would refuse this.
+  const emp = 228;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3228',1500,1)")
+    .run(emp, 'Moved Together');
+  const eid = seedInPeriod(emp, 12, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const bid = db.prepare(`INSERT INTO time_breaks (time_entry_id, employee_id, start_at, end_at, paid, raw_minutes, created_by)
+    VALUES (?,?,?,?,0,30,'test')`).run(eid, emp, T2.localInputToUtc(`${day}T10:30`), T2.localInputToUtc(`${day}T11:00`)).lastInsertRowid;
+  T2.recompute(db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid));
+  const cookie = await signIn('3228');
+  const { corr } = await edit(cookie, eid, {
+    at_in: `${day}T12:00`,                        // the break at 10:30 now precedes the punch
+    brk_id: String(bid), brk_start: `${day}T14:30`, brk_end: `${day}T15:00`,
+  }, '3228');
+  const r = await decide(corr.id, 'approved');
+  assert.strictEqual(r.status, 302);
+  const fresh = db.prepare('SELECT * FROM time_corrections WHERE id = ?').get(corr.id);
+  assert.strictEqual(fresh.decision, 'approved', 'the request was granted, not blocked');
+  const e = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(eid);
+  assert.strictEqual(T2.clockFace(e.clock_in_at), '12:00 PM');
+  assert.strictEqual(e.payable_minutes, 330, 'six hours less the half-hour break');
+});
+
+test('2B: an edit that changes nothing is refused before it becomes a request', async () => {
+  const emp = 229;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3229',1500,1)")
+    .run(emp, 'No Change');
+  const eid = seedInPeriod(emp, 13, '10:00', '18:00');
+  const cookie = await signIn('3229');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n;
+  const r = await post('/portal/clock/fix', { entry_id: eid, kind: 'shift_times', pin: '3229' }, { cookie });
+  assert.match(decodeURIComponent(r.headers.get('location')), /Change something before sending it/);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n,
+    before, 'and no empty request lands in the manager queue');
+});
+
+test('2B: an end before the start is refused, and so is a backwards break', async () => {
+  const emp = 230;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3230',1500,1)")
+    .run(emp, 'Bad Times');
+  const eid = seedInPeriod(emp, 8, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3230');
+  const r1 = await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', at_in: `${day}T18:00`, at_out: `${day}T10:00`, pin: '3230' }, { cookie });
+  assert.match(decodeURIComponent(r1.headers.get('location')), /end has to be after the start/);
+  const r2 = await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', brk_id: '', brk_start: `${day}T14:00`, brk_end: `${day}T13:00`, pin: '3230' }, { cookie });
+  assert.match(decodeURIComponent(r2.headers.get('location')), /break has to end after it starts/);
+  const r3 = await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', brk_id: '', brk_start: `${day}T14:00`, brk_end: '', pin: '3230' }, { cookie });
+  assert.match(decodeURIComponent(r3.headers.get('location')), /needs both a start and an end/);
+});
+
+test('2B: editing a shift still requires the PIN', async () => {
+  const emp = 231;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3231',1500,1)")
+    .run(emp, 'Pin Kept');
+  const eid = seedInPeriod(emp, 9, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3231');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n;
+  const r = await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', at_out: `${day}T19:00`, pin: '0000' }, { cookie });
+  assert.match(decodeURIComponent(r.headers.get('location')), /PIN/, 'a wrong PIN is refused');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n,
+    before, 'and nothing was filed');
+});
+
+// --- the add sheet ---------------------------------------------------------
+
+test('2B: adding a shift files a request, writes no punch, and can carry a break', async () => {
+  const emp = 232;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3232',1500,1)")
+    .run(emp, 'Never Clocked');
+  const per = curPeriod();
+  const day = require('../src/dates').addDays(per.start, 2);
+  const cookie = await signIn('3232');
+
+  const page = await text(`/portal/timesheet/day/${day}`, { cookie });
+  assert.match(page, /data-pes="new-/, 'the add sheet is on the day');
+  assert.match(page, /Took a break\?/, 'with the optional break folded away');
+  assert.match(page, /name="pin"/, 'adding still asks for the PIN');
+
+  const before = entriesOf(emp).length;
+  await post('/portal/clock/add', {
+    at_in: `${day}T17:00`, at_out: `${day}T23:00`, position: 'server', daypart: 'dinner',
+    brk_start: `${day}T19:00`, brk_end: `${day}T19:30`, pin: '3232', note: 'tablet was down',
+  }, { cookie });
+  assert.strictEqual(entriesOf(emp).length, before, 'nothing is written to the clock yet');
+  const corr = lastCorr();
+  assert.strictEqual(corr.kind, 'new_shift');
+  assert.strictEqual(corr.time_entry_id, null, 'there is no punch for it to point at');
+  assert.strictEqual(payloadOf(corr).breaks.length, 1, 'the break travels with it');
+
+  await decide(corr.id, 'approved');
+  assert.strictEqual(entriesOf(emp).length, before + 1, 'approval makes the punch');
+  const e = entriesOf(emp).slice(-1)[0];
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(e.id).n, 1,
+    'and the break with it');
+  assert.strictEqual(e.payable_minutes, 330, 'six hours less the half hour');
+});
+
+test('2B: adding a shift over one that exists is refused at the door', async () => {
+  const emp = 233;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3233',1500,1)")
+    .run(emp, 'Overlapper');
+  const eid = seedInPeriod(emp, 10, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3233');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n;
+  const r = await post('/portal/clock/add', {
+    at_in: `${day}T14:00`, at_out: `${day}T20:00`, position: 'server', daypart: 'dinner', pin: '3233',
+  }, { cookie });
+  assert.match(decodeURIComponent(r.headers.get('location')), /err=/, 'refused');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n,
+    before, 'and no request that could never be granted was filed');
+});
+
+test('2B: a break outside the shift is refused when adding', async () => {
+  const emp = 234;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3234',1500,1)")
+    .run(emp, 'Stray Break');
+  const per = curPeriod();
+  const day = require('../src/dates').addDays(per.start, 3);
+  const cookie = await signIn('3234');
+  const r = await post('/portal/clock/add', {
+    at_in: `${day}T17:00`, at_out: `${day}T23:00`, position: 'server', daypart: 'dinner',
+    brk_start: `${day}T15:00`, brk_end: `${day}T15:30`, pin: '3234',
+  }, { cookie });
+  assert.match(decodeURIComponent(r.headers.get('location')), /break has to sit inside the shift/);
+});
+
+test('2B: adding a shift still requires the PIN', async () => {
+  const emp = 235;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3235',1500,1)")
+    .run(emp, 'Add Pin Kept');
+  const per = curPeriod();
+  const day = require('../src/dates').addDays(per.start, 4);
+  const cookie = await signIn('3235');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n;
+  const r = await post('/portal/clock/add', {
+    at_in: `${day}T17:00`, at_out: `${day}T23:00`, position: 'server', daypart: 'dinner', pin: '0000',
+  }, { cookie });
+  assert.match(decodeURIComponent(r.headers.get('location')), /PIN/);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_corrections WHERE employee_id = ?').get(emp).n, before);
+});
+
+// --- the submit sheet and its token ---------------------------------------
+
+test('2B: the staleness token is a digest, and it moves when the hours do', async () => {
+  const emp = 236;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3236',1500,1)")
+    .run(emp, 'Token Holder');
+  const per = curPeriod();
+  const eid = seedInPeriod(emp, 11, '09:00', '17:00');
+  const cookie = await signIn('3236');
+  const tokenOf = async () => ((await text(`/portal/timesheet?p=${per.start}`, { cookie }))
+    .match(/name="seen" value="([^"]*)"/) || [])[1];
+
+  const t1 = await tokenOf();
+  assert.match(t1, /^[0-9a-f]{16}$/, 'opaque and fixed-width, not a float');
+  assert.ok(!/\./.test(t1), 'nothing that can be reformatted differently by anything');
+  assert.strictEqual(await tokenOf(), t1, 'stable across renders when nothing changed');
+
+  // A shift whose total is IDENTICAL but whose punches moved. The bare figure
+  // this replaced could not see this at all.
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  db.prepare('UPDATE time_entries SET clock_in_at = ?, clock_out_at = ? WHERE id = ?')
+    .run(T2.localInputToUtc(`${day}T10:00`), T2.localInputToUtc(`${day}T18:00`), eid);
+  const t2 = await tokenOf();
+  assert.notStrictEqual(t2, t1, 'the same eight hours at different times is a different timesheet');
+
+  // And a signature given for the old figures is refused.
+  const r = await post('/portal/timesheet/submit',
+    { period: per.start, confirm: '1', seen: t1 }, { cookie });
+  assert.match(decodeURIComponent(r.headers.get('location')), /hours changed while this was open/);
+  const r2 = await post('/portal/timesheet/submit',
+    { period: per.start, confirm: '1', seen: t2 }, { cookie });
+  assert.ok(!/err=/.test(decodeURIComponent(r2.headers.get('location'))), 'the current one goes through');
+});
+
+test('2B: the submit sheet shows the period and its hours, and asks for no PIN', async () => {
+  const emp = 237;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3237',1500,1)")
+    .run(emp, 'Sheet Signer');
+  const per = curPeriod();
+  seedInPeriod(emp, 12, '09:00', '17:00');
+  const cookie = await signIn('3237');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  const sheet = (html.match(/data-pes="submit"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(sheet, 'it uses the shared bottom sheet, like every other one');
+  assert.match(sheet, /<span>Pay period<\/span>/, 'the period');
+  assert.match(sheet, /<span>Regular<\/span>/, 'regular hours');
+  assert.match(sheet, /Total hours/, 'the total');
+  assert.match(sheet, /name="confirm"/, 'the confirmation');
+  assert.match(sheet, /name="note"/, 'an optional note');
+  assert.ok(!/name="pin"/.test(sheet), 'and no PIN');
+});
+
+// --- shell, navigation, and the mobile hooks ------------------------------
+
+test('2B: every redesigned screen carries one crumb and a way back', async () => {
+  const emp = 238;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3238',1500,1)")
+    .run(emp, 'Navigator');
+  const per = curPeriod();
+  const eid = seedInPeriod(emp, 13, '09:00', '17:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3238');
+  for (const [path, back] of [
+    ['/portal/clock', '/portal'],
+    [`/portal/clock/entry/${eid}`, '/portal/clock'],
+    [`/portal/timesheet?p=${per.start}`, '/portal/clock'],
+    [`/portal/timesheet/day/${day}`, `/portal/timesheet?p=${per.start}`],
+  ]) {
+    const html = await text(path, { cookie });
+    assert.match(html, /class="pt-crumb"/, `${path} has the one header`);
+    assert.ok(html.includes(`class="pt-back" href="${back}"`), `${path} goes back to ${back}`);
+    assert.match(html, /data-pt-back/, `${path} prefers real history when there is some`);
+  }
+});
+
+test('2B: the clock screen is built for a phone', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal/clock', { cookie });
+  assert.match(html, /viewport-fit=cover/, 'it opts into the safe area');
+  assert.match(html, /class="pt has-tabs"/, 'and reserves room for the tab bar');
+  assert.ok(!/<table/.test(html), 'no table on the primary employee screen');
+  // Every class the redesigned card uses must actually be defined, or the page
+  // renders as unstyled boxes on a phone and nobody finds out until service.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  for (const cls of ['tcc', 'tcc-top', 'tcc-dot', 'tcc-state', 'tcc-clock', 'tcc-cap',
+    'tcc-facts', 'tcc-f', 'tcc-note', 'tcc-acts', 'tcc-form', 'tcc-field', 'tcc-alert',
+    'tcc-on', 'tcc-break', 'tcc-warn', 'tcc-blocked', 'tcc-off', 'tcc-done',
+    'pes-more', 'pes-more-b', 'pes-line', 'pes-rows', 'pes-acts', 'pes-panel-sm',
+    'tcd-tot', 'tcd-st']) {
+    assert.ok(css.includes(`.${cls}`), `staff.css defines .${cls}`);
+  }
 });

@@ -522,3 +522,58 @@ their components. Redesigning it first would mean inventing card shapes twice.
 8. `<script>` inside `innerHTML` never executes — any scripted component must
    be emitted on the host page, not injected into a fragment.
 9. The 759-test suite stays green at every step.
+
+---
+
+## 11. Phase 2B components (shipped)
+
+Portal only. All in `public/staff.css`, all token-driven.
+
+### The status card — `.tcc`
+
+One shape, four tones. Never a different layout per state.
+
+```
+.tcc              card shell (radius, hairline, 4px left rule)
+  .tcc-top          dot + status word
+  .tcc-clock        the live figure, tabular mono, 46px (38px under 360px)
+  .tcc-cap          the caption under it
+  .tcc-facts        ruled rows — borders, not background gaps, so it works
+    .tcc-f          on a tinted card as well as a white one
+  .tcc-note         explanatory line (.tcc-note-warn for amber)
+  .tcc-acts         stacked full-width actions, primary first
+  .tcc-form         the clock-in form (.tcc-field per asked question)
+```
+
+Tones: `.tcc-on` green · `.tcc-break` amber + `--pt-warn-soft` · `.tcc-warn`
+amber rule only · `.tcc-blocked` red · `.tcc-off` neutral · `.tcc-done` green +
+`--pt-ok-soft`.
+
+**Red is reserved.** Only `.tcc-blocked` — no assigned position — is red. A
+shift left open past the threshold is amber, because they are not blocked: they
+can still clock out from that card.
+
+### Bottom sheet additions — `.pes-*`
+
+`.pes` was already the one sheet pattern. Phase 2B added:
+
+- `.pes-panel-sm` — read-and-confirm sheets that size to content
+- `.pes-rows` / `.pes-line` — label/value rows
+- `.pes-acts` — Cancel + primary, `1fr 1.4fr`
+- `.pes-more` — the "More changes" disclosure, with a rotating chevron
+- `.pes-brk` — a break row: two `type="time"` faces, and a hidden pair carrying
+  the full datetime that `pesScript` fastens the day onto at submit
+
+`count()` in `pesScript` returns `0` for a sheet with no time fields, which is
+what lets the submit-timesheet sheet share the shell.
+
+### Shift detail — `.tcd-*`
+
+`.tcd-tot` (payable, first) and `.tcd-st` (`-pending` amber, `-approved` green,
+`-rejected` red).
+
+### Feedback
+
+Success is a toast (`.pt-toasts` / `.pt-toast.ok`, removed after 3.6s); failure
+is `.tcc-alert` and keeps its place on the page. The URL keeps its `?ok=` either
+way, so a reload still tells the truth.

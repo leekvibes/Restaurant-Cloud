@@ -4741,8 +4741,13 @@ function clockPage(req, who, opts = {}) {
   const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
 
   const todays = st.doneToday;
-  const err = opts.err ? `<div class="tc-err">${esc(opts.err)}</div>` : '';
-  const ok = opts.ok ? `<div class="tc-ok">${esc(opts.ok)}</div>` : '';
+  // A failure stays on the screen; a success does not. "Clocked in." is news
+  // for about two seconds and then it is a banner sitting above the card that
+  // already says Working — which is why it used to still be there, pushing the
+  // clock down, on a page somebody reloads all evening. Anything that went
+  // wrong keeps its place, because that is a thing they still have to act on.
+  const err = opts.err ? `<div class="tcc-alert" role="alert">${esc(opts.err)}</div>` : '';
+  const ok = opts.ok ? String(opts.ok) : '';
 
   // --- the one card that matters ------------------------------------------
   // The counter is anchored to the SERVER's clock, not the phone's: the page
@@ -4750,81 +4755,138 @@ function clockPage(req, who, opts = {}) {
   // script works out the difference once. A device an hour fast still shows the
   // true elapsed time.
   const serverNow = TC.toDate(TC.nowUtc()).getTime();
-  let card = '';
+
+  // One card, four states, one shape. What was here grew a different layout per
+  // state — different type sizes, the live figure in a different place, the
+  // actions in a different order — so the screen somebody looks at forty times
+  // a week rearranged itself under them depending on what they were doing.
+  // Status word, live figure, the facts, the actions: always in that order.
+  const fact = (k, v) => `<div class="tcc-f"><span>${k}</span><b>${v}</b></div>`;
+  const shell = (tone, state, body) => `
+    <section class="tcc tcc-${tone}" aria-live="polite">
+      <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+        <span class="tcc-state">${esc(state)}</span></div>
+      ${body}
+    </section>`;
+
+  let card = '', outSheet = '';
   if (active && active.status === 'on_break') {
     const br = TC.q.openBreak.get(active.id);
-    card = `
-      <div class="tc-state tc-break">
-        <div class="tc-kick">On break</div>
-        <div class="tc-live" data-since="${TC.toDate(br.start_at).getTime()}" data-now="${serverNow}">0:00</div>
-        <div class="tc-meta">Break started ${esc(TC.clockFace(br.start_at))} · ${esc(br.paid ? 'paid' : 'unpaid')}</div>
-        <div class="tc-sub" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}"
-          data-prefix="On the clock ">On the clock</div>
-        <form method="post" action="/portal/clock/break/end" class="tc-actions">
-          <button class="tc-btn tc-btn-go" type="submit" data-once>End break</button>
+    const bt = TC.breakTotals(active.id);
+    // Payable stops when an unpaid break starts, so it is quoted as of that
+    // moment rather than ticking — a figure that grows while somebody is
+    // sitting down is a figure that will not match their cheque. A paid break
+    // does keep counting, and says so.
+    const payable = br.paid
+      ? Math.max(0, TC.elapsedMinutes(active) - bt.unpaid)
+      : Math.max(0, TC.minutesBetween(active.clock_in_at, br.start_at) - bt.unpaid);
+    card = shell('break', 'On break', `
+      <div class="tcc-clock" data-since="${TC.toDate(br.start_at).getTime()}" data-now="${serverNow}">0:00</div>
+      <div class="tcc-cap">on break since ${esc(TC.clockFace(br.start_at))}${br.paid ? ' · paid' : ''}</div>
+      <div class="tcc-facts">
+        ${fact('Payable so far', esc(TC.hm(payable)))}
+        ${fact('Clocked in', esc(TC.clockFace(active.clock_in_at)))}
+      </div>
+      ${br.paid ? '' : '<p class="tcc-note">Your payable time is paused while you are on an unpaid break.</p>'}
+      <div class="tcc-acts">
+        <form method="post" action="/portal/clock/break/end">
+          <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>End break</button>
         </form>
-      </div>`;
+      </div>`);
   } else if (active) {
     const stale = looksStale(active);
-    card = `
-      <div class="tc-state tc-on${stale ? ' tc-stale' : ''}">
-        <div class="tc-kick">${stale ? 'Still clocked in' : 'On the clock'}</div>
-        <div class="tc-live" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}">0:00</div>
-        <div class="tc-meta">In at ${esc(TC.clockFace(active.clock_in_at))}
-          · ${esc(posName(active.position))}${active.daypart ? ' · ' + esc(dp(active.daypart)) : ''}</div>
-        ${TC.breakTotals(active.id).unpaid ? `<div class="tc-sub">Less ${TC.hm(TC.breakTotals(active.id).unpaid)} of break so far</div>` : ''}
-        ${stale ? `<p class="tc-note">That is over ${staleHours()} hours. If you forgot to clock out,
-          clock out now and then ask your manager to fix the time.</p>` : ''}
-        <div class="tc-actions">
-          <form method="post" action="/portal/clock/break/start">
-            <button class="tc-btn tc-btn-quiet" type="submit" data-once>Start break</button>
-          </form>
-          ${cfg.pinAtOut
-            ? `<button class="tc-btn tc-btn-go" type="button" onclick="document.getElementById('tc-outsheet').hidden=false">Clock out</button>`
-            : `<form method="post" action="/portal/clock/out">
-                 <button class="tc-btn tc-btn-go" type="submit" data-once>Clock out</button>
-               </form>`}
-        </div>
+    const bt = TC.breakTotals(active.id);
+    card = shell(stale ? 'warn' : 'on', stale ? 'Still clocked in' : 'Working', `
+      <div class="tcc-clock" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}">0:00</div>
+      <div class="tcc-cap">since ${esc(TC.clockFace(active.clock_in_at))}</div>
+      <div class="tcc-facts">
+        ${fact('Position', esc(posName(active.position)))}
+        ${fact('Service', active.daypart ? esc(dp(active.daypart)) : '—')}
+        ${bt.unpaid ? fact('Break', `−${esc(TC.hm(bt.unpaid))} unpaid`) : ''}
       </div>
-      ${cfg.pinAtOut ? `<div class="tc-sheet" id="tc-outsheet" hidden>
-        <form method="post" action="/portal/clock/out">
-          <div class="tc-kick">Enter your PIN to clock out</div>
-          <input class="tc-pin" name="pin" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="••••" required>
-          <div class="tc-actions">
-            <button class="tc-btn tc-btn-quiet" type="button" onclick="document.getElementById('tc-outsheet').hidden=true">Cancel</button>
-            <button class="tc-btn tc-btn-go" type="submit" data-once>Clock out</button>
+      ${stale ? `<p class="tcc-note tcc-note-warn">That is over ${staleHours()} hours. If you forgot to
+        clock out, clock out now — then open the shift and ask for the right time.</p>` : ''}
+      <div class="tcc-acts">
+        ${/* Primary is Clock out, and it opens the confirmation sheet rather
+              than firing. Start break is deliberately the quiet one: it is the
+              more frequent tap but the less consequential, and putting the two
+              at the same visual weight is how somebody ends their shift when
+              they meant to sit down for ten minutes. */''}
+        <button class="tc-btn tc-btn-go tc-btn-big" type="button" data-pes-open="clockout">Clock out</button>
+        <form method="post" action="/portal/clock/break/start">
+          <button class="tc-btn tc-btn-quiet tc-btn-big" type="submit" data-once>Start break</button>
+        </form>
+      </div>`);
+
+    // The clock-out confirmation. No PIN — see /portal/clock/out. Its figures
+    // tick, because this sheet is rendered when the PAGE loads and somebody can
+    // sit on the clock screen for an hour before tapping Clock out; a frozen
+    // "you will be paid for 6h 02m" that was true at 4pm is worse than no
+    // figure at all.
+    const bt2 = TC.breakTotals(active.id);
+    outSheet = `
+      <div class="pes" data-pes="clockout" hidden>
+        <div class="pes-scrim" data-pes-close></div>
+        <form class="pes-panel pes-panel-sm" method="post" action="/portal/clock/out">
+          <div class="pes-bar">
+            <button type="button" class="pes-back" data-pes-close aria-label="Cancel">‹</button>
+            <b>Clock out</b>
+          </div>
+          <div class="pes-rows">
+            <div class="pes-line"><span>Clocked in</span><b>${esc(TC.clockFace(active.clock_in_at))}</b></div>
+            <div class="pes-line"><span>Clocking out</span>
+              <b data-live-face data-now="${serverNow}">${esc(TC.clockFace(TC.nowUtc()))}</b></div>
+            <div class="pes-line"><span>Break</span><b>${bt2.unpaid || bt2.paid
+              ? esc(TC.hm(bt2.unpaid + bt2.paid)) + (bt2.unpaid ? ` (${esc(TC.hm(bt2.unpaid))} unpaid)` : ' (paid)')
+              : 'none'}</b></div>
+            <div class="pes-line"><span>Position</span><b>${esc(posName(active.position))}</b></div>
+            <div class="pes-line"><span>Service</span><b>${active.daypart ? esc(dp(active.daypart)) : '—'}</b></div>
+          </div>
+          <div class="pes-total"><span>Payable</span>
+            <b data-live-mins data-base="${-bt2.unpaid}"
+               data-since="${TC.toDate(active.clock_in_at).getTime()}"
+               data-now="${serverNow}">${esc(TC.hm(Math.max(0, TC.elapsedMinutes(active) - bt2.unpaid)))}</b></div>
+          <p class="pes-fine">Your manager can still fix this afterwards — open the shift and ask.</p>
+          <div class="pes-acts">
+            <button class="tc-btn tc-btn-quiet tc-btn-big" type="button" data-pes-close>Cancel</button>
+            <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Confirm clock out</button>
           </div>
         </form>
-      </div>` : ''}`;
+      </div>`;
   } else if (!allowed.length) {
-    card = `<div class="tc-state tc-blocked">
-      <div class="tc-kick">Cannot clock in</div>
-      <p class="tc-big">No position is assigned to you.</p>
-      <p class="tc-note">Ask your manager to add your position in Staff, then you can clock in.</p>
-    </div>`;
+    // The only red state on this screen. Red is reserved for a thing they
+    // cannot get past, and this is the one: no position means no clock-in, and
+    // no amount of tapping fixes it from here.
+    card = shell('blocked', 'Cannot clock in', `
+      <p class="tcc-big">No position is assigned to you.</p>
+      <p class="tcc-note">Ask your manager to add your position, then you can clock in.</p>`);
   } else {
     const one = allowed.length === 1;
     const suggested = TC.suggestDaypart(TC.nowUtc(), cfg.dinnerFrom);
-    card = `
-      <div class="tc-state tc-off">
-        <div class="tc-kick">${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
-        <p class="tc-big">You are clocked out.</p>
-        <form method="post" action="/portal/clock/in" class="tc-form">
-          ${one
-            ? `<input type="hidden" name="position" value="${esc(allowed[0])}">
-               <div class="tc-fixed"><span>Position</span><b>${esc(posName(allowed[0]))}</b></div>`
-            : `<label class="tc-field"><span>Which position are you working?</span>
-                 <select name="position" required>
-                   <option value="">Choose…</option>
-                   ${allowed.map((r) => `<option value="${esc(r)}">${esc(posName(r))}</option>`).join('')}
-                 </select></label>`}
-          <label class="tc-field"><span>Which service?</span>
-            <select name="daypart" required>
-              ${DAYPARTS.map((d) => `<option value="${d}"${d === suggested ? ' selected' : ''}>${dp(d)}</option>`).join('')}
-            </select></label>
-          <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Clock in</button>
-        </form>
-      </div>`;
+    // Only what has to be asked. One position is not a choice, and the service
+    // is not one either unless this restaurant has said staff must confirm it —
+    // in which case it is asked, and otherwise it travels as the suggestion the
+    // route was always going to apply.
+    card = shell('off', 'Clocked out', `
+      <div class="tcc-cap">${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+      <form method="post" action="/portal/clock/in" class="tcc-form">
+        ${one
+          ? `<input type="hidden" name="position" value="${esc(allowed[0])}">`
+          : `<label class="tcc-field"><span>Position</span>
+               <select name="position" required>
+                 <option value="">Choose…</option>
+                 ${allowed.map((r) => `<option value="${esc(r)}">${esc(posName(r))}</option>`).join('')}
+               </select></label>`}
+        ${cfg.requireService
+          ? `<label class="tcc-field"><span>Service</span>
+               <select name="daypart" required>
+                 ${DAYPARTS.map((d) => `<option value="${d}"${d === suggested ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+               </select></label>`
+          : `<input type="hidden" name="daypart" value="${esc(suggested)}">`}
+        <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Clock in</button>
+      </form>
+      ${one && !cfg.requireService
+        ? `<p class="tcc-note">${esc(posName(allowed[0]))} · ${esc(dp(suggested))}</p>` : ''}`);
   }
 
   const entryRow = (e) => {
@@ -4838,26 +4900,33 @@ function clockPage(req, who, opts = {}) {
 
   // The clock-out receipt: what was just recorded, and the one way to query it.
   // Shown instead of asking questions nobody wants at the end of a shift.
+  //
+  // It replaces the status card and nothing else — the shortcuts and the day's
+  // rows stay exactly where they were, so this reads as a receipt laid on top
+  // of the screen they know rather than as a different screen.
   const justOut = opts.doneEntry;
   const receipt = !justOut ? '' : (() => {
     const bt = TC.breakTotals(justOut.id);
-    const line = (k, v) => `<div class="tc-rc-r"><span>${k}</span><b>${v}</b></div>`;
-    return `<div class="tc-receipt">
-      <div class="tc-kick">Clocked out</div>
-      <div class="tc-rc-h">${esc(TC.hm(justOut.payable_minutes))}</div>
-      <div class="tc-rc-s">payable · ${esc(new Date(justOut.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
-      <div class="tc-rc-g">
-        ${line('In', esc(TC.clockFace(justOut.clock_in_at)))}
-        ${line('Out', esc(TC.clockFace(justOut.clock_out_at)))}
+    const line = (k, v) => `<div class="tcc-f"><span>${k}</span><b>${v}</b></div>`;
+    return `<section class="tcc tcc-done">
+      <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+        <span class="tcc-state">Clocked out</span></div>
+      <div class="tcc-clock">${esc(TC.hm(justOut.payable_minutes))}</div>
+      <div class="tcc-cap">payable · ${esc(new Date(justOut.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+      <div class="tcc-facts">
+        ${line('Clocked in', esc(TC.clockFace(justOut.clock_in_at)))}
+        ${line('Clocked out', esc(TC.clockFace(justOut.clock_out_at)))}
         ${line('Break', bt.unpaid || bt.paid ? esc(TC.hm(bt.unpaid + bt.paid)) : 'none')}
         ${line('Position', esc(posName(justOut.position)))}
         ${line('Service', justOut.daypart ? esc(dp(justOut.daypart)) : '—')}
       </div>
-      <div class="tc-actions">
-        <a class="tc-btn tc-btn-quiet" href="/portal/clock/entry/${justOut.id}">Something's wrong</a>
-        <a class="tc-btn tc-btn-go" href="/portal/clock">Done</a>
+      <div class="tcc-acts">
+        <a class="tc-btn tc-btn-go tc-btn-big" href="/portal/clock">Done</a>
+        ${/* Straight into the shift, where the edit sheet is — not to a form
+              that asks them to describe the problem in words first. */''}
+        <a class="tc-btn tc-btn-quiet tc-btn-big" href="/portal/clock/entry/${justOut.id}">Something's wrong</a>
       </div>
-    </div>`;
+    </section>`;
   })();
 
   // Today's total sits above everything: the number a person opens this for.
@@ -4878,23 +4947,28 @@ function clockPage(req, who, opts = {}) {
   return portalPage('Time clock', `
     ${portalTop({ href: '/portal', label: 'Home' }, 'Time clock')}
     <div class="pt-body tc-body">
-      ${err}${ok}
-      ${receipt}
-      ${justOut ? '' : summary}
+      ${err}
+      ${receipt || summary}
       ${justOut ? '' : card}
 
+      ${/* Visible rows, not a menu. Every one of these was reachable only
+            through a three-dot button at the top of the screen, which is where
+            an owner-side toolbar puts things nobody uses often — and these are
+            the three things an employee comes here for after clocking in. */''}
       <div class="tc-shorts">
         ${/* Carrying the period, so the tile lands on the one the badge is
               about rather than on whatever is running today. */''}
         ${shortcut(`/portal/timesheet?p=${encodeURIComponent(st.period.start)}`, 'Timesheet',
           `${esc(labelFor(st.period))} · ${TC.hm(TC.totalsFor(st.entries).payable)}`, st.sheetBadge)}
         ${shortcut('/portal/requests', 'My requests', 'Fixes you have asked for', st.reqBadge)}
+        ${shortcut('/portal/clock/history', 'Time history', 'Every shift you have worked', null)}
       </div>
 
       ${todays.length ? `<div class="tc-kick tc-kick-sec">Earlier today</div>
         <div class="tc-rows">${todays.map(entryRow).join('')}</div>` : ''}
-      <a class="tc-more" href="/portal/clock/history">Your time history ›</a>
     </div>
+    ${outSheet}${outSheet ? pesScript() : ''}
+    ${ok ? `<div class="pt-toasts"><div class="pt-toast ok" role="status">${esc(opts.ok)}</div></div>` : ''}
     <script>
       // The counter ticks every second so the time visibly moves while somebody
       // is looking at it. It is display only — the punch the server recorded is
@@ -4923,6 +4997,23 @@ function clockPage(req, who, opts = {}) {
             }
             var txt = fmt(t - Number(el.getAttribute('data-since')));
             el.textContent = (el.getAttribute('data-prefix') || '') + txt;
+          });
+          // The clock-out sheet's figures. This sheet is built when the PAGE
+          // loads and can be opened an hour later, so "clocking out at" and
+          // "payable" have to be worked out at the moment somebody is looking
+          // at them, not at the moment the HTML was written.
+          document.querySelectorAll('[data-live-face]').forEach(function (el) {
+            var d = new Date(t), h = d.getHours(), m = d.getMinutes();
+            var ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+            el.textContent = h + ':' + (m < 10 ? '0' + m : m) + ' ' + ap;
+          });
+          document.querySelectorAll('[data-live-mins]').forEach(function (el) {
+            // base is negative — the unpaid break already taken comes off the
+            // time since the punch, exactly as recompute() does it server-side.
+            var mins = (Number(el.getAttribute('data-base')) || 0)
+              + Math.floor((t - Number(el.getAttribute('data-since'))) / 60000);
+            mins = Math.max(0, mins);
+            el.textContent = Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
           });
         }
         // The total only needs re-reading about once a minute.
@@ -4956,6 +5047,11 @@ function clockPage(req, who, opts = {}) {
             setTimeout(function () { b.disabled = true; b.textContent = 'Working…'; }, 0);
           });
         });
+        // The toast says its piece and goes. The URL keeps the ?ok= so a
+        // reload still tells the truth about what happened; only the pixels
+        // are temporary.
+        var toasts = document.querySelector('.pt-toasts');
+        if (toasts) setTimeout(function () { toasts.remove(); }, 3600);
       })();
     </script>`);
 }
@@ -5093,14 +5189,16 @@ app.post('/portal/clock/out', (req, res) => {
   const { emp } = who;
   const back = (p) => res.redirect('/portal/clock?' + p);
   const active = TC.q.active.get(emp.id);
+  // Already clocked out — a double-tap, or the sheet submitted twice. Not an
+  // error, and not a second punch: the first one stands and they are told so.
   if (!active) return back('ok=' + encodeURIComponent('You are already clocked out.'));
-  // Off by default: they are holding the phone they signed in on, so a second
-  // PIN confirms nothing the session has not already established. Restaurants
-  // that want the extra step can switch it back on in the time-clock settings.
-  if (TC.settings().pinAtOut) {
-    const g = pinCheck(req, emp, req.body.pin);
-    if (!g.ok) return back('err=' + encodeURIComponent(g.msg + ' Nothing was changed.'));
-  }
+  // No PIN, ever, and no setting that can bring one back. Clocking out is the
+  // one action here that is purely about now, by somebody holding the phone
+  // they already signed in on — a second challenge confirms nothing the session
+  // has not established, and it stood between a person and the end of their
+  // shift. Editing or adding a shift still asks, because those are claims about
+  // a time that has already passed. The confirmation sheet is what makes this
+  // deliberate, and it is on the page rather than in this route.
   if (active.status === 'on_break' || TC.q.openBreak.get(active.id)) {
     return back('err=' + encodeURIComponent('End your break first, then clock out.'));
   }
@@ -5161,6 +5259,36 @@ app.post('/portal/clock/out', (req, res) => {
  * would have — silently, by wiring the second sheet's arithmetic to the
  * first sheet's inputs.
  */
+/**
+ * Audit actions in plain English, for the person the shift belongs to.
+ *
+ * The owner's screens print the raw action — `clock_out_corrected` — and that
+ * is defensible there, where the reader works with the clock every day. On the
+ * portal it is not, and the alternative that shipped was worse: the shift
+ * detail said "edited: yes — see the history with your manager", which is a
+ * page telling somebody to go and ask a person for information the page is
+ * holding. Only actions a person can make sense of appear; anything not in
+ * this map is filtered out rather than printed raw.
+ */
+const TC_EVENT = {
+  clock_in: 'Clocked in', clock_out: 'Clocked out',
+  break_start: 'Break started', break_end: 'Break ended',
+  clock_in_corrected: 'Clock-in changed', clock_out_corrected: 'Clock-out changed',
+  break_added: 'Break added', break_corrected: 'Break changed',
+  position_corrected: 'Position changed', service_corrected: 'Service changed',
+  created_from_request: 'Shift added from your request',
+  // Deliberately not listed: hours_written. It is the clock telling the shift
+  // sheet what the punch came to — real, audited, and no part of the story a
+  // person is reading this to follow. History here is what happened to their
+  // shift, not what the system did about it.
+};
+/** The ones whose before/after are timestamps, so they can be shown as times. */
+const TC_EVENT_TIME = {
+  clock_in_corrected: 1, clock_out_corrected: 1,
+};
+/** A decision, as a word rather than a database value. */
+const REQ_STATE = { pending: 'Waiting', approved: 'Approved', rejected: 'Not approved' };
+
 function pesCanAsk(e) {
   // Not while they are still on it: the end has not happened yet, and a
   // request to change a time that does not exist is not a thing to file.
@@ -5178,19 +5306,30 @@ const pesUnpaid = (brs) => brs.reduce(
 const pesButton = (e, label = 'Edit shift', cls = 'tc-btn tc-btn-go tc-btn-big') =>
   `<button type="button" class="${cls}" data-pes-open="${e.id}">${esc(label)}</button>`;
 
-/** The sheet itself. Render one per shift; they are fixed-position and hidden. */
-function pesSheet(e, brs) {
+/**
+ * The sheet itself. Render one per shift; they are fixed-position and hidden.
+ *
+ * Four fields are the default view — start, end, total, note — because four
+ * fields is what a wrong shift usually is. Position, service and breaks are
+ * real and they are here, folded into "More changes", where they cost one tap
+ * for the few people who need them and nothing at all for everybody else.
+ */
+function pesSheet(e, brs, opts = {}) {
   const inLocal = TC.utcToLocalInput(e.clock_in_at);
   // An unfinished shift has no end to show, so it offers the clock-in's own
   // day and leaves the time blank rather than inventing one.
   const outLocal = e.clock_out_at
     ? TC.utcToLocalInput(e.clock_out_at)
     : inLocal.slice(0, 10) + 'T';
+  const roles = opts.positions || [];
+  const parts = opts.dayparts || DAYPARTS;
+  const bLocal = (v) => (v ? TC.utcToLocalInput(v).slice(11, 16) : '');
+  const day = inLocal.slice(0, 10);
   return `
     <div class="pes" data-pes="${e.id}" hidden>
       <div class="pes-scrim" data-pes-close></div>
       <form class="pes-panel" method="post" action="/portal/clock/fix"
-            data-unpaid="${pesUnpaid(brs)}"
+            data-unpaid="${pesUnpaid(brs)}" data-day="${esc(day)}"
             data-orig-in="${esc(inLocal)}" data-orig-out="${esc(outLocal)}">
         <div class="pes-bar">
           <button type="button" class="pes-back" data-pes-close aria-label="Back">‹</button>
@@ -5214,6 +5353,42 @@ function pesSheet(e, brs) {
         </label>
 
         <div class="pes-total"><span>Total hours<i data-pes-sub></i></span><b data-pes-tot>—</b></div>
+
+        <details class="pes-more">
+          <summary>More changes<i>position, service, breaks</i></summary>
+          <div class="pes-more-b">
+            ${roles.length > 1 ? `<label class="pes-row"><span>Position</span>
+              <select name="position" class="pes-sel">
+                ${roles.map((r) => `<option value="${esc(r)}"${r === e.position ? ' selected' : ''}>${esc(posName(r))}</option>`).join('')}
+              </select></label>` : ''}
+            <label class="pes-row"><span>Service</span>
+              <select name="daypart" class="pes-sel">
+                ${parts.map((d) => `<option value="${esc(d)}"${d === e.daypart ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}
+              </select></label>
+            ${/* Breaks are times on the same day, so only the clock face is
+                   asked for — the date comes off the shift. A break that
+                   crosses midnight is rare enough to be worth a manager. */''}
+            ${/* The clock faces are what somebody fills in; the hidden pair
+                   beside them is what posts. A type="time" input cannot hold a
+                   full datetime, so the day is fastened on at submit — see
+                   pesScript, which picks whichever of the shift's two days puts
+                   the break inside the shift. */''}
+            ${brs.map((b) => `<label class="pes-row pes-brk" data-pes-brkrow><span>Break${b.paid ? ' (paid)' : ''}</span>
+              <input type="hidden" name="brk_id" value="${b.id}">
+              <input type="hidden" name="brk_start" data-pes-bs>
+              <input type="hidden" name="brk_end" data-pes-be>
+              <input type="time" data-pes-bt="s" value="${esc(bLocal(b.start_at))}">
+              <input type="time" data-pes-bt="e" value="${esc(bLocal(b.end_at))}">
+            </label>`).join('')}
+            <label class="pes-row pes-brk" data-pes-brkrow><span>Add a break</span>
+              <input type="hidden" name="brk_id" value="">
+              <input type="hidden" name="brk_start" data-pes-bs>
+              <input type="hidden" name="brk_end" data-pes-be>
+              <input type="time" data-pes-bt="s">
+              <input type="time" data-pes-bt="e">
+            </label>
+          </div>
+        </details>
 
         <label class="pes-note"><span>Add a note <i>optional</i></span>
           <textarea name="note" maxlength="500" rows="3" placeholder="Attach a note to your request"></textarea></label>
@@ -5271,6 +5446,23 @@ function pesAddSheet(emp, date, positions_, dayparts) {
             ${dayparts.map((d) => `<option value="${esc(d)}">${esc(dp(d))}</option>`).join('')}
           </select></label>
 
+        ${/* A break, when there was one. Folded away for the same reason it is
+               on the edit sheet: most shifts being added back are a straight
+               in-and-out somebody forgot to punch, and asking everybody about
+               breaks to serve the few who took one is how a two-field job
+               becomes a form. */''}
+        <details class="pes-more">
+          <summary>Took a break?<i>optional</i></summary>
+          <div class="pes-more-b">
+            <label class="pes-row pes-brk" data-pes-brkrow><span>Break</span>
+              <input type="hidden" name="brk_start" data-pes-bs>
+              <input type="hidden" name="brk_end" data-pes-be>
+              <input type="time" data-pes-bt="s">
+              <input type="time" data-pes-bt="e">
+            </label>
+          </div>
+        </details>
+
         <label class="pes-note"><span>Add a note <i>optional</i></span>
           <textarea name="note" maxlength="500" rows="3" placeholder="Say what happened, if it helps"></textarea></label>
 
@@ -5308,15 +5500,52 @@ function pesScript() {
       // bigger number than the one that reaches the cheque. The deduction is
       // spelled out underneath rather than silently applied.
       var b = bits(lay), unpaid = Number(b.f.getAttribute('data-unpaid')) || 0;
+      // Not every sheet is about a pair of times — the submit-timesheet sheet
+      // uses this same shell for its scrim, its swipe and its Cancel, and has
+      // nothing to add up. No time fields, nothing to check.
+      if (!b.ind || !b.int_ || !b.outd || !b.outt || !b.tot) return 0;
       if (!b.ind.value || !b.int_.value || !b.outd.value || !b.outt.value) {
         b.tot.textContent = '—'; b.sub.textContent = ''; return null;
       }
       var m = Math.round((new Date(b.outd.value + 'T' + b.outt.value)
                         - new Date(b.ind.value + 'T' + b.int_.value)) / 60000);
       if (!(m > 0)) { b.tot.textContent = 'check the times'; b.sub.textContent = ''; return null; }
+      // Breaks the sheet is CURRENTLY showing, not the ones the shift was
+      // rendered with — somebody who shortens their break in More changes has
+      // to see the total go up as they do it, or the figure they are signing
+      // off is not the one the request will produce.
+      var edited = breakMins(lay);
+      if (edited !== null) unpaid = edited;
       b.tot.textContent = hm(Math.max(0, m - unpaid));
       b.sub.textContent = unpaid ? hm(m) + ' less ' + unpaid + 'm unpaid break' : '';
       return m;
+    }
+    // The break rows, in minutes, or null when this sheet has none.
+    function breakMins(lay) {
+      var rows = lay.querySelectorAll('[data-pes-brkrow]');
+      if (!rows.length) return null;
+      var total = 0;
+      for (var i = 0; i < rows.length; i += 1) {
+        var s = rows[i].querySelector('[data-pes-bt="s"]');
+        var e = rows[i].querySelector('[data-pes-bt="e"]');
+        if (!s || !e || !s.value || !e.value) continue;
+        var d = (new Date('2000-01-01T' + e.value) - new Date('2000-01-01T' + s.value)) / 60000;
+        if (d < 0) d += 1440;                      // a break across midnight
+        total += Math.round(d);
+      }
+      return total;
+    }
+    // A break is entered as a clock face; the shift says which day that is.
+    // A shift running 6pm–2am has two, and the right one is whichever puts the
+    // break inside the shift — so 11pm lands on the first day and 1am on the
+    // second without anybody being asked about it.
+    function withDay(t, inStr, outStr) {
+      if (!t) return '';
+      var a = inStr.slice(0, 10) + 'T' + t;
+      if (a >= inStr && (!outStr || a <= outStr)) return a;
+      var b2 = (outStr || inStr).slice(0, 10) + 'T' + t;
+      if (b2 >= inStr && (!outStr || b2 <= outStr)) return b2;
+      return a;                                    // outside the shift: let the server say so
     }
     function show(lay, on) {
       lay.hidden = !on;
@@ -5345,9 +5574,20 @@ function pesScript() {
       // Only what actually moved travels. An unchanged end is not a request to
       // set the end to what it already is.
       var b = bits(lay);
+      if (!b.ind || !b.outd) return;               // a sheet with no times to send
       var inNew = b.ind.value + 'T' + b.int_.value, outNew = b.outd.value + 'T' + b.outt.value;
       b.f.querySelector('[data-pes-in]').value = inNew === b.f.getAttribute('data-orig-in') ? '' : inNew;
       b.f.querySelector('[data-pes-out]').value = outNew === b.f.getAttribute('data-orig-out') ? '' : outNew;
+      // Break clock faces get their day fastened on here, into the hidden pair
+      // that actually posts. A row left blank posts blank and the server skips
+      // it, so an untouched "Add a break" is not a request to add nothing.
+      lay.querySelectorAll('[data-pes-brkrow]').forEach(function (row) {
+        var s = row.querySelector('[data-pes-bt="s"]'), e2 = row.querySelector('[data-pes-bt="e"]');
+        var hs = row.querySelector('[data-pes-bs]'), he = row.querySelector('[data-pes-be]');
+        if (!hs || !he) return;
+        hs.value = s && s.value ? withDay(s.value, inNew, outNew) : '';
+        he.value = e2 && e2.value ? withDay(e2.value, inNew, outNew) : '';
+      });
     });
   })();
   </script>`;
@@ -5372,22 +5612,49 @@ app.get('/portal/clock/entry/:id', (req, res) => {
   // themselves, and that has not moved.
   const { can: canAsk, why: whyNot } = pesCanAsk(e);
 
+  const bt = TC.breakTotals(e.id);
+  // What the clock did to this shift, in words somebody who does not work here
+  // would recognise. The audit rows are already kept for every punch; the only
+  // thing standing between an employee and their own history was that nobody
+  // had translated `clock_out_corrected` into English. "See the history with
+  // your manager" was the old answer, and it is not an answer.
+  const hist = TC.q.eventsFor.all('entry', e.id).filter((v) => TC_EVENT[v.action]);
+
   res.send(portalPage('Your time', `
     ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'Your shift')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
+
+      ${/* The number they came to check, before the detail that explains it. */''}
+      <div class="tcd-tot"><b>${esc(TC.hm(e.payable_minutes))}</b><span>payable</span></div>
+
       <div class="tc-facts">
         ${fact('Clocked in', esc(TC.clockFace(e.clock_in_at)))}
         ${fact('Clocked out', e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i>still open</i>')}
+        ${fact('Breaks', brs.length
+          ? esc(brs.map((b) => `${TC.clockFace(b.start_at)}–${b.end_at ? TC.clockFace(b.end_at) : '…'}${b.paid ? ' (paid)' : ''}`).join(', '))
+            + (bt.unpaid ? ` <i>−${esc(TC.hm(bt.unpaid))}</i>` : '')
+          : 'none')}
         ${fact('Position', esc(posName(e.position)))}
         ${fact('Service', e.daypart ? esc(dp(e.daypart)) : '—')}
-        ${fact('Breaks', brs.length ? brs.map((b) => `${TC.clockFace(b.start_at)}–${b.end_at ? TC.clockFace(b.end_at) : '…'}`).join(', ') : 'none')}
-        ${fact('Payable', esc(TC.hm(e.payable_minutes)))}
-        ${e.edited ? fact('Edited', 'yes — see the history with your manager') : ''}
       </div>
+
       ${corr.length ? `<div class="tc-kick tc-kick-sec">Your requests</div>
-        <div class="tc-rows">${corr.map((c) => `<div class="tc-row"><span class="tc-row-l"><b>${esc(c.kind.replace(/_/g, ' '))}</b><i>${esc(c.reason)}</i></span>
-          <span class="tc-row-r"><b>${esc(c.decision)}</b></span></div>`).join('')}</div>` : ''}
+        <div class="tc-rows">${corr.map((c) => `<div class="tc-row tc-row-flat">
+          <span class="tc-row-l"><b>${esc(reqKind(c))}</b>
+            <i>${esc(c.proposed_value || c.reason || '')}</i></span>
+          <span class="tc-row-r"><b class="tcd-st tcd-st-${esc(c.decision)}">${esc(REQ_STATE[c.decision] || c.decision)}</b>
+            ${c.decision_note ? `<i>${esc(c.decision_note)}</i>` : ''}</span>
+        </div>`).join('')}</div>` : ''}
+
+      ${hist.length ? `<div class="tc-kick tc-kick-sec">History</div>
+        <div class="tc-rows">${hist.map((v) => `<div class="tc-row tc-row-flat">
+          <span class="tc-row-l"><b>${esc(TC_EVENT[v.action])}</b>
+            ${v.before_val && v.after_val && TC_EVENT_TIME[v.action]
+              ? `<i>${esc(TC.clockFace(v.before_val))} → ${esc(TC.clockFace(v.after_val))}</i>`
+              : v.reason ? `<i>${esc(v.reason)}</i>` : ''}</span>
+          <span class="tc-row-r"><i>${esc(TC.stamp(v.at))}</i></span>
+        </div>`).join('')}</div>` : ''}
 
       ${/* One button, one sheet.
              What was here asked somebody to pick which KIND of thing was wrong
@@ -5400,7 +5667,7 @@ app.get('/portal/clock/entry/:id', (req, res) => {
       ${corrOpen ? '<p class="tc-note">You already have a request waiting on this shift.</p>' : ''}
     </div>
 
-    ${canAsk ? pesSheet(e, brs) + pesScript() : ''}`));
+    ${canAsk ? pesSheet(e, brs, { positions: clockPositionsFor(emp), dayparts: DAYPARTS }) + pesScript() : ''}`));
 });
 
 app.post('/portal/clock/fix', (req, res) => {
@@ -5430,12 +5697,17 @@ app.post('/portal/clock/fix', (req, res) => {
   const b = req.body;
   let payload = null, summary = null;
   if (kind === 'shift_times') {
-    // Both ends in one request. Either may be left alone — start only, end
-    // only, or both — and whichever came through is what the manager approves,
-    // together, in one go.
+    // The whole shift in one request. Any part of it may be left alone — start
+    // only, end only, both, or neither if what moved was the position, the
+    // service or a break — and whatever came through is what the manager
+    // approves, together, in one go.
+    //
+    // Only what genuinely moved travels: the sheet blanks a field it did not
+    // change, so an untouched end is not a request to set the end to what it
+    // already is. That matters on approval, where "unset" and "set to the same
+    // value" are the difference between a no-op and a spurious audit line.
     const at_in = b.at_in ? TC.localInputToUtc(b.at_in) : null;
     const at_out = b.at_out ? TC.localInputToUtc(b.at_out) : null;
-    if (!at_in && !at_out) return back('err=' + encodeURIComponent('Change a time before sending it.'));
     if (at_in && at_out && at_out <= at_in) {
       return back('err=' + encodeURIComponent('The end has to be after the start.'));
     }
@@ -5443,6 +5715,52 @@ app.post('/portal/clock/fix', (req, res) => {
     const bits = [];
     if (at_in) { payload.in = at_in; bits.push(`starts ${TC.clockFace(at_in)}`); }
     if (at_out) { payload.out = at_out; bits.push(`ends ${TC.clockFace(at_out)}`); }
+
+    // The "More changes" section. Each of these was its own request kind, and
+    // filing three of them to describe one wrong evening is how a record stays
+    // wrong. Refused here as well as on approval, so a hand-made post cannot
+    // queue something that can never be granted.
+    if (b.position && b.position !== e.position) {
+      if (!clockPositionsFor(emp).includes(b.position)) {
+        return back('err=' + encodeURIComponent('That is not a position you can work.'));
+      }
+      payload.position = b.position; bits.push(`position ${posName(b.position)}`);
+    }
+    if (b.daypart && b.daypart !== e.daypart) {
+      if (!DAYPARTS.includes(b.daypart)) return back('err=' + encodeURIComponent('Pick a service that exists.'));
+      payload.daypart = b.daypart; bits.push(`service ${dp(b.daypart)}`);
+    }
+
+    // Breaks arrive as parallel arrays — one row per break already on the
+    // shift, keyed by its id, plus an optional new one with no id. A row whose
+    // times are unchanged is dropped rather than sent, for the same reason the
+    // times are.
+    const brks = [];
+    const ids = [].concat(b.brk_id || []);
+    const starts = [].concat(b.brk_start || []);
+    const ends = [].concat(b.brk_end || []);
+    const onShift = new Map(TC.q.breaks.all(e.id).map((x) => [String(x.id), x]));
+    for (let i = 0; i < Math.max(ids.length, starts.length); i += 1) {
+      const start = starts[i] ? TC.localInputToUtc(starts[i]) : null;
+      const end = ends[i] ? TC.localInputToUtc(ends[i]) : null;
+      const id = ids[i] ? String(ids[i]) : '';
+      if (!start && !end) continue;
+      if (!start || !end) return back('err=' + encodeURIComponent('A break needs both a start and an end.'));
+      if (end <= start) return back('err=' + encodeURIComponent('A break has to end after it starts.'));
+      if (id) {
+        const was = onShift.get(id);
+        if (!was) return back('err=' + encodeURIComponent('That break is not on this shift.'));
+        if (was.start_at === start && was.end_at === end) continue;
+        brks.push({ id: Number(id), start, end });
+        bits.push(`break ${TC.clockFace(start)}–${TC.clockFace(end)}`);
+      } else {
+        brks.push({ start, end, paid: TC.settings().breaksPaid });
+        bits.push(`adds a break ${TC.clockFace(start)}–${TC.clockFace(end)}`);
+      }
+    }
+    if (brks.length) payload.breaks = brks;
+
+    if (!bits.length) return back('err=' + encodeURIComponent('Change something before sending it.'));
     summary = bits.join(' · ');
   } else if (kind === 'wrong_in' || kind === 'missing_in') {
     const at = TC.localInputToUtc(b.at_in);
@@ -5532,6 +5850,16 @@ app.post('/portal/clock/add', (req, res) => {
   const daypart = DAYPARTS.includes(b.daypart) ? b.daypart : null;
   if (!daypart) return back('err=' + encodeURIComponent('Pick the service you worked.'));
 
+  // The optional break. Checked to the same standard the edit sheet's is, and
+  // for the same reason: a request nobody can grant is worse than no request.
+  const bs = b.brk_start ? TC.localInputToUtc(b.brk_start) : null;
+  const be = b.brk_end ? TC.localInputToUtc(b.brk_end) : null;
+  if ((bs && !be) || (be && !bs)) return back('err=' + encodeURIComponent('A break needs both a start and an end.'));
+  if (bs && be) {
+    if (be <= bs) return back('err=' + encodeURIComponent('A break has to end after it starts.'));
+    if (bs < at_in || be > at_out) return back('err=' + encodeURIComponent('A break has to sit inside the shift.'));
+  }
+
   // Refused here as well as on approval. A request that can never be approved
   // is worse than no request: it sits in a manager's queue looking like work.
   try {
@@ -5542,7 +5870,8 @@ app.post('/portal/clock/add', (req, res) => {
   }
 
   const reason = String(b.note || '').trim().slice(0, 500);
-  const summary = `${TC.clockFace(at_in)} – ${TC.clockFace(at_out)} · ${posName(position)}`;
+  const summary = `${TC.clockFace(at_in)} – ${TC.clockFace(at_out)} · ${posName(position)}`
+    + (bs ? ` · break ${TC.clockFace(bs)}–${TC.clockFace(be)}` : '');
   db.transaction(() => {
     const info = TC.q.addCorrection.run({
       time_entry_id: null, employee_id: emp.id, kind: 'new_shift', field: null,
@@ -5551,7 +5880,8 @@ app.post('/portal/clock/add', (req, res) => {
       reason, requested_by: emp.name,
     });
     db.prepare('UPDATE time_corrections SET payload = ? WHERE id = ?').run(
-      JSON.stringify({ in: at_in, out: at_out, position, daypart, business_date: day }),
+      JSON.stringify({ in: at_in, out: at_out, position, daypart, business_date: day,
+        breaks: bs ? [{ start: bs, end: be, paid: TC.settings().breaksPaid }] : undefined }),
       info.lastInsertRowid);
     TC.logEvent('correction', info.lastInsertRowid, 'requested', emp.name,
       { after: `add ${summary}`, reason });
@@ -5770,6 +6100,33 @@ function tsView(emp, period, opts = {}) {
     status: TC.sheetStatus(sheet, issues), otRule };
 }
 
+/**
+ * A stable name for the figures somebody is signing for.
+ *
+ * The submit form used to carry the raw payable total and the route compared
+ * it as a string. That total is minutes derived from decimal hours, so for
+ * anybody with hours on a shift sheet it renders as 4398.000000000001 — a
+ * number whose text form depends on floating-point luck rather than on
+ * anything about the timesheet. It happens to round-trip through a browser
+ * today, because the same double formats the same way both times. It would
+ * stop the first time a figure passed through anything that reformatted it,
+ * and the failure mode is a person being told their hours changed when they
+ * did not.
+ *
+ * So the form carries a digest instead: the rounded totals, plus every punch
+ * in the period by id and time. Opaque, fixed-width, and — the point of
+ * including the punches — sensitive to a shift being corrected in a way that
+ * leaves the total identical, which the bare number never was.
+ */
+function tsToken(v) {
+  const r = (n) => Math.round(Number(n) || 0);
+  const canon = [
+    r(v.totals.payable), r(v.totals.regular), r(v.totals.overtime), r(v.fromShifts),
+    ...v.entries.map((e) => `${e.id}:${e.clock_in_at || ''}:${e.clock_out_at || ''}:${r(e.payable_minutes)}`),
+  ].join('|');
+  return crypto.createHash('sha1').update(canon).digest('hex').slice(0, 16);
+}
+
 app.get('/portal/timesheet', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -5881,7 +6238,7 @@ app.get('/portal/timesheet', (req, res) => {
           <summary aria-label="Actions">•••</summary>
           <div class="tsx-menu-p">
             ${menuItems.map(([k, label, tone]) => (k === 'submit'
-              ? `<button class="tsx-mi primary" type="button" onclick="document.getElementById('ts-sheet').hidden=false;this.closest('details').open=false">${esc(label)}</button>`
+              ? `<button class="tsx-mi primary" type="button" data-pes-open="submit" onclick="this.closest('details').open=false">${esc(label)}</button>`
               : `<a class="tsx-mi ${tone}" href="${HREF[k] || '#'}">${esc(label)}</a>`)).join('')}
           </div>
         </details>
@@ -5898,8 +6255,10 @@ app.get('/portal/timesheet', (req, res) => {
 
       <div class="tsx-body">
         ${req.query.err ? `<div class="tc-err">${esc(req.query.err)}</div>` : ''}
-        ${req.query.ok ? `<div class="tc-ok">${esc(req.query.ok)}</div>` : ''}
-
+        ${/* "Timesheet submitted." is a toast now, at the foot of the page —
+              see the bottom of this template. It used to sit here above the
+              figures, permanently, on a screen somebody revisits to check
+              hours they have already signed for. */''}
         <section class="tsx-sum" id="ts-sum">
           <div class="tsx-sum-g">
             <div><i>Regular</i><b>${hm(v.totals.regular)}</b></div>
@@ -5942,38 +6301,55 @@ app.get('/portal/timesheet', (req, res) => {
 
         ${!worked ? '<p class="tc-note">No time recorded in this period.</p>' : ''}
         ${canSubmit ? `<button class="tc-btn tc-btn-go tc-btn-big tsx-submit" type="button"
-          onclick="document.getElementById('ts-sheet').hidden=false">Submit timesheet</button>` : ''}
+          data-pes-open="submit">Submit timesheet</button>` : ''}
         ${!ended ? '<p class="tc-note">This period is still running. You can submit it once it ends on '
           + esc(new Date(period.end + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric' })) + '.</p>' : ''}
       </div>
     </div>
 
-    ${canSubmit ? `<div class="tsx-sheet" id="ts-sheet" hidden>
-      <div class="tsx-sheet-c">
-        <div class="tc-kick">Submit for approval</div>
-        <p class="tsx-sheet-n">${esc(emp.name)}</p>
-        <p class="tsx-sheet-r">${esc(labelFor(period))}</p>
-        <div class="tsx-sheet-g">
-          <div><i>Regular</i><b>${hm(v.totals.regular)}</b></div>
-          <div><i>OT</i><b>${otOn ? hm(v.totals.overtime) : '--'}</b></div>
-          <div><i>Total</i><b>${hm(v.totals.payable)}</b></div>
-          <div><i>Days worked</i><b>${byDate.size}</b></div>
+    ${/* The same bottom sheet as every other one in the portal. It used to be
+           a bespoke overlay opened by an inline onclick, so the one screen
+           where somebody signs their name behaved differently from the screens
+           where they edit a shift — no swipe-down, no scrim tap, a Cancel in a
+           different place. One pattern, and pesScript already knows it. */''}
+    ${canSubmit ? `<div class="pes" data-pes="submit" hidden>
+      <div class="pes-scrim" data-pes-close></div>
+      <form class="pes-panel pes-panel-sm" method="post" action="/portal/timesheet/submit">
+        <div class="pes-bar">
+          <button type="button" class="pes-back" data-pes-close aria-label="Cancel">‹</button>
+          <b>Submit for approval</b>
         </div>
-        <form method="post" action="/portal/timesheet/submit">
-          <input type="hidden" name="period" value="${esc(period.start)}">
-          <input type="hidden" name="seen" value="${v.totals.payable}">
-          <label class="ts-confirm"><input type="checkbox" name="confirm" value="1" required>
-            <span>I confirm these hours are complete and accurate.</span></label>
-          <label class="tc-field"><span>Anything to add? <i>optional</i></span>
-            <input name="note" maxlength="300"></label>
-          <div class="tc-actions">
-            <button class="tc-btn tc-btn-quiet" type="button" onclick="document.getElementById('ts-sheet').hidden=true">Cancel</button>
-            <button class="tc-btn tc-btn-go" type="submit" data-once>Submit timesheet</button>
-          </div>
-        </form>
-      </div>
+        <input type="hidden" name="period" value="${esc(period.start)}">
+        ${/* Not the raw total — a digest of it. See tsToken. */''}
+        <input type="hidden" name="seen" value="${tsToken(v)}">
+        <div class="pes-rows">
+          <div class="pes-line"><span>Pay period</span><b>${esc(labelFor(period))}</b></div>
+          <div class="pes-line"><span>Regular</span><b>${hm(v.totals.regular)}</b></div>
+          ${otOn ? `<div class="pes-line"><span>Overtime</span><b>${hm(v.totals.overtime)}</b></div>` : ''}
+          <div class="pes-line"><span>Days worked</span><b>${byDate.size}</b></div>
+        </div>
+        <div class="pes-total"><span>Total hours</span><b>${hm(v.totals.payable)}</b></div>
+        ${/* canSubmit is false whenever anything blocks, so this is the only
+               thing this sheet can honestly say about issues — and saying it is
+               worth more than an empty space where a warning would go. */''}
+        <p class="pes-fine">Nothing on this period needs fixing.</p>
+        <label class="ts-confirm"><input type="checkbox" name="confirm" value="1" required>
+          <span>I confirm these hours are complete and accurate.</span></label>
+        <label class="pes-note"><span>Anything to add? <i>optional</i></span>
+          <input name="note" maxlength="300"></label>
+        <div class="pes-acts">
+          <button class="tc-btn tc-btn-quiet tc-btn-big" type="button" data-pes-close>Cancel</button>
+          <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Submit timesheet</button>
+        </div>
+      </form>
     </div>` : ''}
-    <script>document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});</script>`));
+    ${canSubmit ? pesScript() : ''}
+    ${req.query.ok ? `<div class="pt-toasts"><div class="pt-toast ok" role="status">${esc(req.query.ok)}</div></div>` : ''}
+    <script>
+      document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});
+      var tt = document.querySelector('.pt-toasts');
+      if (tt) setTimeout(function () { tt.remove(); }, 3600);
+    </script>`));
 });
 
 /** One day's punches, reached by tapping a row on the timesheet. */
@@ -6053,7 +6429,8 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
              other half added just as much as an empty day does. */''}
       ${pesAddButton(date, list.length ? 'Add another shift' : 'Add a shift')}
     </div>
-    ${list.filter((e) => pesCanAsk(e).can).map((e) => pesSheet(e, TC.q.breaks.all(e.id))).join('')}
+    ${list.filter((e) => pesCanAsk(e).can).map((e) => pesSheet(e, TC.q.breaks.all(e.id),
+      { positions: clockPositionsFor(emp), dayparts: DAYPARTS })).join('')}
     ${pesAddSheet(emp, date, clockPositionsFor(emp), DAYPARTS)}
     ${pesScript()}`));
 });
@@ -6095,7 +6472,8 @@ app.post('/portal/timesheet/submit', (req, res) => {
   }
   // The signature belongs to the hours that were on screen. If they moved while
   // the page was open, show the new ones rather than signing them silently.
-  if (String(req.body.seen || '') !== String(v.totals.payable)) {
+  // Compared as a digest rather than as a float — see tsToken.
+  if (String(req.body.seen || '') !== tsToken(v)) {
     return back('err=' + encodeURIComponent('Your hours changed while this was open — check them and submit again.'));
   }
   db.transaction(() => {
@@ -15921,8 +16299,14 @@ app.get('/timeclock/settings', (req, res) => {
           'Almost always a missed clock-out rather than a very long day.')}
         ${row('Breaks', check('breaks_paid', c.breaksPaid, 'Count breaks as paid by default'),
           'Either way a manager can change any single break.')}
-        ${row('Ask for the PIN again', `${check('pin_out', c.pinAtOut, 'at clock-out')}${check('pin_fix', c.pinForFix, 'when asking for a correction')}`,
-          'Clocking out is one tap by default — they are already signed in. A correction still asks, because it is a claim about a time that has passed.')}
+        ${/* No clock-out switch. It used to be here, off by default, and it was
+              the wrong thing to offer: a PIN at clock-out confirms nothing the
+              session has not already established, and the one place it fired it
+              stood between somebody and the end of their shift. Corrections
+              still ask, because a correction is a claim about a time that has
+              already passed rather than a thing happening now. */''}
+        ${row('Ask for the PIN', check('pin_fix', c.pinForFix, 'when asking for a correction'),
+          'Clocking in and out never asks — they are already signed in. Editing or adding a shift always does.')}
         ${row('At clock-in', check('require_service', c.requireService, 'Staff must choose the service'),
           'Off, the clock uses the suggestion above without asking.')}
         ${row('Dashboard', check('alerts', c.alertsOn, 'Show time-clock items that need attention'),
@@ -15936,7 +16320,7 @@ app.post('/timeclock/settings', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   TC.saveSettings({
     cutoffHour: req.body.cutoff, dinnerFrom: req.body.dinner, longShift: req.body.long,
-    breaksPaid: req.body.breaks_paid === '1', pinAtOut: req.body.pin_out === '1',
+    breaksPaid: req.body.breaks_paid === '1',
     pinForFix: req.body.pin_fix === '1', requireService: req.body.require_service === '1',
     alertsOn: req.body.alerts === '1',
   });
@@ -16282,6 +16666,31 @@ function reqDiff(c) {
     if (p.out !== undefined) outWant = p.out;
     add('Clock in', face(inNow), face(inWant));
     add('Clock out', face(outNow), face(outWant));
+    // The rest of the envelope, and only when it carries something. A request
+    // that moved two times should not show four rows of "unchanged" for the
+    // parts of the sheet nobody opened.
+    if (p.position) add('Position', was.position ? tcPosName(was.position) : '—', tcPosName(p.position));
+    if (p.daypart) add('Service', was.daypart ? dp(was.daypart) : '—', dp(p.daypart));
+    if (p.breaks && p.breaks.length) {
+      // Unpaid minutes are what the shift actually pays on, so that is the
+      // figure the two columns compare — the individual times are spelled out
+      // beside it rather than left for the manager to subtract.
+      const onShift = e ? TC.q.breaks.all(e.id) : [];
+      const edits = new Map(p.breaks.filter((x) => x.id).map((x) => [Number(x.id), x]));
+      let want = 0;
+      for (const b of onShift) {
+        const x = edits.get(b.id);
+        if (b.paid) continue;
+        want += x ? TC.minutesBetween(x.start, x.end) : (b.raw_minutes || 0);
+      }
+      for (const nb of p.breaks.filter((x) => !x.id)) {
+        if (!nb.paid) want += TC.minutesBetween(nb.start, nb.end);
+      }
+      unpaidWant = want;
+      add('Breaks', unpaidNow ? `${TC.hm(unpaidNow)} unpaid` : 'none',
+        `${unpaidWant ? `${TC.hm(unpaidWant)} unpaid` : 'none'} — `
+        + p.breaks.map((x) => `${face(x.start)}–${face(x.end)}${x.id ? '' : ' (new)'}`).join(', '));
+    }
   } else if (c.kind === 'wrong_in' || c.kind === 'missing_in') {
     inWant = p.at || inNow;
     add('Clock in', face(inNow), face(inWant));

@@ -422,7 +422,7 @@ const settings = () => ({
   dinnerFrom: Number(setting('tc_dinner_from')) || 16,
   breaksPaid: setting('tc_break_paid') === '1',
   longShift: Number(setting('tc_long_shift')) || 16,
-  pinAtOut: setting('tc_pin_out') === '1',
+  // No pinAtOut. Clocking out never asks for a PIN — see /portal/clock/out.
   pinForFix: setting('tc_pin_fix') === '1',
   requireService: setting('tc_require_service') === '1',
   alertsOn: setting('tc_alerts') === '1',
@@ -434,7 +434,6 @@ const saveSettings = (v) => {
   sq.set.run({ key: 'tc_dinner_from', value: String(clamp(v.dinnerFrom, 0, 23, 16)) });
   sq.set.run({ key: 'tc_long_shift', value: String(clamp(v.longShift, 4, 24, 16)) });
   sq.set.run({ key: 'tc_break_paid', value: flag(v.breaksPaid) });
-  sq.set.run({ key: 'tc_pin_out', value: flag(v.pinAtOut) });
   sq.set.run({ key: 'tc_pin_fix', value: flag(v.pinForFix) });
   sq.set.run({ key: 'tc_require_service', value: flag(v.requireService) });
   sq.set.run({ key: 'tc_alerts', value: flag(v.alertsOn) });
@@ -1044,7 +1043,25 @@ function applyCorrection(c, actor, opts = {}) {
     q.linkCorrection.run({ id: c.id, entry: id });
     logEvent('entry', id, 'created_from_request', actor,
       { after: `${inAt} → ${outAt || 'open'}`, reason: `approved request #${c.id}: ${c.reason}` });
-    return `shift added ${clockFace(inAt)}${outAt ? ' – ' + clockFace(outAt) : ''}`;
+    // The break they said they took, made at the same time as the punch. It
+    // goes through addBreak, so it clears the same fits-inside-the-shift check
+    // a manager adding one by hand clears, and the entry recomputes with the
+    // unpaid minutes already off it rather than a moment later.
+    let brkNote = '';
+    for (const b of (payload.breaks || [])) {
+      if (!b || !b.start || !b.end) continue;
+      addBreak(q.byId.get(id), { start: b.start, end: b.end, paid: b.paid, by: actor });
+      logEvent('entry', id, 'break_added', actor,
+        { after: `${clockFace(b.start)}–${clockFace(b.end)}`, reason: `approved request #${c.id}` });
+      brkNote += ` · break ${clockFace(b.start)}–${clockFace(b.end)}`;
+    }
+    // The entry was costed the moment it was created, before the break existed.
+    // Every other path here ends in finish(), which recomputes; this one
+    // returns early, so without this the shift is paid for the break as well as
+    // for the work — and the figure reaches the timesheet, the tip split and
+    // payroll before anybody notices the half hour.
+    if (brkNote) recompute(q.byId.get(id));
+    return `shift added ${clockFace(inAt)}${outAt ? ' – ' + clockFace(outAt) : ''}${brkNote}`;
   }
 
   const entry = q.byId.get(c.time_entry_id);
@@ -1063,14 +1080,16 @@ function applyCorrection(c, actor, opts = {}) {
   };
 
   switch (c.kind) {
-    // One request, both ends of the shift.
+    // One request, the whole shift.
     //
     // Every other kind here changes exactly one thing, which is why asking an
     // employee to fix a shift meant choosing a field first and filing twice
-    // when both were wrong. This carries whichever of the two they changed —
-    // start only, end only, or both — and applies them together, so the shift
-    // is never briefly half-corrected and the manager approves one thing
-    // rather than two halves of one thing.
+    // when both were wrong. This carries whichever of the two ends they changed
+    // — start only, end only, or both — and, since the edit sheet grew a "More
+    // changes" section, the position, the service and the breaks alongside
+    // them. All of it applies together or none of it does, so the shift is
+    // never briefly half-corrected and the manager approves one thing rather
+    // than four fragments of one thing.
     case 'shift_times': {
       const inAt = payload.in || entry.clock_in_at;
       const outAt = payload.out !== undefined ? payload.out : entry.clock_out_at;
@@ -1079,26 +1098,117 @@ function applyCorrection(c, actor, opts = {}) {
       // Validated as one move, not two: checking the new start against the OLD
       // end would refuse a shift being dragged wholesale to another evening.
       assertNoEntryOverlap(entry, inAt, outAt);
+
+      // Breaks are judged against the times this request is ASKING for — on
+      // both sides. Checking the stored breaks against the new punch would
+      // refuse the most ordinary combined edit there is: somebody who clocked
+      // in an hour late and took their break an hour late with it. If the
+      // request moves the break too, the moved break is what has to fit.
+      const asked = new Map((payload.breaks || [])
+        .filter((b) => b && b.id).map((b) => [Number(b.id), b]));
+      const adding = (payload.breaks || []).filter((b) => b && !b.id);
       for (const b of q.breaks.all(entry.id)) {
-        if (b.start_at < inAt) throw new ClockError('A recorded break would fall before that clock-in — fix the break first.');
-        if (outAt && b.end_at && b.end_at > outAt) throw new ClockError('A recorded break would run past that clock-out — fix the break first.');
-        if (outAt && !b.end_at) throw new ClockError('A break is still open on this entry — close it first.');
+        const a = asked.get(b.id);
+        const s0 = a ? a.start : b.start_at;
+        const e0 = a ? a.end : b.end_at;
+        if (a && (!s0 || !e0)) throw new ClockError('That request did not include the break times.');
+        if (s0 < inAt) throw new ClockError('A break would fall before that clock-in — change the break in the same request, or ask a manager.');
+        if (outAt && e0 && e0 > outAt) throw new ClockError('A break would run past that clock-out — change the break in the same request, or ask a manager.');
+        if (outAt && !e0) throw new ClockError('A break is still open on this entry — close it first.');
       }
+      for (const nb of adding) {
+        if (!nb.start || !nb.end) throw new ClockError('That request did not include the break times.');
+        if (nb.end <= nb.start) throw new ClockError('A break has to end after it starts.');
+        if (nb.start < inAt || (outAt && nb.end > outAt)) throw new ClockError('A break has to sit inside the shift.');
+      }
+
+      // Position and service travel in the same envelope, checked against the
+      // same lists the single-field kinds check against.
+      const pos = payload.position || null;
+      if (pos && !(opts.validPositions || []).includes(pos)) {
+        throw new ClockError('That is not a position this person can work.');
+      }
+      const svc = payload.daypart || null;
+      if (svc && !(opts.validDayparts || []).includes(svc)) {
+        throw new ClockError('That is not a service that exists.');
+      }
+
+      // Asked and answered before anything is written. The transaction around
+      // this would roll a late throw back safely, but "does this change
+      // anything" is a question about the request, and it deserves its answer
+      // before the first UPDATE rather than after the last one.
+      const movesIn = !!(payload.in && payload.in !== entry.clock_in_at);
+      const movesOut = payload.out !== undefined && payload.out !== entry.clock_out_at;
+      if (!movesIn && !movesOut && !(pos && pos !== entry.position)
+        && !(svc && svc !== entry.daypart) && !(payload.breaks || []).length) {
+        throw new ClockError('That request does not change anything.');
+      }
+
       const moved = [];
-      if (payload.in && payload.in !== entry.clock_in_at) {
+      if (movesIn) {
         note('clock_in_corrected', entry.clock_in_at, payload.in);
         moved.push(`clock-in ${clockFace(entry.clock_in_at)} → ${clockFace(payload.in)}`);
       }
-      if (payload.out !== undefined && payload.out !== entry.clock_out_at) {
+      if (movesOut) {
         note('clock_out_corrected', entry.clock_out_at || 'open', payload.out);
         moved.push(`clock-out ${entry.clock_out_at ? clockFace(entry.clock_out_at) : 'missing'} → ${clockFace(payload.out)}`);
       }
-      if (!moved.length) throw new ClockError('That request does not change anything.');
+
+      // Which write goes first, when this request moves the punch AND a break.
+      //
+      // A database trigger refuses a punch that would leave a break outside it,
+      // and it looks at the row as it stands — so moving a shift from 10am to
+      // noon is refused while its 10:30 break is still on disk, even though the
+      // same request moves that break to the afternoon. The whole edit is legal;
+      // only the order was wrong.
+      //
+      // So: if every break this request touches would also fit inside the OLD
+      // window, move the breaks first and the punch second. Otherwise the punch
+      // has to lead — which is right when the shift is being widened and a break
+      // is moving into the new part. Anything the two orders cannot express
+      // between them still raises, with the trigger's own words.
+      const edits = (payload.breaks || []);
+      const fitsOld = edits.every((a) => a.start >= entry.clock_in_at
+        && (!entry.clock_out_at || (a.end && a.end <= entry.clock_out_at)));
+      const applyBreaks = () => {
+        for (const a of edits) {
+          const fresh = q.byId.get(entry.id);
+          if (a.id) {
+            const b = q.breakById.get(Number(a.id));
+            if (!b || b.time_entry_id !== entry.id) throw new ClockError('That break is not on this shift.');
+            if (b.start_at === a.start && b.end_at === a.end) continue;
+            assertBreakFits(fresh, b.id, a.start, a.end);
+            note('break_corrected', `${clockFace(b.start_at)}–${b.end_at ? clockFace(b.end_at) : 'open'}`,
+              `${clockFace(a.start)}–${clockFace(a.end)}`);
+            q.editBreak.run({ id: b.id, start_at: a.start, end_at: a.end,
+              paid: a.paid == null ? b.paid : (a.paid ? 1 : 0), raw: minutesBetween(a.start, a.end) });
+            moved.push(`break ${clockFace(a.start)}–${clockFace(a.end)}`);
+          } else {
+            addBreak(fresh, { start: a.start, end: a.end, paid: a.paid, by: actor });
+            note('break_added', null, `${clockFace(a.start)}–${clockFace(a.end)}`);
+            moved.push(`break added ${clockFace(a.start)}–${clockFace(a.end)}`);
+          }
+        }
+      };
+
+      if (edits.length && fitsOld) applyBreaks();
       db.prepare("UPDATE time_entries SET clock_in_at = ?, clock_out_at = ?, status = CASE WHEN ? IS NULL THEN status ELSE 'complete' END WHERE id = ?")
         .run(inAt, outAt, outAt, entry.id);
+      if (edits.length && !fitsOld) applyBreaks();
+      if (pos && pos !== entry.position) {
+        note('position_corrected', entry.position, pos);
+        db.prepare('UPDATE time_entries SET position = ? WHERE id = ?').run(pos, entry.id);
+        moved.push(`position ${entry.position} → ${pos}`);
+      }
+      if (svc && svc !== entry.daypart) {
+        note('service_corrected', entry.daypart || 'none', svc);
+        db.prepare('UPDATE time_entries SET daypart = ? WHERE id = ?').run(svc, entry.id);
+        moved.push(`service ${entry.daypart || 'none'} → ${svc}`);
+      }
+      if (!moved.length) throw new ClockError('That request does not change anything.');
       // The trading day comes from the clock-in, so moving it can move the day,
-      // and the pay period with it. Re-filed through the same find-or-create
-      // every path uses.
+      // and the pay period with it. The service moves which shift it belongs
+      // to. Both re-file through the same find-or-create every path uses.
       if (opts.relink) opts.relink(q.byId.get(entry.id));
       return finish(moved.join(' · '));
     }
