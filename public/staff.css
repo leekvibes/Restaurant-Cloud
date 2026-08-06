@@ -783,8 +783,14 @@ body.bare {
 
 .tc-kick { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; letter-spacing: .12em;
   text-transform: uppercase; color: var(--pt-muted); margin-bottom: 10px; }
-.tc-kick-sec { display: flex; justify-content: space-between; align-items: baseline; margin: 24px 0 8px; }
-.tc-kick-sec b { font-family: var(--pt-mono, ui-monospace, monospace); color: var(--pt-body); font-size: 12px; }
+.tc-kick-sec { display: flex; justify-content: space-between; align-items: baseline;
+  gap: 14px; margin: 24px 0 8px; }
+/* The label uppercases; the figure beside it must not. `.tc-kick` is a
+   small-caps section head, and inheriting that turned "56h 29m OT" into
+   "56H 29M OT" — shouted units, and an m that reads as a different unit from
+   the one everywhere else on the page. */
+.tc-kick-sec b { font-family: var(--pt-mono, ui-monospace, monospace); color: var(--pt-body);
+  font-size: 12px; text-transform: none; }
 .tc-note { font-size: 13px; color: var(--pt-muted); line-height: 1.5; margin: 10px 0 0; }
 
 .tc-actions { display: flex; gap: 10px; margin-top: 18px; }
@@ -824,19 +830,6 @@ body.bare {
 .pt-row-clock .pt-tag.done { background: transparent; color: var(--pt-muted); border-color: var(--pt-line); }
 
 /* --- Timesheet: the pay period read back to the person who worked it ----- */
-.ts-head { margin-bottom: 16px; }
-.ts-head .tc-h { margin: 2px 0 8px; }
-.ts-status { display: inline-block; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px;
-  letter-spacing: .08em; text-transform: uppercase; padding: 3px 9px; border: 1px solid var(--pt-line); color: var(--pt-muted); }
-.ts-status.ts-open { color: var(--pt-body); }
-.ts-status.ts-needs_attention { color: var(--pt-amber); border-color: var(--pt-amber); }
-.ts-status.ts-submitted { color: var(--pt-green); border-color: var(--pt-green); }
-.ts-status.ts-returned { color: var(--pt-red); border-color: var(--pt-red); }
-.ts-total { border: 1px solid var(--pt-line); background: var(--pt-field); padding: 20px 18px; margin-bottom: 14px; }
-.ts-total-v { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 40px; line-height: 1; color: var(--pt-ink);
-  font-variant-numeric: tabular-nums; }
-.ts-total-l { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--pt-muted); margin-top: 8px; }
 .ts-returned { border-left: 3px solid var(--pt-red); background: var(--pt-field); padding: 14px; margin: 16px 0; }
 .ts-returned b { color: var(--pt-ink); font-size: 15px; }
 .ts-returned p { color: var(--pt-body); font-size: 13.5px; margin: 6px 0; line-height: 1.5; }
@@ -1018,6 +1011,63 @@ body.bare {
 .tcc-alert { border-left: 3px solid var(--pt-red); background: var(--pt-field); border-radius: var(--pt-r);
   padding: 13px 14px; font-size: 14px; line-height: 1.5; color: var(--pt-ink); margin-bottom: 14px; }
 
+/* --- one period selector ------------------------------------------------- */
+/* Arrows step, the middle jumps. Timesheet is the only history there is now,
+   and stepping an arrow twenty-six times to reach last spring is exactly what
+   made a separate Time history page look necessary. */
+.tsp { display: flex; align-items: center; gap: 8px; margin: 2px 0 16px; }
+.tsp-arrow {
+  flex: none; width: 44px; height: 44px; display: grid; place-items: center;
+  border: 1px solid var(--pt-line); border-radius: 50%; background: var(--pt-field);
+  color: var(--pt-ink); text-decoration: none; font-size: 17px;
+}
+.tsp-arrow.off { opacity: .3; pointer-events: none; }
+.tsp-sel {
+  flex: 1 1 auto; min-width: 0; font: inherit; font-size: 15px; text-align: center;
+  min-height: 44px; padding: 0 10px; color: var(--pt-ink); border-radius: var(--pt-r);
+  border: 1px solid var(--pt-line); background: var(--pt-field);
+}
+
+/* --- filter chips -------------------------------------------------------- */
+/* The count rides on the chip, so an empty queue is visible without selecting
+   it and finding out. */
+.tc-chips { display: flex; gap: 8px; margin: 0 0 14px; flex-wrap: wrap; }
+.tc-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 14px;
+  border: 1px solid var(--pt-line); border-radius: 999px; background: var(--pt-field);
+  color: var(--pt-body); text-decoration: none; font-size: 14px;
+}
+.tc-chip i {
+  font-style: normal; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px;
+  color: var(--pt-muted);
+}
+.tc-chip.on { background: var(--pt-ink); border-color: var(--pt-ink); color: #fff; }
+.tc-chip.on i { color: rgba(255, 255, 255, .72); }
+
+/* --- original beside requested ------------------------------------------- */
+/* The same two columns the manager's queue shows. The person who filed the
+   request is the one who most needs to see what they asked to change FROM. */
+.tc-diff { margin: 9px 0 4px; border-top: 1px solid var(--pt-hair); }
+.tc-diff-h, .tc-diff-r { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 6px 0; }
+.tc-diff-r { grid-template-columns: 1fr 1fr; align-items: baseline; }
+.tc-diff-h span {
+  font-family: var(--pt-mono, ui-monospace, monospace); font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--pt-muted);
+}
+.tc-diff-r i {
+  grid-column: 1 / -1; font-style: normal; font-size: 11.5px; color: var(--pt-muted); margin-top: 2px;
+}
+.tc-diff-r span, .tc-diff-r b {
+  font-family: var(--pt-mono, ui-monospace, monospace); font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.tc-diff-r span { color: var(--pt-muted); text-decoration: line-through; }
+.tc-diff-r b { color: var(--pt-ink); }
+
+/* A day row carrying something the employee has to fix. */
+.tc-row-bad { border-left: 3px solid var(--pt-red); padding-left: 9px; }
+.tc-row-bad .tc-row-r i { color: var(--pt-red); }
+
 /* --- shift detail -------------------------------------------------------- */
 .tcd-tot { display: flex; align-items: baseline; gap: 9px; margin: 0 0 16px; }
 .tcd-tot b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 34px; line-height: 1;
@@ -1035,31 +1085,13 @@ body.bare {
 .ts-awaiting b { display: block; color: var(--pt-ink); font-size: 15px; }
 .ts-awaiting span { display: block; color: var(--pt-body); font-size: 13.5px; margin-top: 5px; line-height: 1.5; }
 
-.ts-issues { display: grid; gap: 8px; }
 .ts-issue { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 11px 12px;
   border: 1px solid var(--pt-line); background: var(--pt-field); text-decoration: none; color: var(--pt-ink); font-size: 13.5px; }
 .ts-issue.bad { border-left: 3px solid var(--pt-red); }
 .ts-issue i { font-style: normal; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 10.5px;
   color: var(--pt-muted); white-space: nowrap; }
-.ts-day { border-bottom: 1px solid var(--pt-hair); }
-.ts-day-h { display: flex; align-items: baseline; gap: 12px; padding: 13px 2px; cursor: pointer; list-style: none; }
-.ts-day-h::-webkit-details-marker { display: none; }
-.ts-day-d { font-size: 14px; color: var(--pt-ink); font-weight: 600; }
-.ts-day-m { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11px; color: var(--pt-muted); }
-.ts-day-t { margin-left: auto; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 14px; color: var(--pt-ink); }
-.ts-entry { display: flex; justify-content: space-between; gap: 12px; padding: 10px 2px 10px 14px;
-  text-decoration: none; color: inherit; border-top: 1px dotted var(--pt-hair); }
-.ts-e-l { display: grid; gap: 2px; min-width: 0; }
-.ts-e-l b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 13px; color: var(--pt-ink); }
-.ts-e-l i { font-style: normal; font-size: 11.5px; color: var(--pt-muted); }
-.ts-e-r { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 13px; color: var(--pt-ink); white-space: nowrap; }
-.ts-submit { margin-top: 22px; display: grid; gap: 14px; }
 .ts-confirm { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--pt-ink); line-height: 1.45; }
 .ts-confirm input { width: 20px; height: 20px; flex: none; margin-top: 1px; }
-.ts-done { border-left: 3px solid var(--pt-green); background: var(--pt-field); padding: 14px; margin-top: 22px; }
-.ts-done b { color: var(--pt-ink); font-size: 15px; }
-.ts-done p { color: var(--pt-body); font-size: 13.5px; margin: 6px 0; }
-.ts-done i { font-style: normal; font-size: 12px; color: var(--pt-muted); }
 
 /* --- The combined time-clock workspace ----------------------------------- */
 .tc-today { text-align: center; padding: 4px 0 18px; }
@@ -1112,82 +1144,25 @@ body.bare {
    added above, "crumb + a full screen" made every timesheet taller than the
    phone. The page opened already scrolled, which slid the crumb up under the
    status bar and put the title behind the clock. */
-.tsx { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.tsx-top { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
 .tsx-back { font-size: 26px; line-height: 1; color: var(--pt-blue); text-decoration: none; width: 32px; }
 /* Left, like every other page's title. It was centred to sit between a back
    arrow and the menu; the back arrow moved up into the shared crumb, and a
    centred title with nothing on its left just looks adrift. */
-.tsx-title { flex: 1 1 auto; text-align: left; font-family: var(--pt-serif, Georgia, serif); font-size: 26px;
-  color: var(--pt-ink); margin: 0; font-weight: 500; }
 .pt-crumb + .tsx .tsx-top { padding-top: 10px; }
-.tsx-menu { position: relative; width: 32px; text-align: right; }
-.tsx-menu > summary { list-style: none; cursor: pointer; font-size: 20px; color: var(--pt-ink); letter-spacing: 1px; }
-.tsx-menu > summary::-webkit-details-marker { display: none; }
-.tsx-menu-p { position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; min-width: 230px;
-  background: var(--pt-page); border: 1px solid var(--pt-line); box-shadow: 0 12px 32px rgba(0,0,0,.16); }
-.tsx-mi { display: block; width: 100%; text-align: left; padding: 13px 15px; font: inherit; font-size: 14.5px;
-  background: none; border: 0; border-bottom: 1px solid var(--pt-hair); color: var(--pt-ink);
-  text-decoration: none; cursor: pointer; }
-.tsx-mi:last-child { border-bottom: 0; }
-.tsx-mi.primary { color: var(--pt-blue); font-weight: 600; }
-.tsx-mi.warn { color: var(--pt-amber); }
-.tsx-mi.quiet { color: var(--pt-body); }
 
-.tsx-per { display: flex; align-items: center; gap: 8px; padding: 4px 16px 14px; }
 .tsx-arrow { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border-radius: 50%;
   border: 1px solid var(--pt-line); color: var(--pt-ink); text-decoration: none; font-size: 15px; }
 .tsx-arrow.off { opacity: .3; pointer-events: none; }
-.tsx-range { flex: 1 1 auto; text-align: center; font-family: var(--pt-mono, ui-monospace, monospace);
-  font-size: 15px; color: var(--pt-ink); background: var(--pt-field); border: 1px solid var(--pt-line);
-  padding: 9px 12px; }
 .tsx-today { flex: none; padding: 9px 14px; border: 1px solid var(--pt-line); color: var(--pt-ink);
   text-decoration: none; font-size: 14px; }
 .tsx-today.on { border-color: var(--pt-ink); }
 
-.tsx-body { flex: 1 1 auto; padding: 0 16px 40px; }
-.tsx-sum { border: 1px solid var(--pt-line); background: var(--pt-field); padding: 14px 16px; margin-bottom: 16px; }
-.tsx-sum-g { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.tsx-sum-g > div { display: grid; gap: 3px; }
-.tsx-sum-g i { font-style: normal; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 10px;
-  letter-spacing: .1em; text-transform: uppercase; color: var(--pt-muted); }
-.tsx-sum-g b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 18px; color: var(--pt-ink);
-  font-variant-numeric: tabular-nums; }
-.tsx-sum-g .tsx-big { font-size: 22px; }
-.tsx-status { margin-top: 12px; padding-top: 11px; border-top: 1px dotted var(--pt-hair);
-  font-family: var(--pt-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--pt-muted); }
-.tsx-status.ts-needs_attention { color: var(--pt-amber); }
-.tsx-status.ts-submitted, .tsx-status.ts-approved { color: var(--pt-green); }
-.tsx-status.ts-returned { color: var(--pt-red); }
-
 .tsx-issues { border: 1px solid var(--pt-amber); padding: 12px 14px; margin-bottom: 16px; }
 .tsx-issues-h { font-size: 14px; color: var(--pt-ink); font-weight: 600; margin-bottom: 8px; }
-
-.tsx-week { display: grid; gap: 8px; }
-.tsx-wtot { text-align: center; font-family: var(--pt-mono, ui-monospace, monospace); font-size: 12px;
-  color: var(--pt-muted); padding: 14px 0 18px; }
-.tsd { display: grid; grid-template-columns: 54px repeat(4, 1fr) auto; gap: 8px; align-items: center;
-  padding: 12px 13px; border: 1px solid var(--pt-line); background: var(--pt-page);
-  text-decoration: none; color: inherit; }
-.tsd-none { background: var(--pt-field); opacity: .62; }
-.tsd-today { border-left: 3px solid var(--pt-blue); }
-.tsd-bad { border-color: var(--pt-amber); }
-.tsd-d { display: grid; gap: 1px; }
-.tsd-d b { font-size: 20px; color: var(--pt-ink); line-height: 1; }
-.tsd-d i { font-style: normal; font-size: 11.5px; color: var(--pt-muted); }
-.tsd-c { display: grid; gap: 2px; text-align: center; min-width: 0; }
-.tsd-c i { font-style: normal; font-size: 9.5px; color: var(--pt-muted); overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
-.tsd-c b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 13px; color: var(--pt-body);
-  font-variant-numeric: tabular-nums; }
-.tsd-tot b { color: var(--pt-blue); }
-.tsd-flag { color: var(--pt-amber); font-weight: 700; }
-.tsx-submit { width: 100%; margin-top: 8px; }
 
 .tsx-daycard { border: 1px solid var(--pt-line); background: var(--pt-field); padding: 14px; margin-bottom: 12px; }
 
 @media (min-width: 760px) {
-  .tsx { max-width: 620px; margin: 0 auto; }
 }
 
 /* --- the pay period, on Your hours & pay -------------------------------------
@@ -1234,12 +1209,12 @@ body.bare {
 
 /* --- surfaces ------------------------------------------------------------ */
 .pt-body { background: var(--pt-page); }
-.tsx-daycard, .tc-facts, .pt-stats, .tsx-sum, .tc-sheet {
+.tsx-daycard, .tc-facts, .pt-stats {
   background: var(--pt-field);
   border: 1px solid var(--pt-line);
   border-radius: var(--pt-r);
 }
-.tc-fact, .tc-row, .tsd { border-color: var(--pt-hair); }
+.tc-fact, .tc-row { border-color: var(--pt-hair); }
 .tc-btn { border-radius: var(--pt-r); min-height: var(--pt-tap); }
 .tc-btn-go { background: var(--pt-blue); border-color: var(--pt-blue); }
 

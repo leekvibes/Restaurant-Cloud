@@ -568,11 +568,11 @@ a status, a pill, or by typing the URL.
 | Notifications feed | `/notifications` | The bell |
 | Cash tips PIN page | `/tips` | Settings → Staff-facing |
 | Portal shift detail | `/portal/clock/entry/:id` | Tapping a shift in history or a day |
-| Portal day detail | `/portal/timesheet/day/:date` | Tapping a day row |
+| Portal day detail | `/portal/timesheet/day/:date` | Tapping a day row (worked days only since Phase 2C) |
 | Portal earnings detail | `/portal/earnings/:id` | Tapping a past shift |
 | Portal notifications | `/portal/notifications` | "See all", or the hub line when nothing is new |
-| Portal requests | `/portal/requests` | Timesheet ••• menu |
-| Portal time history | `/portal/clock/history` | Timesheet ••• menu |
+| Portal requests | `/portal/requests` | Clock shortcut row, More menu, timesheet footer link |
+| ~~Portal time history~~ | `/portal/clock/history` | **Retired in Phase 2C** — 301s to `/portal/timesheet`. No nav entry anywhere |
 | Tips receipt | `/tips?done=1&…` | Only after submitting |
 | CSV / Excel exports | `/timeclock/export`, `/payroll/export` | Buttons |
 | CSRF token | `/csrf` | Service worker / fetch wrapper |
@@ -590,9 +590,8 @@ These have no route and are invisible to a route-based audit:
 | Timesheet bottom sheet | `.tso-*` | Owner timesheet grid |
 | Portal edit-shift sheet | `.pes-*` (22 rules) | Portal shift detail + day |
 | Portal add-shift sheet | `.pes-*` | Portal day screen |
-| Submit-timesheet sheet | `#ts-sheet` | Portal timesheet |
+| Submit-timesheet sheet | `.pes[data-pes="submit"]` | Portal timesheet — was `#ts-sheet` until Phase 2B |
 | Account menu | `.bs-acct` / `.bs-pop` | Masthead |
-| Timesheet actions menu | `.tsx-menu` | Portal timesheet ••• |
 | Index overflow menu | `.bs-bottom` `<details>` | Mobile bottom bar |
 | Band group panel | `.bs-band-x` | Mid-width nav |
 | Search results popover | `.tsearch-pop` | Masthead |
@@ -811,3 +810,49 @@ Timesheet (`/portal/timesheet`), Day detail (`/portal/timesheet/day/:date`),
 Requests (`/portal/requests`), Time history (`/portal/clock/history`). The edit
 and add sheets already appear on the day-detail page and were upgraded there
 too — the sheets are Phase 2B, the pages around them are not.
+
+---
+
+## 8. PHASE 2C — Timesheet, Day detail, Requests
+
+Shipped. Time history is retired.
+
+### 8.1 What changed
+
+| Page | Was | Is |
+|---|---|---|
+| Timesheet | 14 day rows × 5 numeric columns, ••• menu, bespoke period nav | Worked days only as shift rows; `.tcc` status card; one period selector reaching a year back; every action visible |
+| Day detail | Cards, no total, explainer repeated per card | Day total first, one explainer under all shift-sheet cards |
+| Requests | Own label map missing the two kinds the portal files; no original; empty quotes | Shared label map, Was/Asked-for via `reqDiff`, filter chips with counts |
+| Time history | A second, punch-only answer to "what have I worked" | **Gone.** `301 → /portal/timesheet` |
+
+### 8.2 Four correctness fixes
+
+1. **History vs Timesheet disagreed.** History read `time_entries` alone, so a
+   person whose hours arrive on shift sheets saw 8 minutes beside a timesheet
+   reporting 101 hours. Retiring the page removes the second answer.
+2. **Per-day overtime was fake.** The OT cell was hardcoded `--` and Regular
+   equalled Total, under a header claiming 21:09 of OT. Overtime is a weekly
+   threshold, so it now appears on the week (from `splitWeeks`) and on the
+   period, and nowhere else.
+3. **Raw kinds reached employees.** `shift_times` and `new_shift` — the only two
+   the portal can file — were missing from the page's private label map.
+4. **A request with no note rendered `“”`.**
+
+Also: duplicate `id="ts-issues"`, and a dead `applied_at ? 'approved' : 'approved'` ternary.
+
+### 8.3 Two period lists, deliberately
+
+`tsPeriodsFor()` (8) governs **submission** and the ready-to-sign badge —
+unchanged, because widening what may be signed is a business-rule change.
+`tsViewPeriods()` (26) governs **viewing** and the selector, because Timesheet
+is now the only history there is. `canSubmit` requires membership of the short
+list, so the screen never offers a button the route would refuse.
+
+### 8.4 Retired markup
+
+`.tsx-menu` and its panel, the three in-page anchors, the `.tsd` day grid, the
+bespoke `.tsx-per` nav, `.tsx-sum*`, `.tsx-status`, `.tsx-week`, `.tsx-wtot`,
+`.tsx-body`, `.tsx-top/title`, plus twelve `.ts-*` blocks already dead before
+this phase — **68 CSS rules**, each verified unreferenced across `src/` first.
+`.tsx-arrow` / `.tsx-today` stay: the owner payroll timesheet still uses them.

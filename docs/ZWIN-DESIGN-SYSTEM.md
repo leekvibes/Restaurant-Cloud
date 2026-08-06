@@ -577,3 +577,46 @@ what lets the submit-timesheet sheet share the shell.
 Success is a toast (`.pt-toasts` / `.pt-toast.ok`, removed after 3.6s); failure
 is `.tcc-alert` and keeps its place on the page. The URL keeps its `?ok=` either
 way, so a reload still tells the truth.
+
+---
+
+## 12. Phase 2C components (shipped)
+
+### One period selector — `.tsp`
+
+Arrows step, the middle jumps. A native `<select>` listing a year of periods by
+`labelFor()`, navigating on change.
+
+```
+.tsp          flex row
+  .tsp-arrow    44px circular step control (.off when there is nowhere to go)
+  .tsp-sel      full-width native select, 44px tall
+```
+
+### Filter chips — `.tc-chips` / `.tc-chip`
+
+Pill row, count on the chip (`<i>`), `.on` for the selected one. The count is
+the point: an empty queue is visible without selecting it.
+
+### Original beside requested — `.tc-diff`
+
+Two columns from `reqDiff()`, rows filtered to `changed`. Old value struck
+through in muted, new value in ink. Same data the manager's queue reads.
+
+```
+.tc-diff        bordered block
+  .tc-diff-h      "Was" / "Asked for" heads
+  .tc-diff-r      label (full width) + old + new
+```
+
+### Day rows
+
+Plain `.tc-row`, plus `.tc-row-bad` (red left rule) when the day carries a
+blocking issue. Never a numeric grid — that was the owner-style table the
+employee timesheet is explicitly not.
+
+### Where overtime may appear
+
+Period card and week header **only**. Not on a day row, not on a shift. A daily
+overtime figure is an artefact of the order days were summed in; `splitWeeks`
+can produce one, and the employee-facing screens deliberately do not show it.

@@ -3656,7 +3656,8 @@ const PT_TABS = [
 const PT_MORE = [
   ['/portal/notifications', 'Notifications'],
   ['/portal/requests', 'My requests'],
-  ['/portal/clock/history', 'Time history'],
+  // No Time history. Timesheet carries it now and the old route redirects
+  // there — a menu entry that bounces you somewhere else is worse than none.
   ['/portal/specials', 'Specials & 86 board'],
   ['/portal/stock', 'Report out of stock'],
   // Only for the positions that hand tips in. A cook is not offered this on
@@ -4959,9 +4960,13 @@ function clockPage(req, who, opts = {}) {
         ${/* Carrying the period, so the tile lands on the one the badge is
               about rather than on whatever is running today. */''}
         ${shortcut(`/portal/timesheet?p=${encodeURIComponent(st.period.start)}`, 'Timesheet',
-          `${esc(labelFor(st.period))} · ${TC.hm(TC.totalsFor(st.entries).payable)}`, st.sheetBadge)}
+          `${esc(labelFor(st.period))} · ${TC.hm(TC.totalsFor(st.entries).payable)} · every shift you have worked`, st.sheetBadge)}
+        ${/* No Time history row. It was a second answer to "what have I
+              worked" and the worse one — it read punches alone, so anybody
+              whose hours arrive on a shift sheet saw an almost empty page next
+              to a timesheet full of hours. Timesheet carries the lot now, and
+              reaches back a year through its own selector. */''}
         ${shortcut('/portal/requests', 'My requests', 'Fixes you have asked for', st.reqBadge)}
-        ${shortcut('/portal/clock/history', 'Time history', 'Every shift you have worked', null)}
       </div>
 
       ${todays.length ? `<div class="tc-kick tc-kick-sec">Earlier today</div>
@@ -5950,30 +5955,50 @@ app.get('/portal/requests', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const { emp } = who;
-  const rows = db.prepare(`SELECT c.*, e.business_date, e.position, e.daypart
+  const all = db.prepare(`SELECT c.*, e.business_date, e.position, e.daypart
     FROM time_corrections c LEFT JOIN time_entries e ON e.id = c.time_entry_id
     WHERE c.employee_id = ? ORDER BY c.id DESC LIMIT 60`).all(emp.id);
   const period = currentPeriod();
   const sheet = TC.sheetFor(emp.id, period);
-  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
 
-  const KIND = { missing_in: 'Forgotten clock-in', wrong_in: 'Clock-in time', missing_out: 'Forgotten clock-out',
-    wrong_out: 'Clock-out time', break: 'Break time', missing_break: 'Missing break',
-    wrong_position: 'Position', wrong_service: 'Service', other: 'Something else' };
-  const STATE = { pending: 'Waiting on your manager', approved: 'Approved', rejected: 'Not approved' };
+  // One filter, three states, and the counts on the chips so somebody can see
+  // there is nothing waiting without having to select it and find out.
+  const FILTERS = [['all', 'All'], ['pending', 'Waiting'], ['answered', 'Answered']];
+  const f = FILTERS.some(([k]) => k === req.query.f) ? req.query.f : 'all';
+  const match = (c) => (f === 'all' ? true : f === 'pending' ? c.decision === 'pending' : c.decision !== 'pending');
+  const count = (k) => all.filter((c) => (k === 'all' ? true
+    : k === 'pending' ? c.decision === 'pending' : c.decision !== 'pending')).length;
+  const rows = all.filter(match);
 
   const row = (c) => {
-    const state = c.decision === 'approved' ? (c.applied_at ? 'approved' : 'approved') : c.decision;
-    const cls = state === 'approved' ? 'ok' : state === 'rejected' ? 'no' : 'wait';
+    const cls = c.decision === 'approved' ? 'ok' : c.decision === 'rejected' ? 'no' : 'wait';
+    // Original beside Requested, from the same function the manager's queue
+    // reads. The employee filing the request is the one person who most needs
+    // to see what they asked to change FROM — and until now this page showed
+    // only the "asked for" half, so an approved request read as though the
+    // shift had always said that.
+    const diff = reqDiff(c).filter((r) => r.changed);
     return `<a class="tc-req ${cls}" href="${c.time_entry_id ? '/portal/clock/entry/' + c.time_entry_id : '/portal/clock'}">
       <div class="tc-req-h">
-        <b>${esc(KIND[c.kind] || c.kind)}</b>
-        <i class="tc-req-s">${esc(STATE[state] || state)}${c.decision === 'approved' && c.applied_at ? ' · applied' : ''}</i>
+        ${/* The shared label map. This page kept its own, and that copy was
+               missing the only two kinds the portal can actually file — so
+               everybody who used the Phase 2B sheets saw a card headed
+               "shift_times" or "new_shift". */''}
+        <b>${esc(reqKind(c))}</b>
+        <i class="tc-req-s">${esc(REQ_STATE[c.decision] || c.decision)}${c.decision === 'approved' && c.applied_at ? ' · applied' : ''}</i>
       </div>
       <div class="tc-req-m">${c.business_date
         ? esc(new Date(c.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))
-        : '—'}${c.proposed_value ? ` · asked for ${esc(c.proposed_value)}` : ''}</div>
-      <div class="tc-req-r">“${esc(c.reason)}”</div>
+        : '—'}</div>
+      ${diff.length ? `<div class="tc-diff">
+        <div class="tc-diff-h"><span>Was</span><span>Asked for</span></div>
+        ${diff.map((r) => `<div class="tc-diff-r"><i>${esc(r.label)}</i>
+          <span>${esc(r.now)}</span><b>${esc(r.want)}</b></div>`).join('')}
+      </div>` : (c.proposed_value ? `<div class="tc-req-m">Asked for ${esc(c.proposed_value)}</div>` : '')}
+      ${/* Only when there IS one. The note became optional with the Phase 2B
+             sheet, and this rendered a bare pair of quotation marks for every
+             request without one — which is now most of them. */''}
+      ${c.reason ? `<div class="tc-req-r">“${esc(c.reason)}”</div>` : ''}
       <div class="tc-req-f">Sent ${esc(TC.stamp(c.requested_at))}${c.decided_by ? ` · answered by ${esc(c.decided_by)}` : ''}${c.decision_note ? ` — ${esc(c.decision_note)}` : ''}</div>
       ${c.apply_error && c.decision === 'pending' ? `<div class="tc-req-e">Could not be applied: ${esc(c.apply_error)}</div>` : ''}
     </a>`;
@@ -5991,47 +6016,37 @@ app.get('/portal/requests', (req, res) => {
     <div class="pt-body tc-body">
       <h1 class="tc-h">My requests</h1>
       ${returned}
+      ${all.length ? `<div class="tc-chips">${FILTERS.map(([k, label]) => `
+        <a class="tc-chip${k === f ? ' on' : ''}" href="/portal/requests${k === 'all' ? '' : '?f=' + k}">
+          ${esc(label)}<i>${count(k)}</i></a>`).join('')}</div>` : ''}
       ${rows.length ? `<div class="tc-reqs">${rows.map(row).join('')}</div>`
         : `<div class="tc-empty">
-             <b>Nothing to show</b>
-             <span>When you ask for a time to be fixed, it will appear here with your manager's answer.</span>
+             <b>${all.length ? 'Nothing here' : 'Nothing to show'}</b>
+             <span>${all.length
+               ? 'No requests match that filter.'
+               : 'When you ask for a time to be fixed, it will appear here with your manager\'s answer.'}</span>
            </div>`}
-      <p class="tc-note">Open a day from your time history to ask for a fix.</p>
-      <a class="tc-more" href="/portal/clock/history">Your time history ›</a>
+      <p class="tc-note">Open a day from your timesheet to ask for a fix.</p>
+      <a class="tc-more" href="/portal/timesheet">Your timesheet ›</a>
     </div>`));
 });
 
-/** Today, this week, and what came before. */
+/**
+ * Retired — kept so old links, bookmarks and notification hrefs still land.
+ *
+ * This was a second, parallel answer to "what have I worked", and it was the
+ * worse one: it read time_entries alone, so for anybody whose hours reach the
+ * books through a shift sheet rather than a punch it showed a near-empty page
+ * beside a timesheet reporting a hundred hours. Two employee-facing screens
+ * disagreeing about the same hours is the one thing this app must never do.
+ *
+ * Timesheet now carries the whole history, punches and shift-sheet hours
+ * together, which is where it was always going to be correct.
+ */
 app.get('/portal/clock/history', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
-  const { emp } = who;
-  const cfg = TC.settings();
-  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
-  const weekStart = addDays(today, -((new Date(today + 'T00:00:00').getDay() + 6) % 7));
-  const rows = TC.q.forEmployeeSince.all(emp.id, addDays(today, -60));
-  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
-
-  const sum = (list) => list.reduce((a, e) => a + (e.payable_minutes || 0), 0);
-  const group = (label, list) => (!list.length ? '' : `
-    <div class="tc-kick tc-kick-sec">${label}<b>${TC.hm(sum(list))}</b></div>
-    <div class="tc-rows">${list.map((e) => `
-      <a class="tc-row" href="/portal/clock/entry/${e.id}">
-        <span class="tc-row-l"><b>${esc(new Date(e.business_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</b>
-          <i>${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : 'open'} · ${esc(posName(e.position))}</i></span>
-        <span class="tc-row-r"><b>${TC.isOpen(e) ? 'running' : esc(TC.hm(e.payable_minutes))}</b>${e.edited ? '<i>edited</i>' : ''}</span>
-      </a>`).join('')}</div>`);
-
-  res.send(portalPage('Your time history', `
-    ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'Time history')}
-    <div class="pt-body tc-body">
-      <h1 class="tc-h">Your time</h1>
-      ${group('Today', rows.filter((e) => e.business_date === today))}
-      ${group('This week', rows.filter((e) => e.business_date >= weekStart && e.business_date < today))}
-      ${group('Earlier', rows.filter((e) => e.business_date < weekStart))}
-      ${rows.length ? '' : '<p class="tc-note">Nothing recorded yet.</p>'}
-      <p class="tc-note">Hours shown are what the clock recorded. Your pay is worked out by your manager at the end of the period.</p>
-    </div>`));
+  res.redirect(301, '/portal/timesheet');
 });
 
 // ---------------------------------------------------------------------------
@@ -6046,6 +6061,14 @@ app.get('/portal/clock/history', (req, res) => {
 // changing means nothing.
 // ---------------------------------------------------------------------------
 const tsPeriodsFor = () => recentPeriods(8);
+/**
+ * The periods a person may LOOK at. Longer than the list they may sign.
+ *
+ * Timesheet absorbed Time history, so this is now the only route back to
+ * anything older than a fortnight — and a year of them is a selector, not a
+ * row of arrow taps. Submission deliberately still reads tsPeriodsFor.
+ */
+const tsViewPeriods = () => recentPeriods(26);
 const tsFindPeriod = (start) => tsPeriodsFor().find((p) => p.start === start) || currentPeriod();
 
 /**
@@ -6131,7 +6154,12 @@ app.get('/portal/timesheet', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const { emp } = who;
-  const periods = tsPeriodsFor();                 // newest first
+  // Two lists, deliberately. Viewing reaches back a year, because Timesheet is
+  // now the only history there is and stepping an arrow twenty-six times is
+  // what made a second page seem necessary. Submission still uses the shorter
+  // list it always used — widening what may be signed is a rule change, and
+  // this is not the phase for one.
+  const periods = tsViewPeriods();                // newest first
   const cfg = TC.settings();
   const todayIso = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
   // Opening on the period they are working is right — that is what somebody
@@ -6146,20 +6174,11 @@ app.get('/portal/timesheet', (req, res) => {
   const idx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
   const period = periods[idx] || currentPeriod();
   const v = tsView(emp, period);
-  const posName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
-  // Rounded FIRST, which the shared TC.hm does and this local copy did not.
-  //
-  // Hours carried on the shift sheets are decimal, and decimal hours times 60
-  // is rarely a whole number of minutes: 99.56 hours is 5973.6 minutes, and
-  // `5973.6 % 60` is 33.600000000000364. This printed "99:33.600000000000364"
-  // at the top of somebody's timesheet — the "big decimal number" that started
-  // this. Fractional minutes are deliberate upstream (rounding every row before
-  // summing accumulates error); they are meant to be rounded once, here.
-  const hm = (m) => {
-    if (!m) return '--';
-    const t = Math.max(0, Math.round(m));
-    return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
-  };
+  // Every figure on this page goes through TC.hm, which rounds before it
+  // divides. A local copy here did not, and decimal shift-sheet hours times 60
+  // is rarely a whole number of minutes — 99.56 hours is 5973.6, and
+  // `5973.6 % 60` is 33.600000000000364. That printed at the top of somebody's
+  // timesheet. One formatter, and the fractions round once.
 
   // A period is submittable once it has finished. Signing for hours you are
   // still working is a signature that will be wrong by the end of the night.
@@ -6167,151 +6186,152 @@ app.get('/portal/timesheet', (req, res) => {
   const blocking = v.issues.filter((i) => i.blocking);
   const submitted = v.sheet.status === 'submitted' && !v.sheet.resubmit_needed;
   const worked = v.entries.length > 0 || v.fromShifts.length > 0;
-  const canSubmit = ended && worked && !blocking.length
+  // Only offer the button for a period the route will actually accept. The
+  // viewing list is longer than the submission list, so without this an old
+  // period would show Submit and the POST would answer "not open for
+  // submission" — a screen disagreeing with its own server.
+  const submittable = tsPeriodsFor().some((p) => p.start === period.start);
+  const canSubmit = ended && worked && !blocking.length && submittable
     && !submitted && !['approved', 'locked'].includes(v.sheet.status);
 
-  // --- every day of the period, grouped into weeks -------------------------
-  //
-  // Punches AND hours carried on the shift sheets with no punch behind them.
-  // The total at the top has always counted both (tsView passes fromShifts to
-  // totalsFor as `extra`), and this map counted only the first — so anybody
-  // whose hours were entered on shifts rather than clocked saw a full period
-  // total above fourteen rows of "--". Ninety-nine hours from nowhere.
-  const byDate = new Map();
-  const push = (d, row) => {
-    if (!byDate.has(d)) byDate.set(d, []);
-    byDate.get(d).push(row);
-  };
-  for (const e of v.entries) push(e.business_date, { minutes: e.payable_minutes || 0,
-    paid: e.paid_break_min || 0, id: e.id });
-  for (const x of v.fromShifts) push(x.business_date, { minutes: x.minutes || 0, paid: 0, id: null });
-  const days = [];
-  for (let d = period.end; d >= period.start; d = addDays(d, -1)) days.push(d);
-  const weeks = [];
-  for (const d of days) {
-    const monday = addDays(d, -((new Date(d + 'T00:00:00').getDay() + 6) % 7));
-    if (!weeks.length || weeks[weeks.length - 1].wk !== monday) weeks.push({ wk: monday, days: [] });
-    weeks[weeks.length - 1].days.push(d);
-  }
+  // The requests badge, from the one function that knows about requests.
+  const st2 = clockStatus(emp);
+  const shortcutRow = (href, title, sub, badge) => `
+    <a class="tc-short" href="${href}">
+      <span class="tc-short-t"><b>${title}</b><i>${esc(sub)}</i></span>
+      ${badge ? `<span class="tc-badge">${esc(badge)}</span>` : ''}
+      <span class="tc-short-go">›</span>
+    </a>`;
 
+  // --- the days actually worked, grouped into weeks ------------------------
+  //
+  // Worked days only. Fourteen rows, ten of them "--", was a period pretending
+  // to be a spreadsheet: the empty days carried no information and buried the
+  // four that did. A day nobody worked is reached by "Add a day you worked",
+  // which is the only reason to open one.
+  //
+  // splitWeeks is the same function the manager's review reads, with the same
+  // threshold and the same week boundary — so the two screens cannot disagree
+  // about which week a day fell in or what the week came to.
+  const weeks = TC.splitWeeks(v.entries, {
+    periodStart: period.start, extra: v.fromShifts,
+    otEnabled: v.otRule.enabled, otExempt: !!emp.ot_exempt, otThreshold: v.otRule.threshold,
+  });
   const otOn = v.otRule.enabled && !emp.ot_exempt;
+  const daysWorked = weeks.reduce((n, w) => n + w.days.length, 0);
+
   const dayRow = (d) => {
-    const list = byDate.get(d) || [];
-    const mins = list.reduce((a, e) => a + (e.minutes || 0), 0);
-    const paidBrk = list.reduce((a, e) => a + (e.paid || 0), 0);
-    const dt = new Date(d + 'T00:00:00');
-    const bad = v.issues.some((i) => list.some((e) => e.id != null && e.id === i.entryId) && i.blocking);
-    const isToday = d === todayIso;
-    // A day with nothing on it is still a day you can open — that is where a
-    // shift nobody clocked gets asked for. It was a dead link with
-    // aria-disabled, which is exactly the day somebody most needs to reach.
-    return `<a class="tsd${list.length ? '' : ' tsd-none'}${isToday ? ' tsd-today' : ''}${bad ? ' tsd-bad' : ''}"
-      href="/portal/timesheet/day/${d}">
-      <span class="tsd-d"><b>${dt.getDate()}</b><i>${dt.toLocaleDateString('en-US', { weekday: 'short' })}</i></span>
-      <span class="tsd-c"><i>Paid breaks</i><b>${paidBrk ? hm(paidBrk) : '--'}</b></span>
-      <span class="tsd-c"><i>Regular</i><b>${mins ? hm(otOn ? Math.max(0, mins) : mins) : '--'}</b></span>
-      <span class="tsd-c"><i>OT</i><b>--</b></span>
-      <span class="tsd-c tsd-tot"><i>Total</i><b>${mins ? hm(mins) : '--'}</b></span>
-      ${bad ? '<span class="tsd-flag">!</span>' : ''}
+    const bad = v.issues.some((i) => i.blocking && d.entries.some((e) => e.id === i.entryId));
+    const dt = new Date(d.date + 'T00:00:00');
+    // What was worked, in the words the shift itself uses. Punches read as
+    // times; hours carried on a shift sheet say so, because there is no punch
+    // behind them and pretending otherwise is how somebody taps a row expecting
+    // to edit a time and finds nothing to edit.
+    const bits = d.entries.map((e) => `${TC.clockFace(e.clock_in_at)}–${e.clock_out_at ? TC.clockFace(e.clock_out_at) : 'open'}`);
+    if (d.extra.length) bits.push(d.extra.length === 1 ? 'on the shift sheet' : `${d.extra.length} on the shift sheet`);
+    return `<a class="tc-row${bad ? ' tc-row-bad' : ''}" href="/portal/timesheet/day/${d.date}">
+      <span class="tc-row-l">
+        <b>${esc(dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</b>
+        <i>${esc(bits.join(' · '))}</i></span>
+      <span class="tc-row-r"><b>${esc(TC.hm(d.minutes))}</b>${bad ? '<i>needs a fix</i>' : ''}</span>
     </a>`;
   };
 
+  // The status card, in the Phase 2B shape. Tone follows the sheet's state, and
+  // red is reserved for the one state that is theirs to act on.
+  const TONE = { open: 'off', needs_attention: 'warn', submitted: 'done', returned: 'blocked',
+    approved: 'done', locked: 'done', transferred: 'done', finalized: 'done' };
   const statusLabel = TC.SHEET_LABEL[v.status] || v.status;
-  const menuItems = [];
-  if (canSubmit) menuItems.push(['submit', 'Submit timesheet', 'primary']);
-  if (!ended) menuItems.push(['open', 'Timesheet still open', 'quiet']);
-  if (blocking.length) menuItems.push(['issues', `Review ${blocking.length} issue${blocking.length === 1 ? '' : 's'}`, 'warn']);
-  if (submitted) menuItems.push(['view', 'View submission', 'quiet']);
-  if (v.sheet.status === 'returned') menuItems.push(['issues', 'Review what came back', 'warn']);
-  menuItems.push(['history', 'Your time history', 'quiet']);
-  menuItems.push(['requests', 'My requests', 'quiet']);
-
-  const HREF = { history: '/portal/clock/history', requests: '/portal/requests',
-    issues: '#ts-issues', view: '#ts-state', open: '#ts-sum' };
 
   res.send(portalPage('Timesheet', `
     ${portalTop({ href: '/portal/clock', label: 'Time clock' }, 'Timesheet')}
-    <div class="tsx">
-      <header class="tsx-top">
-        <h1 class="tsx-title">Timesheet</h1>
-        <details class="tsx-menu">
-          <summary aria-label="Actions">•••</summary>
-          <div class="tsx-menu-p">
-            ${menuItems.map(([k, label, tone]) => (k === 'submit'
-              ? `<button class="tsx-mi primary" type="button" data-pes-open="submit" onclick="this.closest('details').open=false">${esc(label)}</button>`
-              : `<a class="tsx-mi ${tone}" href="${HREF[k] || '#'}">${esc(label)}</a>`)).join('')}
-          </div>
-        </details>
-      </header>
+    <div class="pt-body tc-body">
+      ${req.query.err ? `<div class="tcc-alert" role="alert">${esc(req.query.err)}</div>` : ''}
 
-      <nav class="tsx-per">
-        <a class="tsx-arrow${idx + 1 < periods.length ? '' : ' off'}"
-           href="${idx + 1 < periods.length ? `/portal/timesheet?p=${periods[idx + 1].start}` : '#'}" aria-label="Earlier period">←</a>
-        <span class="tsx-range">${esc(period.start.slice(5).replace('-', '/'))} – ${esc(period.end.slice(5).replace('-', '/'))}</span>
-        <a class="tsx-arrow${idx > 0 ? '' : ' off'}"
-           href="${idx > 0 ? `/portal/timesheet?p=${periods[idx - 1].start}` : '#'}" aria-label="Later period">→</a>
-        <a class="tsx-today${idx === 0 ? ' on' : ''}" href="/portal/timesheet">Today</a>
+      ${/* One period selector. The arrows step, the middle jumps — a year of
+             fortnights is a lot of taps on an arrow, and stepping back through
+             them one at a time was the whole reason Time history existed as a
+             separate page. */''}
+      <nav class="tsp">
+        <a class="tsp-arrow${idx + 1 < periods.length ? '' : ' off'}"
+           href="${idx + 1 < periods.length ? `/portal/timesheet?p=${periods[idx + 1].start}` : '#'}"
+           aria-label="Earlier period">←</a>
+        <select class="tsp-sel" data-tsp aria-label="Pay period">
+          ${periods.map((p) => `<option value="${esc(p.start)}"${p.start === period.start ? ' selected' : ''}>${esc(labelFor(p))}</option>`).join('')}
+        </select>
+        <a class="tsp-arrow${idx > 0 ? '' : ' off'}"
+           href="${idx > 0 ? `/portal/timesheet?p=${periods[idx - 1].start}` : '#'}"
+           aria-label="Later period">→</a>
       </nav>
 
-      <div class="tsx-body">
-        ${req.query.err ? `<div class="tc-err">${esc(req.query.err)}</div>` : ''}
-        ${/* "Timesheet submitted." is a toast now, at the foot of the page —
-              see the bottom of this template. It used to sit here above the
-              figures, permanently, on a screen somebody revisits to check
-              hours they have already signed for. */''}
-        <section class="tsx-sum" id="ts-sum">
-          <div class="tsx-sum-g">
-            <div><i>Regular</i><b>${hm(v.totals.regular)}</b></div>
-            <div><i>OT</i><b>${otOn ? hm(v.totals.overtime) : '--'}</b></div>
-            <div><i>Total</i><b class="tsx-big">${hm(v.totals.payable)}</b></div>
-            ${v.totals.paid ? `<div><i>Paid breaks</i><b>${hm(v.totals.paid)}</b></div>` : ''}
-          </div>
-          <div class="tsx-status ts-${esc(v.status)}" id="ts-state">${esc(statusLabel)}${
-            submitted && v.sheet.submitted_at ? ` · ${esc(TC.stamp(v.sheet.submitted_at))}` : ''}</div>
-        </section>
+      <section class="tcc tcc-${TONE[v.status] || 'off'}">
+        <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+          <span class="tcc-state">${esc(statusLabel)}</span></div>
+        <div class="tcc-clock">${esc(TC.hm(v.totals.payable))}</div>
+        <div class="tcc-cap">${esc(labelFor(period))}${submitted && v.sheet.submitted_at
+          ? ` · submitted ${esc(TC.stamp(v.sheet.submitted_at))}` : ''}</div>
+        <div class="tcc-facts">
+          ${/* Overtime at the period level, where the weekly rule has finished
+                 running and the figure is the one payroll uses. Never per day —
+                 a daily overtime number is an artefact of the order the days
+                 were added up in, not a fact about the day. */''}
+          ${otOn ? `<div class="tcc-f"><span>Regular</span><b>${esc(TC.hm(v.totals.regular))}</b></div>
+                    <div class="tcc-f"><span>Overtime</span><b>${esc(TC.hm(v.totals.overtime))}</b></div>` : ''}
+          ${v.totals.paid ? `<div class="tcc-f"><span>Paid breaks</span><b>${esc(TC.hm(v.totals.paid))}</b></div>` : ''}
+          <div class="tcc-f"><span>Days worked</span><b>${daysWorked}</b></div>
+        </div>
+        ${canSubmit ? `<div class="tcc-acts">
+          <button class="tc-btn tc-btn-go tc-btn-big" type="button" data-pes-open="submit">Submit timesheet</button>
+        </div>` : ''}
+        ${!ended ? `<p class="tcc-note">This period is still running. You can submit it once it ends on
+          ${esc(new Date(period.end + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric' }))}.</p>` : ''}
+        ${ended && worked && !canSubmit && !submitted && !blocking.length && !['approved', 'locked', 'transferred', 'finalized'].includes(v.sheet.status)
+          ? '<p class="tcc-note">This period is too old to submit from here — ask your manager.</p>' : ''}
+      </section>
 
-        ${/* The period that has ended and still wants their name on it. Shown
-              while they are looking at the one they are working, because that
-              is the screen they land on and the one where the submit button is
-              — correctly — not there. */''}
-        ${awaiting ? `<a class="ts-awaiting" href="/portal/timesheet?p=${encodeURIComponent(awaiting.start)}">
-          <b>${esc(labelFor(awaiting))} is ready to submit</b>
-          <span>That period has ended. Tap to check the hours and send them for approval.</span>
-        </a>` : ''}
+      ${/* The period that has ended and still wants their name on it. Shown
+             while they are looking at the one they are working, because that
+             is the screen they land on and the one where the submit button is
+             — correctly — not there. */''}
+      ${awaiting ? `<a class="ts-awaiting" href="/portal/timesheet?p=${encodeURIComponent(awaiting.start)}">
+        <b>${esc(labelFor(awaiting))} is ready to submit</b>
+        <span>That period has ended. Tap to check the hours and send them for approval.</span>
+      </a>` : ''}
 
-        ${v.sheet.status === 'returned' ? `<section class="ts-returned" id="ts-issues">
-          <b>Returned for correction</b>
-          <p>${esc(v.sheet.returned_reason || '')}</p>
-          <i>${esc(v.sheet.returned_by || 'Your manager')} · ${esc(TC.stamp(v.sheet.returned_at))}</i>
-        </section>` : ''}
-        ${v.sheet.resubmit_needed && v.sheet.status === 'submitted' ? `<section class="ts-returned">
-          <b>Your hours changed after you submitted</b>
-          <p>Check them and submit again.</p></section>` : ''}
+      ${v.sheet.status === 'returned' ? `<section class="ts-returned">
+        <b>Returned for correction</b>
+        <p>${esc(v.sheet.returned_reason || '')}</p>
+        <i>${esc(v.sheet.returned_by || 'Your manager')} · ${esc(TC.stamp(v.sheet.returned_at))}</i>
+      </section>` : ''}
+      ${v.sheet.resubmit_needed && v.sheet.status === 'submitted' ? `<section class="ts-returned">
+        <b>Your hours changed after you submitted</b>
+        <p>Check them and submit again.</p></section>` : ''}
 
-        ${blocking.length ? `<section class="tsx-issues" id="ts-issues">
-          <div class="tsx-issues-h">${blocking.length} item${blocking.length === 1 ? '' : 's'} need attention</div>
-          ${blocking.map((i) => `<a class="ts-issue bad" href="${i.entryId ? '/portal/clock/entry/' + i.entryId : '/portal/clock'}">
-            <span>${esc(i.text)}</span><i>fix</i></a>`).join('')}
-        </section>` : ''}
+      ${blocking.length ? `<section class="tsx-issues">
+        <div class="tsx-issues-h">${blocking.length} item${blocking.length === 1 ? '' : 's'} need attention</div>
+        ${blocking.map((i) => `<a class="ts-issue bad" href="${i.entryId ? '/portal/clock/entry/' + i.entryId : '/portal/clock'}">
+          <span>${esc(i.text)}</span><i>fix</i></a>`).join('')}
+      </section>` : ''}
 
-        ${weeks.map((w) => `
-          <div class="tsx-week">${w.days.map(dayRow).join('')}</div>
-          <div class="tsx-wtot">Week total ${hm(w.days.reduce((a, d) => a
-            + (byDate.get(d) || []).reduce((x, e) => x + (e.minutes || 0), 0), 0))}</div>`).join('')}
+      ${weeks.length ? weeks.map((w) => `
+        <div class="tc-kick tc-kick-sec">Week of ${esc(new Date(w.start + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))}
+          <b>${esc(TC.hm(w.payable))}${otOn && w.overtime ? ` · ${esc(TC.hm(w.overtime))} OT` : ''}</b></div>
+        <div class="tc-rows">${w.days.map(dayRow).join('')}</div>`).join('')
+        : `<div class="tc-empty">
+             <b>No hours in this period</b>
+             <span>If you worked and it is not here, add the day and your manager can put it right.</span>
+           </div>`}
 
-        ${!worked ? '<p class="tc-note">No time recorded in this period.</p>' : ''}
-        ${canSubmit ? `<button class="tc-btn tc-btn-go tc-btn-big tsx-submit" type="button"
-          data-pes-open="submit">Submit timesheet</button>` : ''}
-        ${!ended ? '<p class="tc-note">This period is still running. You can submit it once it ends on '
-          + esc(new Date(period.end + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric' })) + '.</p>' : ''}
+      ${/* The way back in for a day nobody clocked. It opens the SAME add
+             sheet the day screen uses, with the date editable — so there is one
+             add-a-shift implementation, not two. */''}
+      ${pesAddButton(period.start, 'Add a day you worked')}
+
+      <div class="tc-shorts">
+        ${shortcutRow('/portal/requests', 'My requests', 'Fixes you have asked for', st2.reqBadge)}
       </div>
     </div>
 
-    ${/* The same bottom sheet as every other one in the portal. It used to be
-           a bespoke overlay opened by an inline onclick, so the one screen
-           where somebody signs their name behaved differently from the screens
-           where they edit a shift — no swipe-down, no scrim tap, a Cancel in a
-           different place. One pattern, and pesScript already knows it. */''}
     ${canSubmit ? `<div class="pes" data-pes="submit" hidden>
       <div class="pes-scrim" data-pes-close></div>
       <form class="pes-panel pes-panel-sm" method="post" action="/portal/timesheet/submit">
@@ -6324,11 +6344,11 @@ app.get('/portal/timesheet', (req, res) => {
         <input type="hidden" name="seen" value="${tsToken(v)}">
         <div class="pes-rows">
           <div class="pes-line"><span>Pay period</span><b>${esc(labelFor(period))}</b></div>
-          <div class="pes-line"><span>Regular</span><b>${hm(v.totals.regular)}</b></div>
-          ${otOn ? `<div class="pes-line"><span>Overtime</span><b>${hm(v.totals.overtime)}</b></div>` : ''}
-          <div class="pes-line"><span>Days worked</span><b>${byDate.size}</b></div>
+          ${otOn ? `<div class="pes-line"><span>Regular</span><b>${esc(TC.hm(v.totals.regular))}</b></div>
+                    <div class="pes-line"><span>Overtime</span><b>${esc(TC.hm(v.totals.overtime))}</b></div>` : ''}
+          <div class="pes-line"><span>Days worked</span><b>${daysWorked}</b></div>
         </div>
-        <div class="pes-total"><span>Total hours</span><b>${hm(v.totals.payable)}</b></div>
+        <div class="pes-total"><span>Total hours</span><b>${esc(TC.hm(v.totals.payable))}</b></div>
         ${/* canSubmit is false whenever anything blocks, so this is the only
                thing this sheet can honestly say about issues — and saying it is
                worth more than an empty space where a warning would go. */''}
@@ -6343,10 +6363,13 @@ app.get('/portal/timesheet', (req, res) => {
         </div>
       </form>
     </div>` : ''}
-    ${canSubmit ? pesScript() : ''}
+    ${pesAddSheet(emp, period.start, clockPositionsFor(emp), DAYPARTS)}
+    ${pesScript()}
     ${req.query.ok ? `<div class="pt-toasts"><div class="pt-toast ok" role="status">${esc(req.query.ok)}</div></div>` : ''}
     <script>
       document.querySelectorAll('[data-once]').forEach(function(b){b.addEventListener('click',function(){if(b.dataset.done)return;b.dataset.done='1';});});
+      var sel = document.querySelector('[data-tsp]');
+      if (sel) sel.addEventListener('change', function () { location.href = '/portal/timesheet?p=' + encodeURIComponent(sel.value); });
       var tt = document.querySelector('.pt-toasts');
       if (tt) setTimeout(function () { tt.remove(); }, 3600);
     </script>`));
@@ -6377,6 +6400,15 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
     ${portalTop({ href: `/portal/timesheet?p=${per.start}`, label: 'Timesheet' }, 'Your day')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">${esc(new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</h1>
+      ${/* The day's total, first. The timesheet row that got them here shows a
+             figure for this day; landing on two cards and being left to add
+             them up is the page declining to answer the question it was opened
+             with. */''}
+      ${list.length || sheetOnly.length ? `<div class="tcd-tot">
+        <b>${esc(TC.hm(list.reduce((a, e) => a + (e.payable_minutes || 0), 0)
+          + sheetOnly.reduce((a, x) => a + (x.minutes || 0), 0)))}</b>
+        <span>payable${list.length + sheetOnly.length > 1 ? ` \u00b7 ${list.length + sheetOnly.length} shifts` : ''}</span>
+      </div>` : ''}
       ${list.length ? list.map((e) => {
         const brs = TC.q.breaks.all(e.id);
         const fact = (k, val) => `<div class="tc-fact"><span>${k}</span><b>${val}</b></div>`;
@@ -6410,9 +6442,13 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
           <div class="tc-fact"><span>Service</span><b>${x.daypart ? esc(dp(x.daypart)) : '—'}</b></div>
           <div class="tc-fact"><span>Recorded</span><b>${x.hours_source === 'manager' ? 'By your manager' : 'On the shift sheet'}</b></div>
         </div>
-        <p class="tc-note">No clock-in was recorded for this one. If the hours are wrong,
-          add the shift you actually worked and your manager can put it right.</p>
       </section>`).join('')}
+      ${/* Said once, under all of them. It used to repeat verbatim on every
+             card, so a day with two shift-sheet entries printed the same
+             paragraph twice. */''}
+      ${sheetOnly.length ? `<p class="tc-note">No clock-in was recorded for
+        ${sheetOnly.length === 1 ? 'this one' : 'these'}. If the hours are wrong, add the shift you
+        actually worked and your manager can put it right.</p>` : ''}
 
       ${!list.length && !sheetOnly.length
         ? `<p class="tc-note">Nothing recorded on this day.${pend.length ? '' : ' If you worked it, add it and your manager can approve it.'}</p>`

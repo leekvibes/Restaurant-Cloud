@@ -674,7 +674,7 @@ test('the timesheet totals a period from its entries', async () => {
   const cookie = await signIn('3333');
   const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
   assert.match(html, /Timesheet/, 'the page renders');
-  assert.match(html, /Regular/, 'with the period summary');
+  assert.match(html, /Days worked/, 'with the period summary');
   // Reading a period must NOT write to the database — a view-only account
   // opening this page creates nothing. The row appears when something is
   // actually recorded against it, which is the submission.
@@ -1325,7 +1325,8 @@ test('my requests gathers every kind of fix, with the answer', async () => {
   assert.match(html, /My requests/);
   assert.match(html, /Clock-out time/, 'the kind is in plain words');
   assert.match(html, /left later than that/, 'their reason is shown back');
-  assert.match(html, /Waiting on your manager/, 'and where it stands');
+  assert.match(html, /Waiting/, 'and where it stands');
+  assert.match(html, /class="tc-diff"/, 'with the original beside what they asked for');
 });
 
 test('my requests says so plainly when there is nothing', async () => {
@@ -1339,7 +1340,7 @@ test('the timesheet still works, and comes back to the clock', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal/timesheet', { cookie });
   assert.match(html, /Timesheet/, 'the full timesheet is intact');
-  assert.match(html, /Regular/, 'with its totals');
+  assert.match(html, /Days worked/, 'with its totals');
   assert.match(html, /href="\/portal\/clock"/, 'and its way back is the clock');
 });
 
@@ -1354,30 +1355,62 @@ test('the timesheet moves between pay periods with the arrows', async () => {
 
   const cur = await text('/portal/timesheet', { cookie });
   assert.match(cur, new RegExp(`p=${prev.start}`), 'the back arrow points at the period before');
-  assert.match(cur, /tsx-arrow off/, 'and there is nothing later to go to');
+  assert.match(cur, /tsp-arrow off/, 'and there is nothing later to go to');
 
   const earlier = await text(`/portal/timesheet?p=${prev.start}`, { cookie });
   assert.match(earlier, new RegExp(`p=${now.start}`), 'from there the forward arrow returns');
-  assert.match(earlier, /Today/, 'and Today is offered');
+  // And the selector jumps, so a year back is one gesture rather than 26 taps.
+  assert.match(earlier, /<select class="tsp-sel"/, 'the period selector is there');
+  assert.ok((earlier.match(/<option value="20/g) || []).length >= 26,
+    'listing a year of periods, which is what retiring Time history has to replace');
 });
 
 test('the period shown is the one asked for, and Today comes back', async () => {
   const cookie = await signIn('3333');
   const prev = P.recentPeriods(2)[1];
   const html = await text(`/portal/timesheet?p=${prev.start}`, { cookie });
-  assert.match(html, new RegExp(prev.start.slice(5).replace('-', '/')), 'the range names that period');
+  assert.ok(html.includes(`<option value="${prev.start}" selected`), 'the selector names that period');
   const back = await text('/portal/timesheet', { cookie });
-  assert.match(back, new RegExp(P.currentPeriod().start.slice(5).replace('-', '/')), 'and no argument means now');
+  assert.ok(back.includes(`<option value="${P.currentPeriod().start}" selected`), 'and no argument means now');
 });
 
-test('every day of the period is listed, grouped into weeks', async () => {
+test('the timesheet lists the days worked, grouped into weeks', async () => {
+  // Worked days only. Fourteen rows with ten of them "--" was a period
+  // pretending to be a spreadsheet — the empty days carried no information and
+  // buried the ones that did.
   const cookie = await signIn('3333');
   const per = curPeriod();
+  const worked = new Set(T2.q.entriesInPeriod.all(EMP.none, per.start, per.end).map((e) => e.business_date));
   const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
-  const rows = (html.match(/class="tsd[ "]/g) || []).length;
-  assert.ok(rows >= 14, `a fortnight shows all its days, saw ${rows}`);
-  assert.match(html, /Week total/, 'and they are grouped by week');
-  assert.match(html, /tsd-none/, 'days with no work are present but quiet');
+  const rows = (html.match(/href="\/portal\/timesheet\/day\//g) || []).length;
+  assert.strictEqual(rows, worked.size, `one row per day worked, saw ${rows} for ${worked.size} days`);
+  assert.ok(rows < 14, 'and not one per calendar day');
+  assert.match(html, /Week of /, 'grouped by week');
+  assert.ok(!/tsd-none/.test(html), 'no empty-day rows at all');
+  // The way to reach a day nobody worked is the action, not a row.
+  assert.match(html, /Add a day you worked/, 'with a way in for a day that has none');
+  assert.match(html, /data-pes="new-/, 'which opens the same add sheet the day screen uses');
+});
+
+test('weekly overtime is shown on the week, never on the day', async () => {
+  // The approved rule: overtime is a weekly threshold, so a per-day overtime
+  // figure is an artefact of the order the days were added up in. It belongs on
+  // the week and on the period, where the calculation is truthful.
+  const emp = 240;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3240',1500,1)")
+    .run(emp, 'Overtime Week');
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('ot_enabled','1')").run();
+  const per = curPeriod();
+  for (let d = 0; d < 6; d += 1) seedInPeriod(emp, d, '09:00', '18:00');   // 6 x 9h = 54h in week one
+  const cookie = await signIn('3240');
+  const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  assert.match(html, /<span>Overtime<\/span>/, 'the period card names overtime');
+  assert.match(html, /OT<\/b>|OT<\/i>| OT</, 'and the week header carries it');
+  // No day row claims any overtime of its own.
+  const dayRows = html.match(/<a class="tc-row[^"]*" href="\/portal\/timesheet\/day\/[\s\S]*?<\/a>/g) || [];
+  assert.ok(dayRows.length, 'there are day rows');
+  for (const r of dayRows) assert.ok(!/OT/.test(r), 'and none of them mentions overtime');
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('ot_enabled','0')").run();
 });
 
 test('a period still being worked cannot be signed off', async () => {
@@ -1400,7 +1433,8 @@ test('a finished period offers submission from the menu and the page', async () 
   const cookie = await signIn('3777');
   const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
   assert.match(html, /Submit timesheet/, 'the action is offered');
-  assert.match(html, /tsx-menu/, 'from the three-dot menu');
+  assert.ok(!/tsx-menu/.test(html), 'on the card, not hidden in a three-dot menu');
+  assert.match(html, /data-pes-open="submit"/, 'and it opens the shared sheet');
   assert.match(html, /I confirm these hours are complete and accurate/, 'with a confirmation to tick');
 });
 
@@ -1424,7 +1458,8 @@ test('once submitted the page says so and stops offering it', async () => {
   const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
   assert.match(html, /Submitted/, 'the state is shown');
   assert.ok(!/Submit timesheet<\/button>/.test(html), 'and the action is gone');
-  assert.match(html, /View submission/, 'the menu offers to look at it instead');
+  assert.match(html, /class="tcc tcc-done"/, 'the card carries the state itself');
+  assert.match(html, /submitted /, 'with when it was signed');
 });
 
 test('tapping a worked day opens its punches', async () => {
@@ -1949,11 +1984,16 @@ test('an empty day is reachable from the timesheet, and offers the add sheet', a
   assert.match(html, /name="position"/, 'asking which position');
   assert.match(html, /name="daypart"/, 'and which service');
 
-  // The timesheet must LINK to that day. It used to be a dead href="#", which
-  // is exactly the day somebody most needs to reach.
+  // The timesheet no longer lists empty days at all — it offers the action
+  // instead, and that action opens the SAME add sheet, with the date editable.
+  // This person has worked nothing, so their timesheet has no day rows and the
+  // add sheet is the only way in. It has to be there.
   const ts = await text('/portal/timesheet', { cookie });
   assert.ok(!/href="#"[^>]*aria-disabled/.test(ts), 'no dead day rows');
-  assert.match(ts, /href="\/portal\/timesheet\/day\//, 'days are links');
+  assert.ok(!/href="\/portal\/timesheet\/day\//.test(ts), 'and no rows for days nobody worked');
+  assert.match(ts, /Add a day you worked/, 'the way in is the action');
+  assert.match(ts, /data-pes="new-/, 'which opens the add sheet');
+  assert.match(ts, /No hours in this period/, 'with an intentional empty state');
 });
 
 // ── Hours that live on the shift sheets, not on a punch ──────────────────────
@@ -1984,12 +2024,12 @@ test('shift-sheet hours show on the day they were worked, not just in the total'
   const html = await text(`/portal/timesheet?p=${per.start}`, { cookie });
 
   // Twenty-four hours, and they are on three days rather than nowhere.
-  assert.match(html, /24:00/, 'the period total is there');
-  const dayTotals = [...html.matchAll(/class="tsd-c tsd-tot"><i>Total<\/i><b>([^<]+)<\/b>/g)].map((m) => m[1]);
-  assert.ok(dayTotals.length >= 14, `the period rendered its days (got ${dayTotals.length})`);
-  const worked = dayTotals.filter((t) => t !== '--');
-  assert.strictEqual(worked.length, 3, 'three days carry hours');
-  assert.deepStrictEqual([...new Set(worked)], ['8:00'], 'eight hours each');
+  assert.match(html, /24h 0m/, 'the period total is there');
+  const dayTotals = [...html.matchAll(/href="\/portal\/timesheet\/day\/[\s\S]*?<span class="tc-row-r"><b>([^<]+)<\/b>/g)]
+    .map((m) => m[1]);
+  assert.strictEqual(dayTotals.length, 3, `three day rows, one per day worked (got ${dayTotals.length})`);
+  assert.deepStrictEqual([...new Set(dayTotals)], ['8h 0m'], 'eight hours each');
+  assert.match(html, /on the shift sheet/, 'and each says where the hours came from');
   assert.ok(!/No time recorded in this period/.test(html), 'and it does not claim there is nothing');
 
   // The button. Requiring a punch meant a person whose whole period was typed
@@ -2029,8 +2069,10 @@ test('decimal shift hours never print as a run-on decimal', async () => {
   // Nowhere on the page: a clock figure with a fractional minute after it.
   const runOn = html.match(/\d+:\d\d\.\d+/g);
   assert.strictEqual(runOn, null, `no run-on decimals (found ${runOn && runOn.join(', ')})`);
-  // 7.33h is 439.8 minutes, which rounds to 7:20 rather than 7:19.8.
-  assert.match(html, /7:20/, 'rounded to the nearest minute');
+  // Nor an "h m" one. TC.hm rounds before it divides, everywhere on the page.
+  assert.strictEqual(html.match(/\d+h \d+\.\d+m/g), null, 'nor in the h/m form');
+  // 7.33h is 439.8 minutes, which rounds to 7h 20m rather than 7h 19.8m.
+  assert.match(html, /7h 20m/, 'rounded to the nearest minute');
 });
 
 test('a period with hours on the sheets is one the portal asks you to sign', async () => {
@@ -2989,7 +3031,7 @@ test('2B: the submit sheet shows the period and its hours, and asks for no PIN',
   const sheet = (html.match(/data-pes="submit"[\s\S]*?<\/form>/) || [''])[0];
   assert.ok(sheet, 'it uses the shared bottom sheet, like every other one');
   assert.match(sheet, /<span>Pay period<\/span>/, 'the period');
-  assert.match(sheet, /<span>Regular<\/span>/, 'regular hours');
+  assert.match(sheet, /<span>Days worked<\/span>/, 'how many days it covers');
   assert.match(sheet, /Total hours/, 'the total');
   assert.match(sheet, /name="confirm"/, 'the confirmation');
   assert.match(sheet, /name="note"/, 'an optional note');
@@ -3035,4 +3077,155 @@ test('2B: the clock screen is built for a phone', async () => {
     'tcd-tot', 'tcd-st']) {
     assert.ok(css.includes(`.${cls}`), `staff.css defines .${cls}`);
   }
+});
+
+// ===========================================================================
+// PHASE 2C — Timesheet absorbs history, requests speak English, overtime is
+// weekly.
+// ===========================================================================
+
+test('2C: Time history is retired, and its old links still land', async () => {
+  const cookie = await signIn('3111');
+  const res = await get('/portal/clock/history', { cookie });
+  assert.strictEqual(res.status, 301, 'permanently moved, so bookmarks update themselves');
+  assert.strictEqual(res.headers.get('location'), '/portal/timesheet', 'onto the page that carries it now');
+  // And nothing still advertises it as a place to go.
+  const clock = await text('/portal/clock', { cookie });
+  assert.ok(!/Time history/.test(clock), 'the clock screen no longer offers it');
+  assert.match(clock, /every shift you have worked/, 'the timesheet row says it holds that now');
+});
+
+test('2C: every correction kind the portal can file has a human label', async () => {
+  // The old requests page kept its own map and it was missing exactly the two
+  // kinds the Phase 2B sheets create — so everyone who used them saw a card
+  // headed "shift_times" or "new_shift".
+  const emp = 241;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3241',1500,1)")
+    .run(emp, 'Label Reader');
+  const eid = seedInPeriod(emp, 3, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3241');
+
+  await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', at_out: `${day}T19:00`, pin: '3241' }, { cookie });
+  await post('/portal/clock/add', {
+    at_in: `${day}T02:00`, at_out: `${day}T05:00`, position: 'server', daypart: 'cafe', pin: '3241',
+  }, { cookie });
+
+  const html = await text('/portal/requests', { cookie });
+  assert.match(html, /Changed shift times/, 'the edit kind reads as English');
+  assert.match(html, /Added a shift/, 'and so does the add kind');
+  // No raw database value anywhere the eye lands.
+  for (const raw of ['shift_times', 'new_shift', 'wrong_out', 'missing_in', 'wrong_position']) {
+    assert.ok(!new RegExp(`>${raw}<`).test(html), `the raw kind "${raw}" is never printed`);
+  }
+});
+
+test('2C: a request shows the original beside what was asked for', async () => {
+  const emp = 242;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3242',1500,1)")
+    .run(emp, 'Diff Reader');
+  const eid = seedInPeriod(emp, 4, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3242');
+  await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', at_out: `${day}T19:00`, note: 'closed up', pin: '3242' }, { cookie });
+
+  const html = await text('/portal/requests', { cookie });
+  assert.match(html, /class="tc-diff"/, 'the two columns are there');
+  assert.match(html, /<span>Was<\/span><span>Asked for<\/span>/, 'headed Was and Asked for');
+  assert.match(html, /6:00 PM/, 'the original end');
+  assert.match(html, /7:00 PM/, 'and the requested one');
+  assert.match(html, /Total hours/, 'with what it does to the pay');
+
+  // The original must survive the decision. Before this, the "before" column
+  // read the live entry, so approving a request made both columns identical
+  // and what they asked to change vanished from the record.
+  const c = lastCorr();
+  await decide(c.id, 'approved');
+  const after = await text('/portal/requests', { cookie });
+  assert.match(after, /6:00 PM/, 'the original is still on the record after approval');
+  assert.match(after, /Approved/, 'alongside the answer');
+});
+
+test('2C: a request with no note shows no note, not empty quotes', async () => {
+  // The note went optional with the Phase 2B sheet, and this rendered a bare
+  // pair of quotation marks for every request without one — now most of them.
+  const emp = 243;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3243',1500,1)")
+    .run(emp, 'No Note');
+  const eid = seedInPeriod(emp, 5, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cookie = await signIn('3243');
+  await post('/portal/clock/fix',
+    { entry_id: eid, kind: 'shift_times', at_out: `${day}T19:00`, pin: '3243' }, { cookie });
+  const html = await text('/portal/requests', { cookie });
+  assert.ok(!/“”/.test(html), 'no empty quotation marks');
+  assert.ok(!/class="tc-req-r">\s*<\/div>/.test(html), 'and no empty note row either');
+});
+
+test('2C: the requests filter selects, and counts without being selected', async () => {
+  const emp = 244;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3244',1500,1)")
+    .run(emp, 'Filter User');
+  const a = seedInPeriod(emp, 6, '10:00', '18:00');
+  const b = seedInPeriod(emp, 7, '10:00', '18:00');
+  const dayA = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(a).d;
+  const dayB = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(b).d;
+  const cookie = await signIn('3244');
+  await post('/portal/clock/fix', { entry_id: a, kind: 'shift_times', at_out: `${dayA}T19:00`, pin: '3244' }, { cookie });
+  const first = lastCorr();
+  await post('/portal/clock/fix', { entry_id: b, kind: 'shift_times', at_out: `${dayB}T19:00`, pin: '3244' }, { cookie });
+  await decide(first.id, 'rejected', 'roster says otherwise');
+
+  const all = await text('/portal/requests', { cookie });
+  assert.match(all, /Waiting<i>1<\/i>/, 'the waiting count rides on the chip');
+  assert.match(all, /Answered<i>1<\/i>/, 'and so does the answered one');
+  assert.strictEqual((all.match(/class="tc-req /g) || []).length, 2, 'All shows both');
+
+  const waiting = await text('/portal/requests?f=pending', { cookie });
+  assert.strictEqual((waiting.match(/class="tc-req /g) || []).length, 1, 'Waiting shows one');
+  assert.match(waiting, /class="tc-chip on"/, 'and the chip reads as selected');
+
+  const answered = await text('/portal/requests?f=answered', { cookie });
+  assert.strictEqual((answered.match(/class="tc-req /g) || []).length, 1, 'Answered shows the other');
+  assert.match(answered, /Not approved/, 'with the manager’s decision');
+  assert.match(answered, /roster says otherwise/, 'and their reason');
+});
+
+test('2C: the timesheet reaches a year back, and only the recent ones may be signed', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal/timesheet', { cookie });
+  const opts = html.match(/<option value="20\d\d-\d\d-\d\d"/g) || [];
+  assert.ok(opts.length >= 26, `a year of periods in the selector, saw ${opts.length}`);
+  // Viewing reaches further than signing. An old period renders, and does NOT
+  // offer a button the route would refuse.
+  const old = P.recentPeriods(20)[19];
+  const page = await text(`/portal/timesheet?p=${old.start}`, { cookie });
+  assert.ok(page.includes(`<option value="${old.start}" selected`), 'the old period renders');
+  assert.ok(!/data-pes-open="submit"/.test(page), 'with no submit button');
+  const res = await post('/portal/timesheet/submit', { period: old.start, confirm: '1', seen: 'x' }, { cookie });
+  assert.match(decodeURIComponent(res.headers.get('location')), /not open for submission/,
+    'and the route agrees with the screen');
+});
+
+test('2C: the day page answers with the day total it was opened for', async () => {
+  const emp = 245;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3245',1500,1)")
+    .run(emp, 'Two Shifts');
+  const per = curPeriod();
+  const day = require('../src/dates').addDays(per.start, 8);
+  db.prepare('DELETE FROM time_entries WHERE employee_id = ? AND business_date = ?').run(emp, day);
+  seedEntry(emp, day, '09:00', '13:00');
+  seedEntry(emp, day, '17:00', '21:00');
+  const cookie = await signIn('3245');
+
+  const ts = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+  const rowTotal = (ts.match(new RegExp(`day/${day}[\\s\\S]*?<span class="tc-row-r"><b>([^<]+)</b>`)) || [])[1];
+  assert.strictEqual(rowTotal, '8h 0m', 'the timesheet row adds both shifts');
+
+  const page = await text(`/portal/timesheet/day/${day}`, { cookie });
+  assert.match(page, /class="tcd-tot">\s*<b>8h 0m<\/b>/, 'and the day page opens with the same figure');
+  assert.match(page, /2 shifts/, 'saying how many shifts that is');
+  assert.strictEqual((page.match(/data-pes-open="\d+"/g) || []).length, 2, 'each with its own edit sheet');
 });
