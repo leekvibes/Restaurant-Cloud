@@ -1088,7 +1088,12 @@ body.bare {
 
 /* Desktop: a centred workspace, not a stretched one. */
 @media (min-width: 760px) {
-  .tc-body { max-width: 560px; margin-left: auto; margin-right: auto; }
+  /* width:100% matters as much as the max-width. .pt is a flex column, and
+     `margin-left/right: auto` on a flex item centres it by making it
+     shrink-to-fit — so a page whose content happens to be narrow, like the
+     shift archive, collapsed to half the column while a page full of cards
+     filled it. Same page, two different widths, decided by the content. */
+  .tc-body { width: 100%; max-width: 560px; margin-left: auto; margin-right: auto; }
   /* One column, at every width. Two columns fitted three rows as 2 + 1, which
      both broke the reading order and squeezed "Jul 4 – Jul 17 · 8h 0m" onto two
      lines in a box with room to spare beside it. Desktop here is meant to be a

@@ -1288,3 +1288,170 @@ test('2E-1: Back from a shift returns to the page it was opened from', async () 
     assert.ok(!/evil|javascript|\/\//.test(href.replace('/portal', '')), `${evil} is not reflected`);
   }
 });
+
+// ===========================================================================
+// PHASE 2E-2 — the money has to add up, on the page, in cents.
+//
+// These read the RENDERED page and reconcile it against itself. That is the
+// property that matters to somebody holding the phone: whatever the engine
+// produced, the rows they can see must sum to the figure they are being shown.
+// A test that recomputed the engine's answer and compared it with itself would
+// pass while the page quietly displayed something else.
+// ===========================================================================
+
+/** Every "$x.yz" in a fragment, as integer cents. No float arithmetic. */
+const centsIn = (html) => [...html.matchAll(/(−?)\$([\d,]+)\.(\d{2})/g)]
+  .map((m) => (m[1] ? -1 : 1) * (Number(m[2].replace(/,/g, '')) * 100 + Number(m[3])));
+const oneCents = (html) => { const c = centsIn(html); return c.length ? c[0] : null; };
+/** The markup between one section heading and the next. */
+const sectionOf = (html, heading) => {
+  const i = html.indexOf(heading);
+  if (i < 0) return '';
+  const j = html.indexOf('tc-kick-sec', i + heading.length);
+  return html.slice(i, j < 0 ? html.length : j);
+};
+
+/** A period with awkward cents: $17.33/hr over 6.25h is 10831.25 -> 10831. */
+function seedMoneyPeriod() {
+  const P2 = require('../src/periods');
+  const D2 = require('../src/dates');
+  const per = P2.recentPeriods(2)[1];
+  const w = new Database(DB);
+  w.prepare("INSERT OR IGNORE INTO employees (id, name, role, hourly_rate_cents, active, pin) VALUES (910,'Cents Carla','server',1733,1,'9101')").run();
+  const mk = w.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status, created_at) VALUES (?,?,'emailed',datetime('now'))");
+  const find = w.prepare('SELECT id FROM shifts WHERE date = ? AND daypart = ?');
+  const work = w.prepare(`INSERT INTO work (shift_id, employee_id, role, hours)
+    VALUES (?,?,'server',?) ON CONFLICT(shift_id, employee_id) DO UPDATE SET hours = excluded.hours`);
+  const sales = w.prepare(`INSERT INTO server_sales
+      (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents, card_tips_cents, cash_tips_cents)
+    VALUES (?,?,?,?,?,?,?)
+    ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+      card_tips_cents = excluded.card_tips_cents, cash_tips_cents = excluded.cash_tips_cents`);
+  const days = [];
+  // One in each payroll week, so week 1 / week 2 both carry hours.
+  for (const [off, card, cash] of [[1, 8737, 4319], [9, 6151, 2783]]) {
+    const date = D2.addDays(per.start, off);
+    mk.run(date, 'dinner');
+    const sh = find.get(date, 'dinner').id;
+    work.run(sh, 910, 6.25);
+    sales.run(sh, 910, 41133, 0, 17777, card, cash);
+    days.push({ date, sh });
+  }
+  w.close();
+  return { per, days };
+}
+
+test('2E-2: the rows on the pay page sum exactly to the Gross pay shown', async () => {
+  const { per } = seedMoneyPeriod();
+  const cookie = await signIn('9101');
+  const html = await (await asStaff(`/portal/earnings?p=${per.start}`, cookie)).text();
+
+  // The headline figure, off the status card.
+  const card = html.slice(html.indexOf('class="tcc tcc-'), html.indexOf('</section>', html.indexOf('class="tcc tcc-')));
+  const gross = oneCents(card);
+  assert.ok(gross !== null && gross > 0, `a gross figure is shown (${gross})`);
+
+  // "On this payment" — its component rows, and its own total.
+  const pay = sectionOf(html, 'On this payment');
+  assert.ok(pay, 'the payment breakdown is on the page');
+  const all = centsIn(pay);
+  assert.ok(all.length >= 2, 'it has components and a total');
+  const total = all[all.length - 1];
+  const components = all.slice(0, -1);
+  assert.strictEqual(total, gross, 'the breakdown total IS the headline figure');
+  assert.strictEqual(components.reduce((a, b) => a + b, 0), gross,
+    `components ${components.join('+')} sum to ${gross}`);
+  // Integer cents throughout — never a float rendered into the page.
+  assert.ok(!/\$\d+\.\d{3,}/.test(html), 'no over-precise amount anywhere');
+  assert.ok(!/\d\.\d{10,}/.test(html), 'and no floating-point leakage');
+});
+
+test('2E-2: cash is shown once, separately, and never inside Gross pay', async () => {
+  const { per } = seedMoneyPeriod();
+  const cookie = await signIn('9101');
+  const html = await (await asStaff(`/portal/earnings?p=${per.start}`, cookie)).text();
+
+  const already = sectionOf(html, 'Already received');
+  assert.ok(already, 'the separately-received section is there');
+  const cash = oneCents(already);
+  assert.ok(cash > 0, `cash tips are shown (${cash})`);
+  assert.match(already, /paid separately and is not included/, 'and said once');
+  assert.strictEqual((html.match(/paid separately and is not included/g) || []).length, 1,
+    'exactly once — the old page said it three times');
+
+  // It is not a component of the payment, and it is not a deduction.
+  const pay = sectionOf(html, 'On this payment');
+  assert.ok(!centsIn(pay).includes(cash), 'the cash figure is not in the payment breakdown');
+  // Scoped to the section it is in: "Before tax and deductions" legitimately
+  // appears on the gross-pay note, and that is a different sentence about a
+  // different thing.
+  assert.ok(!/deduct/i.test(already), 'cash is never described as a deduction');
+
+  // Gross + cash is never presented as one number.
+  const card = html.slice(html.indexOf('class="tcc tcc-'), html.indexOf('</section>', html.indexOf('class="tcc tcc-')));
+  const gross = oneCents(card);
+  assert.ok(!centsIn(html).includes(gross + cash), 'their sum appears nowhere');
+});
+
+test('2E-2: a shift reconciles by source and by delivery', async () => {
+  const { days } = seedMoneyPeriod();
+  const cookie = await signIn('9101');
+  const html = await (await asStaff(`/portal/earnings/${days[0].sh}`, cookie)).text();
+  const grab = (label) => {
+    const m = html.match(new RegExp(label + '[\\s\\S]{0,160}?(−?\\$[\\d,]+\\.\\d{2})'));
+    return m ? centsIn(m[1])[0] : null;
+  };
+  // Where the tips came from.
+  const card = grab('Card tips'), cash = grab('Cash tips'), collected = grab('Total tips collected');
+  assert.ok(card !== null && cash !== null && collected !== null, 'the sources are itemised');
+  assert.strictEqual(card + cash, collected, 'card plus cash is what was collected');
+
+  // How they reached her: what she walked out with, plus what payroll carries.
+  const kept = grab('Tips you keep');
+  const out = grab('Total tip-out');
+  assert.ok(kept !== null, 'what she keeps is shown');
+  if (out !== null) {
+    assert.strictEqual(collected + out, kept,
+      'collected less the tip-out is what she keeps (tip-out renders negative)');
+  }
+  // Hours pay follows the resolved rate, in whole cents.
+  const wage = grab('Hours pay') ?? grab('hours pay');
+  if (wage !== null) {
+    assert.strictEqual(wage, Math.round(1733 * 6.25), 'rate x hours, rounded once, to the cent');
+  }
+});
+
+test('2E-2: a shift that cannot be costed is kept, not dropped', async () => {
+  // The contract, proved where it is decided rather than by manufacturing a
+  // corruption that the schema keeps refusing to hold.
+  //
+  // What made rows disappear was a `continue` in the costing loop while the
+  // COUNT beside it counted the same row. Two things have to be true and both
+  // are checked here: the list and the count read the SAME population, and the
+  // loop no longer has a path that skips a row.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function earningsFor('), src.indexOf('\n}', src.indexOf('function earningsFor(')));
+  const cnt = src.slice(src.indexOf('const earningsCount'), src.indexOf('function earningsFor('));
+
+  // Same WHERE on both, so the count can never describe a different set.
+  for (const clause of ["w.employee_id = ?", "sh.status = '${SHIFT_DONE}'", 'sh.date >= ?']) {
+    assert.ok(fn.includes(clause), `the row query filters on ${clause}`);
+    assert.ok(cnt.includes(clause), `and so does the count`);
+  }
+  // The catch keeps the row.
+  const cat = fn.slice(fn.indexOf('catch (e)'), fn.indexOf('const asServer'));
+  assert.match(cat, /out\.push\(/, 'a costing failure still pushes a row');
+  assert.match(cat, /unavailable: true/, 'flagged as unavailable');
+  assert.match(cat, /kept: null/, 'with null rather than zero');
+  assert.ok(!/kept: 0|wage: 0,/.test(cat), 'never a fabricated zero');
+  assert.match(cat, /sh\.worked_hours/, 'and hours from the authoritative work row');
+  assert.match(cat, /console\.error/, 'the failure is logged');
+  // The only `continue` left is the one AFTER the row has been pushed.
+  const pushAt = cat.indexOf('out.push(');
+  assert.ok(pushAt > -1 && cat.indexOf('continue', pushAt) > pushAt,
+    'the row is recorded before the loop moves on');
+
+  // And the page states it in words a person can act on, with nothing internal.
+  assert.match(src, /Earnings unavailable/, 'the state has a name');
+  assert.match(src, /couldn.t calculate this shift.s earnings/i, 'and a plain explanation');
+});
