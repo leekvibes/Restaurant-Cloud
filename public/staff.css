@@ -1355,12 +1355,15 @@ body.bare {
 .st-opt { font-style: normal; font-weight: 400; color: var(--pt-muted); }
 .st-in { position: relative; display: flex; align-items: center; }
 .st-cur { position: absolute; left: 14px; color: var(--pt-muted); font-size: 17px; pointer-events: none; }
-.st-in input { width: 100%; padding: 14px 14px 14px 30px; font-size: 17px; }
 .st-f input, .st-f select, .st-f textarea {
   width: 100%; background: var(--pt-field); color: var(--pt-ink);
   border: 1px solid var(--pt-line); border-radius: 12px; padding: 14px;
   font: inherit; font-size: 17px; /* 17px+ stops iOS zooming the page on focus */ }
 .st-f textarea { resize: vertical; }
+/* Clears the "$". Must sit after the generic .st-f input rule: same
+   specificity, so source order is what decides, and being above it let the
+   generic padding win and slide the first digit under the currency mark. */
+.st-in input { padding-left: 30px; }
 .st-f input:focus, .st-f select:focus, .st-f textarea:focus {
   outline: 2px solid var(--pt-green); outline-offset: 1px; }
 .st-f.is-bad input, .st-f.is-bad select { border-color: var(--pt-red); }
@@ -1387,3 +1390,31 @@ body.bare {
 @media (min-width: 768px) {
   .st-title { font-size: 30px; }
 }
+
+/* The current shift, stated rather than chosen (Phase 2F UX correction).
+   Reporting happens at the end of the shift just worked; when that shift is
+   knowable there is nothing to pick, and changing it stays secondary. */
+.st-now { display: flex; align-items: center; gap: 12px; margin: 0 0 22px;
+  padding: 14px 16px; background: var(--pt-field); border: 1px solid var(--pt-line);
+  border-radius: 14px; }
+.st-now.is-live { border-color: var(--pt-green); box-shadow: inset 3px 0 0 var(--pt-green); }
+.st-now-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.st-now-k { font-size: 12px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--pt-muted); font-weight: 700; }
+.st-now-v { font-size: 19px; color: var(--pt-ink); font-weight: 650; }
+.st-now-d { font-style: normal; font-size: 13px; color: var(--pt-muted); }
+/* Deliberately a quiet link, not a button — it is the uncommon path. */
+.st-change { flex: none; font-size: 15px; color: var(--pt-green);
+  text-decoration: underline; padding: 8px 4px; }
+
+.st-ch-sm { padding: 12px 14px; }
+.st-ch-sm .st-ch-b b { font-size: 15px; }
+
+.st-picks { display: flex; flex-direction: column; gap: 10px; }
+.st-pick { display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+  background: var(--pt-field); border: 1px solid var(--pt-line); border-radius: 14px;
+  color: inherit; text-decoration: none; }
+.st-pick-b { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.st-pick-b b { font-size: 16px; color: var(--pt-ink); font-weight: 650; }
+.st-pick-b i { font-style: normal; font-size: 13px; color: var(--pt-muted); }
+.st-pick-go { flex: none; font-size: 22px; color: var(--pt-muted); }

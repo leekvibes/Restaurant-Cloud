@@ -907,3 +907,179 @@ test('2F: two people reporting the same service land on one shared shift', async
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM work WHERE shift_id=?').get(sh.id).n, 2,
     'and both of them are on it');
 });
+
+// ===========================================================================
+// PHASE 2F (UX correction) — the shift you are standing in, not an archive.
+//
+// Reporting happens at the end of the shift just worked: usually today,
+// usually still clocked in. The first screen answers that case and hides the
+// history behind one tap.
+// ===========================================================================
+
+/** Today as the server counts it — same timezone the test server runs in. */
+const TODAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+const DAYS_AGO = (n) => {
+  const d = new Date(`${TODAY}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+};
+
+/** A server with a clean history, so these tests do not read other tests' shifts. */
+function seedToday(pin, name, opts = {}) {
+  const w = writable();
+  w.prepare(`INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin)
+             VALUES (?, 'server', 1500, 1, ?)`).run(name, pin);
+  const id = w.prepare('SELECT id FROM employees WHERE name = ?').get(name).id;
+  const shiftOn = (date, daypart) => {
+    w.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(date, daypart);
+    return w.prepare('SELECT id FROM shifts WHERE date = ? AND daypart = ?').get(date, daypart).id;
+  };
+  const out = { id, today: [], past: [] };
+  for (const dpt of opts.today || []) {
+    const sid = shiftOn(TODAY, dpt);
+    w.prepare(`INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours)
+               VALUES (?, ?, 'server', 0)`).run(sid, id);
+    out.today.push({ id: sid, daypart: dpt });
+  }
+  for (const [n, dpt] of opts.past || []) {
+    const sid = shiftOn(DAYS_AGO(n), dpt);
+    w.prepare(`INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours)
+               VALUES (?, ?, 'server', 6)`).run(sid, id);
+    out.past.push({ id: sid, date: DAYS_AGO(n), daypart: dpt });
+  }
+  if (opts.clockedInto) {
+    const sid = out.today.find((t) => t.daypart === opts.clockedInto).id;
+    w.prepare(`INSERT INTO time_entries (employee_id, shift_id, business_date, position,
+                 clock_in_at, status, source)
+               VALUES (?, ?, ?, 'server', datetime('now','-2 hours'), 'active', 'portal')`)
+      .run(id, sid, TODAY);
+  }
+  w.close();
+  return out;
+}
+
+const page = async (cookie, url) => (await fetch(`${BASE}${url}`, { headers: { cookie } })).text();
+
+test('2F-UX: an open punch selects itself and the form is there without another tap', async () => {
+  const seed = seedToday('5150', 'Dana Wu', { today: ['dinner'], past: [[3, 'cafe'], [5, 'dinner']], clockedInto: 'dinner' });
+  const { cookie } = await signIn('5150');
+  const html = await page(cookie, '/portal/tips');
+
+  assert.match(html, /Current shift/, 'it says which shift this is');
+  assert.match(html, /class="st-now is-live"/, 'as a summary, not a question');
+  assert.match(html, new RegExp(`name="shift_id" value="${seed.today[0].id}"`),
+    'and it is already chosen');
+  // The money is on screen immediately. That is the whole point.
+  assert.match(html, /id="st-food"/, 'the sales fields are right there');
+  assert.match(html, /id="st-cash_kept"/, 'and the tips fields');
+  assert.ok(!/<div class="st-chs"/.test(html), 'nothing to pick from');
+});
+
+test('2F-UX: the first screen carries no history at all', async () => {
+  seedToday('5151', 'Omar Reid', { today: ['cafe'], past: [[2, 'dinner'], [4, 'cafe'], [9, 'dinner']] });
+  const { cookie } = await signIn('5151');
+  const html = await page(cookie, '/portal/tips');
+
+  for (const n of [2, 4, 9]) {
+    assert.ok(!html.includes(DAYS_AGO(n)), `${DAYS_AGO(n)} is not on the first screen`);
+  }
+  assert.ok(!/Already submitted/.test(html), 'and no archive of what was filed before');
+  assert.match(html, /Today's shift/, "it is today's shift that is shown");
+  assert.match(html, /id="st-food"/, 'with the form already open');
+});
+
+test('2F-UX: one recorded shift today is chosen without being asked about', async () => {
+  const seed = seedToday('5152', 'Priya Shah', { today: ['cafe'], past: [[1, 'dinner']] });
+  const { cookie } = await signIn('5152');
+  const html = await page(cookie, '/portal/tips');
+  assert.match(html, new RegExp(`name="shift_id" value="${seed.today[0].id}"`), 'chosen');
+  assert.ok(!/<div class="st-chs"/.test(html), 'and not offered as a choice');
+});
+
+test('2F-UX: two services today is a compact choice, and only today is on it', async () => {
+  const seed = seedToday('5153', 'Lena Ford', { today: ['cafe', 'dinner'], past: [[3, 'dinner']] });
+  const { cookie } = await signIn('5153');
+  const html = await page(cookie, '/portal/tips');
+
+  assert.match(html, /<div class="st-chs"/, 'a choice is offered');
+  for (const t of seed.today) {
+    assert.match(html, new RegExp(`value="${t.id}"`), `${t.daypart} today is on it`);
+  }
+  assert.ok(!html.includes(seed.past[0].date), 'the older shift is not');
+  // Compact: small rows, and no radio is preselected, because two services is
+  // a real question with two answers.
+  assert.match(html, /class="st-ch st-ch-sm"/, 'the rows are the compact ones');
+  // Matched against real <input> tags only — a looser regex over the whole
+  // page hits `[data-st-shift]:checked` inside the script and reports a
+  // preselection that is not there.
+  const radios = [...html.matchAll(/<input[^>]*data-st-shift[^>]*>/g)].map((m) => m[0]);
+  assert.strictEqual(radios.length, 2, 'two services, two radios');
+  for (const r of radios) assert.ok(!/\bchecked\b/.test(r), `neither is guessed: ${r}`);
+});
+
+test('2F-UX: "Choose another shift" is where the history lives', async () => {
+  const seed = seedToday('5154', 'Ruth Okon', { today: ['dinner'], past: [[2, 'cafe'], [6, 'dinner']] });
+  const { cookie } = await signIn('5154');
+
+  const first = await page(cookie, '/portal/tips');
+  assert.match(first, /href="\/portal\/tips\?pick=1"/, 'one tap away');
+
+  const picker = await page(cookie, '/portal/tips?pick=1');
+  assert.match(picker, /Choose another shift/, 'and it opens');
+  for (const p of seed.past) {
+    assert.match(picker, new RegExp(`href="/portal/tips\\?shift=${p.id}"`), `${p.date} is here`);
+  }
+  assert.match(picker, /href="\/portal\/tips\?manual=1"/, 'so is reporting one that is not listed');
+  assert.match(picker, /Still to report/, 'grouped by whether it still needs doing');
+  assert.match(picker, /Already submitted/, 'and by what can be corrected');
+});
+
+test('2F-UX: a past shift opens to its own form, correction and all', async () => {
+  const seed = seedToday('5155', 'Ivan Boyd', { today: ['dinner'], past: [[3, 'cafe']] });
+  const { token, cookie } = await signIn('5155');
+  const past = seed.past[0];
+
+  // File it, then reach it again through the picker.
+  await form('/tips', { token, position: 'server', shift_id: String(past.id), cash_tips: '30' });
+  const picker = await page(cookie, '/portal/tips?pick=1');
+  assert.match(picker, new RegExp(`href="/portal/tips\\?shift=${past.id}"`), 'listed');
+
+  const html = await page(cookie, `/portal/tips?shift=${past.id}`);
+  assert.match(html, /Previously submitted/, 'and opens as a correction');
+  assert.match(html, /Update report/, 'with the right verb on the button');
+  assert.match(html, /data-st-confirm/, 'and a confirmation to tick');
+  assert.match(html, new RegExp(`name="shift_id" value="${past.id}"`), 'against that shift');
+});
+
+test('2F-UX: reaching a shift by id is still checked, whatever the screen shows', async () => {
+  // The picker is a convenience. It changes nothing about what the write will
+  // accept: a shift on another date that this person neither worked nor was
+  // rostered on is refused, exactly as before.
+  const seed = seedToday('5156', 'Nora Vale', { past: [[4, 'dinner']] });
+  seedToday('5157', 'Otis Kane', {});
+  const other = await signIn('5157');
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie: other.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(seed.past[0].id), cash_tips: '20' }).toString(),
+  });
+  assert.strictEqual(res.status, 403, "somebody else's past shift is refused");
+  const sh = seed.past[0].id;
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sh, empId('Otis Kane')).n, 0, 'and nothing was written');
+});
+
+test('2F-UX: today\'s open service is filable even before a manager adds you', async () => {
+  // The ordinary case that used to leave the picker empty. It grants nothing
+  // the manual path does not — that path resolves any date and service by name.
+  const w = writable();
+  w.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(TODAY, 'cafe');
+  w.close();
+  seedToday('5158', 'Wes Amari', {});
+  const { token } = await signIn('5158');
+  const sid = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(TODAY, 'cafe').id;
+  const res = await form('/tips', { token, position: 'server', shift_id: String(sid), cash_tips: '18' });
+  assert.strictEqual(res.status, 302, 'accepted');
+  assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sid, empId('Wes Amari')).c, 1800);
+});

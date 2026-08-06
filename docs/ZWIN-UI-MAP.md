@@ -1227,6 +1227,34 @@ is `NOT NULL DEFAULT 0`, so once a row exists a stored `0` cannot be told apart
 from "never said". The workspace, review and receipt all read the state from the
 latest audit row and print **"Not entered"** rather than `$0.00`.
 
+### The first screen is the shift you are standing in
+
+Reporting happens at the end of the shift just worked: usually today, usually
+still clocked in, occasionally for a past date. The first screen answers that
+case and nothing else. **No visible list of past shifts on arrival.**
+
+Selection hierarchy, in order:
+
+1. **Active punch** → auto-selected, shown as `Current shift · Dinner · Server`
+   with a live edge and *"You are clocked in now"*.
+2. **One recorded shift today** → auto-selected, shown as `Today's shift`.
+3. **Several services today** → a compact radio group, **today only**, nothing
+   preselected. A service they were actually on outranks one that merely
+   exists: if the café is open and they worked dinner, the café is not offered.
+4. **`Change` / `Choose another shift`** → `/portal/tips?pick=1`, a separate
+   state holding recent unreported shifts, previously submitted reports open
+   for correction, and the manual path.
+
+Today's shared shift is filable even before a manager has added the employee to
+it — the ordinary case that used to leave the picker empty. This grants nothing
+the manual path does not, since that path resolves or creates any date and
+service by name; the write accepts a posted `shift_id` only when the employee is
+on that shift **or** it is one of today's services.
+
+When exactly one job is eligible there is no "Which job" section at all — the
+summary card already names it, and a heading that restates it costs about a
+hundred pixels off the top of a phone screen.
+
 ### Shift-reporting modes
 
 1. **Current active shift** — an open punch. Shown first, labelled `Current shift · …`.

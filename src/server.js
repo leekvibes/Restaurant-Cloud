@@ -4781,43 +4781,89 @@ const shiftTitle = (sh) => `${dp(sh.daypart)} · ${niceDate(sh.date)}`;
  * renders — which shift is current, which fields to show, whether this is a
  * correction — is made here from database rows, and repeated on the write.
  */
+/** Today's business date, the same one every other portal page counts by. */
+const tipsToday = () => isoDate(startOfToday());
+
+/**
+ * Today's shared shifts, whether or not this person has been added to one yet.
+ *
+ * Somebody arriving to file before a manager has put them on the close is the
+ * ordinary case, not an edge case — it is what used to leave the picker empty.
+ * Offering today's shift by id grants nothing the manual path does not already
+ * grant: that path resolves or creates ANY date and service by name. This is
+ * the same door, with the answer filled in.
+ */
+const todaySharedQ = db.prepare(
+  'SELECT id, date, daypart, status FROM shifts WHERE date = ? ORDER BY daypart');
+
+/**
+ * Build the whole workspace model on the server. Every decision the page
+ * renders — which shift is current, which fields to show, whether this is a
+ * correction — is made here from database rows, and repeated on the write.
+ *
+ * The selection hierarchy is the shape of the job, not a preference:
+ *
+ *   1. the punch they are standing in          auto-selected
+ *   2. one recorded shift today                auto-selected
+ *   3. several shifts today                    a compact choice, today only
+ *   4. "Choose another shift"                  past, corrections, manual
+ *
+ * Reporting happens at the end of the shift just worked, almost always today
+ * and usually still clocked in. A list of every past shift on arrival answers
+ * a question nobody asked and buries the one they came to answer.
+ */
 function tipsWorkspace(emp, opts = {}) {
   const gate = tipsEligibility(emp);
   if (!gate.ok) return { ok: false, msg: gate.msg };
 
+  const today = tipsToday();
   const rows = tipsShiftsQ.all({ emp: emp.id });
   const anchor = TC.anchorEntryFor(emp.id);
   const anchorShift = anchor && anchor.shift_id ? anchor.shift_id : null;
   const anchorOpen = !!(anchor && anchor.clock_out_at == null);
 
-  const choices = rows.map((r) => ({
-    id: r.id, date: r.date, daypart: r.daypart,
-    role: r.work_role || null,
-    filed: r.subs > 0,
-    current: r.id === anchorShift && anchorOpen,
-    recorded: r.punches > 0 || !!r.work_role,
-    title: shiftTitle(r),
-  }));
-
-  // Priority: the shift they are standing in, then recorded shifts still
-  // owing a report, then everything already filed (available to correct).
-  const rank = (c) => (c.current ? 0 : (!c.filed ? 1 : 2));
-  choices.sort((a, b) => rank(a) - rank(b)
-    || (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-
-  // Preselect only when there is one obvious answer. A wrong guess here files
-  // somebody's money against the wrong night.
-  let selected = null;
-  if (opts.shiftId) selected = choices.find((c) => c.id === Number(opts.shiftId)) || null;
-  if (!selected) {
-    const cur = choices.find((c) => c.current);
-    const owing = choices.filter((c) => !c.filed);
-    if (cur) selected = cur;
-    else if (owing.length === 1) selected = owing[0];
+  const seen = new Set();
+  const choices = [];
+  for (const r of rows) {
+    seen.add(r.id);
+    choices.push({
+      id: r.id, date: r.date, daypart: r.daypart, role: r.work_role || null,
+      filed: r.subs > 0, current: r.id === anchorShift && anchorOpen,
+      recorded: r.punches > 0 || !!r.work_role, today: r.date === today,
+      title: shiftTitle(r),
+    });
+  }
+  // Today's services they are not on yet. Never any other date — a shift
+  // somebody is not on and did not work is not something to offer them.
+  for (const sh of todaySharedQ.all(today)) {
+    if (seen.has(sh.id)) continue;
+    choices.push({
+      id: sh.id, date: sh.date, daypart: sh.daypart, role: null,
+      filed: false, current: false, recorded: false, today: true,
+      title: shiftTitle(sh),
+    });
   }
 
-  // The filing position. One eligible job is chosen for them; several must be
-  // picked, because that choice decides kept-vs-pooled.
+  const byRecency = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+  const byService = (a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0)
+    || (a.daypart < b.daypart ? -1 : 1);
+  const allToday = choices.filter((c) => c.today).sort(byService);
+  // A service they were actually on outranks a service that merely exists. If
+  // the café is open and they worked dinner, the café is not a choice they
+  // should be asked to rule out — offering it invites the wrong answer.
+  const recordedToday = allToday.filter((c) => c.recorded);
+  const todayChoices = recordedToday.length ? recordedToday : allToday;
+  const pastChoices = choices.filter((c) => !c.today).sort(byRecency);
+
+  // An explicit choice always wins — it is how somebody reaches a past shift
+  // to correct it. Otherwise the hierarchy decides, and it only decides when
+  // there is one answer: a guess here files somebody's money against a night
+  // they did not work.
+  let selected = null;
+  if (opts.shiftId) selected = choices.find((c) => c.id === Number(opts.shiftId)) || null;
+  if (!selected) selected = todayChoices.find((c) => c.current) || null;
+  if (!selected && todayChoices.length === 1) selected = todayChoices[0];
+
   const eligibleSlugs = gate.eligible;
   let position = null;
   const asked = opts.position && String(opts.position).trim();
@@ -4829,7 +4875,11 @@ function tipsWorkspace(emp, opts = {}) {
   const stored = selected ? storedReportFor(selected.id, emp.id) : null;
 
   return {
-    ok: true, emp, choices, selected, position, caps, stored,
+    ok: true, emp, selected, position, caps, stored, today,
+    // The primary screen never sees `pastChoices`. It is rendered only when
+    // somebody asks for it, which is the whole point of this phase's correction.
+    todayChoices, pastChoices,
+    mode: opts.manual ? 'manual' : opts.pick ? 'pick' : 'form',
     eligible: eligibleSlugs.map((slug) => positions.bySlug.get(slug)).filter(Boolean),
     manual: !!opts.manual,
     dayparts: DAYPARTS,
@@ -4863,6 +4913,56 @@ const cardStateText = (state, cents) => (state === 'unstated' ? 'Not entered'
   : state === 'zero' ? '$0.00' : money(cents || 0));
 
 /**
+ * "Choose another shift" — the secondary state.
+ *
+ * Everything the primary screen deliberately withholds: shifts from other
+ * days, reports already filed that somebody wants to correct, and the manual
+ * path for a night with no record at all. Reaching it is one tap; arriving at
+ * it by default was the mistake this replaces.
+ */
+function tipsPickerPage(model) {
+  const posName = (slug) => {
+    const p = positions.bySlug.get(slug);
+    return p ? p.name : slug;
+  };
+  const row = (c) => `
+    <a class="st-pick" href="/portal/tips?shift=${c.id}">
+      <span class="st-pick-b">
+        <b>${esc(shiftTitle(c))}</b>
+        <i>${c.current ? 'You are clocked in now'
+    : c.filed ? 'Already submitted — open it to correct it'
+      : c.role ? `Worked as ${esc(posName(c.role))}` : 'Recorded shift'}</i>
+      </span>
+      <span class="st-pick-go" aria-hidden="true">&rsaquo;</span>
+    </a>`;
+
+  const owing = [...model.todayChoices, ...model.pastChoices].filter((c) => !c.filed);
+  const filed = [...model.todayChoices, ...model.pastChoices].filter((c) => c.filed);
+  const group = (title, list, empty) => `
+    <div class="st-sec">
+      <h2 class="st-h">${title}</h2>
+      ${list.length ? `<div class="st-picks">${list.slice(0, 15).map(row).join('')}</div>`
+    : `<p class="st-sub">${empty}</p>`}
+    </div>`;
+
+  return portalPage('Sales & tips', `
+    ${portalTop({ href: '/portal/tips', label: 'Back' }, 'Sales & tips')}
+    <div class="pt-body tc-body st-body">
+      <h1 class="st-title">Choose another shift</h1>
+      <p class="st-lede">Report a shift other than today's, or correct one you already sent.</p>
+      ${group('Still to report', owing, 'Nothing outstanding.')}
+      ${group('Already submitted', filed, 'Nothing submitted yet.')}
+      <div class="st-sec">
+        <h2 class="st-h">Not listed</h2>
+        <p class="st-sub">A shift with no record — you forgot to clock in, or it was
+          never opened. Reporting it files your sales and tips only: no clock-in,
+          no hours, no wages.</p>
+        <a class="tc-btn tc-btn-go tc-btn-big" href="/portal/tips?manual=1">Report a shift not listed</a>
+      </div>
+    </div>`);
+}
+
+/**
  * The submission workspace. One page: choose the shift, enter the figures,
  * read the review, send it. No hidden steps — there is nothing to tab into
  * that is not on the screen.
@@ -4879,17 +4979,37 @@ function tipsWorkspacePage(model, opts = {}) {
     return p ? p.name : slug;
   };
 
-  // --- shift choice ---------------------------------------------------------
-  const choiceRow = (c) => `
-    <label class="st-ch${selected && selected.id === c.id ? ' is-on' : ''}">
-      <input type="radio" name="shift_id" value="${c.id}"${
-  selected && selected.id === c.id ? ' checked' : ''}
-             data-st-shift aria-describedby="st-ch-${c.id}-m">
+  // --- shift context --------------------------------------------------------
+  //
+  // A summary, not a picker. Reporting happens at the end of the shift just
+  // worked; when that shift is knowable there is nothing to choose, and a
+  // radio list of every past shift on arrival buries the one thing they came
+  // to do. Changing it stays one tap away and stays visually secondary.
+  const summaryCard = (c) => `
+    <div class="st-now${c.current ? ' is-live' : ''}">
+      <div class="st-now-t">
+        <span class="st-now-k">${c.current ? 'Current shift'
+    : c.today ? "Today's shift" : 'Reporting'}</span>
+        <b class="st-now-v">${esc(dp(c.daypart))}${
+  position ? ` · ${esc(posName(position))}` : ''}</b>
+        ${c.today ? '' : `<i class="st-now-d">${esc(niceDate(c.date))}</i>`}
+        ${c.current ? '<i class="st-now-d">You are clocked in now</i>' : ''}
+        ${c.filed ? '<i class="st-now-d">Already submitted — this will update it</i>' : ''}
+      </div>
+      <a class="st-change" href="/portal/tips?pick=1">Change</a>
+    </div>`;
+
+  // Only when today genuinely has more than one service they could be filing
+  // for. Today only — old dates never appear here.
+  const todayRow = (c) => `
+    <label class="st-ch st-ch-sm">
+      <input type="radio" name="shift_id" value="${c.id}" data-st-shift
+             aria-describedby="st-ch-${c.id}-m">
       <span class="st-ch-b">
-        <b>${c.current ? 'Current shift · ' : ''}${esc(shiftTitle(c))}</b>
+        <b>${c.current ? 'Current shift · ' : ''}${esc(dp(c.daypart))}</b>
         <i id="st-ch-${c.id}-m">${c.current ? 'You are clocked in now'
     : c.filed ? 'Already submitted — you can correct it'
-      : c.role ? `Worked as ${esc(posName(c.role))}` : 'Recorded shift'}</i>
+      : c.role ? `Worked as ${esc(posName(c.role))}` : 'Open today'}</i>
       </span>
     </label>`;
 
@@ -4915,23 +5035,37 @@ function tipsWorkspacePage(model, opts = {}) {
           ${DAYPARTS.map((d) => `<option value="${d}"${
     vals.daypart === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
         </select>
-        <p class="st-hint" id="st-dp-h">Café or dinner.</p>
+        <p class="st-hint" id="st-dp-h">Caf&eacute; or dinner.</p>
         ${errs.daypart ? `<p class="st-err" id="st-dp-e">${esc(errs.daypart)}</p>` : ''}
       </div>
       <input type="hidden" name="mode" value="manual">
-      <a class="st-alt" href="/portal/tips">Back to your recorded shifts</a>
-    </div>` : `
+      <a class="st-alt" href="/portal/tips">Back to today</a>
+    </div>`
+    : selected ? `
+    ${summaryCard(selected)}
+    <input type="hidden" name="shift_id" value="${selected.id}">`
+      : model.todayChoices.length ? `
+    <div class="st-sec">
+      <h2 class="st-h">Which service</h2>
+      <p class="st-sub">More than one service today, so it is not assumed.</p>
+      <div class="st-chs" role="radiogroup" aria-label="Shift to report">
+        ${model.todayChoices.map(todayRow).join('')}
+      </div>
+      <a class="st-alt" href="/portal/tips?pick=1">Choose another shift</a>
+    </div>`
+        : `
     <div class="st-sec">
       <h2 class="st-h">Which shift</h2>
-      ${choices.length ? `<div class="st-chs" role="radiogroup" aria-label="Shift to report">
-        ${choices.slice(0, 12).map(choiceRow).join('')}
-      </div>` : `<p class="st-sub">No recorded shifts yet.</p>`}
-      <a class="st-alt" href="/portal/tips?manual=1">Report a shift not listed</a>
+      <p class="st-sub">Nothing is open today to report against.</p>
+      <a class="st-alt" href="/portal/tips?pick=1">Choose another shift</a>
     </div>`;
 
   // --- filing position ------------------------------------------------------
   const many = model.eligible.length > 1;
-  const posBlock = `
+  // Only a section when there is genuinely something to answer. With one
+  // eligible job the summary card above already says which, and a heading that
+  // restates it costs a hundred pixels off the top of a phone screen.
+  const posBlock = !many ? `<input type="hidden" name="position" value="${esc(position || '')}">` : `
     <div class="st-sec">
       <h2 class="st-h">Which job</h2>
       ${many ? `
@@ -4948,8 +5082,7 @@ function tipsWorkspacePage(model, opts = {}) {
             or the pool's, so it has to be the job you actually worked.</p>
           ${errs.position ? `<p class="st-err" id="st-pos-e">${esc(errs.position)}</p>` : ''}
         </div>` : `
-        <input type="hidden" name="position" value="${esc(position || '')}">
-        <p class="st-sub">Filing as <b>${esc(posName(position))}</b>.</p>`}
+        <input type="hidden" name="position" value="${esc(position || '')}">`}
     </div>`;
 
   // --- the money ------------------------------------------------------------
@@ -5138,9 +5271,11 @@ const openTips = (req, res) => {
   // shown an error — they arrived by tapping something, and the row they
   // tapped should not have been there. The WRITE refuses with a status.
   const model = tipsWorkspace(who.emp, {
-    shiftId: req.query.shift, position: req.query.position, manual: req.query.manual === '1',
+    shiftId: req.query.shift, position: req.query.position,
+    manual: req.query.manual === '1', pick: req.query.pick === '1',
   });
   if (!model.ok) return res.redirect('/portal');
+  if (model.mode === 'pick') return res.send(tipsPickerPage(model));
   res.send(tipsWorkspacePage(model, { manual: model.manual }));
 };
 app.get('/portal/tips', openTips);
@@ -5206,7 +5341,13 @@ function writeSalesTips(req, emp, opts = {}) {
     // date and service then come from the ROW, never from the body, so a
     // rewritten form cannot move a recorded shift to another night.
     const owned = tipsShiftsQ.all({ emp: emp.id }).some((r) => r.id === wantId);
-    if (!owned) return { ok: false, refuse: 'That shift is not one of yours.' };
+    // Or one of today's services. Somebody arriving to file before a manager
+    // has added them to the close is the ordinary case, and this grants
+    // nothing the manual path does not: that path resolves or creates ANY
+    // date and service by name. Today only — a shift on another date that
+    // they neither worked nor were rostered on is not theirs to file against.
+    const openToday = !owned && todaySharedQ.all(tipsToday()).some((r) => r.id === wantId);
+    if (!owned && !openToday) return { ok: false, refuse: 'That shift is not one of yours.' };
     sh = s.shiftById.get(wantId) || null;
   }
   if (!sh && String(body.mode || '') === 'manual') {
