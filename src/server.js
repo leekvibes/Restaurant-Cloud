@@ -3171,314 +3171,6 @@ function pinScript() {
   </script>`;
 }
 
-/**
- * The end-of-shift report, in two steps.
- *
- * One <form> and one POST — the steps are two panels the page switches
- * between, not two round trips. That keeps the server contract exactly as it
- * was, means nothing is half-saved if someone closes the tab on step 2, and
- * degrades to the old single scroll if the JavaScript never runs: step 2 is
- * hidden by script, not by markup.
- *
- * The progress bar reads "of 3". The third is the confirmation screen, which
- * is a real step from where the person is standing — they are not finished
- * until they have seen it.
- */
-function tipsFormPage(emp, opts = {}) {
-  // The SAME answer to "which day is it" that the clock uses. Plain calendar
-  // date was wrong for exactly the shifts that matter most: somebody filing at
-  // 1:15am on Saturday worked Friday night, the clock files their punch under
-  // Friday, and the tips were landing on Saturday — two shifts, hours on one
-  // and money on the other, for a person who did nothing unusual.
-  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
-  const err = opts.err ? `<div class="tp-err">${esc(opts.err)}</div>` : '';
-  const token = tipsToken(emp.id);
-  const first = emp.name.split(' ')[0];
-
-  // Only the jobs you've given them in Staff that are ALSO asked to hand
-  // something in — from the same function the write route uses, so the menu
-  // cannot offer a choice the submission would then refuse. A kitchen hand who
-  // also picks up server shifts sees "Server" and only "Server".
-  const roles = tipsEligibility(emp).eligible;
-  const label = (r) => ((positions.bySlug.get(r) || {}).name || r);
-  // What the form opens on. One eligible job is not a choice, so it is made;
-  // several is a choice nobody else can make for them, because it decides
-  // whether the tips are theirs or the pool's — so nothing is preselected and
-  // the sales block starts hidden until they say.
-  const one = roles.length === 1;
-  const opensAs = one ? roles[0] : null;
-  const salesHidden = opensAs === 'server' ? '' : ' hidden';
-  const positionField = !one
-    ? `<div class="tp-row">
-         <select name="position" id="tip-position" class="tp-sel-role" required>
-           <option value="">Which job?</option>
-           ${roles.map((r) => `<option value="${esc(r)}">${esc(label(r))}</option>`).join('')}
-         </select>
-         <span class="tp-row-h">pick what you actually did &mdash; it decides how your tips are handled</span>
-       </div>`
-    : `<div class="tp-row">
-         <span class="tp-row-v">${esc(label(roles[0]))}</span>
-         <input type="hidden" name="position" id="tip-position" value="${esc(roles[0])}">
-         <span class="tp-row-h">worked something else? tell your manager</span>
-       </div>`;
-
-  const money = (name, extra = '') =>
-    `<div class="tp-money${extra.includes('big') ? ' big' : ''}">
-      <span class="cur">$</span>
-      <input name="${name}" id="f-${name}" type="text" inputmode="decimal"
-        autocomplete="off" placeholder="0.00" data-money>
-      <span class="tp-step2">
-        <button type="button" tabindex="-1" data-bump="${name}" data-by="1" aria-label="Add a dollar">&#9650;</button>
-        <button type="button" tabindex="-1" data-bump="${name}" data-by="-1" aria-label="Take off a dollar">&#9660;</button>
-      </span>
-    </div>`;
-
-  const body = `
-    <div class="tp">
-      <!-- step 1 header: who you are -->
-      <div class="tp-top" data-when="1">
-        <span class="tp-mark">${esc(markOf(RESTAURANT))}</span>
-        <div class="tp-who">
-          <div class="tp-brand">${esc(RESTAURANT)}</div>
-          <div class="tp-name">Hi ${esc(first)}</div>
-        </div>
-        ${/* Steps two and three have had a Back button all along; step one had
-              only "Not you?", which is a sign-out, not a way back. Somebody who
-              opened this from the hub to look at it had no way home that did
-              not end their session. */''}
-        <a class="tp-home" href="/portal">&lsaquo; Home</a>
-        <a href="/tips">Not you?</a>
-      </div>
-
-      <!-- step 2 header: back out of it -->
-      <div class="tp-navbar" data-when="2" hidden>
-        <button type="button" class="tp-back" data-goto="1">&larr; Back</button>
-        <span class="tp-navt">Your tips</span>
-        <span class="tp-count"><b>2</b> / 3</span>
-      </div>
-
-      <form method="post" action="/tips" id="report">
-        <input type="hidden" name="token" value="${token}">
-
-        <div class="tp-body">
-          <div data-when="1">
-            <h1 class="tp-h">End-of-shift report.</h1>
-            <p class="tp-lead">Fill this in when you close out. Your manager only sees the totals.</p>
-            ${err}
-          </div>
-
-          <div class="tp-prog">
-            <span class="on"></span><span data-seg="2"></span><span data-seg="3"></span>
-          </div>
-          <p class="tp-stepk" id="stepk">Step 1 of 3 &middot; who &amp; when</p>
-
-          <!-- ---------------- step 1 ---------------- -->
-          <div id="step1">
-            <div class="tp-sec">
-              <div class="tp-seck">What you worked</div>
-              ${positionField}
-            </div>
-
-            <div class="tp-sec">
-              <div class="tp-seck">Date you worked</div>
-              <div class="tp-row">
-                <span class="tp-date" id="datetext">${esc(usDate(today))}</span>
-                <input type="date" name="date" id="f-date" value="${today}" max="${today}" required hidden>
-                <button type="button" class="tp-link" id="datechange">change</button>
-              </div>
-            </div>
-
-            <div class="tp-sec">
-              <div class="tp-seck">Which shift</div>
-              <!-- Nothing is preselected. A default here is a guess, and a
-                   guess that is wrong files somebody's tips against the wrong
-                   service — which the manager then has to unpick by hand. -->
-              <div class="tp-toggle">
-                <input type="radio" name="daypart" id="dp-cafe" value="cafe" required>
-                <label for="dp-cafe">Caf&eacute; <span class="tick">&#10003;</span></label>
-                <input type="radio" name="daypart" id="dp-dinner" value="dinner" required>
-                <label for="dp-dinner">Dinner <span class="tick">&#10003;</span></label>
-              </div>
-              <p class="tp-pick" id="pickshift" hidden>Choose which shift you worked to carry on.</p>
-            </div>
-
-            <div class="tp-sec" id="server-sales"${salesHidden}>
-              <div class="tp-seck">Your sales tonight</div>
-              <div class="tp-field">
-                <span class="tp-label">Kitchen / food sales</span>
-                ${money('food')}
-              </div>
-              <div class="tp-field">
-                <span class="tp-label">Coffee &amp; beverage sales</span>
-                ${money('coffee')}
-              </div>
-              <div class="tp-field">
-                <span class="tp-label">Alcohol sales <i>&middot; leave blank if none</i></span>
-                ${money('alcohol')}
-              </div>
-            </div>
-          </div>
-
-          <!-- ---------------- step 2 ---------------- -->
-          <div id="step2">
-            <div class="tp-field" style="margin-top:0">
-              <span class="tp-label">Cash tips you took home</span>
-              ${money('cash_tips', 'big')}
-            </div>
-
-            <div class="tp-field">
-              <span class="tp-label">Card tips</span>
-              ${money('card_tips')}
-              <p class="tp-help">From your closeout slip. Leave blank if you don't have it.</p>
-            </div>
-
-            <div class="tp-field">
-              <span class="tp-label">Note <i>&middot; optional</i></span>
-              <textarea name="note" class="tp-note" maxlength="500"
-                placeholder="Anything unusual about tonight's numbers, or a message for your manager&hellip;"></textarea>
-            </div>
-
-            <div class="tp-tot">
-              <div class="tp-tot-h">Tonight's totals &mdash; what your manager sees</div>
-              <div class="tp-tot-r" id="row-sales"${salesHidden}><span>Sales rung</span><b id="t-sales">$0.00</b></div>
-              <div class="tp-tot-r"><span>Cash tips</span><b id="t-cash">$0.00</b></div>
-              <div class="tp-tot-r"><span>Card tips</span><b id="t-card">$0.00</b></div>
-              <div class="tp-tot-r sum"><span>Total tips</span><b id="t-tips">$0.00</b></div>
-            </div>
-          </div>
-        </div>
-      </form>
-
-      <div class="tp-foot">
-        <button class="tp-go" type="button" id="next" data-when="1">Next: your tips &rarr;</button>
-        <button class="tp-go" type="submit" form="report" data-when="2" hidden>Submit report</button>
-        <p class="tp-reassure" data-when="2" hidden>You can edit until your manager sends the shift.</p>
-      </div>
-      <div class="tp-build" data-when="1">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
-    </div>
-    ${reportScript()}`;
-  return layout('Log your tips', body, { bare: true, staff: true });
-}
-
-/** 2026-07-22 → "07 / 22 / 2026", the way the mock reads a date back. */
-function usDate(iso) {
-  const [y, m, d] = String(iso).split('-');
-  return `${m} / ${d} / ${y}`;
-}
-
-function reportScript() {
-  return `<script>
-  (function () {
-    var form = document.getElementById('report');
-    if (!form) return;
-    var $ = function (id) { return document.getElementById(id); };
-    var at = 1;
-
-    // Step 2 is hidden HERE rather than in the markup: if this script never
-    // runs, the page is the single long form it has always been, and the
-    // submit button at the bottom still posts every field.
-    $('step2').hidden = true;
-    var showFor = function (n) {
-      var all = document.querySelectorAll('[data-when]');
-      for (var i = 0; i < all.length; i++) all[i].hidden = all[i].dataset.when !== String(n);
-    };
-
-    function go(n) {
-      at = n;
-      $('step1').hidden = n !== 1;
-      $('step2').hidden = n !== 2;
-      showFor(n);
-      $('stepk').textContent = n === 1 ? 'Step 1 of 3 · who & when' : 'Step 2 of 3 · your tips';
-      var seg = document.querySelector('[data-seg="2"]');
-      if (seg) seg.className = n >= 2 ? 'on' : '';
-      window.scrollTo(0, 0);
-      total();
-    }
-    go(1);
-
-    // --- step 1 gate -------------------------------------------------------
-    // The shift is deliberately unset, so this is the one thing that can stop
-    // you moving on. Everything else is allowed to be blank.
-    $('next').addEventListener('click', function () {
-      var picked = form.querySelector('input[name="daypart"]:checked');
-      if (!picked) {
-        $('pickshift').hidden = false;
-        $('pickshift').scrollIntoView({ block: 'center' });
-        return;
-      }
-      go(2);
-    });
-    form.addEventListener('change', function (e) {
-      if (e.target.name === 'daypart') $('pickshift').hidden = true;
-    });
-    document.addEventListener('click', function (e) {
-      var b = e.target.closest('[data-goto]');
-      if (b) go(Number(b.dataset.goto));
-    });
-
-    // --- the date reads as text until you want to change it ----------------
-    var dc = $('datechange');
-    if (dc) dc.addEventListener('click', function () {
-      var f = $('f-date');
-      f.hidden = false; $('datetext').hidden = true; dc.hidden = true;
-      if (f.showPicker) { try { f.showPicker(); } catch (err) { f.focus(); } } else f.focus();
-    });
-
-    // --- steppers ----------------------------------------------------------
-    document.addEventListener('click', function (e) {
-      var b = e.target.closest('[data-bump]');
-      if (!b) return;
-      var f = $('f-' + b.dataset.bump);
-      var v = Math.round((parseFloat(f.value) || 0) * 100) + Number(b.dataset.by) * 100;
-      if (v < 0) v = 0;
-      f.value = (v / 100).toFixed(2);
-      total();
-    });
-
-    // --- sales are a server thing ------------------------------------------
-    var pos = $('tip-position');
-    var sales = $('server-sales');
-    function syncSales() {
-      var isServer = pos.value === 'server';
-      sales.hidden = !isServer;
-      $('row-sales').hidden = !isServer;
-      total();
-    }
-    if (pos && sales) { pos.addEventListener('change', syncSales); syncSales(); }
-
-    // --- running totals ----------------------------------------------------
-    // The trust feature. Someone who can see what their manager will see is
-    // far less likely to submit a number they meant to fix later.
-    function cents(id) { return Math.round((parseFloat(($(id) || {}).value) || 0) * 100); }
-    function usd(c) { return '$' + (c / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-    function total() {
-      var isServer = !pos || pos.value === 'server';
-      var s = isServer ? cents('f-food') + cents('f-coffee') + cents('f-alcohol') : 0;
-      var cash = cents('f-cash_tips');
-      var card = cents('f-card_tips');
-      $('t-sales').textContent = usd(s);
-      $('t-cash').textContent = usd(cash);
-      $('t-card').textContent = usd(card);
-      $('t-tips').textContent = usd(cash + card);
-    }
-    form.addEventListener('input', total);
-
-    // Tidy a figure when you leave it: "128" reads back as "128.00", the way
-    // the totals panel below already prints it. Done on blur, never while
-    // typing — reformatting under someone's fingers moves the caret.
-    form.addEventListener('focusout', function (e) {
-      var el = e.target;
-      if (!el.hasAttribute || !el.hasAttribute('data-money')) return;
-      var raw = String(el.value).trim();
-      if (raw === '') return;
-      var n = parseFloat(raw);
-      el.value = isFinite(n) && n >= 0 ? n.toFixed(2) : '';
-      total();
-    });
-    total();
-  })();
-  </script>`;
-}
 
 // ===========================================================================
 // THE STAFF PORTAL
@@ -5372,7 +5064,7 @@ function writeSalesTips(req, emp, opts = {}) {
 
   // Nothing has touched the database yet, and nothing will if anything above
   // is wrong.
-  if (Object.keys(errs).length) return { ok: false, errs, vals, position };
+  if (Object.keys(errs).length) return { ok: false, errs, vals, position, manual };
 
   // 4. Resolve or create the shared shift. getOrIgnore is the idempotency
   //    boundary and the UNIQUE(date, daypart) index is what makes two people
@@ -5479,7 +5171,10 @@ app.post('/portal/tips/submit', (req, res) => {
     const model = tipsWorkspace(who.emp, {
       shiftId: out.shiftId || req.body.shift_id,
       position: out.position || req.body.position,
-      manual: String(req.body.mode || '') === 'manual',
+      // The write's answer, not the body's: it is the one that decided a date
+      // and service were needed, so it is the one that knows which block the
+      // error belongs on.
+      manual: out.manual || String(req.body.mode || '') === 'manual',
     });
     if (!model.ok) return refuseTips(req, res, model.msg);
     return res.status(400).send(tipsWorkspacePage(model, {
@@ -8364,11 +8059,18 @@ app.post('/tips', (req, res) => {
   const out = writeSalesTips(req, emp, { requireConfirm: false });
   if (out.refuse) return refuseTips(req, res, out.refuse);
   if (!out.ok) {
-    // The legacy door answers a refusal the way it always has: the form back,
-    // 200, with the reason on it. Nothing was written — writeSalesTips refuses
-    // before it resolves a shift, so not even an empty shift row is left.
-    const first = Object.values(out.errs)[0] || 'Check the amounts and send it again.';
-    return res.send(tipsFormPage(emp, { err: first }));
+    // The legacy door answers a refusal the way it always has — the form back,
+    // 200, with the reason on it — but the form it comes back as is the same
+    // workspace the portal serves. A verified PIN mints a portal session, so
+    // by this point the two doors are one product and only the entrance
+    // differed. Nothing was written: writeSalesTips refuses before it resolves
+    // a shift, so not even an empty shift row is left behind.
+    const model = tipsWorkspace(emp, { position: out.position, shiftId: out.shiftId,
+      manual: out.manual || String(req.body.mode || '') === 'manual' });
+    if (!model.ok) return refuseTips(req, res, model.msg);
+    return res.send(tipsWorkspacePage(model, {
+      errs: out.errs, vals: out.vals, manual: model.manual,
+      top: 'Nothing was saved. Check the highlighted fields and send it again.' }));
   }
   // Somebody signed in to the portal gets the real receipt. The PIN door has
   // no session to prove ownership with, so it gets the neutral confirmation —

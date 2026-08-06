@@ -808,7 +808,10 @@ test('the staff portal starts below the phone status bar', async () => {
   // from the start; the top never did, so the restaurant name and "Not you?"
   // drew underneath the clock on every iPhone.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
-  for (const bar of ['.tp-top', '.tp-navbar', '.si-top']) {
+  // .tp-navbar was the old tips wizard's header. The wizard is gone (2F) and
+  // .pt-crumb is the bar that now sits at the top of every portal page,
+  // including the sales & tips workspace that replaced it.
+  for (const bar of ['.tp-top', '.pt-crumb', '.si-top']) {
     const m = new RegExp(`\\${bar}\\s*\\{([^}]*)\\}`).exec(css);
     assert.ok(m, `${bar} exists`);
     assert.match(m[1], /padding:\s*calc\([^)]*env\(safe-area-inset-top\)/,

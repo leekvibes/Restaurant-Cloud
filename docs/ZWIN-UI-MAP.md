@@ -1349,3 +1349,45 @@ authentication surface the brief requires preserving. The wizard is gone from
 the portal workflow; removing the markup entirely would retire the PIN door
 with it. Its write now goes through the same core, so the money grammar,
 authorization and audit behaviour cannot differ between the two doors.
+
+### §13.1 — Final integrity (Phase 2F, third commit)
+
+**Legacy PIN convergence.** `POST /tips/start` already mints a portal session,
+so a verified PIN lands on the same product; only the entrance differed. The
+last thing that still rendered the old wizard — the legacy refusal path — now
+renders the workspace. Both doors therefore share one capability model, one
+money parser, one authorization, one correction decision, one write core and
+one durable receipt. **PIN authentication and its throttling are untouched.**
+
+Retired after proving them unreferenced across `src/` and `public/`:
+`tipsFormPage()`, `usDate()`, `reportScript()`, and **54 CSS rules** covering 29
+`.tp-*` classes (`staff.css` 77.2 KB → 69.5 KB). The 16 `.tp-*` classes still
+used by the two sign-in pages were kept. `.tp-navbar` was the wizard's header;
+the safe-area test that guarded it now guards `.pt-crumb`, which is the bar that
+replaced it on every portal page.
+
+**Manual-report row footprint.** Exactly three rows plus the shared shift:
+
+| Row | What it carries |
+|---|---|
+| `shifts` | resolved or created by `getOrIgnore()` |
+| `work` | the filing role, `hours = 0`, `hours_source = NULL`, `hourly_rate_cents = 0` |
+| `server_sales` | the figures |
+| `tip_submissions` | the audit row |
+
+No `time_entries`, no `time_breaks`. The `work` placeholder is inert: the engine
+costs it at zero hours and zero wage, so it cannot reach hours, overtime, wages
+or Payroll, and it leaves the employee clocked out. `hourly_rate_cents = 0` is a
+**"use the default rate" marker, not a $0.00 wage** — when real hours arrive
+later the row costs at the employee's own rate, the money is untouched, and no
+audit row is added by a time edit.
+
+**Retry idempotency, stated separately from stale edits.** The 60-second
+identical-repeat guard covers a double tap or a browser retry of the *same*
+body. It does **not** cover a retry that arrives more than 60 seconds later, or
+one whose body differs by any figure — both append a new audit row, which for a
+genuine correction is the wanted behaviour and for a very slow retry is a
+duplicate audit row with identical values. The stored current values are the
+same either way. This is a separate concern from stale edits, where two tabs
+carrying different figures both write, both audit rows survive, and the last
+completed write is current (last-write-wins, unchanged, no locking column added).

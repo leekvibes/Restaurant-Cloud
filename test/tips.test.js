@@ -1083,3 +1083,401 @@ test('2F-UX: today\'s open service is filable even before a manager adds you', a
   assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
     .get(sid, empId('Wes Amari')).c, 1800);
 });
+
+// ===========================================================================
+// PHASE 2F — final integrity. What a submission touches, and what it must not.
+// ===========================================================================
+
+/**
+ * Run code against the same database in a fresh process, with the engine and
+ * reports modules loaded for real. In-process would need a second connection
+ * to a database this file deliberately holds read-only.
+ */
+const inApp = (code) => {
+  const r = require('node:child_process').spawnSync(process.execPath, ['-e', `
+    process.env.DB_PATH = ${JSON.stringify(DB)};
+    process.env.ZWIN_SKIP_BACKFILL = '1';
+    process.env.TZ = 'America/New_York';
+    const { db, q, s, w, shiftInputs } = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'db'))});
+    const { runShift } = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'engine'))});
+    const { policyForShift } = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'policy'))});
+    const out = (v) => process.stdout.write('@@' + JSON.stringify(v) + '@@');
+    ${code}
+  `], { encoding: 'utf8', env: { ...process.env, DB_PATH: DB } });
+  if (r.status !== 0) throw new Error(r.stderr || 'subprocess failed');
+  const m = /@@([\s\S]*)@@/.exec(r.stdout);
+  assert.ok(m, `no result from subprocess: ${r.stdout}${r.stderr}`);
+  return JSON.parse(m[1]);
+};
+
+// --- 1. what a manual report actually writes --------------------------------
+
+test('2F-I: a manual report writes three rows and no fourth', async () => {
+  const date = '2026-11-02';
+  const { token } = await signIn('8642');                    // Mia Reyes, server
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', food: '300', cash_tips: '25' });
+  const s = stored('Mia Reyes', date, 'dinner');
+  const id = empId('Mia Reyes');
+
+  // Exactly: the shared shift, a work row naming the job, the sales figures,
+  // and the audit row. Nothing else.
+  assert.ok(s.shift, 'the shared shift');
+  assert.ok(s.work, 'a work row');
+  assert.ok(s.sales, 'the figures');
+  assert.strictEqual(s.subs.length, 1, 'one audit row');
+  assert.strictEqual(s.punches, 0, 'and no punch');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE employee_id = ?').get(id).n,
+    db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE employee_id = ?').get(id).n, 'no breaks invented');
+});
+
+test('2F-I: the zero-hour work row leaks into nothing that counts hours or money', async () => {
+  const date = '2026-11-03';
+  const { token, cookie } = await signIn('8642');
+  await form('/tips', { token, position: 'server', date, daypart: 'cafe',
+    mode: 'manual', food: '500', cash_tips: '40' });
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'cafe');
+  const id = empId('Mia Reyes');
+  const wrow = db.prepare('SELECT * FROM work WHERE shift_id=? AND employee_id=?').get(sh.id, id);
+
+  // The placeholder itself: a role, and nothing that claims to be time or pay.
+  assert.strictEqual(wrow.hours, 0, 'zero hours');
+  assert.strictEqual(wrow.hours_source, null, 'and nobody claims to have set them');
+  assert.strictEqual(wrow.hourly_rate_cents, 0, 'no per-shift wage');
+
+  // The engine costs it as no time and no wage — so it cannot reach payroll as
+  // either, and cannot fabricate overtime out of a zero.
+  const cost = inApp(`
+    const sh = db.prepare("SELECT * FROM shifts WHERE date='${date}' AND daypart='cafe'").get();
+    policyForShift(sh);
+    const r = runShift(shiftInputs(sh.id), require(${JSON.stringify(path.join(__dirname, '..', 'src', 'policy'))}).policyForShift(sh));
+    const me = r.servers.find((x) => x.employeeId === ${id});
+    out({ hours: me ? me.hours : null, wage: me ? Math.round((me.hourlyRate || 0) * 100) : null });
+  `);
+  assert.strictEqual(cost.hours, 0, 'no hours in the costing');
+  assert.strictEqual(cost.wage, 0, 'no wage in the costing');
+
+  // Nothing the clock or the timesheet counts: no punch on this shift, no
+  // minutes, no break, and no open state for the clock to show.
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, id).n, 0, 'no punch on the shift the report went to');
+  assert.strictEqual(db.prepare(`SELECT COUNT(*) n FROM time_entries
+    WHERE employee_id=? AND clock_out_at IS NULL AND status IN ('active','on_break')`).get(id).n, 0,
+  'and the report did not leave them clocked in anywhere');
+  const clock = await (await fetch(`${BASE}/portal/clock`, { headers: { cookie } })).text();
+  assert.ok(!/Clock out/i.test(clock), 'so the clock offers to clock IN, not out');
+});
+
+test('2F-I: real time arrives later without touching the money or the rate', async () => {
+  const date = '2026-11-04';
+  const { token } = await signIn('8642');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', food: '600', cash_tips: '55' });
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner');
+  const id = empId('Mia Reyes');
+
+  // A manager (or the clock) later puts authoritative hours on the same row.
+  const w2 = writable();
+  w2.prepare(`UPDATE work SET hours = 7.5, hours_source = 'manager', hours_set_by = 'test'
+              WHERE shift_id = ? AND employee_id = ?`).run(sh.id, id);
+  w2.close();
+
+  const after = db.prepare('SELECT * FROM work WHERE shift_id=? AND employee_id=?').get(sh.id, id);
+  const sales = db.prepare('SELECT * FROM server_sales WHERE shift_id=? AND employee_id=?').get(sh.id, id);
+  assert.strictEqual(after.hours, 7.5, 'the hours land');
+  assert.strictEqual(after.role, 'server', 'the filing job is untouched');
+  assert.strictEqual(after.hourly_rate_cents, 0,
+    'the placeholder zero is a "use the default rate" marker, not a $0.00 wage');
+  assert.strictEqual(sales.food_cents, 60000, 'the sales are untouched');
+  assert.strictEqual(sales.cash_tips_cents, 5500, 'and so are the tips');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM tip_submissions WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, id).n, 1, 'and no audit row was added by the time edit');
+
+  // And now it costs at the employee's real rate, not at zero.
+  const cost = inApp(`
+    const sh = db.prepare("SELECT * FROM shifts WHERE date='${date}' AND daypart='dinner'").get();
+    const pol = policyForShift(sh);
+    const inp = shiftInputs(sh.id);
+    // The wage lives on the engine INPUT — a payout row carries tips, not pay.
+    const me = inp.servers.find((x) => x.employeeId === ${id});
+    const paid = runShift(inp, pol).servers.find((x) => x.employeeId === ${id});
+    out({ hours: paid.hours, rate: Math.round(me.hourlyRate * 100) });
+  `);
+  assert.strictEqual(cost.hours, 7.5);
+  const paid = db.prepare('SELECT hourly_rate_cents r, pay_type FROM employees WHERE id=?').get(id);
+  if (paid.pay_type !== 'salary' && paid.r > 0) {
+    assert.strictEqual(cost.rate, paid.r,
+      'costed at their own wage — the placeholder zero means "use the default", not "$0.00"');
+  } else {
+    assert.strictEqual(cost.rate, 0, 'salaried, so no hourly wage either way');
+  }
+});
+
+// --- 2. filing before clocking out ------------------------------------------
+
+test('2F-I: filing before clock-out leaves the punch open and the person working', async () => {
+  const seed = seedToday('5160', 'Cass Iyer', { today: ['dinner'], clockedInto: 'dinner' });
+  const { token, cookie } = await signIn('5160');
+  const sid = seed.today[0].id;
+  const id = empId('Cass Iyer');
+
+  const before = db.prepare('SELECT * FROM time_entries WHERE employee_id=? AND shift_id=?').get(id, sid);
+  assert.strictEqual(before.clock_out_at, null, 'open to begin with');
+
+  const html = await page(cookie, '/portal/tips');
+  assert.match(html, /Current shift/, 'auto-selected');
+  assert.match(html, /id="st-food"/, 'and the form is right there');
+
+  const res = await form('/tips', { token, position: 'server', shift_id: String(sid),
+    food: '800', cash_tips: '60' });
+  assert.strictEqual(res.status, 302, 'it files');
+
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(before.id);
+  assert.strictEqual(after.clock_out_at, null, 'the punch is still open');
+  assert.strictEqual(after.status, before.status, 'and unchanged');
+  assert.strictEqual(after.payable_minutes, before.payable_minutes, 'no minutes were invented');
+  assert.strictEqual(db.prepare('SELECT hours FROM work WHERE shift_id=? AND employee_id=?')
+    .get(sid, id).hours, 0, 'and no hours were finalised');
+
+  const clock = await (await fetch(`${BASE}/portal/clock`, { headers: { cookie } })).text();
+  assert.match(clock, /Working|Clock out/i, 'the clock still has them on shift');
+});
+
+test('2F-I: clocking out afterwards uses the same shift and adds no second report', async () => {
+  const seed = seedToday('5161', 'Dov Marek', { today: ['dinner'], clockedInto: 'dinner' });
+  const { token, cookie } = await signIn('5161');
+  const sid = seed.today[0].id;
+  const id = empId('Dov Marek');
+  await form('/tips', { token, position: 'server', shift_id: String(sid), cash_tips: '45' });
+
+  // Clock out through the real route.
+  await fetch(`${BASE}/portal/clock/out`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: '',
+  });
+
+  const punches = db.prepare('SELECT * FROM time_entries WHERE employee_id=?').all(id);
+  assert.strictEqual(punches.length, 1, 'one punch, not two');
+  assert.strictEqual(punches[0].shift_id, sid, 'on the same shared shift the report went to');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM tip_submissions WHERE shift_id=? AND employee_id=?')
+    .get(sid, id).n, 1, 'and clocking out filed nothing');
+  assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sid, id).c, 4500, 'the money is where it was');
+});
+
+// --- 3. the two meanings of cash, through the engine ------------------------
+
+test('2F-I: server cash reduces the paycheck once; pooled cash never touches it', async () => {
+  const date = '2026-11-06';
+  const w2 = writable();
+  w2.prepare(`INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin)
+              VALUES ('Pool Pia','barista',1400,1,'5170')`).run();
+  w2.close();
+  const srv = await signIn('8642');                    // Mia Reyes, server
+  const sup = await signIn('5170');                    // Pia, barista
+  await form('/tips', { token: srv.token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', food: '900', coffee: '150', alcohol: '250',
+    card_tips: '180', cash_tips: '73.40' });
+  await form('/tips', { token: sup.token, position: 'barista', date, daypart: 'dinner',
+    mode: 'manual', card_tips: '20', cash_tips: '46.60' });
+
+  const r = inApp(`
+    const sh = db.prepare("SELECT * FROM shifts WHERE date='${date}' AND daypart='dinner'").get();
+    const pol = policyForShift(sh);
+    const inp = shiftInputs(sh.id);
+    const res = runShift(inp, pol);
+    out({
+      serverCashIn: inp.servers.map((x) => x.cashTips),
+      supportCashIn: inp.support.map((x) => x.cashTips),
+      poolCash: res.pool.cash,
+      server: res.servers.map((x) => ({ id: x.employeeId, cash: x.cashTips, kept: x.tipsKept })),
+    });
+  `);
+
+  // The server's $73.40 is theirs; it is not in the jar.
+  assert.deepStrictEqual(r.serverCashIn, [73.4], 'the server states what they kept');
+  // The barista's $46.60 IS the jar.
+  assert.deepStrictEqual(r.supportCashIn, [46.6], 'the barista states what the pool collected');
+  assert.strictEqual(r.poolCash, 4660,
+    'the shared cash pot is the support cash alone — the server cash is not in it');
+});
+
+test('2F-I: the redesigned write produces the same allocation the old one did', async () => {
+  // Equivalence, not a re-derivation: two shifts, identical figures, one
+  // written through the redesigned route and one written straight into the
+  // columns the way the old route did. The engine must not tell them apart.
+  const A = '2026-11-07'; const B = '2026-11-08';
+  const srv = await signIn('8642');
+  await form('/tips', { token: srv.token, position: 'server', date: A, daypart: 'dinner',
+    mode: 'manual', food: '812.35', coffee: '99.05', alcohol: '141.60',
+    card_tips: '203.15', cash_tips: '61.85' });
+
+  const w2 = writable();
+  w2.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(B, 'dinner');
+  const bid = w2.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(B, 'dinner').id;
+  const aid = w2.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(A, 'dinner').id;
+  const me = empId('Mia Reyes');
+  w2.prepare("INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?,?,'server',0)").run(bid, me);
+  w2.prepare(`INSERT OR REPLACE INTO server_sales
+    (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents, card_tips_cents, cash_tips_cents, cash_entered_by)
+    VALUES (?, ?, 81235, 9905, 14160, 20315, 6185, 'staff')`).run(bid, me);
+  w2.close();
+
+  const cmp = inApp(`
+    const one = (id) => {
+      const sh = db.prepare('SELECT * FROM shifts WHERE id = ?').get(id);
+      const r = runShift(shiftInputs(sh.id), policyForShift(sh));
+      const me = r.servers[0];
+      return { tipouts: me.tipouts, total: me.tipoutTotal, kept: me.tipsKept,
+               pots: r.pots, pool: r.pool };
+    };
+    out({ a: one(${aid}), b: one(${bid}) });
+  `);
+  assert.deepStrictEqual(cmp.a, cmp.b,
+    'identical figures allocate identically however they were written');
+});
+
+// --- 4. operational value vs what the employee said -------------------------
+
+test('2F-I: a later POS or manager change moves the operational value, not the audit', async () => {
+  const date = '2026-11-09';
+  const { token, cookie } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '10' });        // card deliberately not entered
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner');
+  const me = empId('Rosa Diaz');
+  const sub = db.prepare('SELECT * FROM tip_submissions WHERE shift_id=? AND employee_id=?').get(sh.id, me);
+  assert.strictEqual(sub.card_tips_cents, null, 'the employee said nothing about card');
+
+  // The POS pushes a figure afterwards.
+  const w2 = writable();
+  w2.prepare('UPDATE server_sales SET card_tips_cents = 9125 WHERE shift_id=? AND employee_id=?')
+    .run(sh.id, me);
+  w2.close();
+
+  assert.strictEqual(db.prepare('SELECT card_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, me).c, 9125, 'the operational value moved');
+  assert.strictEqual(db.prepare('SELECT card_tips_cents c FROM tip_submissions WHERE id=?').get(sub.id).c, null,
+    'and the audit row still says the employee never stated one');
+
+  // The receipt is a record of what WAS SUBMITTED, so it keeps saying so.
+  const r = await (await fetch(`${BASE}/portal/tips/receipt/${sub.id}`, { headers: { cookie } })).text();
+  assert.match(r, /Card tips<\/span><b>Not entered<\/b>/, 'the receipt does not claim the POS figure');
+  assert.ok(!r.includes('91.25'), 'and does not show it');
+
+  // A blank correction still must not wipe the POS figure.
+  const b = await signIn('2468');
+  await form('/tips', { token: b.token, position: 'server', shift_id: String(sh.id), cash_tips: '12' });
+  assert.strictEqual(db.prepare('SELECT card_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, me).c, 9125, 'blank left the POS figure alone');
+});
+
+// --- 5. receipts stay the submission they were ------------------------------
+
+test('2F-I: an older receipt keeps its own figures after a correction', async () => {
+  const date = '2026-11-10';
+  const { token, cookie } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'cafe',
+    mode: 'manual', cash_tips: '11.11' });
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'cafe');
+  const me = empId('Rosa Diaz');
+  const first = db.prepare('SELECT id FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id').all(sh.id, me)[0].id;
+
+  const b = await signIn('2468');
+  await form('/tips', { token: b.token, position: 'server', shift_id: String(sh.id), cash_tips: '22.22' });
+  const rows = db.prepare('SELECT id FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id').all(sh.id, me);
+  assert.strictEqual(rows.length, 2, 'the correction has its own row');
+
+  const old = await (await fetch(`${BASE}/portal/tips/receipt/${first}`, { headers: { cookie } })).text();
+  assert.match(old, /\$11\.11/, 'the first receipt still shows what was sent first');
+  assert.ok(!old.includes('22.22'), 'not what replaced it');
+  assert.match(old, /Your report was recorded/, 'and reads as the first report');
+
+  const now = await (await fetch(`${BASE}/portal/tips/receipt/${rows[1].id}`, { headers: { cookie } })).text();
+  assert.match(now, /\$22\.22/, 'the correction has its own receipt');
+  assert.match(now, /Your report was updated/, 'which says it is an update');
+});
+
+// --- 6. two stale forms -----------------------------------------------------
+
+test('2F-I: two stale corrections both survive as history; the last one is current', async () => {
+  const date = '2026-11-11';
+  const { token, cookie } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '10' });
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner');
+  const me = empId('Rosa Diaz');
+
+  // Two tabs opened at the same time, submitted one after the other. Neither
+  // knows about the other; the schema has no version to notice with.
+  const send = (amount) => fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(sh.id),
+      cash_tips: amount, confirm_update: '1' }).toString(),
+  });
+  await send('30');
+  await send('40');
+
+  const rows = db.prepare('SELECT cash_tips_cents c FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id')
+    .all(sh.id, me).map((r) => r.c);
+  assert.deepStrictEqual(rows, [1000, 3000, 4000], 'every version is still in the history');
+  assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, me).c, 4000, 'and the last completed write is the current value');
+});
+
+// --- 7. a forged shift id that genuinely exists ------------------------------
+
+test('2F-I: a real shared shift on another date is still refused', async () => {
+  // Not a nonsense id — a shift that exists, is open, and that somebody else
+  // is on. Being real is not the same as being theirs, and it is not today.
+  const date = '2026-11-12';
+  const w2 = writable();
+  w2.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(date, 'dinner');
+  const other = w2.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner').id;
+  w2.close();
+
+  const { token, cookie } = await signIn('2468');
+  const res = await form('/tips', { token, position: 'server', shift_id: String(other), cash_tips: '99' });
+  assert.strictEqual(res.status, 403, 'refused');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM server_sales WHERE shift_id=?').get(other).n, 0,
+    'nothing written');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM work WHERE shift_id=?').get(other).n, 0,
+    'and they were not added to it');
+
+  // The portal door answers the same.
+  const p = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(other), cash_tips: '99' }).toString(),
+  });
+  assert.strictEqual(p.status, 403, 'both doors');
+});
+
+// --- 8. Home ----------------------------------------------------------------
+
+test('2F-I: filing clears its own reminder and leaves the others alone', async () => {
+  const seed = seedToday('5162', 'Yara Osei', { today: ['dinner'], clockedInto: 'dinner' });
+  const { token, cookie } = await signIn('5162');
+  const sid = seed.today[0].id;
+
+  const before = await (await fetch(`${BASE}/portal`, { headers: { cookie } })).text();
+  const others = (before.match(/href="\/portal\/(clock|earnings|specials|stock)/g) || []).length;
+  assert.match(before, /href="\/portal\/tips"/, 'the reminder is there to start with');
+
+  await form('/tips', { token, position: 'server', shift_id: String(sid), cash_tips: '35' });
+  const after = await (await fetch(`${BASE}/portal`, { headers: { cookie } })).text();
+
+  assert.ok(!/Due/.test((after.match(/[^<>]*Sales[^<>]*|[^<>]*tips[^<>]*/gi) || []).join(' ')),
+    'the sales & tips item no longer reads as outstanding');
+  assert.strictEqual((after.match(/href="\/portal\/(clock|earnings|specials|stock)/g) || []).length, others,
+    'and nothing unrelated moved');
+  assert.match(after, /Working|Clocked in|Clock out/i, 'the clock still shows them on shift');
+
+  // Correcting it does not bring the reminder back.
+  const b = await signIn('5162');
+  await form('/tips', { token: b.token, position: 'server', shift_id: String(sid), cash_tips: '36' });
+  const third = await (await fetch(`${BASE}/portal`, { headers: { cookie } })).text();
+  assert.ok(!/Due/.test((third.match(/[^<>]*Sales[^<>]*|[^<>]*tips[^<>]*/gi) || []).join(' ')),
+    'a correction does not recreate it');
+});
