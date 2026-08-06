@@ -1113,3 +1113,178 @@ test('the tips receipt lets you out — to the clock, or home', async () => {
   // The blank that used to sit where the back button goes.
   assert.ok(!/<div class="tp-navbar">\s*<span><\/span>/.test(html), 'no empty slot where the way out belongs');
 });
+
+// ===========================================================================
+// PHASE 2E-1 — proving the Pay archive rather than asserting it.
+// ===========================================================================
+
+/** 105 finished shifts for one person, with deliberate same-date collisions. */
+function seedBigHistory() {
+  const w = new Database(DB);
+  w.prepare("INSERT OR IGNORE INTO employees (id, name, role, hourly_rate_cents, active, pin) VALUES (900,'Archive Amy','server',1500,1,'9001')").run();
+  w.prepare("INSERT OR IGNORE INTO employees (id, name, role, hourly_rate_cents, active, pin) VALUES (901,'Other Owen','server',1500,1,'9002')").run();
+  const mkShift = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES (?,?,'emailed',datetime('now'))");
+  const mkWork = w.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)');
+  const D = require('../src/dates');
+  const ids = [];
+  // (date, daypart) is unique, so 53 days x 2 services. Two shifts share every
+  // date — which is the case an unstable sort quietly gets wrong between pages.
+  for (let d = 0; d < 53 && ids.length < 105; d += 1) {
+    const date = D.addDays('2025-06-01', -d);
+    for (const part of ['cafe', 'dinner']) {
+      if (ids.length >= 105) break;
+      const id = mkShift.run(date, part).lastInsertRowid;
+      mkWork.run(id, 900, 'server', 6);
+      ids.push({ id, date });
+    }
+  }
+  // One shift belonging to somebody else, on a date of its own.
+  const foreign = mkShift.run(D.addDays('2025-06-01', -60), 'dinner').lastInsertRowid;
+  mkWork.run(foreign, 901, 'server', 6);
+  w.close();
+  return { ids, foreign };
+}
+
+test('2E-1: 105 shifts page cleanly — every row exactly once, newest first', async () => {
+  const { ids, foreign } = seedBigHistory();
+  assert.strictEqual(ids.length, 105, 'the fixture really is 105 shifts');
+  const cookie = await signIn('9001');
+
+  const first = await (await asStaff('/portal/earnings/shifts', cookie)).text();
+  const pages = Number((first.match(/Page 1 of (\d+)/) || [])[1]);
+  assert.strictEqual(pages, 6, '105 over 20 is six pages');
+  assert.match(first, /105 shifts recorded/, 'and the count is the population');
+
+  const idsOn = (html) => [...html.matchAll(/href="\/portal\/earnings\/(\d+)\?from=shifts/g)]
+    .map((m) => Number(m[1]));
+
+  const seen = [];
+  const sizes = [];
+  for (let p = 1; p <= pages; p += 1) {
+    const html = await (await asStaff(`/portal/earnings/shifts?page=${p}`, cookie)).text();
+    const got = idsOn(html);
+    sizes.push(got.length);
+    seen.push(...got);
+    assert.ok(!got.includes(foreign), `page ${p} never shows another employee's shift`);
+  }
+  assert.deepStrictEqual(sizes, [20, 20, 20, 20, 20, 5],
+    'twenty a page, and the remainder on the last');
+
+  // The whole set, exactly once each — not "next and previous links exist".
+  assert.strictEqual(seen.length, 105, '105 rows across the archive');
+  assert.strictEqual(new Set(seen).size, 105, 'no id appears twice');
+  const expected = new Set(ids.map((x) => x.id));
+  for (const id of seen) assert.ok(expected.has(id), `${id} is one of Amy's`);
+  for (const id of expected) assert.ok(seen.includes(id), `${id} is not missing`);
+
+  // Global ordering: date DESC, then id DESC as the tie-break.
+  const byId = new Map(ids.map((x) => [x.id, x.date]));
+  for (let i = 1; i < seen.length; i += 1) {
+    const a = { id: seen[i - 1], date: byId.get(seen[i - 1]) };
+    const b = { id: seen[i], date: byId.get(seen[i]) };
+    assert.ok(a.date > b.date || (a.date === b.date && a.id > b.id),
+      `${a.date}#${a.id} sorts before ${b.date}#${b.id}`);
+  }
+});
+
+test('2E-1: only page-sized work is done, however long the history', async () => {
+  const cookie = await signIn('9001');
+  // Bounded by construction: pages 1 and 2 are disjoint 20-row windows of a
+  // 105-row history, which an in-memory slice of the whole archive could also
+  // produce — so the real evidence is that the row query carries LIMIT/OFFSET
+  // and the engine runs once per returned row.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function earningsFor('), src.indexOf('\n}', src.indexOf('function earningsFor(')));
+  assert.match(fn, /LIMIT \? OFFSET \?/, 'the row query pages in SQL');
+  assert.match(fn, /\.all\(empId, HISTORY_FROM, limit, offset\)/, 'bound to the request');
+  assert.strictEqual((fn.match(/runShift\(/g) || []).length, 1,
+    'the engine is invoked once per returned row and nowhere else');
+  const count = src.slice(src.indexOf('const earningsCount'), src.indexOf('function earningsFor('));
+  assert.match(count, /SELECT COUNT\(\*\)/, 'the total is a COUNT, not a load');
+  assert.ok(!/runShift/.test(count), 'and costs nothing');
+
+  // And the main Pay page does not reach for the archive.
+  const pay = src.slice(src.indexOf("app.get('/portal/earnings', (req, res)"),
+    src.indexOf("app.get('/portal/earnings/shifts'"));
+  const call = (pay.match(/earningsFor\(emp\.id, (\d+)\)/) || [])[1];
+  assert.ok(Number(call) <= 60, `Pay costs a bounded window, not the archive (saw ${call})`);
+  const t0 = Date.now();
+  await asStaff('/portal/earnings/shifts', cookie);
+  const t1 = Date.now();
+  await asStaff('/portal/earnings/shifts?page=5', cookie);
+  const t2 = Date.now();
+  // No threshold — a late page must simply not cost more than an early one,
+  // which is what loading-everything-then-slicing would show.
+  assert.ok((t2 - t1) < (t1 - t0) * 4 + 500,
+    `page 5 is not dramatically dearer than page 1 (${t1 - t0}ms vs ${t2 - t1}ms)`);
+});
+
+test('2E-1: a page value out of range lands somewhere real', async () => {
+  const cookie = await signIn('9001');
+  const at = async (q) => {
+    const html = await (await asStaff(`/portal/earnings/shifts${q}`, cookie)).text();
+    return Number((html.match(/Page (\d+) of/) || [])[1]);
+  };
+  assert.strictEqual(await at(''), 1, 'no page is page 1');
+  assert.strictEqual(await at('?page=1'), 1, 'page 1');
+  assert.strictEqual(await at('?page=3'), 3, 'a middle page');
+  assert.strictEqual(await at('?page=6'), 6, 'the last page');
+  // Clamped, not errored and not empty — an archive is somewhere you browse.
+  assert.strictEqual(await at('?page=999'), 6, 'beyond the end clamps to the last');
+  assert.strictEqual(await at('?page=0'), 1, 'zero');
+  assert.strictEqual(await at('?page=-4'), 1, 'negative');
+  assert.strictEqual(await at('?page=2.7'), 2, 'a decimal floors');
+  assert.strictEqual(await at('?page=banana'), 1, 'nonsense');
+  assert.strictEqual(await at('?page=2&page=5'), 1, 'a repeated value is not trusted');
+  // And it never bounces: the URL asked for is the URL served.
+  const res = await fetch(`${BASE}/portal/earnings/shifts?page=999`, { headers: { cookie }, redirect: 'manual' });
+  assert.strictEqual(res.status, 200, 'no redirect loop');
+});
+
+test('2E-1: the archive is only ever your own shifts', async () => {
+  const amy = await signIn('9001');
+  const owen = await signIn('9002');
+  const owenHtml = await (await asStaff('/portal/earnings/shifts', owen)).text();
+  assert.match(owenHtml, /1 shift recorded/, "Owen's archive counts only Owen's");
+  const owenIds = [...owenHtml.matchAll(/earnings\/(\d+)\?from=shifts/g)].map((m) => Number(m[1]));
+  assert.strictEqual(owenIds.length, 1);
+
+  // Amy cannot open it by typing the id, and is not told it exists.
+  const res = await fetch(`${BASE}/portal/earnings/${owenIds[0]}`, { headers: { cookie: amy }, redirect: 'manual' });
+  assert.strictEqual(res.status, 302, 'a foreign id is turned away');
+  assert.strictEqual(res.headers.get('location'), '/portal/earnings', 'to her own Pay page');
+  const body = await res.text();
+  assert.ok(!/Owen/.test(body), 'and nothing about whose it was');
+  // A shift that does not exist behaves identically — no oracle either way.
+  const missing = await fetch(`${BASE}/portal/earnings/99999999`, { headers: { cookie: amy }, redirect: 'manual' });
+  assert.strictEqual(missing.status, 302);
+  assert.strictEqual(missing.headers.get('location'), '/portal/earnings',
+    'missing and foreign are indistinguishable from outside');
+});
+
+test('2E-1: Back from a shift returns to the page it was opened from', async () => {
+  const cookie = await signIn('9001');
+  const html = await (await asStaff('/portal/earnings/shifts?page=3', cookie)).text();
+  const id = Number((html.match(/earnings\/(\d+)\?from=shifts/) || [])[1]);
+  assert.ok(html.includes(`?from=shifts&amp;page=3`) || html.includes('?from=shifts&page=3'),
+    'rows carry the page they were listed on');
+
+  const back = async (q) => {
+    const d = await (await asStaff(`/portal/earnings/${id}${q}`, cookie)).text();
+    return (d.match(/class="pt-back" href="([^"]+)"/) || [])[1];
+  };
+  assert.strictEqual(await back('?from=shifts&page=3'), '/portal/earnings/shifts?page=3',
+    'back to the archive, on the page they were on');
+  assert.strictEqual(await back('?from=shifts'), '/portal/earnings/shifts', 'or its first page');
+  assert.strictEqual(await back(''), '/portal/earnings', 'and Pay by default');
+
+  // Nothing from the query string can become the destination.
+  for (const evil of ['?from=https://evil.test', '?from=//evil.test', '?from=javascript:alert(1)',
+    '?from=%2F%2Fevil.test', '?from=/portal/out', '?from=shifts&page=javascript:1',
+    '?from=shifts&page=-1', '?from=shifts&page=%2F%2Fevil']) {
+    const href = await back(evil);
+    assert.ok(href === '/portal/earnings' || href === '/portal/earnings/shifts',
+      `"${evil}" cannot steer Back (got ${href})`);
+    assert.ok(!/evil|javascript|\/\//.test(href.replace('/portal', '')), `${evil} is not reflected`);
+  }
+});

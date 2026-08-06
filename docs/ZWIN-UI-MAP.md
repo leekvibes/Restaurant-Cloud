@@ -1045,3 +1045,118 @@ never from its title. A notification whose key matches a rendered attention item
 is hidden **on Home only**: it stays stored, stays unread, and stays on
 `/portal/notifications`. No key means never suppressed, which is the right
 answer for a notification that merely mentions a module.
+
+---
+
+## 12. PHASE 2E — Pay, in three views
+
+| View | Route | Notes |
+|---|---|---|
+| Pay period | `GET /portal/earnings` | One period. `.tsp` selector, `?p=<start>` survives refresh |
+| Shift archive | `GET /portal/earnings/shifts` | Paginated, 20/page, `?page=N` |
+| Shift receipt | `GET /portal/earnings/:id` | Registered **last** — otherwise `shifts` is read as an id |
+
+All three activate the **Pay** tab via `portalTabForRoute()`.
+
+### 12.1 What the money means
+
+**`Gross pay` = wages + overtime premium + tips delivered through payroll**
+(`aggregatePayroll`'s `takeHome`). Supporting line: *"Before tax and deductions.
+What reaches your bank will be less."*
+
+This app models **no** taxes, deductions, benefits, withholding, net pay or bank
+deposits. Forbidden until data proves them: *Take-home*, *Net pay*, *On this
+check*, *Paid*, *Deposited*.
+
+**`Already received`** — cash tips and any other separately delivered money.
+Shown apart, never added to gross pay, never described as a deduction.
+
+### 12.2 Period status
+
+| Status | Proven by |
+|---|---|
+| `Sent to payroll` | a `sendRecord` for the period start — the owner sent it. **Not proof of payment** |
+| `Still running` | today is on or before `period.end` |
+| `Not sent yet` | the period has ended and no send record exists |
+
+There is no `Paid`. Every unsettled state says the totals may still change.
+
+### 12.3 Pagination
+
+20 rows. One bounded row query (`LIMIT ? OFFSET ?`) and one `COUNT(*)`; the tip
+engine runs once per returned row. Ordering `date DESC, id DESC` — the id is the
+tie-break, so a row cannot swap pages. Page normalisation: missing/zero/negative/
+non-numeric/repeated → 1; decimals floor; **beyond the end clamps to the last
+page**, served at the URL asked for with no redirect.
+
+### 12.4 When a shift will not cost
+
+`runShift` can throw. It used to `continue`, which deleted the row from the list
+while the `COUNT` still counted it — the totals stopped matching and every later
+row slid onto the wrong page.
+
+Now the row survives as `Earnings unavailable`: date, position, service, and
+hours from the **work row** (manager-authoritative, independent of the engine).
+No `$0.00`, no invented figures, no exception text. The detail page shows the
+same state rather than a not-found. Diagnostics go to the server log with the
+shift and employee id; none of it reaches the page.
+
+A shift that does not exist and one belonging to somebody else behave
+**identically** — both redirect to `/portal/earnings`, so neither confirms the
+other's existence.
+
+### 12.5 Return destination
+
+`?from=shifts[&page=N]` selects one of two known destinations **by name**. `page`
+is parsed as an integer and re-rendered. Nothing from the query string is ever
+used as a URL, so absolute, protocol-relative, `javascript:`, encoded-external
+and unrelated-portal values all fall through to `/portal/earnings`.
+
+### 12.6 One rate per shift — a limitation, not a feature
+
+`earningsFor` resolves **one** wage rate per shift through `WAGE_RATE_SQL`
+(per-shift override → role wage → default). When one authoritative rate exists it
+is shown; salaried or no meaningful rate uses the non-hourly label. **`Rate
+varies` is never shown, because the data cannot prove it.**
+
+> The current earnings model resolves one wage rate per shift. True multi-rate
+> shifts require a future allocation model that records time or earnings by rate
+> segment.
+
+Future requirements, for the Payroll/time model and **not** display logic:
+effective-dated wage assignments · position-specific rates · intra-shift position
+changes · rate segments with start/end boundaries · overtime allocation across
+rates · manager override history · payroll export reconciliation · immutable
+historical rate snapshots.
+
+### 12.7 Index review — no schema change made
+
+Query plan for the archive row query:
+
+```
+SEARCH sh USING INDEX sqlite_autoindex_shifts_1 (date>?)
+SEARCH w  USING COVERING INDEX sqlite_autoindex_work_1 (shift_id=? AND employee_id=?)
+USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+```
+
+Employee filtering and the join are covered by `work`'s primary key; date
+ordering is covered by `shifts`' unique `(date, daypart)`. The temp B-tree sorts
+only the `id DESC` tie-break **within equal dates** — at most a couple of rows.
+
+**Reported, not acted on:** the plan drives from `shifts` by date and probes
+`work`, so an employee with few shifts in a long company history scans more
+shift rows than they own. An index on `work(employee_id, shift_id)` would let it
+drive from the employee. That is a schema change and belongs to a migration
+decision, not to this phase.
+
+### 12.8 Future — Owner workspace → Settings → Staff Portal → Pay visibility
+
+Not implemented: show finalized pay only · show preliminary earnings · show
+employee wage rates · historical pay-period visibility · historical shift
+visibility · tip-source detail visibility · cash-versus-payroll delivery
+visibility · pay-statement availability · pay-finalized notifications.
+
+**No visibility setting may ever substitute for server-side employee isolation.**
+
+Taxes, deductions, benefits, downloadable pay statements and net pay require a
+future Payroll/pay-statement model. They are not display rows to be handcrafted.

@@ -3964,8 +3964,28 @@ function earningsFor(empId, limit = 400, offset = 0) {
 
   const out = [];
   for (const sh of worked) {
-    let r;
-    try { r = runShift(shiftInputs(sh.id), policyForShift(sh)); } catch { continue; }
+    // A shift that will not cost is still a shift they worked.
+    //
+    // This used to `continue`, which quietly deleted the row: it vanished from
+    // the archive while the COUNT beside it still counted it, so the totals
+    // stopped matching the list and — because paging is by offset — every later
+    // row slid onto the wrong page. The person it belonged to was told nothing.
+    // Now the row survives and says it cannot be costed.
+    let r = null;
+    try { r = runShift(shiftInputs(sh.id), policyForShift(sh)); } catch (e) {
+      // Enough to investigate with, in the log. None of it reaches the page.
+      console.error('[pay] could not cost shift', sh.id, 'for employee', empId,
+        '-', (e && e.message) || 'unknown');
+      const salariedF = sh.pay_type === 'salary';
+      out.push({ shift: sh, kind: 'unavailable', unavailable: true,
+        // Null, not zero. A zero here is a claim about somebody's earnings.
+        kept: null, collected: null, tippedOut: null, cash: null, toPaycheck: null,
+        salaried: salariedF, rate: salariedF ? 0 : (sh.rate_cents || 0),
+        // Hours come from the work row, which is the manager-authoritative
+        // record and does not depend on the tip engine at all.
+        hours: sh.worked_hours || 0, wage: null, role: sh.worked_role });
+      continue;
+    }
     const asServer = r.servers.find((x) => x.employeeId === empId);
     const asSupport = (r.support || []).find((x) => x.employeeId === empId);
     // Salaried people have no hourly rate, and showing them one would be a
@@ -4967,6 +4987,7 @@ const shiftRowModel = (x) => ({
   wageCents: x.wage || 0,
   tipsCents: x.kept || 0,
   kind: x.kind,
+  unavailable: !!x.unavailable,
   href: `/portal/earnings/${x.shift.id}`,
 });
 
@@ -4975,12 +4996,15 @@ const payHrs = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$/,
 
 /** One shift row, rendered. */
 const payShiftRow = (r, from) => `
-  <a class="tc-row" href="${r.href}${from ? `?from=${from}` : ''}">
+  <a class="tc-row" href="${r.href}${from || ''}">
     <span class="tc-row-l">
       <b>${esc(niceDate(r.date))}${r.service ? ` · ${esc(r.service)}` : ''}</b>
-      <i>${esc(r.position)} · ${esc(payHrs(r.hours))}${r.wageCents ? ` · ${esc(payMoney(r.wageCents))} wages` : ''}</i></span>
-    <span class="tc-row-r"><b>${r.tipsCents ? esc(payMoney(r.tipsCents)) : esc(payHrs(r.hours))}</b>
-      <i>${r.tipsCents ? 'tips' : 'worked'}</i></span>
+      <i>${esc(r.position)} · ${esc(payHrs(r.hours))}${r.unavailable ? ''
+        : r.wageCents ? ` · ${esc(payMoney(r.wageCents))} wages` : ''}</i></span>
+    ${r.unavailable
+      ? `<span class="tc-row-r"><span class="tc-chip warn">Earnings unavailable</span></span>`
+      : `<span class="tc-row-r"><b>${r.tipsCents ? esc(payMoney(r.tipsCents)) : esc(payHrs(r.hours))}</b>
+          <i>${r.tipsCents ? 'tips' : 'worked'}</i></span>`}
   </a>`;
 
 app.get('/portal/earnings', (req, res) => {
@@ -5067,7 +5091,7 @@ app.get('/portal/earnings', (req, res) => {
       </div>` : ''}
 
       ${rows.length ? `<h2 class="tc-kick tc-kick-sec">Shifts in this period<b>${rows.length}</b></h2>
-        <div class="tc-rows">${rows.map((r) => payShiftRow(r, 'pay')).join('')}</div>`
+        <div class="tc-rows">${rows.map((r) => payShiftRow(r, '')).join('')}</div>`
         : `<div class="tc-empty"><b>No shifts in this period</b>
              <span>Nothing has been sent for this fortnight yet.</span></div>`}
       `}
@@ -5110,7 +5134,8 @@ app.get('/portal/earnings/shifts', (req, res) => {
     <div class="pt-body tc-body">
       <h1 class="tc-h">Shift history</h1>
       ${total ? `<p class="tc-note">${total} shift${total === 1 ? '' : 's'} recorded.</p>
-        <div class="tc-rows">${rows.map((r) => payShiftRow(r, 'shifts')).join('')}</div>
+        <div class="tc-rows">${rows.map((r) => payShiftRow(r,
+          `?from=shifts${page > 1 ? `&page=${page}` : ''}`)).join('')}</div>
         ${pages > 1 ? `<nav class="pay-pager" aria-label="Shift history pages">
           <a class="tsp-arrow${page > 1 ? '' : ' off'}"
              href="${page > 1 ? to(page - 1) : '#'}"
@@ -5149,16 +5174,30 @@ app.get('/portal/earnings/:id', (req, res) => {
   const x = earningsFor(emp.id, 400).find((e) => e.shift.id === id);
   if (!x) return res.redirect('/portal/earnings');
 
-  // Where Back goes. A closed set of two — never a URL from the query string,
-  // which is how an open redirect gets built by accident.
-  const back = req.query.from === 'shifts'
-    ? { href: '/portal/earnings/shifts', label: 'Shift history' }
-    : { href: '/portal/earnings', label: 'Pay' };
+  // Where Back goes.
+  //
+  // Nothing from the query string is ever used AS a URL. `from` selects one of
+  // two known destinations by name, and `page` is read as an integer and
+  // re-rendered — so an absolute URL, a protocol-relative one, a javascript:
+  // URL, an encoded external host or any other portal path all fall through to
+  // the same default. There is no input that can become the href.
+  const back = (() => {
+    if (req.query.from !== 'shifts') return { href: '/portal/earnings', label: 'Pay' };
+    const n = Math.floor(Number(req.query.page));
+    const page = Number.isFinite(n) && n > 1 ? n : null;
+    return { href: `/portal/earnings/shifts${page ? `?page=${page}` : ''}`, label: 'Shift history' };
+  })();
 
   res.send(portalPage('Shift pay', `
     ${portalTop(back, 'Shift pay')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">${esc(niceDate(x.shift.date))}</h1>
+      ${x.unavailable ? `<section class="tcc tcc-warn">
+        <h2 class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+          <span class="tcc-state">Earnings unavailable</span></h2>
+        <p class="tcc-note">We couldn't calculate this shift's earnings. Your hours are
+          recorded and your manager can see this — ask them if it does not sort itself out.</p>
+      </section>` : ''}
       <div class="tcc tcc-plain">
         <div class="tcc-facts">
           <div class="tcc-f"><span>Position</span><b>${esc(posName(x.role || x.shift.worked_role))}</b></div>
@@ -5169,13 +5208,14 @@ app.get('/portal/earnings/:id', (req, res) => {
                  figure they are not paid by. */''}
           ${x.salaried ? '<div class="tcc-f"><span>Pay</span><b>Salaried</b></div>'
             : x.rate ? `<div class="tcc-f"><span>Rate</span><b>${esc(money(x.rate))}/hr</b></div>` : ''}
-          ${x.wage ? `<div class="tcc-f"><span>Hours pay</span><b>${esc(payMoney(x.wage))}</b></div>` : ''}
-          ${x.kept ? `<div class="tcc-f"><span>Tips</span><b>${esc(payMoney(x.kept))}</b></div>` : ''}
+          ${x.unavailable ? '' : `
+            ${x.wage ? `<div class="tcc-f"><span>Hours pay</span><b>${esc(payMoney(x.wage))}</b></div>` : ''}
+            ${x.kept ? `<div class="tcc-f"><span>Tips</span><b>${esc(payMoney(x.kept))}</b></div>` : ''}`}
         </div>
       </div>
       ${/* The engine's own itemisation — the same object the nightly email is
              rendered from, so the two cannot drift. */''}
-      ${shiftBreakdown(x)}
+      ${x.unavailable ? '' : shiftBreakdown(x)}
     </div>`));
 });
 
