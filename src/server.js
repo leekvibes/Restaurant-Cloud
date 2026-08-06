@@ -3650,50 +3650,236 @@ const portalBackScript = () => `<script>
  * `More` is a <details> sheet, like the owner side's Index, so it works with
  * JavaScript off and holds the screens that do not earn a permanent slot.
  */
-const PT_TABS = [
-  ['/portal', 'Home', '⌂'],
-  ['/portal/clock', 'Time clock', '◷'],
-  ['/portal/timesheet', 'Timesheet', '▤'],
-  ['/portal/earnings', 'Pay', '❖'],
-];
-const PT_MORE = [
-  ['/portal/notifications', 'Notifications'],
-  ['/portal/requests', 'My requests'],
-  // No Time history. Timesheet carries it now and the old route redirects
-  // there — a menu entry that bounces you somewhere else is worse than none.
-  ['/portal/specials', 'Specials & 86 board'],
-  ['/portal/stock', 'Report out of stock'],
-  // Only for the positions that hand tips in. A cook is not offered this on
-  // the hub and is redirected away from the route; the nav agrees.
-  ['/portal/tips', 'Submit sales or tips', (sh) => !!(sh && sh.tips)],
-  ['/portal/out', 'Sign out'],
+/**
+ * The portal's navigation, defined once.
+ *
+ * Tabs, locked destinations and the More sheet are shell infrastructure, not
+ * page decoration — so they are described as data here and rendered from that
+ * description. Switching Schedule on when it exists means changing
+ * `availability` and adding its routes to PORTAL_AREA. It does not mean
+ * editing any page.
+ *
+ * A nav item carries:
+ *   key                 stable id, and the active-area name
+ *   label               what it says
+ *   icon                the glyph
+ *   href                where it goes — null when it is not a destination
+ *   availability        'available' | 'locked' | 'hidden'
+ *   lockedTitle/Message what the informational sheet says when locked
+ *   accessibilityLabel  overrides the visible label for assistive tech
+ *   badge               a count, when a future area wants one
+ */
+const PORTAL_NAV = [
+  { key: 'home', label: 'Home', icon: '⌂', href: '/portal', availability: 'available' },
+  { key: 'clock', label: 'Time clock', icon: '◷', href: '/portal/clock', availability: 'available' },
+  // Deliberately present and deliberately not built. Staff ask where the
+  // schedule is; an empty slot answers that better than silence, and a fake
+  // calendar answers it worse than either.
+  { key: 'schedule',
+    label: 'Schedule',
+    icon: '▤',                       // the agenda grid Timesheet used to carry
+    href: null,
+    availability: 'locked',
+    accessibilityLabel: 'Schedule, coming soon',
+    lockedTitle: 'Schedule',
+    lockedMessage: 'Employee scheduling is coming soon. You will be able to view '
+      + 'upcoming shifts here once scheduling is available.' },
+  { key: 'pay', label: 'Pay', icon: '❖', href: '/portal/earnings', availability: 'available' },
+  { key: 'more', label: 'More', icon: '⋯', href: null, availability: 'available' },
 ];
 
-const ptOn = (href, path) => (href === '/portal' ? path === '/portal' : path.startsWith(href));
+/**
+ * Which tab owns a route.
+ *
+ * One table, longest prefix wins. Timesheets, days, requests and shift details
+ * all belong to the clock — they are the same job — which is why removing the
+ * Timesheet tab costs nothing: every one of those pages still lights the tab
+ * the person came in through, and none of them is orphaned.
+ *
+ * When Schedule becomes real its routes are added here and nowhere else.
+ */
+const PORTAL_AREA = [
+  ['/portal/clock', 'clock'],
+  ['/portal/timesheet', 'clock'],
+  ['/portal/requests', 'clock'],
+  ['/portal/earnings', 'pay'],
+];
 
+/** @returns {string} the key of the tab that should read as current. */
+function portalTabForRoute(pathname) {
+  const p = String(pathname || '').split('?')[0];
+  if (p === '/portal' || p === '/portal/') return 'home';
+  let best = null;
+  for (const [prefix, key] of PORTAL_AREA) {
+    if ((p === prefix || p.startsWith(prefix + '/') || p.startsWith(prefix + '?'))
+      && (!best || prefix.length > best[0].length)) best = [prefix, key];
+  }
+  // Everything else under /portal is a utility screen, and those live in More.
+  return best ? best[1] : (p.startsWith('/portal') ? 'more' : 'home');
+}
+
+/** What More holds. Utility screens only — never a tab's own area. */
+const portalMoreItems = (shape) => [
+  { href: '/portal/notifications', label: 'Notifications' },
+  { href: '/portal/requests', label: 'My requests' },
+  { href: '/portal/specials', label: 'Specials & 86 board' },
+  { href: '/portal/stock', label: 'Report out of stock' },
+  // Only for the positions that hand tips in. The hub withholds the row and
+  // the write route refuses the post; the nav agrees with both.
+  ...(shape && shape.tips ? [{ href: '/portal/tips', label: 'Submit sales or tips' }] : []),
+  { href: '/portal/out', label: 'Sign out' },
+];
+
+/** A small padlock, drawn rather than typed — emoji render in colour. */
+const PT_LOCK = '<svg class="pt-tab-lock" viewBox="0 0 10 12" aria-hidden="true" focusable="false">'
+  + '<path d="M2.6 5V3.4a2.4 2.4 0 0 1 4.8 0V5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
+  + '<rect x="1" y="5" width="8" height="6.2" rx="1.2" fill="currentColor"/></svg>';
+
+/**
+ * The bar, the More sheet, the locked-destination sheet, and the one script
+ * that drives them. Emitted once per page by portalPage().
+ */
 function portalTabs(path) {
-  const tabs = PT_TABS.map(([href, label, g]) =>
-    `<a href="${href}"${ptOn(href, path) ? ' class="on"' : ''}>
-      <span class="pt-tab-g" aria-hidden="true">${g}</span><span>${esc(label)}</span></a>`).join('');
-  return `
-    <nav class="pt-tabs" aria-label="Sections">
-      ${tabs}
-      <details class="pt-more">
-        <summary><span class="pt-tab-g" aria-hidden="true">⋯</span><span>More</span></summary>
-        <div class="pt-more-p">
-          ${PT_MORE.filter(([, , when]) => (when ? when(portalShape) : true))
-            .map(([href, label]) => `<a href="${href}">${esc(label)}</a>`).join('')}
+  const current = portalTabForRoute(path);
+  const locked = PORTAL_NAV.filter((t) => t.availability === 'locked');
+
+  const tab = (t) => {
+    const label = `<span class="pt-tab-g" aria-hidden="true">${t.icon}</span><span>${esc(t.label)}</span>`;
+    // A locked tab is a button, not a link with nowhere to go, and it never
+    // takes aria-current — it is not where you are and cannot become where you
+    // are. Not `disabled` either: that would stop it opening the sheet that
+    // explains itself, which is the whole point of it being there.
+    if (t.availability === 'locked') {
+      return `<button type="button" class="pt-tab pt-tab-locked" data-portal-locked="${esc(t.key)}"
+        aria-haspopup="dialog" aria-label="${esc(t.accessibilityLabel || t.label)}">${label}${PT_LOCK}</button>`;
+    }
+    return `<button type="button" class="pt-tab" id="pt-more-btn" data-portal-more
+      aria-haspopup="dialog" aria-expanded="false">${label}</button>`;
+  };
+
+  // A real destination. aria-current and the class travel together, so it is
+  // built in one place rather than patched.
+  const anchor = (t) => {
+    const on = t.availability === 'available' && t.key === current;
+    return `<a class="pt-tab${on ? ' on' : ''}" href="${t.href}"${on ? ' aria-current="page"' : ''}>
+      <span class="pt-tab-g" aria-hidden="true">${t.icon}</span><span>${esc(t.label)}</span></a>`;
+  };
+
+  const bar = PORTAL_NAV.filter((t) => t.availability !== 'hidden').map((t) => (
+    t.availability === 'locked' || t.key === 'more' ? tab(t) : anchor(t))).join('');
+
+  const sheet = (id, heading, body, labelledBy) => `
+    <div class="pt-nav" id="${id}" hidden>
+      <div class="pt-nav-scrim" data-portal-close></div>
+      <div class="pt-nav-panel" role="dialog" aria-modal="true" aria-labelledby="${labelledBy}">
+        <div class="pt-nav-bar">
+          <h2 class="pt-nav-h" id="${labelledBy}">${esc(heading)}</h2>
+          <button type="button" class="pt-nav-x" data-portal-close aria-label="Close">✕</button>
         </div>
-      </details>
-    </nav>`;
+        ${body}
+      </div>
+    </div>`;
+
+  return `
+    <nav class="pt-tabs" aria-label="Sections">${bar}</nav>
+    ${sheet('pt-more-sheet', 'More',
+      `<div class="pt-nav-links">${portalMoreItems(portalShape)
+        .map((i) => `<a href="${i.href}">${esc(i.label)}</a>`).join('')}</div>`, 'pt-more-h')}
+    ${locked.map((t) => sheet(`pt-locked-${t.key}`, t.lockedTitle || t.label,
+      `<p class="pt-nav-p">${esc(t.lockedMessage || '')}</p>
+       <button type="button" class="tc-btn tc-btn-go tc-btn-big" data-portal-close>Got it</button>`,
+      `pt-locked-h-${t.key}`)).join('')}
+    ${portalNavScript()}`;
+}
+
+/**
+ * One script for every navigation surface.
+ *
+ * Both sheets behave identically because they ARE the same thing: open one,
+ * the other closes; the scrim and Escape close them; focus goes in and comes
+ * back to whatever opened it; the page keeps its scroll position, because
+ * `position: fixed` on the body would throw it to the top and that is the
+ * single most disorienting thing a menu can do.
+ */
+function portalNavScript() {
+  return `<script>
+  (function () {
+    var open = null, opener = null, scrollY = 0;
+    function panelOf(el) { return el.querySelector('.pt-nav-panel'); }
+    function show(el, from) {
+      if (open === el) return;                       // tapping twice opens once
+      if (open) hide(true);
+      open = el; opener = from || null;
+      scrollY = window.scrollY;
+      // Locked, without moving the page. Overflow alone keeps the position;
+      // position:fixed would jump it to the top and lose their place.
+      document.documentElement.style.overflow = 'hidden';
+      document.body.style.overflow = 'hidden';
+      el.hidden = false;
+      void el.offsetHeight;
+      el.classList.add('is-open');
+      if (from && from.hasAttribute('aria-expanded')) from.setAttribute('aria-expanded', 'true');
+      var f = panelOf(el).querySelector('a, button, [tabindex]');
+      if (f) f.focus();
+    }
+    function hide(quiet) {
+      if (!open) return;
+      var el = open, from = opener;
+      open = null; opener = null;
+      el.classList.remove('is-open');
+      el.hidden = true;
+      if (from && from.hasAttribute('aria-expanded')) from.setAttribute('aria-expanded', 'false');
+      if (!quiet) {
+        document.documentElement.style.overflow = '';
+        document.body.style.overflow = '';
+        window.scrollTo(0, scrollY);
+        if (from) from.focus();
+      }
+    }
+    document.addEventListener('click', function (ev) {
+      var t = ev.target;
+      var more = t.closest && t.closest('[data-portal-more]');
+      if (more) { ev.preventDefault(); show(document.getElementById('pt-more-sheet'), more); return; }
+      var lock = t.closest && t.closest('[data-portal-locked]');
+      if (lock) {
+        // No navigation, no reload, no history entry, and the tab the person
+        // is actually on stays lit.
+        ev.preventDefault();
+        show(document.getElementById('pt-locked-' + lock.getAttribute('data-portal-locked')), lock);
+        return;
+      }
+      if (t.closest && t.closest('[data-portal-close]')) { ev.preventDefault(); hide(); }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (!open) return;
+      if (ev.key === 'Escape') { ev.preventDefault(); hide(); return; }
+      if (ev.key !== 'Tab') return;
+      // Keep focus inside while it is modal.
+      var f = panelOf(open).querySelectorAll('a[href], button:not([disabled])');
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1];
+      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+    });
+  })();
+  </script>`;
 }
 
 const portalPage = (title, body, opts = {}) => layout(title,
   // Emitted here rather than at eleven call sites, and only when the page
   // actually has a back link — which is every sub-page and not the hub.
-  `<div class="pt${opts.noTabs ? '' : ' has-tabs'}">${body}</div>${
-    body.includes('data-pt-back') ? portalBackScript() : ''}${
-    opts.noTabs ? '' : portalTabs(currentPath())}`,
+  //
+  // The tab bar and the navigation sheets go INSIDE .pt, and that is not
+  // cosmetic. Every portal colour and the whole z-index scale are custom
+  // properties declared on .pt; rendered as a sibling, the bar inherited none
+  // of them — `background: var(--pt-field)` resolved to nothing, so it painted
+  // transparent and the page scrolled visibly through it, and `z-index:
+  // var(--pt-z-tabs)` came out as `auto`. That is the "too transparent, moves
+  // strangely" bar. Nothing between here and the root sets a transform, so
+  // position: fixed still resolves against the viewport.
+  `<div class="pt${opts.noTabs ? '' : ' has-tabs'}">${body}${
+    opts.noTabs ? '' : portalTabs(currentPath())}</div>${
+    body.includes('data-pt-back') ? portalBackScript() : ''}`,
   { bare: true, staff: true });
 
 // ---------------------------------------------------------------------------
@@ -3952,6 +4138,28 @@ function outstandingSubmissions(emp, today) {
   return rows.filter((r) => held.has(r.role) && canSubmitSalesTips(positions.bySlug.get(r.role)));
 }
 
+/**
+ * A notification's domain identity, or null when it has none.
+ *
+ * Read out of the href the notification already carries, because that is the
+ * one part of an event that names a RECORD rather than describing it. Titles
+ * are prose and change; "/portal/timesheet?p=2026-07-04" is a period.
+ *
+ * Null means "no identity" and therefore never suppressed — which is the right
+ * answer for a notification that merely mentions a module, like a correction
+ * decision that links to the requests list without naming which one.
+ */
+function eventDedupKey(e) {
+  const href = String(e.href || '');
+  let m = /^\/portal\/timesheet\?p=(\d{4}-\d{2}-\d{2})/.exec(href);
+  if (m) return `timesheet:${m[1]}`;
+  m = /^\/portal\/clock\/entry\/(\d+)/.exec(href);
+  if (m) return `entry:${m[1]}`;
+  m = /^\/portal\/earnings\/(\d+)/.exec(href);
+  if (m) return `shift:${m[1]}`;
+  return null;
+}
+
 /** Everything Home needs, worked out once. */
 function homeModel(emp) {
   const cfg = TC.settings();
@@ -4004,7 +4212,8 @@ function homeModel(emp) {
   for (const i of st.issues) {
     if (!i.blocking) continue;
     if (active && i.entryId === active.id) continue;
-    add({ key: `issue:${i.entryId || 'x'}`, type: 'timeclock', priority: ATTN.BLOCKING,
+    add({ key: `issue:${i.entryId || 'x'}`, dedup: i.entryId ? `entry:${i.entryId}` : null,
+      type: 'timeclock', priority: ATTN.BLOCKING,
       label: 'A shift needs fixing', description: i.text, status: 'Fix', tone: 'bad',
       href: i.entryId ? `/portal/clock/entry/${i.entryId}` : '/portal/clock' });
   }
@@ -4024,12 +4233,14 @@ function homeModel(emp) {
 
   // Returned, and its sibling: submitted, then the hours moved underneath.
   if (st.sheet.status === 'returned') {
-    add({ key: 'sheet:returned', type: 'timesheet', priority: ATTN.RETURNED,
+    add({ key: 'sheet:returned', dedup: `timesheet:${st.period.start}`,
+      type: 'timesheet', priority: ATTN.RETURNED,
       label: 'Your timesheet came back',
       description: st.sheet.returned_reason || 'Your manager sent it back for a correction.',
       status: 'Returned', tone: 'bad', href: `/portal/timesheet?p=${st.period.start}` });
   } else if (st.sheet.status === 'submitted' && st.sheet.resubmit_needed) {
-    add({ key: 'sheet:resubmit', type: 'timesheet', priority: ATTN.RETURNED,
+    add({ key: 'sheet:resubmit', dedup: `timesheet:${st.period.start}`,
+      type: 'timesheet', priority: ATTN.RETURNED,
       label: 'Your hours changed after you submitted', description: 'Check them and submit again.',
       status: 'Submit again', tone: 'warn', href: `/portal/timesheet?p=${st.period.start}` });
   }
@@ -4050,7 +4261,8 @@ function homeModel(emp) {
 
   // Non-blocking, but real.
   if (st.canSubmit) {
-    add({ key: 'sheet:ready', type: 'timesheet', priority: ATTN.REMINDER,
+    add({ key: 'sheet:ready', dedup: `timesheet:${st.period.start}`,
+      type: 'timesheet', priority: ATTN.REMINDER,
       label: 'Your timesheet is ready to submit', description: `${labelFor(st.period)} has ended.`,
       status: 'Ready', tone: 'info', href: `/portal/timesheet?p=${st.period.start}` });
   }
@@ -4078,7 +4290,24 @@ function homeModel(emp) {
   PORTAL.q.ensureSeen.run({ id: emp.id });
   const unseen = PORTAL.q.unseenFor.all({ id: emp.id });
   const unseenIds = new Set(unseen.map((e) => e.id));
+  //
+  // One event, one place on this screen.
+  //
+  // "Your timesheet is ready to submit" was appearing as an attention row AND
+  // as a notification preview directly under it — the same fact, twice, in two
+  // different voices. The attention row wins: it is the one with somewhere to
+  // go and something to do.
+  //
+  // Matched on a DOMAIN identifier pulled out of the notification's own href,
+  // never on the title. Two corrections, two shifts, or two periods are
+  // different records and stay separate; a general notification that merely
+  // mentions the same module has no identifier and is never suppressed.
+  //
+  // Suppression is display-only. The row stays stored, stays unread if it was,
+  // and is still on /portal/notifications.
+  const shown = new Set(attention.map((a) => a.dedup).filter(Boolean));
   const notifications = (firstEver ? unseen : PORTAL.q.eventsFor.all({ id: emp.id }))
+    .filter((e) => { const k = eventDedupKey(e); return !k || !shown.has(k); })
     .slice(0, 3).map((e) => ({ ...e, unread: unseenIds.has(e.id) }));
   if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
 
@@ -5092,10 +5321,17 @@ function clockPage(req, who, opts = {}) {
   // a week rearranged itself under them depending on what they were doing.
   // Status word, live figure, the facts, the actions: always in that order.
   const fact = (k, v) => `<div class="tcc-f"><span>${k}</span><b>${v}</b></div>`;
-  const shell = (tone, state, body) => `
-    <section class="tcc tcc-${tone}" aria-live="polite">
+  // The card is NOT a live region. It was `aria-live="polite"` with the ticking
+  // counter inside it, so a screen reader read the elapsed time out loud once a
+  // second, forever — that makes the card unusable, and the figure is the least
+  // useful thing on it to hear. Only the state word announces, and only when it
+  // changes; the counter is hidden and a stable sentence beside it says the
+  // same thing without moving.
+  const shell = (tone, state, body, said) => `
+    <section class="tcc tcc-${tone}">
       <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
-        <span class="tcc-state">${esc(state)}</span></div>
+        <span class="tcc-state" aria-live="polite">${esc(state)}</span></div>
+      ${said ? `<p class="pt-sr">${esc(said)}</p>` : ''}
       ${body}
     </section>`;
 
@@ -5111,7 +5347,7 @@ function clockPage(req, who, opts = {}) {
       ? Math.max(0, TC.elapsedMinutes(active) - bt.unpaid)
       : Math.max(0, TC.minutesBetween(active.clock_in_at, br.start_at) - bt.unpaid);
     card = shell('break', 'On break', `
-      <div class="tcc-clock" data-since="${TC.toDate(br.start_at).getTime()}" data-now="${serverNow}">0:00</div>
+      <div class="tcc-clock" aria-hidden="true" data-since="${TC.toDate(br.start_at).getTime()}" data-now="${serverNow}">0:00</div>
       <div class="tcc-cap">on break since ${esc(TC.clockFace(br.start_at))}${br.paid ? ' · paid' : ''}</div>
       <div class="tcc-facts">
         ${fact('Payable so far', esc(TC.hm(payable)))}
@@ -5122,12 +5358,13 @@ function clockPage(req, who, opts = {}) {
         <form method="post" action="/portal/clock/break/end">
           <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>End break</button>
         </form>
-      </div>`);
+      </div>`,
+      `On break since ${TC.clockFace(br.start_at)}. Payable so far ${TC.hm(payable)}.`);
   } else if (active) {
     const stale = looksStale(active);
     const bt = TC.breakTotals(active.id);
     card = shell(stale ? 'warn' : 'on', stale ? 'Still clocked in' : 'Working', `
-      <div class="tcc-clock" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}">0:00</div>
+      <div class="tcc-clock" aria-hidden="true" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}">0:00</div>
       <div class="tcc-cap">since ${esc(TC.clockFace(active.clock_in_at))}</div>
       <div class="tcc-facts">
         ${fact('Position', esc(posName(active.position)))}
@@ -5146,7 +5383,9 @@ function clockPage(req, who, opts = {}) {
         <form method="post" action="/portal/clock/break/start">
           <button class="tc-btn tc-btn-quiet tc-btn-big" type="submit" data-once>Start break</button>
         </form>
-      </div>`);
+      </div>`,
+      `${stale ? 'Still clocked in' : 'Working'} since ${TC.clockFace(active.clock_in_at)}`
+        + ` as ${posName(active.position)}.`);
 
     // The clock-out confirmation. No PIN — see /portal/clock/out. Its figures
     // tick, because this sheet is rendered when the PAGE loads and somebody can
@@ -5165,7 +5404,7 @@ function clockPage(req, who, opts = {}) {
           <div class="pes-rows">
             <div class="pes-line"><span>Clocked in</span><b>${esc(TC.clockFace(active.clock_in_at))}</b></div>
             <div class="pes-line"><span>Clocking out</span>
-              <b data-live-face data-now="${serverNow}">${esc(TC.clockFace(TC.nowUtc()))}</b></div>
+              <b data-live-face aria-hidden="true" data-now="${serverNow}">${esc(TC.clockFace(TC.nowUtc()))}</b></div>
             <div class="pes-line"><span>Break</span><b>${bt2.unpaid || bt2.paid
               ? esc(TC.hm(bt2.unpaid + bt2.paid)) + (bt2.unpaid ? ` (${esc(TC.hm(bt2.unpaid))} unpaid)` : ' (paid)')
               : 'none'}</b></div>
@@ -5173,7 +5412,7 @@ function clockPage(req, who, opts = {}) {
             <div class="pes-line"><span>Service</span><b>${active.daypart ? esc(dp(active.daypart)) : '—'}</b></div>
           </div>
           <div class="pes-total"><span>Payable</span>
-            <b data-live-mins data-base="${-bt2.unpaid}"
+            <b data-live-mins aria-hidden="true" data-base="${-bt2.unpaid}"
                data-since="${TC.toDate(active.clock_in_at).getTime()}"
                data-now="${serverNow}">${esc(TC.hm(Math.max(0, TC.elapsedMinutes(active) - bt2.unpaid)))}</b></div>
           <p class="pes-fine">Your manager can still fix this afterwards — open the shift and ask.</p>
@@ -5263,8 +5502,9 @@ function clockPage(req, who, opts = {}) {
   const summary = `
     <div class="tc-today">
       <div class="tc-today-l">Worked today</div>
-      <div class="tc-today-v"${active ? ` data-total="${st.todayMin}" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}" data-mode="total"` : ''}>${esc(TC.hm(st.todayMin))}</div>
+      <div class="tc-today-v"${active ? ' aria-hidden="true"' : ''}${active ? ` data-total="${st.todayMin}" data-since="${TC.toDate(active.clock_in_at).getTime()}" data-now="${serverNow}" data-mode="total"` : ''}>${esc(TC.hm(st.todayMin))}</div>
       <div class="tc-today-s">${esc(st.label)}</div>
+      ${active ? `<p class="pt-sr">Worked today so far, ${esc(TC.hm(st.todayMin))}.</p>` : ''}
     </div>`;
 
   const shortcut = (href, title, sub, badge) => `
@@ -5281,10 +5521,10 @@ function clockPage(req, who, opts = {}) {
       ${receipt || summary}
       ${justOut ? '' : card}
 
-      ${/* Visible rows, not a menu. Every one of these was reachable only
-            through a three-dot button at the top of the screen, which is where
-            an owner-side toolbar puts things nobody uses often — and these are
-            the three things an employee comes here for after clocking in. */''}
+      ${/* Visible rows, not a menu — and since Phase 2D-1 this is also where
+            Timesheet lives in the navigation. It gave up its bottom tab to
+            Schedule, so its entry point here is load-bearing: it is a normal
+            action row, first in the list, never behind More or a disclosure. */''}
       <div class="tc-shorts">
         ${/* Carrying the period, so the tile lands on the one the badge is
               about rather than on whatever is running today. */''}

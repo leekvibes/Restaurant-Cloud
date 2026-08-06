@@ -973,3 +973,75 @@ the kitchen ones. `tipsEligibility(emp, requestedPosition)` resolves the slug
 against what the person actually holds, then asks `canSubmitSalesTips` of the
 resolved row. The form offers only eligible held positions; one is chosen
 automatically, several must be picked, none closes the door.
+
+---
+
+## 11. PHASE 2D-1 — navigation, and the Schedule placeholder
+
+### 11.1 Bottom tabs
+
+`Home · Time clock · Schedule · Pay · More`. Timesheet gave up its tab; it is a
+visible action row on `/portal/clock` and every timesheet route still lights the
+**Time clock** tab, so nothing is orphaned.
+
+Defined once, in `PORTAL_NAV`. An item carries `key, label, icon, href,
+availability, lockedTitle, lockedMessage, accessibilityLabel, badge`.
+`availability` is `available | locked | hidden`.
+
+Route→tab lives in `PORTAL_AREA` + `portalTabForRoute(pathname)`, longest prefix
+wins:
+
+| Route | Tab |
+|---|---|
+| `/portal` | Home |
+| `/portal/clock*`, `/portal/timesheet*`, `/portal/requests*` | Time clock |
+| `/portal/earnings*` | Pay |
+| anything else under `/portal` | More (no `aria-current` — More is a button) |
+
+### 11.2 Layer scale
+
+Declared on `.pt` and read by every fixed surface:
+
+```
+--pt-z-tabs: 60   the bottom bar
+--pt-z-nav: 70    More, and locked-destination sheets
+--pt-z-sheet: 90  .pes form sheets
+--pt-z-toast: 120 feedback
+```
+
+**The tab bar renders inside `.pt`.** It used to be a sibling, which meant it
+inherited none of the portal custom properties: `background: var(--pt-field)`
+resolved to nothing and painted transparent, and `z-index: var(--pt-z-tabs)`
+came out `auto`. That was the "too transparent, moves strangely while
+scrolling" bar.
+
+### 11.3 Schedule — locked, and deliberately empty
+
+No route, no table, no API, no data. The tab is a `<button>` (never `disabled`,
+so it can open the sheet that explains itself), labelled `Schedule, coming
+soon`, and never takes `aria-current`. Tapping it opens a shared dialog and
+changes nothing else — no navigation, no history entry, no write.
+
+**Turning it on later:** set `availability: 'available'`, give it an `href`, and
+add its routes to `PORTAL_AREA`. No page changes.
+
+**Future home: Owner workspace → Scheduling.** Scope recorded, not built:
+weekly builder · publish/unpublish · employee shift view · availability ·
+time-off requests · open shifts · shift offers · swap and cover · position and
+location eligibility · schedule notifications · publish acknowledgements ·
+manager change audit · conflict detection · labour and overtime warnings.
+
+**Future settings: Owner workspace → Settings → Scheduling.** Also not built:
+scheduling enabled · week start · availability enabled · time-off enabled ·
+swaps enabled · open-shift claiming · approval rules · publish notifications ·
+minimum-rest warnings · overtime warnings · how far ahead staff can see ·
+whether unpublished shifts are hidden · change-cutoff rules.
+
+### 11.4 Home deduplication
+
+An attention item may carry `dedup`, a domain key. A notification's key is
+parsed from its **href** — `timesheet:<period>`, `entry:<id>`, `shift:<id>` —
+never from its title. A notification whose key matches a rendered attention item
+is hidden **on Home only**: it stays stored, stays unread, and stays on
+`/portal/notifications`. No key means never suppressed, which is the right
+answer for a notification that merely mentions a module.

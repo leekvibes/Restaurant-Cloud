@@ -2560,8 +2560,10 @@ test('2B: working — live counter, the facts, and both actions in the open', as
   const html = await text('/portal/clock', { cookie });
   assert.match(html, /class="tcc tcc-on"/, 'the green state');
   assert.match(html, />Working</, 'named');
-  assert.match(html, /class="tcc-clock" data-since="\d+" data-now="\d+"/,
-    'the counter is anchored to the server clock, not the phone');
+  assert.match(html, /class="tcc-clock" aria-hidden="true" data-since="\d+" data-now="\d+"/,
+    'the counter is anchored to the server clock, and hidden from screen readers');
+  assert.match(html, /class="pt-sr">Working since [^<]+<\/p>/,
+    'with a stable sentence that says the same thing without ticking');
   assert.match(html, /Position<\/span><b>Server/, 'position on the card');
   assert.match(html, /Service<\/span><b>/, 'service on the card');
   assert.match(html, /data-pes-open="clockout"[^>]*>Clock out/, 'clock out is primary');
@@ -2583,7 +2585,7 @@ test('2B: the clock-out sheet shows what is being recorded, and asks for no PIN'
   // The two figures that would go stale are computed at look-time, not at
   // render-time — the sheet can sit unopened for an hour.
   assert.match(sheet, /data-live-face/, 'the clock-out time is live');
-  assert.match(sheet, /data-live-mins data-base="-?\d+"/, 'and so is the payable total');
+  assert.match(sheet, /data-live-mins aria-hidden="true" data-base="-?\d+"/, 'and so is the payable total');
   await post('/portal/clock/out', {}, { cookie });
   assert.ok(!activeOf(EMP.solo), 'and it closes the punch with no PIN at all');
 });
@@ -2628,7 +2630,9 @@ test('2B: on break — break duration ticks, payable is quoted as of the break',
   const html = await text('/portal/clock', { cookie });
   assert.match(html, /class="tcc tcc-break"/, 'the amber state');
   assert.match(html, />On break</, 'named');
-  assert.match(html, /class="tcc-clock" data-since=/, 'the break duration is the live figure');
+  assert.match(html, /class="tcc-clock" aria-hidden="true" data-since=/, 'the break duration is the live figure');
+  assert.match(html, /class="pt-sr">On break since [^<]+ Payable so far [^<]+<\/p>/,
+    'and a stable sentence carries it for assistive tech');
   assert.match(html, /Payable so far<\/span>/, 'payable so far is shown');
   assert.match(html, /paused while you are on an unpaid break/,
     'and it says why that figure is not moving');
@@ -3422,11 +3426,11 @@ test('2D: Home is not a second copy of the bottom navigation', async () => {
   const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
   assert.ok(tabs, 'the tab bar rendered');
   for (const [href, label] of [['/portal', 'Home'], ['/portal/clock', 'Time clock'],
-    ['/portal/timesheet', 'Timesheet'], ['/portal/earnings', 'Pay']]) {
+    ['/portal/earnings', 'Pay']]) {
     assert.ok(tabs.includes(`href="${href}"`) && tabs.includes(`>${label}<`), `${label} tab intact`);
   }
-  assert.match(tabs, /<summary><span class="pt-tab-g" aria-hidden="true">⋯<\/span><span>More<\/span><\/summary>/,
-    'and More is unchanged');
+  assert.match(tabs, />Schedule</, 'Schedule holds its place');
+  assert.match(tabs, /data-portal-more/, 'and More opens the shared sheet');
 });
 
 test('2D: Home is reachable, accessible and fits a phone', async () => {
@@ -3458,4 +3462,267 @@ test('2D: Home never shows a raw label or anything owner-only', async () => {
   for (const owner of ['hourly_rate', '/payroll', '/timeclock/', 'aggregatePayroll', 'takeHome']) {
     assert.ok(!body.includes(owner), `nothing owner-only: ${owner}`);
   }
+});
+
+// ===========================================================================
+// PHASE 2D-1 — navigation, accessibility, and one event in one place.
+// ===========================================================================
+
+test('2D-1: the bottom bar is Home, Time clock, Schedule, Pay, More', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal', { cookie });
+  const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
+  assert.ok(tabs, 'the bar rendered');
+  const labels = [...tabs.matchAll(/<span>([^<]+)<\/span>/g)].map((m) => m[1]);
+  assert.deepStrictEqual(labels, ['Home', 'Time clock', 'Schedule', 'Pay', 'More'],
+    'five tabs, in that order');
+  assert.ok(!/Timesheet/.test(tabs), 'Timesheet gave up its tab');
+  assert.ok(!/href="\/portal\/schedule"/.test(html), 'and Schedule has no route to give');
+});
+
+test('2D-1: Schedule is present, locked, and never the current tab', async () => {
+  const cookie = await signIn('3111');
+  for (const [path, expected] of [['/portal', 'Home'], ['/portal/clock', 'Time clock'],
+    ['/portal/earnings', 'Pay']]) {
+    const html = await text(path, { cookie });
+    const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
+    assert.strictEqual((tabs.match(/aria-current="page"/g) || []).length, 1,
+      `exactly one tab is current on ${path}`);
+    const cur = (tabs.match(/aria-current="page"[\s\S]*?<span>([^<]+)<\/span>\s*<\/a>/) || [])[1]
+      || (tabs.match(/aria-current="page"[^>]*>[\s\S]*?<span>([^<]+)<\/span>/) || [])[1];
+    assert.strictEqual(cur, expected, `${path} lights ${expected}`);
+    assert.ok(!/pt-tab-locked[^>]*aria-current/.test(tabs), 'Schedule is never current');
+  }
+  const html = await text('/portal', { cookie });
+  assert.match(html, /class="pt-tab pt-tab-locked" data-portal-locked="schedule"/, 'it is a button, not a dead link');
+  assert.match(html, /aria-label="Schedule, coming soon"/, 'with a spoken state');
+  assert.match(html, /aria-haspopup="dialog"/, 'that says it opens information');
+  assert.ok(!/pt-tab-locked[^>]*disabled/.test(html), 'and is not disabled — it has to be tappable');
+  assert.match(html, /class="pt-tab-lock"/, 'a lock indicator rides alongside the calendar icon');
+});
+
+test('2D-1: the locked Schedule sheet explains itself and invents nothing', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal', { cookie });
+  const i = html.indexOf('id="pt-locked-schedule"');
+  const sheet = i > -1 ? html.slice(i, html.indexOf('</div>', html.indexOf('Got it', i)) + 6) : '';
+  assert.ok(sheet, 'the sheet is on the page');
+  assert.match(sheet, /role="dialog" aria-modal="true"/, 'it is a dialog');
+  assert.match(sheet, /<h2 class="pt-nav-h" id="pt-locked-h-schedule">Schedule<\/h2>/, 'with a heading');
+  assert.match(sheet, /Employee scheduling is coming soon/, 'saying so plainly');
+  assert.match(sheet, /once scheduling is available/, 'and what it will do');
+  assert.match(sheet, />Got it</, 'with one way out');
+  assert.match(sheet, /data-portal-close/, 'plus the scrim and the close control');
+  // Nothing invented. ("upcoming shifts" is in the approved sentence — what
+  // must not be here is schedule DATA, or a promise about when.)
+  for (const fake of ['Monday', 'Tuesday', ':00', 'availability', 'time off', 'swap',
+    'next week', 'January', 'soon as', 'by the end of']) {
+    assert.ok(!new RegExp(fake, 'i').test(sheet), `no fabricated content: ${fake}`);
+  }
+  assert.ok(!/\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}/.test(sheet), 'and no dates at all');
+});
+
+test('2D-1: every known portal route maps to exactly one tab', async () => {
+  const cookie = await signIn('3111');
+  const per = curPeriod();
+  const eid = seedInPeriod(EMP.solo, 4, '10:00', '18:00');
+  const day = db.prepare('SELECT business_date d FROM time_entries WHERE id=?').get(eid).d;
+  const cases = [
+    ['/portal', 'Home'],
+    ['/portal/clock', 'Time clock'],
+    [`/portal/clock/entry/${eid}`, 'Time clock'],
+    [`/portal/timesheet?p=${per.start}`, 'Time clock'],
+    [`/portal/timesheet/day/${day}`, 'Time clock'],
+    ['/portal/requests', 'Time clock'],
+    ['/portal/earnings', 'Pay'],
+    ['/portal/notifications', 'More'],
+    ['/portal/specials', 'More'],
+    ['/portal/stock', 'More'],
+  ];
+  for (const [path, expected] of cases) {
+    const html = await text(path, { cookie });
+    const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
+    const n = (tabs.match(/aria-current="page"/g) || []).length;
+    if (expected === 'More') {
+      // More is a button, not a destination, so nothing carries aria-current.
+      assert.strictEqual(n, 0, `${path} lights no destination tab`);
+    } else {
+      assert.strictEqual(n, 1, `${path} lights exactly one tab`);
+      assert.ok(tabs.includes(`aria-current="page"`), `${path} marks it`);
+      const seg = tabs.slice(tabs.indexOf('aria-current="page"'));
+      assert.ok(seg.includes(`>${expected}<`), `${path} lights ${expected}`);
+    }
+  }
+});
+
+test('2D-1: Timesheet is still easy to find without a tab', async () => {
+  const cookie = await signIn('3111');
+  const clock = await text('/portal/clock', { cookie });
+  // A normal, visible action row — not behind More, a menu or a disclosure.
+  assert.match(clock, /<a class="tc-short" href="\/portal\/timesheet\?p=/, 'a plain row on the clock');
+  assert.ok(!/<details[\s\S]*?\/portal\/timesheet/.test(clock), 'not inside a disclosure');
+  const more = await text('/portal', { cookie });
+  const sheet = (more.match(/id="pt-more-sheet"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/) || [''])[0];
+  assert.ok(!/portal\/timesheet/.test(sheet), 'and deliberately not in More — it belongs to the clock');
+  // Every route still answers.
+  const per = curPeriod();
+  for (const path of ['/portal/timesheet', `/portal/timesheet?p=${per.start}`]) {
+    assert.strictEqual((await get(path, { cookie })).status, 200, `${path} still works`);
+  }
+});
+
+test('2D-1: More holds the utility screens and nothing aspirational', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal', { cookie });
+  const sheet = (html.match(/id="pt-more-sheet"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/) || [''])[0];
+  assert.ok(sheet, 'the More sheet is on the page');
+  assert.match(sheet, /role="dialog" aria-modal="true"/, 'a dialog, not a dropdown');
+  assert.match(sheet, /<h2 class="pt-nav-h" id="pt-more-h">More<\/h2>/, 'with a heading');
+  assert.match(sheet, /class="pt-nav-x"[^>]*aria-label="Close"/, 'and a close control');
+  for (const keep of ['/portal/notifications', '/portal/requests', '/portal/specials',
+    '/portal/stock', '/portal/out']) {
+    assert.ok(sheet.includes(`href="${keep}"`), `${keep} stays in More`);
+  }
+  for (const no of ['/portal/timesheet', '/portal/schedule', '/portal/account',
+    '/portal/documents', '/portal/help', '/portal/settings']) {
+    assert.ok(!sheet.includes(`href="${no}"`), `${no} is not in More`);
+  }
+  assert.ok(!/<details/.test(html), 'the <details> menu is gone entirely');
+});
+
+test('2D-1: the tips entry in More still follows position eligibility', async () => {
+  const server = await text('/portal', { cookie: await signIn('3111') });
+  assert.match((server.match(/id="pt-more-sheet"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/) || [''])[0],
+    /href="\/portal\/tips"/, 'a server is offered it');
+  const emp = 260;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'busser','3260',1400,1)")
+    .run(emp, 'More Busser');
+  const busser = await text('/portal', { cookie: await signIn('3260') });
+  assert.ok(!/href="\/portal\/tips"/.test(busser), 'and a busser is not');
+});
+
+test('2D-1: the tab bar is opaque, fixed, and spaced for by the shell', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  const bar = css.slice(css.indexOf('.pt-tabs {'), css.indexOf('}', css.indexOf('.pt-tabs {')));
+  assert.match(bar, /position: fixed/, 'anchored to the viewport');
+  assert.match(bar, /bottom: 0/, 'at the bottom of it');
+  assert.match(bar, /background: var\(--pt-field\)/, 'on a solid surface token');
+  // The SURFACE must be opaque. A drop shadow is allowed to be rgba — that is
+  // the shadow, not the background showing through.
+  const bg = (bar.match(/background:[^;]+/) || [''])[0];
+  assert.ok(!/rgba|hsla|transparent/.test(bg), `the background is opaque: ${bg}`);
+  assert.ok(!/backdrop-filter|blur\(|opacity:/.test(bar), 'no glass effect and no blur');
+  assert.match(bar, /padding-bottom: env\(safe-area-inset-bottom\)/, 'and the iOS inset');
+  // The shell reserves the room — never whichever element happens to be last.
+  assert.match(css, /\.pt\.has-tabs \{ padding-bottom: calc\(60px \+ env\(safe-area-inset-bottom\)\); \}/,
+    'the shell reserves the space');
+  assert.ok(!/\.pt\.has-tabs > :last-child/.test(css), 'and not by :last-child');
+  // One layer scale, not scattered numbers.
+  for (const v of ['--pt-z-tabs', '--pt-z-nav', '--pt-z-sheet', '--pt-z-toast']) {
+    assert.ok(css.includes(v), `${v} is defined`);
+  }
+  const order = ['--pt-z-tabs: 60', '--pt-z-nav: 70', '--pt-z-sheet: 90', '--pt-z-toast: 120'];
+  for (const o of order) assert.ok(css.includes(o), `${o} — sheets above nav, nav above tabs`);
+  assert.match(css, /\.pes \{ position: fixed; inset: 0; z-index: var\(--pt-z-sheet\)/,
+    'form sheets read from the scale');
+  assert.match(css, /\.pt-nav \{ position: fixed; inset: 0; z-index: var\(--pt-z-nav\)/,
+    'and so does navigation');
+});
+
+test('2D-1: the nav script opens once, closes every way, and keeps the scroll', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal', { cookie });
+  const js = (html.match(/<script>\s*\(function \(\) \{\s*var open = null[\s\S]*?<\/script>/) || [''])[0];
+  assert.ok(js, 'the shared nav script is on the page');
+  assert.match(js, /if \(open === el\) return;/, 'tapping twice opens once');
+  assert.match(js, /if \(open\) hide\(true\);/, 'and opening one closes the other');
+  assert.match(js, /ev\.key === 'Escape'/, 'Escape closes');
+  assert.match(js, /data-portal-close/, 'so do the scrim and the close control');
+  assert.match(js, /scrollY = window\.scrollY/, 'the scroll position is kept');
+  assert.match(js, /window\.scrollTo\(0, scrollY\)/, 'and restored on close');
+  // Checked against the CODE, not the prose: the comment above it explains
+  // why position:fixed is wrong, and a naive match hits the explanation.
+  assert.ok(!/body\.style\.position|documentElement\.style\.position/.test(js),
+    'without pinning the body, which would jump the page to the top');
+  assert.match(js, /overflow = 'hidden'/, 'background scrolling locks');
+  assert.match(js, /from\.focus\(\)/, 'focus returns to whatever opened it');
+  assert.match(js, /ev\.key !== 'Tab'/, 'and is kept inside while it is open');
+  assert.ok(!/history\.|pushState|location\.hash/.test(js), 'no history games');
+});
+
+test('2D-1: a ticking counter is never announced, but is never silent either', async () => {
+  const cookie = await signIn('3111');
+  await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
+  const on = await text('/portal/clock', { cookie });
+  // The card is not a live region; only the state word is.
+  assert.ok(!/<section class="tcc[^"]*" aria-live/.test(on), 'the card is not a live region');
+  assert.match(on, /<span class="tcc-state" aria-live="polite">Working<\/span>/,
+    'the state announces when it changes');
+  assert.match(on, /class="tcc-clock" aria-hidden="true"/, 'the counter is hidden from assistive tech');
+  assert.match(on, /class="pt-sr">Working since [^<]+<\/p>/, 'and a stable sentence carries it');
+  // Still visible, still ticking.
+  assert.match(on, /data-since="\d+" data-now="\d+"/, 'the visible figure keeps its server anchor');
+  assert.match(on, /setInterval\(tick, 1000\)/, 'and keeps updating');
+
+  await post('/portal/clock/break/start', {}, { cookie });
+  const brk = await text('/portal/clock', { cookie });
+  assert.match(brk, /<span class="tcc-state" aria-live="polite">On break<\/span>/, 'break announces once');
+  assert.match(brk, /class="pt-sr">On break since /, 'with its own stable sentence');
+  await post('/portal/clock/break/end', {}, { cookie });
+
+  const res = await post('/portal/clock/out', {}, { cookie });
+  const id = (decodeURIComponent(res.headers.get('location')).match(/done=(\d+)/) || [])[1];
+  const receipt = await text(`/portal/clock?done=${id}`, { cookie });
+  assert.match(receipt, /class="tcc-state">Clocked out</, 'the receipt states itself');
+  assert.ok(!/tcc-done[^>]*aria-live/.test(receipt), 'and is not a live region');
+});
+
+test('2D-1: one event shows once on Home, and stays in the notification list', async () => {
+  const emp = 261;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3261',1500,1)")
+    .run(emp, 'Dedup Reader');
+  const per = curPeriod();
+  seedInPeriod(emp, 5, '09:00', '17:00');
+  const cookie = await signIn('3261');
+  await text('/portal', { cookie });                       // baseline
+
+  // The notification the reminder sweep sends, naming the same period the
+  // attention row is about.
+  db.prepare(`INSERT INTO portal_events (kind, title, body, employee_id, href)
+    VALUES ('timesheet','Your timesheet is ready to submit','Check it and send it',?,?)`)
+    .run(emp, `/portal/timesheet?p=${per.start}`);
+  // And one that names a different record entirely.
+  db.prepare(`INSERT INTO portal_events (kind, title, body, employee_id, href)
+    VALUES ('special','Branzino is on tonight','ask the kitchen',NULL,'/portal/specials')`).run();
+
+  const home = homeBody(await text('/portal', { cookie }));
+  assert.match(home, /Your timesheet is ready to submit/, 'the fact is on Home');
+  assert.strictEqual((home.match(/Your timesheet is ready to submit/g) || []).length, 1,
+    'exactly once — the attention row, not the row and its echo');
+  assert.match(home, /class="tc-chip[^"]*">Ready</, 'and it is the actionable one that survived');
+  assert.match(home, /Branzino is on tonight/, 'an unrelated notification is untouched');
+
+  // Suppressed on Home, not suppressed anywhere else, and not marked read by it.
+  const list = await text('/portal/notifications', { cookie });
+  assert.match(list, /Your timesheet is ready to submit/, 'still on the notifications page');
+  const row = db.prepare("SELECT * FROM portal_events WHERE title = 'Your timesheet is ready to submit'").get();
+  assert.ok(row, 'and still stored');
+});
+
+test('2D-1: different records are never folded together', async () => {
+  const emp = 262;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3262',1500,1)")
+    .run(emp, 'Dedup Two');
+  const cookie = await signIn('3262');
+  await text('/portal', { cookie });
+  const per = curPeriod();
+  const other = P.recentPeriods(3)[2];
+  db.prepare(`INSERT INTO portal_events (kind, title, body, employee_id, href)
+    VALUES ('timesheet','Timesheet A','one',?,?)`).run(emp, `/portal/timesheet?p=${per.start}`);
+  db.prepare(`INSERT INTO portal_events (kind, title, body, employee_id, href)
+    VALUES ('timesheet','Timesheet B','two',?,?)`).run(emp, `/portal/timesheet?p=${other.start}`);
+  const home = homeBody(await text('/portal', { cookie }));
+  // Two different periods are two different records, whatever they are called.
+  assert.match(home, /Timesheet A/, 'the first survives');
+  assert.match(home, /Timesheet B/, 'and so does the second');
 });
