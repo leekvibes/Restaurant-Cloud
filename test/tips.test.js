@@ -1481,3 +1481,254 @@ test('2F-I: filing clears its own reminder and leaves the others alone', async (
   assert.ok(!/Due/.test((third.match(/[^<>]*Sales[^<>]*|[^<>]*tips[^<>]*/gi) || []).join(' ')),
     'a correction does not recreate it');
 });
+
+// ===========================================================================
+// PHASE 2F — pre/post equivalence.
+//
+// Every fixture is written TWICE: once through the redesigned route, and once
+// straight into the columns using the statements and the toCents() semantics
+// the pre-2F handler used. The engine is then run over both and the results
+// compared with exact deep equality on integer cents.
+//
+// This is the question that matters for a push: does money that used to land
+// one way still land that way?
+// ===========================================================================
+
+/**
+ * The pre-Phase-2F storage path, replayed literally.
+ *
+ * The old handler's writes, in the old order, with the old parser:
+ *   insertWorkIfAbsent -> setCashTips(always) -> setCardTips(only when the
+ *   posted string was non-empty) -> setNote -> setSales(servers, only when
+ *   something was entered) -> submissions.add
+ *
+ * toCents() is `Math.round(parseFloat(x) * 100)`, reproduced here rather than
+ * imported, so this fixture keeps testing the OLD behaviour even if the shared
+ * helper is ever changed.
+ */
+function writeTheOldWay(dbw, shiftId, empIdN, position, body) {
+  const oldToCents = (v) => {
+    if (v === null || v === undefined || v === '') return 0;
+    const n = typeof v === 'string' ? parseFloat(v) : v;
+    if (!Number.isFinite(n)) return 0;
+    return Math.round(n * 100);
+  };
+  dbw.prepare(`INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours)
+               VALUES (?, ?, ?, 0)`).run(shiftId, empIdN, position);
+  const cash = oldToCents(body.cash_tips);
+  dbw.prepare(`INSERT INTO server_sales (shift_id, employee_id, cash_tips_cents, cash_entered_by)
+               VALUES (@s, @e, @c, 'staff')
+               ON CONFLICT(shift_id, employee_id) DO UPDATE
+               SET cash_tips_cents = @c, cash_entered_by = 'staff'`)
+    .run({ s: shiftId, e: empIdN, c: cash });
+  const cardRaw = String(body.card_tips || '').trim();
+  if (cardRaw !== '') {
+    dbw.prepare('UPDATE server_sales SET card_tips_cents = ? WHERE shift_id = ? AND employee_id = ?')
+      .run(oldToCents(cardRaw), shiftId, empIdN);
+  }
+  let anySales = false;
+  if (position === 'server') {
+    anySales = ['food', 'coffee', 'alcohol'].some((k) => String(body[k] || '').trim() !== '');
+    if (anySales) {
+      dbw.prepare(`UPDATE server_sales SET food_cents = ?, coffee_cents = ?, alcohol_cents = ?
+                   WHERE shift_id = ? AND employee_id = ?`)
+        .run(oldToCents(body.food), oldToCents(body.coffee), oldToCents(body.alcohol), shiftId, empIdN);
+    }
+  }
+  dbw.prepare(`INSERT INTO tip_submissions
+      (shift_id, employee_id, role, cash_tips_cents, card_tips_cents,
+       food_cents, coffee_cents, alcohol_cents, note, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'staff')`)
+    .run(shiftId, empIdN, position, cash,
+      cardRaw === '' ? null : oldToCents(cardRaw),
+      position === 'server' && anySales ? oldToCents(body.food) : null,
+      position === 'server' && anySales ? oldToCents(body.coffee) : null,
+      position === 'server' && anySales ? oldToCents(body.alcohol) : null);
+}
+
+/** Everything the engine and Payroll produce for one shift, as integer cents. */
+const financialsOf = (shiftId) => inApp(`
+  const sh = db.prepare('SELECT * FROM shifts WHERE id = ${shiftId}').get();
+  const pol = policyForShift(sh);
+  const inp = shiftInputs(sh.id);
+  const r = runShift(inp, pol);
+  // runShift's payout rows are already in integer cents — shiftInputs feeds it
+  // dollars, the engine converts once, and the payout carries the result. No
+  // second multiplication here.
+  const money = (c) => Math.round(c || 0);
+  out({
+    pots: r.pots,
+    poolCash: r.pool.cash,
+    poolCard: r.pool.togoCard,
+    poolTotal: r.pool.total,
+    orphaned: r.orphanedPots,
+    conflicts: r.poolConflicts,
+    servers: r.servers.map((x) => ({
+      role: 'server',
+      food: money(x.sales.food), coffee: money(x.sales.coffee), alcohol: money(x.sales.alcohol),
+      card: money(x.cardTips), cash: money(x.cashTips), total: money(x.totalTips),
+      tipouts: Object.fromEntries(Object.entries(x.tipouts).map(([k, v]) => [k, v])),
+      tipoutTotal: x.tipoutTotal, kept: x.tipsKept,
+    })).sort((a, b) => a.food - b.food || a.card - b.card),
+    support: (r.support || []).map((x) => ({
+      role: x.role, share: x.share, paycheck: x.paycheck, cash: x.cash,
+    })).sort((a, b) => String(a.role).localeCompare(String(b.role))),
+  });
+`);
+
+/** Stored operational columns, the ones every screen and the engine read. */
+const operationalOf = (shiftId) => db.prepare(`SELECT employee_id, food_cents, coffee_cents,
+    alcohol_cents, card_tips_cents, cash_tips_cents, cash_entered_by
+  FROM server_sales WHERE shift_id = ? ORDER BY employee_id`).all(shiftId)
+  .map((r) => ({ ...r, employee_id: undefined }));
+
+test('2F-EQ: every fixture allocates identically before and after the redesign', async () => {
+  const w2 = writable();
+  for (const [name, role, pin] of [['Eq Server', 'server', '6001'], ['Eq Barista', 'barista', '6002'],
+    ['Eq Bartender', 'bartender', '6003']]) {
+    w2.prepare(`INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin)
+                VALUES (?, ?, 1500, 1, ?)`).run(name, role, pin);
+  }
+  w2.close();
+  const ids = { server: empId('Eq Server'), barista: empId('Eq Barista'), bartender: empId('Eq Bartender') };
+
+  // Each fixture is a list of [pin, position, body]. Figures are chosen to be
+  // valid under BOTH parsers — that is the point: for input the old code
+  // accepted, nothing may have moved.
+  const FIXTURES = [
+    ['server only, food only', [['6001', 'server', { food: '900', cash_tips: '0' }]]],
+    ['server only, coffee only', [['6001', 'server', { coffee: '450.25', cash_tips: '0' }]]],
+    ['server only, alcohol only', [['6001', 'server', { alcohol: '312.80', cash_tips: '0' }]]],
+    ['server, mixed categories', [['6001', 'server', { food: '812.35', coffee: '99.05', alcohol: '141.60', card_tips: '203.15', cash_tips: '61.85' }]]],
+    ['server card tips, no cash', [['6001', 'server', { food: '500', card_tips: '120.50', cash_tips: '0' }]]],
+    ['server card and retained cash', [['6001', 'server', { food: '640.10', card_tips: '88.88', cash_tips: '73.40' }]]],
+    ['server card blank', [['6001', 'server', { food: '400', cash_tips: '20' }]]],
+    ['server card explicit zero', [['6001', 'server', { food: '400', card_tips: '0', cash_tips: '20' }]]],
+    ['server plus barista pooled cash', [['6001', 'server', { food: '700', coffee: '120', card_tips: '150', cash_tips: '40' }],
+      ['6002', 'barista', { card_tips: '20', cash_tips: '46.60' }]]],
+    ['server plus two support roles', [['6001', 'server', { food: '1000', coffee: '200', alcohol: '300', card_tips: '250', cash_tips: '55' }],
+      ['6002', 'barista', { cash_tips: '31.33' }], ['6003', 'bartender', { cash_tips: '18.67' }]]],
+    ['rounding boundary: a penny', [['6001', 'server', { food: '0.01', coffee: '0.01', alcohol: '0.01', card_tips: '0.01', cash_tips: '0.01' }]]],
+    ['rounding boundary: thirds', [['6001', 'server', { food: '333.33', coffee: '333.33', alcohol: '333.34', card_tips: '100.01', cash_tips: '0.99' }],
+      ['6002', 'barista', { cash_tips: '33.33' }], ['6003', 'bartender', { cash_tips: '33.33' }]]],
+  ];
+
+  const results = [];
+  let day = 1;
+  for (const [label, people] of FIXTURES) {
+    const dNew = `2027-01-${String(day).padStart(2, '0')}`;
+    const dOld = `2027-02-${String(day).padStart(2, '0')}`;
+    day += 1;
+
+    // --- the redesigned route ---------------------------------------------
+    for (const [pin, position, body] of people) {
+      const { token } = await signIn(pin);
+      const res = await form('/tips', { token, position, date: dNew, daypart: 'dinner',
+        mode: 'manual', ...body });
+      assert.strictEqual(res.status, 302, `${label}: ${position} filed`);
+    }
+
+    // --- the pre-2F storage path -------------------------------------------
+    const w3 = writable();
+    w3.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(dOld, 'dinner');
+    const oldId = w3.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(dOld, 'dinner').id;
+    for (const [pin, position, body] of people) {
+      const who = { 6001: ids.server, 6002: ids.barista, 6003: ids.bartender }[Number(pin)];
+      writeTheOldWay(w3, oldId, who, position, body);
+    }
+    w3.close();
+
+    const newId = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(dNew, 'dinner').id;
+
+    // Same policy version on both, or the comparison is meaningless.
+    const pol = inApp(`
+      const a = db.prepare('SELECT policy_id FROM shifts WHERE id = ${newId}').get();
+      const b = db.prepare('SELECT * FROM shifts WHERE id = ${oldId}').get();
+      policyForShift(b);
+      out({ a: a.policy_id, b: db.prepare('SELECT policy_id FROM shifts WHERE id = ${oldId}').get().policy_id });
+    `);
+    assert.strictEqual(pol.a, pol.b, `${label}: both shifts locked the same policy version`);
+
+    assert.deepStrictEqual(operationalOf(newId), operationalOf(oldId),
+      `${label}: stored operational values are identical`);
+    const fNew = financialsOf(newId);
+    const fOld = financialsOf(oldId);
+    assert.deepStrictEqual(fNew, fOld, `${label}: every allocated cent is identical`);
+    results.push({ label, poolCash: fNew.poolCash, pots: fNew.pots,
+      kept: fNew.servers.map((s) => s.kept), tipouts: fNew.servers.map((s) => s.tipoutTotal) });
+  }
+
+  // Printed so the matrix is readable in the run, not just asserted.
+  console.log('\n  Pre/post equivalence matrix (integer cents, identical on both paths):');
+  for (const r of results) {
+    console.log(`   ${r.label.padEnd(34)} pool=${r.poolCash} tipouts=${JSON.stringify(r.tipouts)} kept=${JSON.stringify(r.kept)}`);
+  }
+  assert.strictEqual(results.length, FIXTURES.length, 'every fixture ran');
+});
+
+test('2F-EQ: rows written before the redesign still cost, display and correct', async () => {
+  // Shaped like production: a shift whose figures were written by the old
+  // handler and whose audit row predates the tri-state distinction.
+  const date = '2027-03-01';
+  const w2 = writable();
+  w2.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(date, 'dinner');
+  const sid = w2.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner').id;
+  const me = empId('Rosa Diaz');
+  // An old row: hours already set by the importer, sales present, and NO audit
+  // row at all — the state every pre-logging shift is in.
+  w2.prepare(`INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours, hours_source)
+              VALUES (?, ?, 'server', 6.25, 'legacy')`).run(sid, me);
+  w2.prepare(`INSERT OR REPLACE INTO server_sales (shift_id, employee_id, food_cents,
+                coffee_cents, alcohol_cents, card_tips_cents, cash_tips_cents, cash_entered_by)
+              VALUES (?, ?, 55000, 12000, 8000, 14500, 3000, 'pos')`).run(sid, me);
+  w2.close();
+
+  // It costs without touching it.
+  const before = financialsOf(sid);
+  assert.strictEqual(before.servers.length, 1, 'the old row still costs');
+  assert.deepStrictEqual(
+    { food: before.servers[0].food, coffee: before.servers[0].coffee,
+      alcohol: before.servers[0].alcohol, card: before.servers[0].card, cash: before.servers[0].cash },
+    { food: 55000, coffee: 12000, alcohol: 8000, card: 14500, cash: 3000 },
+    'at exactly the figures it already had');
+
+  const { cookie } = await signIn('2468');
+  // db.js carries a one-time backfill (pre-dating this phase, untouched by it)
+  // that mints an `imported` audit row for any pre-logging server_sales row.
+  // So an old row DOES have history — marked as imported rather than dressed
+  // up as a real submission — and the workspace correctly offers to correct it
+  // rather than claiming it was never filed.
+  const imported = db.prepare(`SELECT source, card_tips_cents FROM tip_submissions
+    WHERE shift_id = ? AND employee_id = ?`).get(sid, me);
+  const html = await page(cookie, `/portal/tips?shift=${sid}`);
+  if (imported) {
+    assert.strictEqual(imported.source, 'imported', 'the backfilled row says where it came from');
+    assert.match(html, /Previously submitted/, 'and the workspace offers to correct it');
+    assert.match(html, /Update report/, 'with the right verb');
+  } else {
+    assert.match(html, /Submit report/, 'with no history at all it reads as a first report');
+  }
+
+  // Correcting it works and does not rewrite the row's history — it creates it.
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(sid),
+      food: '560', coffee: '120', alcohol: '80', cash_tips: '30',
+      ...(imported ? { confirm_update: '1' } : {}) }).toString(),
+  });
+  assert.strictEqual(res.status, 302, 'the correction lands');
+  const after = db.prepare('SELECT * FROM server_sales WHERE shift_id=? AND employee_id=?').get(sid, me);
+  assert.strictEqual(after.food_cents, 56000, 'the new figure is stored');
+  assert.strictEqual(after.card_tips_cents, 14500,
+    'and the POS card figure survived a blank card field');
+  assert.strictEqual(db.prepare('SELECT hours FROM work WHERE shift_id=? AND employee_id=?').get(sid, me).hours,
+    6.25, 'the pre-existing hours are untouched');
+  assert.strictEqual(db.prepare('SELECT hours_source h FROM work WHERE shift_id=? AND employee_id=?').get(sid, me).h,
+    'legacy', 'and still say where they came from');
+  if (imported) {
+    assert.strictEqual(db.prepare(`SELECT COUNT(*) n FROM tip_submissions
+      WHERE shift_id = ? AND employee_id = ? AND source = 'imported'`).get(sid, me).n, 1,
+    'the imported history row survived the correction');
+  }
+});
