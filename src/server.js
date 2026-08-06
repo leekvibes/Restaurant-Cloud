@@ -3794,62 +3794,30 @@ function earningsFor(empId, limit = 400) {
 // ---------------------------------------------------------------------------
 // HOME
 // ---------------------------------------------------------------------------
-app.get('/portal', (req, res) => {
-  const who = requirePortal(req, res);
-  if (!who) return;
-  const { emp, shape, roleName } = who;
-  const today = isoDate(startOfToday());
-  const now = new Date();
-
-  // Tonight's service, if one is open. The greeting line says what it knows
-  // and no more — the app has no roster, so "you're on tonight" would be a
-  // guess dressed as a fact.
-  const openToday = db.prepare(`SELECT * FROM shifts WHERE date = ? AND status <> '${SHIFT_DONE}'
-    ORDER BY id DESC LIMIT 1`).get(today);
-  const already = openToday
-    ? db.prepare('SELECT 1 FROM tip_submissions WHERE shift_id = ? AND employee_id = ?')
-      .get(openToday.id, emp.id) : null;
-
-  const notes = PORTAL.q.notesFor.all({ on: today });
-  const board = PORTAL.q.specialsAll.all();
-  const running = board.filter((b) => !b.eighty_sixed_at).length;
-  const off = board.length - running;
-
-  const hist = earningsFor(emp.id, 12);
-  const last = hist[0];
-
-  // What's changed since this person last opened the hub — a special posted, a
-  // dish 86'd, a before-shift note, their pay sent. Opening the hub is reading
-  // the heads-up, so it is marked seen now; the block shows what was new this
-  // visit and clears next time. The events also live in their own sections, so
-  // nothing is lost by the block clearing.
-  PORTAL.q.ensureSeen.run({ id: emp.id }); // first time we ever see them → baseline now, no backlog
-  const unseen = PORTAL.q.unseenFor.all({ id: emp.id });
-  if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
-  const NEW_GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖',
-    timesheet: '▤', timeclock: '◷' };
-  const newBlock = unseen.length ? `
-    <div class="pt-kick"><span>What's new</span><a class="pt-kick-a" href="/portal/notifications">See all</a></div>
-    <div class="pt-news">
-      ${unseen.map((e) => `<a class="pt-newr" href="${esc(e.href || '/portal')}">
-        <span class="pt-new-g" aria-hidden="true">${NEW_GLYPH[e.kind] || '•'}</span>
-        <span class="pt-new-t"><b>${esc(e.title)}</b>${e.body ? `<span>${esc(e.body)}</span>` : ''}</span>
-        <span class="pt-new-w">${esc(atTime(e.created_at))}</span>
-      </a>`).join('')}
-    </div>` : '';
-
-  // Turn-on-notifications control. Hidden until the client confirms the browser
-  // can do push; the button asks for permission, subscribes this device, and
-  // saves it against this person. No backticks or ${} in the client script — it
-  // lives inside this template literal.
-  const pushBlock = `
-    <div class="pt-push" id="ptpush" hidden data-vapid="${PORTAL.VAPID_PUBLIC}">
-      <span class="pt-push-l"><b id="ptpush-t">Notifications</b>
-        <span id="ptpush-s">Get a heads-up on your phone for specials, notes and your pay.</span></span>
-      <span class="pt-push-acts">
-        <button type="button" class="pt-push-test" id="ptpush-test" hidden>Send test</button>
-        <button type="button" class="pt-push-b" id="ptpush-b">Turn on</button>
-      </span>
+/**
+ * Turn-on-notifications, as one row.
+ *
+ * Was a bordered card with a heading, a paragraph and two buttons, near the top
+ * of Home — the largest thing on the screen for somebody who had already turned
+ * it on. It is a setting, so it reads as a row like the other settings, and it
+ * appears only when the server can actually send: a card telling staff the owner
+ * has not finished a setup they cannot do is not their problem to read.
+ *
+ * The script below is unchanged. It hides the row when the browser cannot do
+ * push, re-registers a subscription this server has never heard of, and names
+ * what went wrong rather than saying "try again" — all of it hard-won.
+ */
+function pushRow(vapid) {
+  return `
+    <div class="tc-rows pt-push-row" id="ptpush" hidden data-vapid="${esc(vapid)}">
+      <div class="tc-row">
+        <span class="tc-row-l"><b id="ptpush-t">Notifications</b>
+          <i id="ptpush-s">Get a heads-up on your phone for specials, notes and your pay.</i></span>
+        <span class="tc-row-r pt-push-acts">
+          <button type="button" class="tc-chip" id="ptpush-test" hidden>Test</button>
+          <button type="button" class="tc-chip on" id="ptpush-b">Turn on</button>
+        </span>
+      </div>
     </div>
     <script>
     (function(){
@@ -3916,95 +3884,319 @@ app.get('/portal', (req, res) => {
       });
     })();
     </script>`;
+}
 
-  const noteBlock = notes.length ? `
-    <div class="pt-kick"><span>Before your shift</span><span>For today</span></div>
-    <div class="pt-notes">
-      ${notes.map((n) => `<div class="pt-note ${esc(n.tone)}">
-        <b>${esc(n.title)}</b>
-        ${n.body ? `<span>${esc(n.body)}${n.ends_on && n.ends_on <= today
-          ? ' <i>expires today</i>' : ''}</span>` : ''}
-      </div>`).join('')}
-    </div>` : '';
+// ---------------------------------------------------------------------------
+// PORTAL HOME — status, attention, what changed.
+//
+// A model first, then a renderer. What Home shows is a set of decisions about
+// this person right now — am I on the clock, is anything waiting on me, what
+// happened since I looked — and those decisions used to be made inline, in
+// template literals, interleaved with markup. Adding a module meant editing the
+// page's HTML.
+//
+// So: homeModel() answers the questions and returns normalised lists; the route
+// renders them. A future module — documents, training, an acknowledgement —
+// adds one attention item and touches no layout.
+//
+// Every figure comes from the module that owns it: clockStatus() for the clock,
+// tipsEligibility() for who hands tips in, PORTAL's own queries for
+// notifications. Home computes nothing twice.
+// ---------------------------------------------------------------------------
 
-  const lastBlock = last ? `
-    <div class="pt-kick"><span>Your last shift</span><a href="/portal/earnings">All earnings →</a></div>
-    <a class="pt-last" href="/portal/earnings/${last.shift.id}">
-      <div class="pt-last-l">
-        <span>${esc(niceDate(last.shift.date))} · ${last.kind === 'hours' ? 'you worked' : 'you kept'}</span>
-        ${last.kind === 'hours'
-          ? `<i>${hrsShort(last.hours)}${last.rate ? ` at ${money(last.rate)}/hr` : ''}</i>`
-          : `<i>${money(last.cash)} cash + ${money(last.toPaycheck)} to your paycheck${
-              last.tippedOut ? ', after tip-out' : ''}</i>`}
-      </div>
-      <b class="pt-big${last.kind === 'hours' ? ' hrs' : ''}">${last.kind === 'hours' ? hrsShort(last.hours) : money(last.kept)}</b>
-    </a>` : '';
+/**
+ * One attention item.
+ *
+ * key         stable, so a row can be identified across renders
+ * type        the module it came from
+ * priority    1 = most urgent. The SORT KEY IS THE URGENCY, not the module —
+ *             a blocking payroll problem outranks an answered request whichever
+ *             corner of the app each came from.
+ * label       employee-facing title
+ * description one line on why it is here
+ * status      the chip text — never a raw database value
+ * tone        bad | warn | ok | info, always paired with that text
+ * href        one destination, always real
+ */
+const ATTN = {
+  BLOCKING: 1,      // payroll or time is wrong and it is theirs to fix
+  SUBMISSION: 2,    // an end-of-shift hand-in genuinely outstanding
+  RETURNED: 3,      // something came back to them
+  ANSWERED: 4,      // a decision they asked for
+  REMINDER: 5,      // real, but nothing is broken
+};
 
-  const row = (href, glyph, title, sub, tag) => `
-    <a class="pt-row" href="${href}">
-      <span class="pt-ico">${glyph}</span>
-      <span class="pt-row-t"><b>${title}</b>${tag ? `<i class="pt-tag">${tag}</i>` : ''}
-        ${sub ? `<span>${sub}</span>` : ''}</span>
-      <span class="pt-chev">›</span>
+/**
+ * Shifts this person worked, in a job that hands tips in, not yet filed for.
+ *
+ * Per POSITION, read off the role on the work row — not from their primary
+ * position, which is the mistake Phase 2D-1 corrected. Somebody rostered as a
+ * server on Friday and a busser on Saturday is owed a reminder about Friday and
+ * nothing at all about Saturday.
+ *
+ * Bounded to the last week. A shift from March is a conversation with a
+ * manager, not a row on somebody's home screen.
+ */
+function outstandingSubmissions(emp, today) {
+  const rows = db.prepare(`SELECT w.shift_id, w.role, s.date, s.daypart
+    FROM work w JOIN shifts s ON s.id = w.shift_id
+    WHERE w.employee_id = @id AND s.status <> '${SHIFT_DONE}'
+      AND s.date >= @from AND s.date <= @today
+      AND NOT EXISTS (SELECT 1 FROM tip_submissions t
+        WHERE t.shift_id = w.shift_id AND t.employee_id = @id)
+    ORDER BY s.date DESC, s.id DESC`)
+    .all({ id: emp.id, from: addDays(today, -7), today });
+  // The same rule the form and the write route use. A role not asked to hand
+  // anything in is not outstanding — it is finished.
+  const held = new Set(heldPositions(emp));
+  return rows.filter((r) => held.has(r.role) && canSubmitSalesTips(positions.bySlug.get(r.role)));
+}
+
+/** Everything Home needs, worked out once. */
+function homeModel(emp) {
+  const cfg = TC.settings();
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const st = clockStatus(emp);                    // the single clock-state source
+  const serverNow = TC.toDate(TC.nowUtc()).getTime();
+  const pName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+
+  // --- 1. status ----------------------------------------------------------
+  // The same states and the same words as the Phase 2B clock, from the same
+  // function. Home summarises; the clock stays the place things are done, so
+  // every state here has exactly one action and it opens the clock.
+  const active = st.active;
+  let status;
+  if (active && active.status === 'on_break') {
+    const br = TC.q.openBreak.get(active.id);
+    status = { tone: 'break', state: 'On break',
+      live: { since: TC.toDate(br.start_at).getTime(), now: serverNow },
+      caption: `on break since ${TC.clockFace(br.start_at)}`,
+      facts: [['Clocked in', TC.clockFace(active.clock_in_at)]],
+      primary: { href: '/portal/clock', label: 'Open time clock' } };
+  } else if (active) {
+    const stale = looksStale(active);
+    status = { tone: stale ? 'warn' : 'on', state: stale ? 'Still clocked in' : 'Working',
+      live: { since: TC.toDate(active.clock_in_at).getTime(), now: serverNow },
+      caption: `since ${TC.clockFace(active.clock_in_at)}`,
+      facts: [['Position', pName(active.position)],
+        ['Service', active.daypart ? dp(active.daypart) : '—']],
+      note: stale ? `That is over ${staleHours()} hours. If you forgot to clock out, do it now.` : '',
+      primary: { href: '/portal/clock', label: 'Open time clock' } };
+  } else if (!clockPositionsFor(emp).length) {
+    // The only red state Home has, and the only one they cannot act on here.
+    status = { tone: 'blocked', state: 'Cannot clock in', live: null,
+      big: 'No position is assigned to you.',
+      note: 'Ask your manager to add your position, then you can clock in.',
+      facts: [], primary: null };
+  } else {
+    status = { tone: 'off', state: 'Clocked out', live: null,
+      caption: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+      facts: st.todayMin ? [['Worked today', TC.hm(st.todayMin)]] : [],
+      primary: { href: '/portal/clock', label: 'Clock in' } };
+  }
+
+  // --- 2. attention -------------------------------------------------------
+  const attention = [];
+  const add = (o) => attention.push(o);
+
+  // Blocking time or payroll problems — but not the punch they are standing
+  // on. Being on the clock is today, not a fault.
+  for (const i of st.issues) {
+    if (!i.blocking) continue;
+    if (active && i.entryId === active.id) continue;
+    add({ key: `issue:${i.entryId || 'x'}`, type: 'timeclock', priority: ATTN.BLOCKING,
+      label: 'A shift needs fixing', description: i.text, status: 'Fix', tone: 'bad',
+      href: i.entryId ? `/portal/clock/entry/${i.entryId}` : '/portal/clock' });
+  }
+
+  // End-of-shift hand-ins genuinely outstanding, per worked position.
+  const owed = outstandingSubmissions(emp, today);
+  if (owed.length) {
+    const one = owed[0];
+    add({ key: 'tips:outstanding', type: 'tips', priority: ATTN.SUBMISSION,
+      label: owed.length === 1 ? 'Hand in your shift report'
+        : `${owed.length} shift reports need attention`,
+      description: owed.length === 1
+        ? `${niceDate(one.date)} · ${dp(one.daypart)} · ${pName(one.role)}`
+        : `Oldest: ${niceDate(owed[owed.length - 1].date)}`,
+      status: 'Due', tone: 'warn', href: '/portal/tips' });
+  }
+
+  // Returned, and its sibling: submitted, then the hours moved underneath.
+  if (st.sheet.status === 'returned') {
+    add({ key: 'sheet:returned', type: 'timesheet', priority: ATTN.RETURNED,
+      label: 'Your timesheet came back',
+      description: st.sheet.returned_reason || 'Your manager sent it back for a correction.',
+      status: 'Returned', tone: 'bad', href: `/portal/timesheet?p=${st.period.start}` });
+  } else if (st.sheet.status === 'submitted' && st.sheet.resubmit_needed) {
+    add({ key: 'sheet:resubmit', type: 'timesheet', priority: ATTN.RETURNED,
+      label: 'Your hours changed after you submitted', description: 'Check them and submit again.',
+      status: 'Submit again', tone: 'warn', href: `/portal/timesheet?p=${st.period.start}` });
+  }
+
+  // Decisions on what they asked for. Recent only — an answer from six weeks
+  // ago is history, and history is on the requests page.
+  const decided = db.prepare(`SELECT * FROM time_corrections
+    WHERE employee_id = ? AND decision <> 'pending'
+      AND decided_at >= datetime('now','-14 days') ORDER BY decided_at DESC`).all(emp.id);
+  for (const c of decided.slice(0, 3)) {
+    add({ key: `corr:${c.id}`, type: 'requests', priority: ATTN.ANSWERED,
+      label: `${reqKind(c)} — ${(REQ_STATE[c.decision] || c.decision).toLowerCase()}`,
+      description: c.decision_note || (c.decision === 'approved'
+        ? 'Your manager applied it.' : 'Open it to see why.'),
+      status: REQ_STATE[c.decision] || c.decision,
+      tone: c.decision === 'approved' ? 'ok' : 'bad', href: '/portal/requests' });
+  }
+
+  // Non-blocking, but real.
+  if (st.canSubmit) {
+    add({ key: 'sheet:ready', type: 'timesheet', priority: ATTN.REMINDER,
+      label: 'Your timesheet is ready to submit', description: `${labelFor(st.period)} has ended.`,
+      status: 'Ready', tone: 'info', href: `/portal/timesheet?p=${st.period.start}` });
+  }
+  if (st.pending.length) {
+    add({ key: 'corr:pending', type: 'requests', priority: ATTN.REMINDER,
+      label: st.pending.length === 1 ? 'A request is with your manager'
+        : `${st.pending.length} requests are with your manager`,
+      description: 'Nothing changes until they answer.', status: 'Waiting', tone: 'info',
+      href: '/portal/requests' });
+  }
+
+  attention.sort((a, b) => a.priority - b.priority);
+
+  // --- 3. what happened ---------------------------------------------------
+  // ONE source: the rows /portal/notifications reads. Home shows the newest few
+  // as a preview, not a second feed with its own memory. Unread is computed
+  // BEFORE marking seen, which is the behaviour that was already here.
+  //
+  // A first-ever visitor is the exception. ensureSeen pins their baseline to
+  // now, so everything before them is "already seen" — and showing three items
+  // from before they were hired, greyed as read, is a worse first impression
+  // than an empty section. They get their unseen window only; from their second
+  // visit on, the preview is simply the newest few.
+  const firstEver = !db.prepare('SELECT 1 FROM portal_seen WHERE employee_id = ?').get(emp.id);
+  PORTAL.q.ensureSeen.run({ id: emp.id });
+  const unseen = PORTAL.q.unseenFor.all({ id: emp.id });
+  const unseenIds = new Set(unseen.map((e) => e.id));
+  const notifications = (firstEver ? unseen : PORTAL.q.eventsFor.all({ id: emp.id }))
+    .slice(0, 3).map((e) => ({ ...e, unread: unseenIds.has(e.id) }));
+  if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
+
+  // --- 4. role tools ------------------------------------------------------
+  // Only what the bottom tabs do not already carry, and only when it applies.
+  // Timesheet, Pay, Time clock and Requests are deliberately absent: they are
+  // tabs, attention rows, or in More, and repeating them here was most of what
+  // made Home a second copy of the navigation.
+  const roleActions = [];
+  if (tipsEligibility(emp).eligible.length && !owed.length) {
+    // An outstanding one is an attention row already. This is the way in when
+    // nothing is owed — to correct something, or to file early.
+    roleActions.push({ key: 'tips', label: 'Submit sales or tips',
+      description: 'What you made on a shift', href: '/portal/tips' });
+  }
+  roleActions.push({ key: 'stock', label: 'Report out of stock',
+    description: 'Out of something, or running low', href: '/portal/stock' });
+
+  return { status, attention, notifications, roleActions,
+    push: { configured: !!PORTAL.VAPID_PUBLIC, vapid: PORTAL.VAPID_PUBLIC || '' } };
+}
+
+app.get('/portal', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const m = homeModel(emp);
+  const now = new Date();
+  const CHIP = { bad: 'bad', warn: 'warn', ok: 'ok', info: '' };
+
+  const statusCard = (s) => `
+    <section class="tcc tcc-${s.tone}">
+      <h2 class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+        <span class="tcc-state">${esc(s.state)}</span></h2>
+      ${s.live
+        ? `${/* The ticking figure is hidden from screen readers and a static
+                 equivalent sits beside it. A counter inside a live region
+                 announces itself every second, which is unusable. */''}
+           <div class="tcc-clock" aria-hidden="true"
+             data-since="${s.live.since}" data-now="${s.live.now}">0:00</div>
+           <p class="pt-sr">${esc(s.state)}, ${esc(s.caption || '')}</p>`
+        : ''}
+      ${s.big ? `<p class="tcc-big">${esc(s.big)}</p>` : ''}
+      ${s.caption ? `<div class="tcc-cap">${esc(s.caption)}</div>` : ''}
+      ${s.facts.length ? `<div class="tcc-facts">${s.facts.map(([k, v]) =>
+        `<div class="tcc-f"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
+      ${s.note ? `<p class="tcc-note${s.tone === 'warn' ? ' tcc-note-warn' : ''}">${esc(s.note)}</p>` : ''}
+      ${s.primary ? `<div class="tcc-acts">
+        <a class="tc-btn tc-btn-go tc-btn-big" href="${s.primary.href}">${esc(s.primary.label)}</a>
+      </div>` : ''}
+    </section>`;
+
+  const attentionRow = (a) => `
+    <a class="tc-row" href="${a.href}">
+      <span class="tc-row-l"><b>${esc(a.label)}</b><i>${esc(a.description)}</i></span>
+      <span class="tc-row-r"><span class="tc-chip ${CHIP[a.tone] || ''}">${esc(a.status)}</span></span>
     </a>`;
 
-  // Submitting is one option among the others now, not a headline block above
-  // them — a staff member could not find it when it read like a section title.
-  // It is the first row, and it carries a tag so it still stands out: the one
-  // thing on this screen with something to do tonight.
-  // On the clock or off it, and what their timesheet still needs — one row,
-  // because a person should not have to learn which of two pages holds their
-  // hours. Timesheets live inside the clock page now.
-  const tcSt = clockStatus(emp);
-  const clockRow = `
-    <a class="pt-row pt-row-clock" href="/portal/clock">
-      <span class="pt-ico">◷</span>
-      <span class="pt-row-t"><b>Time clock</b>
-        <i class="pt-tag${tcSt.active ? '' : (tcSt.sheetBadge ? '' : ' done')}">${esc(tcSt.active
-          ? (tcSt.active.status === 'on_break' ? 'On break' : 'On the clock')
-          : (tcSt.sheetBadge || 'Clocked out'))}</i>
-        <span>${esc(tcSt.label)}${tcSt.active ? '' : (tcSt.todayMin ? ` · ${TC.hm(tcSt.todayMin)} today` : '')}</span></span>
-      <span class="pt-chev">›</span>
+  const noteRow = (e) => `
+    <a class="tc-row" href="${esc(e.href || '/portal/notifications')}">
+      <span class="tc-row-l"><b>${esc(e.title)}${e.unread
+        ? '<span class="pt-new-dot" aria-hidden="true"></span><span class="pt-sr">Unread</span>' : ''}</b>
+        ${e.body ? `<i>${esc(e.body)}</i>` : ''}</span>
+      <span class="tc-row-r"><i>${esc(atTime(e.created_at))}</i></span>
     </a>`;
 
-  const submitRow = !shape.tips ? '' : `
-    <a class="pt-row pt-row-do" href="/portal/tips">
-      <span class="pt-ico">✎</span>
-      <span class="pt-row-t"><b>Submit sales or tips</b>
-        <i class="pt-tag${already ? ' done' : ''}">${already ? 'Submitted' : 'Due tonight'}</i>
-        <span>${already ? 'Sent — tap to change it' : 'What you made tonight · about a minute'}</span></span>
-      <span class="pt-chev">›</span>
+  const toolRow = (t) => `
+    <a class="tc-row" href="${t.href}">
+      <span class="tc-row-l"><b>${esc(t.label)}</b><i>${esc(t.description)}</i></span>
+      <span class="tc-row-r"><i aria-hidden="true">›</i></span>
     </a>`;
+
+  const quiet = !m.attention.length && !m.notifications.length;
 
   res.send(portalPage('Your portal', `
-    <div class="pt-body">
-      <p class="pt-date">${esc(now.toLocaleDateString('en-US',
-        { weekday: 'short', month: 'long', day: 'numeric' }).toUpperCase())} — ${GREETING(now.getHours()).toUpperCase()}</p>
-      <h1 class="pt-hi">${GREETING(now.getHours())}, ${esc(firstName(emp.name))}.</h1>
+    ${portalTop(null, 'Home')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">${esc(GREETING(now.getHours()))}, ${esc(firstName(emp.name))}.</h1>
 
-      ${newBlock}
-      ${noteBlock}
-      ${lastBlock}
+      ${statusCard(m.status)}
 
-      <div class="pt-kick"><span>What you can do</span></div>
-      <div class="pt-rows">
-        ${clockRow}
-        ${submitRow}
-        ${row('/portal/earnings', '❖', 'Your hours &amp; pay',
-          hist.length ? `${hist.length} shift${hist.length === 1 ? '' : 's'} recorded` : 'Nothing recorded yet')}
-        ${row('/portal/specials', '✦', 'Specials &amp; 86 board',
-          board.length ? `${running} running · ${off} on the 86 board` : 'Nothing on the board')}
-        ${row('/portal/stock', '⊞', 'Report out of stock', 'Out of something, or running low')}
-      </div>
+      ${m.attention.length ? `
+        <h2 class="tc-kick tc-kick-sec">Needs your attention<b>${m.attention.length}</b></h2>
+        <div class="tc-rows">${m.attention.map(attentionRow).join('')}</div>` : ''}
 
-      ${newBlock ? '' : `<p class="pt-quiet pt-allnote"><a href="/portal/notifications">Your notifications</a>
-        — everything your manager has sent you.</p>`}
-      ${pushBlock}
+      ${m.notifications.length ? `
+        <h2 class="tc-kick tc-kick-sec">What happened</h2>
+        <div class="tc-rows">${m.notifications.map(noteRow).join('')}</div>
+        <a class="tc-more" href="/portal/notifications">See all notifications ›</a>` : ''}
+
+      ${quiet ? `<div class="tc-empty">
+        <b>You&rsquo;re all caught up</b>
+        <span>Nothing needs you right now. Anything your manager sends will show up here.</span>
+      </div>` : ''}
+
+      ${m.roleActions.length ? `
+        <h2 class="tc-kick tc-kick-sec">Other things you can do</h2>
+        <div class="tc-rows">${m.roleActions.map(toolRow).join('')}</div>` : ''}
+
+      ${m.push.configured ? pushRow(m.push.vapid) : ''}
     </div>
-    <div class="pt-foot">
-      <p>Anything you submit stays editable until your manager sends the shift.</p>
-      <a class="pt-signout" href="/portal/out">Sign out</a>
-    </div>`));
+    ${m.status.live ? `<script>
+      // Anchored to the SERVER's clock, like every other counter in the portal:
+      // the page carries both the punch and what time the server thinks it is,
+      // so a phone an hour fast still reads true.
+      (function () {
+        var el = document.querySelector('.tcc-clock[data-since]');
+        if (!el) return;
+        var skew = Date.now() - Number(el.getAttribute('data-now'));
+        function tick() {
+          var s = Math.max(0, Math.floor((Date.now() - skew - Number(el.getAttribute('data-since'))) / 1000));
+          var h = Math.floor(s / 3600), mn = Math.floor((s % 3600) / 60), ss = s % 60;
+          var p = function (n) { return n < 10 ? '0' + n : String(n); };
+          el.textContent = h ? h + ':' + p(mn) + ':' + p(ss) : mn + ':' + p(ss);
+        }
+        tick(); setInterval(tick, 1000);
+      })();
+    </script>` : ''}`));
 });
 
 // Opening the submission form. Available as GET so the hub can link to it the

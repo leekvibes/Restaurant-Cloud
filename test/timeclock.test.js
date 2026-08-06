@@ -1228,9 +1228,16 @@ test('the portal hub offers one time-clock entry, not two', async () => {
   // Scoped to the hub's own action rows. The shell's bottom nav carries a
   // Timesheet tab on every screen — that is persistent chrome, not a second
   // destination competing with the clock in the list of things to do here.
-  const rows = (hub.match(/<div class="pt-rows">[\s\S]*?<\/div>\s*<\/div>/) || [''])[0];
-  assert.ok(rows, 'the hub rendered its action rows');
-  assert.ok(!/href="\/portal\/timesheet"/.test(rows), 'and the timesheet is not a second destination');
+  // Home summarises the clock and hands off to it — one status card, one
+  // action, and that action opens /portal/clock. The bottom nav's Timesheet
+  // tab is persistent chrome on every screen, not a second destination
+  // competing with the clock in a list of things to do here.
+  const body = (hub.match(/<div class="pt-body tc-body">[\s\S]*?(?=<nav class="pt-tabs)/) || [hub])[0];
+  assert.match(body, /class="tcc tcc-/, 'the status card is the clock entry');
+  assert.strictEqual((body.match(/href="\/portal\/clock"/g) || []).length, 1,
+    'exactly one way into the clock from Home, and it is the card');
+  assert.ok(!/class="tc-row" href="\/portal\/timesheet"/.test(body),
+    'and the timesheet is not a Home row');
 });
 
 test('the hub tile says where the person stands', async () => {
@@ -2402,10 +2409,13 @@ test('everything sent to a person is kept, not cleared on a glance', async () =>
     VALUES ('timesheet','Your timesheet was approved','8h by Owner',?,'/portal/timesheet')`).run(emp);
   const cookie = await signIn('3215');
 
-  // Reading the hub consumes the unseen block...
+  // Reading the hub clears the UNREAD mark. The item itself stays in the
+  // preview — Home shows what recently happened rather than a queue that
+  // empties — which is the merge Phase 2D made: one source, one feed.
   await text('/portal', { cookie });
   const hub = await text('/portal', { cookie });
-  assert.ok(!/Your timesheet was approved/.test(hub), 'the hub block has cleared, as it always did');
+  assert.match(hub, /Your timesheet was approved/, 'it is still recent, so it is still previewed');
+  assert.ok(!/pt-new-dot/.test(hub), 'but no longer flagged unread');
 
   // ...and the list still has it.
   const list = await text('/portal/notifications', { cookie });
@@ -3228,4 +3238,224 @@ test('2C: the day page answers with the day total it was opened for', async () =
   assert.match(page, /class="tcd-tot">\s*<b>8h 0m<\/b>/, 'and the day page opens with the same figure');
   assert.match(page, /2 shifts/, 'saying how many shifts that is');
   assert.strictEqual((page.match(/data-pes-open="\d+"/g) || []).length, 2, 'each with its own edit sheet');
+});
+
+// ===========================================================================
+// PHASE 2D — Portal Home as status and attention.
+//
+// Home answers four questions: where do I stand, is anything waiting on me,
+// what changed, and is there a job-specific thing to do that the tabs do not
+// already carry. Everything else it used to hold was a second copy of the
+// navigation.
+// ===========================================================================
+
+/** Home's own body — the tab bar is chrome on every screen, not Home content. */
+const homeBody = (html) =>
+  (html.match(/<div class="pt-body tc-body">[\s\S]*?(?=<nav class="pt-tabs)/) || [html])[0];
+
+test('2D: Home reads clocked out, working and on break from the clock itself', async () => {
+  const emp = 250;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3250',1500,1)")
+    .run(emp, 'Home States');
+  const cookie = await signIn('3250');
+
+  const out = homeBody(await text('/portal', { cookie }));
+  assert.match(out, /class="tcc tcc-off"/, 'clocked out is the neutral card');
+  assert.match(out, />Clocked out</, 'named');
+  assert.match(out, /href="\/portal\/clock">Clock in</, 'with one action');
+  assert.ok(!/data-since/.test(out), 'and nothing ticking');
+
+  await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
+  const on = homeBody(await text('/portal', { cookie }));
+  assert.match(on, /class="tcc tcc-on"/, 'working is green');
+  assert.match(on, />Working</, 'named');
+  assert.match(on, /class="tcc-clock" aria-hidden="true"\s+data-since="\d+" data-now="\d+"/,
+    'the live figure is server-anchored and hidden from screen readers');
+  assert.match(on, /Position<\/span><b>Server/, 'position');
+  assert.match(on, /Open time clock/, 'and Home hands off rather than duplicating the controls');
+  assert.ok(!/Start break|Clock out/.test(on), 'no clock controls on Home');
+
+  await post('/portal/clock/break/start', {}, { cookie });
+  const brk = homeBody(await text('/portal', { cookie }));
+  assert.match(brk, /class="tcc tcc-break"/, 'on break is amber');
+  assert.match(brk, />On break</, 'named');
+  assert.match(brk, /Open time clock/, 'one action');
+  await post('/portal/clock/break/end', {}, { cookie });
+  await post('/portal/clock/out', {}, { cookie });
+});
+
+test('2D: a shift left open past the threshold reads as a warning on Home', async () => {
+  const emp = 251;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3251',1500,1)")
+    .run(emp, 'Home Stale');
+  const cookie = await signIn('3251');
+  await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
+  db.prepare("UPDATE time_entries SET clock_in_at = datetime('now','-20 hours') WHERE id = ?")
+    .run(activeOf(emp).id);
+  const html = homeBody(await text('/portal', { cookie }));
+  assert.match(html, /class="tcc tcc-warn"/, 'amber, not red — they are not blocked');
+  assert.match(html, />Still clocked in</, 'named for what it is');
+  assert.match(html, /over 16 hours/, 'with the threshold');
+  await post('/portal/clock/out', {}, { cookie });
+});
+
+test('2D: no position at all is the only red state, and it is not actionable here', async () => {
+  const emp = 252;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'',?,1500,1)")
+    .run(emp, 'Home No Position', '3252');
+  const cookie = await signIn('3252');
+  const html = homeBody(await text('/portal', { cookie }));
+  assert.match(html, /class="tcc tcc-blocked"/, 'red');
+  assert.match(html, /No position is assigned to you/, 'said plainly');
+  assert.ok(!/tc-btn-go/.test(html.split('tcc-facts')[0] || html), 'with no action they cannot complete');
+});
+
+test('2D: nothing waiting is a finished screen, not an empty one', async () => {
+  const emp = 253;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3253',1500,1)")
+    .run(emp, 'Home Quiet');
+  const cookie = await signIn('3253');
+  await text('/portal', { cookie });                    // first visit sets the baseline
+  const html = homeBody(await text('/portal', { cookie }));
+  assert.match(html, /You&rsquo;re all caught up|You’re all caught up/, 'the calm state');
+  assert.ok(!/Needs your attention/.test(html), 'no attention section');
+  assert.ok(!/\$\d/.test(html), 'and no invented statistics');
+});
+
+test('2D: attention items are ordered by urgency, not by module', async () => {
+  const emp = 254;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3254',1500,1)")
+    .run(emp, 'Home Urgent');
+  const per = curPeriod();
+  const eid = seedInPeriod(emp, 2, '09:00', '17:00');
+  // A blocking problem on a PAST shift: a punch with no clock-out that is not
+  // the one they are standing on. (Status stays complete — an 'active' row
+  // would be their current punch, and Home deliberately does not scold
+  // somebody for being on the clock right now.)
+  db.prepare("UPDATE time_entries SET clock_out_at = NULL WHERE id = ?").run(eid);
+  // And an answered request, which is real but less urgent.
+  db.prepare(`INSERT INTO time_corrections (time_entry_id, employee_id, kind, original_value,
+      proposed_value, reason, requested_by, decision, decided_by, decided_at)
+    VALUES (?,?,'shift_times','x','y','',?,'approved','Owner',datetime('now'))`)
+    .run(eid, emp, 'Home Urgent');
+  const cookie = await signIn('3254');
+  const html = homeBody(await text('/portal', { cookie }));
+
+  assert.match(html, /Needs your attention/, 'the section is there');
+  const first = html.indexOf('A shift needs fixing');
+  const later = html.indexOf('Changed shift times');
+  assert.ok(first > -1 && later > -1, 'both items rendered');
+  assert.ok(first < later, 'the blocking problem comes before the answered request');
+  assert.match(html, /class="tc-chip bad">Fix</, 'with a chip that says what to do');
+  assert.ok(!/<details/.test(html), 'and nothing actionable is hidden behind a disclosure');
+  db.prepare("UPDATE time_entries SET clock_out_at = datetime(clock_in_at, '+8 hours'), status='complete' WHERE id=?").run(eid);
+});
+
+test('2D: the tips reminder follows the worked position, not the primary one', async () => {
+  // A server-primary who also busses. The busser shift is not a hand-in and
+  // must not be nagged about; the server shift is.
+  const emp = 255;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3255',1500,1)")
+    .run(emp, 'Home Two Jobs');
+  db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+    .run(emp, 'busser', 1100);
+  const D = require('../src/dates');
+  const today = T2.businessDateOf(T2.nowUtc(), T2.settings().cutoffHour);
+  const mk = (date, daypart, role) => {
+    db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,?,'open')").run(date, daypart);
+    const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, daypart);
+    db.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)')
+      .run(sh.id, emp, role, 6);
+    return sh.id;
+  };
+  const bus = mk(D.addDays(today, -2), 'cafe', 'busser');
+  const cookie = await signIn('3255');
+  let html = homeBody(await text('/portal', { cookie }));
+  assert.ok(!/shift report/i.test(html), 'a busser shift is not something to hand in');
+
+  const srv = mk(D.addDays(today, -1), 'dinner', 'server');
+  html = homeBody(await text('/portal', { cookie }));
+  assert.match(html, /Hand in your shift report/, 'the server shift is');
+  assert.match(html, /class="tc-chip warn">Due</, 'with an urgency chip');
+  assert.match(html, /href="\/portal\/tips"/, 'and a destination');
+
+  // Two of them reads as two, truthfully.
+  const srv2 = mk(today, 'dinner', 'server');
+  html = homeBody(await text('/portal', { cookie }));
+  assert.match(html, /2 shift reports need attention/, 'counted, not guessed');
+
+  // Filing one removes it from the count.
+  db.prepare(`INSERT INTO tip_submissions (shift_id, employee_id, role, cash_tips_cents, source)
+    VALUES (?,?,'server',1000,'staff')`).run(srv2, emp);
+  html = homeBody(await text('/portal', { cookie }));
+  assert.match(html, /Hand in your shift report/, 'one left');
+  assert.ok(!/2 shift reports/.test(html), 'and the count came down');
+  assert.ok(!/Submit sales or tips/.test(html), 'the shortcut row stands down while one is owed');
+});
+
+test('2D: an ineligible position is never reminded, however many shifts it works', async () => {
+  const emp = 256;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'busser','3256',1400,1)")
+    .run(emp, 'Home Busser');
+  const D = require('../src/dates');
+  const today = T2.businessDateOf(T2.nowUtc(), T2.settings().cutoffHour);
+  const d = D.addDays(today, -1);
+  db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?,'dinner','open')").run(d);
+  const sh = db.prepare("SELECT id FROM shifts WHERE date=? AND daypart='dinner'").get(d);
+  db.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)')
+    .run(sh.id, emp, 'busser', 8);
+  const cookie = await signIn('3256');
+  const html = homeBody(await text('/portal', { cookie }));
+  assert.ok(!/shift report/i.test(html), 'no reminder');
+  assert.ok(!/Submit sales or tips/.test(html), 'and no shortcut either');
+  assert.match(html, /Report out of stock/, 'but the tools that DO apply are there');
+});
+
+test('2D: Home is not a second copy of the bottom navigation', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal', { cookie });
+  const body = homeBody(html);
+  for (const gone of ['Your hours &amp; pay', 'Specials &amp; 86 board', 'Your time history']) {
+    assert.ok(!body.includes(gone), `"${gone}" is not a Home row — it is a tab or in More`);
+  }
+  // The tab bar itself is untouched: five tabs, same order, same routes.
+  const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
+  assert.ok(tabs, 'the tab bar rendered');
+  for (const [href, label] of [['/portal', 'Home'], ['/portal/clock', 'Time clock'],
+    ['/portal/timesheet', 'Timesheet'], ['/portal/earnings', 'Pay']]) {
+    assert.ok(tabs.includes(`href="${href}"`) && tabs.includes(`>${label}<`), `${label} tab intact`);
+  }
+  assert.match(tabs, /<summary><span class="pt-tab-g" aria-hidden="true">⋯<\/span><span>More<\/span><\/summary>/,
+    'and More is unchanged');
+});
+
+test('2D: Home is reachable, accessible and fits a phone', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal', { cookie });
+  assert.match(html, /class="pt-crumb"/, 'the shared header');
+  assert.ok(!/class="pt-back"/.test(html), 'with no way back to itself');
+  assert.match(html, /<h1 class="tc-h">/, 'one h1');
+  assert.strictEqual((html.match(/<h1 /g) || []).length, 1, 'and only one');
+  assert.match(html, /<h2 class="tcc-top">/, 'the status card is a heading, not a div');
+  assert.match(html, /viewport-fit=cover/, 'safe area');
+  assert.match(html, /class="pt has-tabs"/, 'room reserved for the tab bar');
+  assert.ok(!/<table/.test(html), 'no table on a phone screen');
+  // Every class Home uses has to exist, or it renders as unstyled boxes.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  for (const c of ['tcc', 'tc-row', 'tc-rows', 'tc-chip', 'tc-kick-sec', 'tc-empty',
+    'tc-more', 'pt-sr', 'pt-new-dot', 'pt-push-row']) {
+    assert.ok(css.includes(`.${c}`), `staff.css defines .${c}`);
+  }
+});
+
+test('2D: Home never shows a raw label or anything owner-only', async () => {
+  const cookie = await signIn('3254');
+  const body = homeBody(await text('/portal', { cookie }));
+  for (const raw of ['shift_times', 'new_shift', 'wrong_out', 'needs_attention',
+    'correction_pending', 'takes_tips', 'employee_id']) {
+    assert.ok(!body.includes(raw), `no raw value: ${raw}`);
+  }
+  for (const owner of ['hourly_rate', '/payroll', '/timeclock/', 'aggregatePayroll', 'takeHome']) {
+    assert.ok(!body.includes(owner), `nothing owner-only: ${owner}`);
+  }
 });

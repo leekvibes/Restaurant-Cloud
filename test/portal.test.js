@@ -66,7 +66,11 @@ test.before(async () => {
   // about the machinery, so they open the window all the way and the one test
   // that is about the cutoff sets its own.
   const env = { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
-    ZWIN_SKIP_BACKFILL: '1', PORTAL_HISTORY_FROM: '2000-01-01' };
+    ZWIN_SKIP_BACKFILL: '1', PORTAL_HISTORY_FROM: '2000-01-01',
+    // A real key pair, so push is genuinely configured here. The control is
+    // only offered when the server can actually send — an unconfigured server
+    // shows nothing rather than a card about a setup staff cannot do.
+    VAPID_PRIVATE_KEY: '2VteNg65QI6QGatN58AyPwmQvU0HOYCA5P4HwvrpyIg' };
   const boot = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
     { env: { ...env, PORT: String(PORT + 40) }, stdio: 'ignore' });
   for (let i = 0; i < 90; i++) {
@@ -190,18 +194,27 @@ test('every role gets the same home, minus what does not apply', async () => {
   const server = await (await asStaff('/portal', await signIn('1111'))).text();
 
   assert.ok(!/Submit sales or tips/.test(cook), 'a cook is not offered the submission row');
-  assert.ok(!/pt-row-do/.test(cook), 'not even a disabled one');
-  assert.match(server, /pt-row-do/, 'while a server gets it');
-  assert.match(server, /Submit sales or tips/, 'named the same for everyone who does');
+  assert.match(server, /Submit sales or tips/, 'while a server gets it');
 
-  // The three rows every role shares, in the same order, both with a working
-  // door behind them.
+  // What Home keeps is what the bottom tabs do NOT already carry. Pay,
+  // Timesheet, Time clock and Requests are tabs or attention rows; Specials
+  // lives in More. Repeating them here was most of what made Home a second
+  // copy of the navigation.
   const cookie = await signIn('2222');
-  for (const [href, what] of [['/portal/earnings', 'their own hours and pay'],
-    ['/portal/specials', 'the board'], ['/portal/stock', 'reporting stock']]) {
-    assert.ok(cook.includes(href), `a cook still gets ${what}`);
-    assert.ok(server.includes(href), `and so does a server`);
-    assert.strictEqual((await asStaff(href, cookie)).status, 200, `and ${href} opens`);
+  assert.ok(cook.includes('/portal/stock'), 'reporting stock is a Home row for everyone');
+  assert.strictEqual((await asStaff('/portal/stock', cookie)).status, 200, 'and it opens');
+  // Checked by the row TITLES, not by href: a notification about your pay
+  // legitimately links to /portal/earnings, and that is a destination rather
+  // than a shortcut. What must be gone is the shortcut row.
+  // Scoped to Home's own body. The More menu is persistent chrome rendered on
+  // every portal screen and carries Specials — that is navigation, not a Home
+  // shortcut competing with it.
+  const body = (cook.match(/<div class="pt-body tc-body">[\s\S]*?<\/div>\s*(?=<script|<nav class="pt-tabs)/) || [cook])[0];
+  for (const gone of ['Your hours &amp; pay', 'Specials &amp; 86 board']) {
+    assert.ok(!body.includes(gone), `"${gone}" is no longer a Home shortcut row`);
+  }
+  for (const href of ['/portal/earnings', '/portal/specials', '/portal/timesheet']) {
+    assert.strictEqual((await asStaff(href, cookie)).status, 200, `${href} still opens from its tab`);
   }
 });
 
@@ -266,9 +279,13 @@ test('any past shift opens to its own full breakdown', async () => {
   const cookie = await signIn('1111');
   // The home screen's last-shift block links straight into that shift; the
   // history list links into each of the rest the same way.
-  const home = await (await asStaff('/portal', cookie)).text();
-  const id = (home.match(/\/portal\/earnings\/(\d+)/) || [])[1];
-  assert.ok(id, 'the last shift links into its own breakdown');
+  // Home no longer keeps a last-shift card — Pay is a bottom tab, and Home is
+  // not a second copy of the navigation. Past shifts live on the Pay page.
+  // Taken from the shift itself. Home no longer carries a last-shift card —
+  // Pay is a bottom tab — and with a single sent shift the Pay page has no
+  // "past shifts" list either, so there is no link to scrape. The page under
+  // test is the breakdown, and it is reached by its own id.
+  const id = db.prepare("SELECT id FROM shifts WHERE status = 'emailed' ORDER BY id DESC LIMIT 1").get().id;
 
   const one = await (await asStaff(`/portal/earnings/${id}`, cookie)).text();
   assert.match(one, /You kept|You worked/, 'the shift opens to its breakdown');
@@ -636,11 +653,16 @@ test("the floor gets a What's-new heads-up when a special is posted", async () =
   await (await asStaff('/portal', cookie)).text();
   await form('/staff-portal/special', { name: 'Qqx Heads-up branzino', price: '30.00' });
   const first = await (await asStaff('/portal', cookie)).text();
-  assert.match(first, /What's new/, "the What's-new block shows");
+  assert.match(first, /What happened/, 'the what-happened preview shows');
   assert.match(first, /Qqx Heads-up branzino/, 'naming the special');
-  // Opening the hub is reading it — it does not nag on the next load.
+  assert.match(first, /pt-new-dot/, 'marked unread the first time');
+  assert.match(first, /Unread/, 'with a word for anybody who cannot see the dot');
+  // Opening the hub is reading it. The item stays — this is a preview of what
+  // happened, not a queue that empties — but it stops being marked unread.
   const second = await (await asStaff('/portal', cookie)).text();
-  assert.ok(!/Qqx Heads-up branzino/.test(second), 'and clears once seen');
+  assert.match(second, /Qqx Heads-up branzino/, 'it is still recent, so it is still shown');
+  assert.ok(!/pt-new-dot/.test(second), 'but no longer flagged as new');
+  assert.match(second, /See all notifications/, 'with the whole feed one tap away');
 });
 
 test('an earnings notification reaches only the person it is for', async () => {
@@ -1030,7 +1052,8 @@ test('every portal sub-page wears the same header, with a way back', async () =>
 
   // The hub itself has no crumb — it is the destination, not a stop.
   const hub = await (await asStaff('/portal', cookie)).text();
-  assert.ok(!/class="pt-crumb"/.test(hub), 'the hub needs no way back to itself');
+  assert.match(hub, /class="pt-crumb"/, 'the hub wears the same header as everything else');
+  assert.ok(!/class="pt-back"/.test(hub), 'but needs no way back to itself');
 
   // And nothing is still wearing the old timesheet-only header.
   for (const p of pages) {
