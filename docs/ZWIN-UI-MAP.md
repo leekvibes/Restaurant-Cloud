@@ -959,9 +959,17 @@ Proposed home: **Owner workspace → Settings → Staff Portal → Sales & tips*
 | Corrections allowed | flag | today resubmission always corrects in place. Turning this off needs a rule for what happens to the second submission, which `tip_submissions` already records append-only |
 | Manager approval required | flag | the largest of these. It needs a pending state, a queue, and a decision path — the correction-request machinery in `time_corrections` is the closest existing model |
 
-**Two cautions for whoever builds it.** `takes_tips` currently answers two
+**One caution for whoever builds it.** `takes_tips` currently answers two
 different questions — who hands tips in, and who receives from the pool. A
 busser is `takes_tips = 0` and still takes a share every service. Splitting the
-first into a portal setting must not disturb the second. And eligibility is
-resolved from the employee's *primary* position; see §9.5 and the multi-position
-note in the 2D-0 report.
+first into a portal setting must not disturb the second. The two are already
+named apart in code: `canSubmitSalesTips()` in `server.js` decides submission,
+and `TIPOUT_ROLES` / `poolShareMap` in `engine.js` decide allocation. Nothing
+imports across that line, and a test asserts it stays that way.
+
+**Eligibility is per filing position** (Phase 2D-1), not per employee. A
+kitchen-primary who also works server shifts may file the server ones and not
+the kitchen ones. `tipsEligibility(emp, requestedPosition)` resolves the slug
+against what the person actually holds, then asks `canSubmitSalesTips` of the
+resolved row. The form offers only eligible held positions; one is chosen
+automatically, several must be picked, none closes the door.

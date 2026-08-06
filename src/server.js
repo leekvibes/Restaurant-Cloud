@@ -3228,21 +3228,24 @@ function tipsFormPage(emp, opts = {}) {
   const token = tipsToken(emp.id);
   const first = emp.name.split(' ')[0];
 
-  // Only the jobs you've given them in Staff. One role each for most people,
-  // so it shows as a fixed line rather than a menu they could get wrong.
-  const roles = rolesForEmployee(emp);
-  const label = (r) => r[0].toUpperCase() + r.slice(1);
-  // What the form opens on: the role marked selected below, or the only one
-  // they have. Sales are a server's question, and the server knows the answer
-  // before it sends the page — so it renders it hidden rather than letting the
-  // script hide it a moment later, which showed a barista a flash of fields
-  // they are never asked to fill.
-  const opensAs = roles.includes(emp.role) ? emp.role : roles[0];
+  // Only the jobs you've given them in Staff that are ALSO asked to hand
+  // something in — from the same function the write route uses, so the menu
+  // cannot offer a choice the submission would then refuse. A kitchen hand who
+  // also picks up server shifts sees "Server" and only "Server".
+  const roles = tipsEligibility(emp).eligible;
+  const label = (r) => ((positions.bySlug.get(r) || {}).name || r);
+  // What the form opens on. One eligible job is not a choice, so it is made;
+  // several is a choice nobody else can make for them, because it decides
+  // whether the tips are theirs or the pool's — so nothing is preselected and
+  // the sales block starts hidden until they say.
+  const one = roles.length === 1;
+  const opensAs = one ? roles[0] : null;
   const salesHidden = opensAs === 'server' ? '' : ' hidden';
-  const positionField = roles.length > 1
+  const positionField = !one
     ? `<div class="tp-row">
          <select name="position" id="tip-position" class="tp-sel-role" required>
-           ${roles.map((r) => `<option value="${r}"${r === emp.role ? ' selected' : ''}>${label(r)}</option>`).join('')}
+           <option value="">Which job?</option>
+           ${roles.map((r) => `<option value="${esc(r)}">${esc(label(r))}</option>`).join('')}
          </select>
          <span class="tp-row-h">pick what you actually did &mdash; it decides how your tips are handled</span>
        </div>`
@@ -4031,20 +4034,92 @@ app.get('/portal', (req, res) => {
  * @param  emp a server-resolved employee row
  * @return {ok, msg, shape, position} — `ok` false means write nothing.
  */
-function tipsEligibility(emp) {
-  // shapeFor is the single source of truth and stays that way. Everything a
-  // future Settings → Staff Portal → Sales & tips screen would control — an
-  // on/off switch for the whole feature, an eligible-positions list, whether
-  // cash or card may be entered — belongs INSIDE this function, so adding it
-  // later touches one place rather than four routes. See docs, §10.
-  const who = portalWho(emp);
-  if (!who.shape.tips) {
-    return { ok: false, shape: who.shape, position: who.position,
-      // Says what is true and nothing about how it was decided. No position
-      // slug, no flag name, no table.
-      msg: 'Your position does not hand in sales or tips. If that is wrong, ask your manager.' };
+/**
+ * Does THIS POSITION hand sales and tips in?
+ *
+ * Named for the question it answers, not for the column it reads. There are
+ * two different concepts sharing `positions.takes_tips` today:
+ *
+ *   canSubmitSalesTips  — may somebody working this job file a submission?
+ *                         Asked here, and by the dashboard's "still to hand in".
+ *   participatesInTipPool — does this job RECEIVE from the pool? Decided in
+ *                         engine.js (poolShareMap), and deliberately not
+ *                         touched by this file.
+ *
+ * They are not the same business rule and will not stay the same value. A
+ * busser is `takes_tips = 0` — asked for nothing — and still takes a share of
+ * every service. Anything that changes submission eligibility must change this
+ * function and leave the engine alone.
+ */
+const canSubmitSalesTips = (position) => !!position && position.takes_tips !== 0;
+
+/**
+ * The jobs this person actually holds, from the employee row and employee_roles.
+ *
+ * Strict on purpose. `rolesForEmployee` falls back to EVERY role when somebody
+ * has none recorded, which is a reasonable default for "what might they pick"
+ * and a terrible one for "what are they allowed to do" — it would hand an
+ * employee with a blank position the whole list.
+ */
+function heldPositions(emp) {
+  const extra = q.rolesForEmployee.all(emp.id).map((r) => r.role);
+  return [...new Set([emp.role, ...extra])].filter((r) => r && r !== 'manager');
+}
+
+/**
+ * May this person file a submission, and under which job?
+ *
+ * ONE answer, asked by every route in the workflow — the two that open the
+ * form and, the point of this function, the one that writes.
+ *
+ * Eligibility belongs to the POSITION BEING FILED, not to the person. Someone
+ * whose main job is in the kitchen and who picks up server shifts may file the
+ * server ones and not the kitchen ones; a server who also busses is the same
+ * story the other way round. Asking only about their primary position got both
+ * of those wrong, in opposite directions.
+ *
+ * `requested` is an untrusted identifier — it arrives in the body of every
+ * submission. It is used to LOOK UP a position, never to grant one: the slug
+ * is checked against what this person actually holds, and the eligibility
+ * answer comes from the row in the database, never from anything posted.
+ *
+ * Omit `requested` to ask the opening question — "is there any job they could
+ * file under" — which is what the form routes need.
+ *
+ * @param  emp       a server-resolved employee row
+ * @param  requested the position slug being filed under, or null
+ * @return {ok, msg, emp, position, held, eligible, shape}
+ */
+function tipsEligibility(emp, requested = null) {
+  // Everything a future Settings → Staff Portal → Sales & tips screen would
+  // control — an on/off switch, an eligible-positions list, whether cash or
+  // card may be entered — belongs INSIDE this function, so adding it later
+  // touches one place rather than three routes. See docs, §10.
+  const held = heldPositions(emp);
+  const eligible = held.filter((slug) => canSubmitSalesTips(positions.bySlug.get(slug)));
+  const base = { emp, held, eligible, shape: portalWho(emp).shape, position: null };
+  // Says what is true and nothing about how it was decided: no slug, no flag
+  // name, no table.
+  const NONE = 'Your position does not hand in sales or tips. If that is wrong, ask your manager.';
+
+  if (requested == null || String(requested).trim() === '') {
+    // The opening question. With exactly one eligible job there is nothing to
+    // choose and it is chosen; with several, the person has to say which,
+    // because that choice is what decides whether the tips are theirs or the
+    // pool's — it is not a detail to guess on their behalf.
+    if (!eligible.length) return { ...base, ok: false, msg: NONE };
+    return { ...base, ok: true, msg: '',
+      position: eligible.length === 1 ? positions.bySlug.get(eligible[0]) : null };
   }
-  return { ok: true, shape: who.shape, position: who.position, msg: '' };
+
+  const slug = String(requested).trim();
+  if (!held.includes(slug)) {
+    return { ...base, ok: false,
+      msg: 'You are not assigned to that position. Ask your manager if that is wrong.' };
+  }
+  const position = positions.bySlug.get(slug) || null;
+  if (!canSubmitSalesTips(position)) return { ...base, ok: false, msg: NONE };
+  return { ...base, ok: true, msg: '', position };
 }
 
 /** A browser navigating, as against something posting straight at the route. */
@@ -6728,8 +6803,16 @@ app.post('/tips', (req, res) => {
   // shift. An ineligible submission must not leave a shift row behind as
   // evidence that it was tried.
   {
-    const gate = tipsEligibility(emp);
+    const gate = tipsEligibility(emp, req.body.position);
     if (!gate.ok) return refuseTips(req, res, gate.msg);
+    // Several jobs they could file under and no choice made. The route will
+    // not pick: which job this was decides whether the tips are kept or
+    // pooled, and guessing it wrong is a real amount of somebody's money.
+    if (!gate.position) {
+      return refuseTips(req, res, 'Choose which job you worked, then send it again.');
+    }
+    // From here on, the filing position is the resolved row — never req.body.
+    req.filingPosition = gate.position.slug;
   }
 
   const date = String(req.body.date || '').slice(0, 10);
@@ -6760,8 +6843,12 @@ app.post('/tips', (req, res) => {
   // pooled (support). If you've already put them on the shift, your role wins.
   // Only a job they're actually assigned — a hand-crafted POST can't file
   // itself as a server (and keep the tips) when they're rostered as support.
-  const allowed = rolesForEmployee(emp);
-  const position = allowed.includes(req.body.position) ? req.body.position : (emp.role || allowed[0]);
+  // Resolved by tipsEligibility above, from a slug it checked against what
+  // this person actually holds. Never read back off the body — the old line
+  // here re-derived it and would silently fall back to `emp.role`, which after
+  // a per-position eligibility check is the one answer that can contradict the
+  // check that just passed.
+  const position = req.filingPosition;
   w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
   const cash = toCents(req.body.cash_tips);
   w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
@@ -11774,8 +11861,10 @@ app.get('/staff-portal', (req, res) => {
       FROM work w JOIN employees e ON e.id = w.employee_id
       WHERE w.shift_id = ? ORDER BY e.name`).all(openShift.id);
   }
-  const takesTips = new Map(positions.all.all().map((p) => [p.slug, p.takes_tips !== 0]));
-  const owing = expected.filter((p) => takesTips.get(p.role) && !p.sent);
+  // The same question the portal asks — who is expected to hand something in —
+  // so it reads the same function rather than the column. Pool participation is
+  // a different concept; see canSubmitSalesTips.
+  const owing = expected.filter((p) => canSubmitSalesTips(positions.bySlug.get(p.role)) && !p.sent);
 
   // Floor reports are red because somebody is waiting on the other end of one.
   // Anything still to hand in is amber: it is the night not being finished

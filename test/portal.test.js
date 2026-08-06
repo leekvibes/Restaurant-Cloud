@@ -83,6 +83,9 @@ test.before(async () => {
   // A training position: on the shift, paid hourly, and on the receiving end
   // of nothing. The engine still lists them among support, with zeroes.
   emp.run('Nico Vance', 'training', 1600, '4444');
+  // One job, and it is a tipped one. Bella has two now, so she is no longer
+  // the right subject for "opens straight onto the sales section".
+  emp.run('Solo Server', 'server', 900, '5555');
 
   // A sent shift with real figures, so the earnings page has the engine's own
   // numbers to show rather than a fixture of its own.
@@ -135,11 +138,17 @@ test('a server is asked for sales, a barista is not', async () => {
   // belongs, in the form rather than on the button. And it is in the HTML as
   // sent: a barista who is slow to run the script must not see a flash of
   // sales fields and start filling them in.
-  const server = await tipForm(await signIn('1111'));
+  const server = await tipForm(await signIn('5555'));      // one job, and it is server
   const barista = await tipForm(await signIn('3333'));
   assert.match(server, /id="server-sales"(?!\s*hidden)/, 'a server opens on the sales section');
   assert.match(barista, /id="server-sales" hidden/, 'a barista opens with it already gone');
   assert.match(barista, /id="row-sales" hidden/, 'and it is out of their running total too');
+
+  // Two eligible jobs means nothing is assumed, including this. Bella's sales
+  // block stays shut until she says which job she worked — the script opens it
+  // when she picks Server.
+  const both = await tipForm(await signIn('1111'));
+  assert.match(both, /id="server-sales" hidden/, 'somebody with a choice to make opens on neither');
 });
 
 test('one job goes straight through, two get a choice', async () => {
@@ -156,6 +165,10 @@ test('one job goes straight through, two get a choice', async () => {
   for (const r of ['server', 'barista']) {
     assert.match(both, new RegExp(`<option value="${r}"`), `${r} is on the menu`);
   }
+  // And genuinely picks: no preselection, because which job she worked decides
+  // whether the tips are hers or the pool's.
+  assert.ok(!/<option value="(server|barista)"[^>]*selected/.test(both), 'nothing is chosen for her');
+  assert.match(both, /<option value="">Which job\?<\/option>/, 'she is asked outright');
 });
 
 test('the report has a way back to the hub', async () => {

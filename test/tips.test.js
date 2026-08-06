@@ -66,6 +66,15 @@ test.before(async () => {
   // of the position they ARE, which is the one on the employee row.
   db.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Mia Reyes','server',950,1,'8642')").run();
   db.prepare("INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES ((SELECT id FROM employees WHERE name='Mia Reyes'),'busser',1000)").run();
+  // Kitchen primary, server second. The case the primary-position rule got
+  // wrong in the other direction: she works server shifts and could not file
+  // a single one of them.
+  db.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Nadia Cruz','kitchen',1700,1,'7531')").run();
+  db.prepare("INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES ((SELECT id FROM employees WHERE name='Nadia Cruz'),'server',950)").run();
+  // Two jobs that BOTH hand in. This is the only shape with a genuine choice
+  // to make — Mia has two jobs but only one of them qualifies.
+  db.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Tess Blake','server',900,1,'1470')").run();
+  db.prepare("INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES ((SELECT id FROM employees WHERE name='Tess Blake'),'bartender',1100)").run();
   db.close();
 
   child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
@@ -163,23 +172,27 @@ test('a full report lands on the right service, for the right person', async () 
 });
 
 test('a posted role never wins over the assigned one', async () => {
-  // Mia's primary job is server, so she may file; her second is busser. A
-  // hand-written POST claiming a role is a claim about WHICH JOB she worked,
-  // and the route reads that from what she is actually assigned.
-  //
-  // This used to be tested with Ana the busser, who may not file at all now —
-  // see the 2D-0 block below. The guarantee is the same and still needs a
-  // subject, so it moved to somebody who gets past the door.
+  // Mia is a server who also busses. A hand-written POST claiming a job she
+  // does not hold used to be quietly substituted for one she does; now it is
+  // refused, which is the more honest answer — the submission it would have
+  // written is not the one she asked for.
   const { token } = await signIn('8642');
   const res = await form('/tips', {
     token, position: 'manager', date: '2026-07-19', daypart: 'cafe', cash_tips: '60',
   });
-  assert.strictEqual(res.status, 302);
+  assert.strictEqual(res.status, 403, 'a job she does not hold is refused');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-07-19' AND daypart='cafe'").get().n, 0,
+    'and nothing was created for it');
+
+  // Filing the job she DOES hold, and which is asked to hand in, goes through.
+  const ok = await form('/tips', {
+    token, position: 'server', date: '2026-07-19', daypart: 'cafe', cash_tips: '60',
+  });
+  assert.strictEqual(ok.status, 302);
   const sh = db.prepare("SELECT id FROM shifts WHERE date='2026-07-19' AND daypart='cafe'").get();
-  const mia = db.prepare("SELECT id FROM employees WHERE name='Mia Reyes'").get();
-  const work = db.prepare('SELECT role FROM work WHERE shift_id=? AND employee_id=?').get(sh.id, mia.id);
-  assert.ok(['server', 'busser'].includes(work.role), 'filed as a job she actually holds');
-  assert.notStrictEqual(work.role, 'manager', 'never as one she posted');
+  assert.strictEqual(db.prepare('SELECT role FROM work WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, db.prepare("SELECT id FROM employees WHERE name='Mia Reyes'").get().id).role, 'server',
+    'filed as the job she named and holds');
 });
 
 test('with no JavaScript the whole form is still there', async () => {
@@ -304,7 +317,7 @@ test('2D-0: a token-authenticated direct POST is refused', async () => {
   });
   assert.strictEqual(res.status, 403, 'refused with a status, not a redirect');
   const body = await res.text();
-  assert.match(body, /does not hand in sales or tips/, 'and a reason she can act on');
+  assert.match(body, /not assigned to that position/, 'and a reason she can act on');
   // Nothing about how the decision was reached.
   for (const leak of ['takes_tips', 'shapeFor', 'positions', 'kitchen', 'SELECT']) {
     assert.ok(!body.includes(leak), `no internal detail leaks: ${leak}`);
@@ -396,19 +409,24 @@ test('2D-0: a browser gets a page, anything else gets JSON', async () => {
   assert.deepStrictEqual(Object.keys(JSON.parse(await asScript.text())).sort(), ['error', 'ok']);
 });
 
-test('2D-0: a multi-position employee is judged on the position she holds', async () => {
-  // Mia is a server who also busses. Her employee row says server, which is
-  // what shapeFor is asked about — so she may file, and she may file EITHER
-  // job. Eligibility and which-job-did-I-work are two different questions and
-  // this asserts they stay that way.
+test('2D-0: eligibility follows the job being filed, not the person', async () => {
+  // Mia's primary is server (asked to hand in), her second is busser (not).
+  // The question is about the job on the submission, so the same person gets
+  // both answers depending on which one she is filing.
   const { token, cookie } = await signIn('8642');
   assert.strictEqual((await fetch(`${BASE}/portal/tips`, { headers: { cookie }, redirect: 'manual' })).status, 200,
-    'the form opens for her');
-  const res = await form('/tips', { token, position: 'busser', date: '2026-06-08', daypart: 'dinner', cash_tips: '30' });
-  assert.strictEqual(res.status, 302, 'and she can file the non-tipped job she also works');
+    'the form opens, because one of her jobs qualifies');
+
+  const asBusser = await form('/tips', { token, position: 'busser', date: '2026-06-08', daypart: 'dinner', cash_tips: '30' });
+  assert.strictEqual(asBusser.status, 403, 'filing the job that is not asked to hand in is refused');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-06-08' AND daypart='dinner'").get().n, 0,
+    'and left nothing behind');
+
+  const asServer = await form('/tips', { token, position: 'server', date: '2026-06-08', daypart: 'dinner', cash_tips: '30' });
+  assert.strictEqual(asServer.status, 302, 'filing the job that is goes through');
   const sh = db.prepare("SELECT id FROM shifts WHERE date='2026-06-08' AND daypart='dinner'").get();
   assert.strictEqual(db.prepare('SELECT role FROM work WHERE shift_id=? AND employee_id=?')
-    .get(sh.id, empId('Mia Reyes')).role, 'busser', 'filed as the job she chose');
+    .get(sh.id, empId('Mia Reyes')).role, 'server');
 });
 
 test('2D-0: resubmitting corrects rather than duplicating', async () => {
@@ -460,4 +478,113 @@ test('2D-0: the route accepts exactly what the real form posts', async () => {
   const res = await form('/tips', body);
   assert.strictEqual(res.status, 302, 'the form payload is accepted as-is');
   assert.match(decodeURIComponent(res.headers.get('location')), /done=1/, 'and lands on the receipt');
+});
+
+// --- 2D-1: eligibility belongs to the job being filed ------------------------
+
+test('2D-1: kitchen primary with a server job may file the server one', async () => {
+  // The correction. Under the primary-position rule Nadia could not file at
+  // all — the form redirected her home and the write route refused her — even
+  // though every server shift she picks up is one she is expected to hand in.
+  const { token, cookie, html } = await signIn('7531');
+  assert.strictEqual((await fetch(`${BASE}/portal/tips`, { headers: { cookie }, redirect: 'manual' })).status, 200,
+    'the form opens for her');
+  // Only the job that qualifies is offered. Kitchen is hers and is not on it.
+  assert.ok(!/<option value="kitchen"/.test(html) && !/value="kitchen"/.test(html),
+    'kitchen is not offered as something to file');
+  assert.match(html, /name="position" id="tip-position" value="server"/,
+    'and with one eligible job it is simply chosen');
+
+  const res = await form('/tips', { token, position: 'server', date: '2026-06-20', daypart: 'dinner', cash_tips: '80' });
+  assert.strictEqual(res.status, 302, 'and she can file it');
+  const sh = db.prepare("SELECT id FROM shifts WHERE date='2026-06-20' AND daypart='dinner'").get();
+  assert.strictEqual(db.prepare('SELECT role FROM work WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, empId('Nadia Cruz')).role, 'server');
+});
+
+test('2D-1: the same person filing her kitchen job is refused', async () => {
+  const { token } = await signIn('7531');
+  const res = await form('/tips', { token, position: 'kitchen', date: '2026-06-21', daypart: 'dinner', cash_tips: '80' });
+  assert.strictEqual(res.status, 403, 'the job decides, not the person');
+  assert.match(await res.text(), /does not hand in sales or tips/);
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-06-21' AND daypart='dinner'").get().n, 0);
+});
+
+test('2D-1: a job the employee does not hold is refused, however real it is', async () => {
+  // `bartender` is a genuine, tipped position. It is simply not hers.
+  const { token } = await signIn('7531');
+  for (const slug of ['bartender', 'barista', 'manager', 'busser']) {
+    const res = await form('/tips', { token, position: slug, date: '2026-06-22', daypart: 'dinner', cash_tips: '40' });
+    assert.strictEqual(res.status, 403, `${slug} is not hers to file`);
+  }
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-06-22'").get().n, 0);
+});
+
+test('2D-1: a forged or nonsense position identifier is refused', async () => {
+  const { token } = await signIn('7531');
+  // Not in this list: "server " and "". A trailing space is whitespace the
+  // browser can add on its own and it normalises to a job she genuinely holds;
+  // an empty value means "not specified", which is the missing-position case
+  // below, not a forgery.
+  for (const slug of ['../server', "server'--", '1', 'SERVER', 'server;drop']) {
+    const res = await form('/tips', { token, position: slug, date: '2026-06-23', daypart: 'dinner', cash_tips: '40' });
+    assert.strictEqual(res.status, 403, `"${slug}" buys nothing`);
+  }
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-06-23'").get().n, 0);
+});
+
+test('2D-1: a missing position is refused when there is a real choice to make', async () => {
+  // Tess holds two jobs and BOTH hand in, so "which job" genuinely has two
+  // answers. The route does not guess: the answer decides how the tips are
+  // handled, and it is not the route's to choose.
+  const { token } = await signIn('1470');
+  const res = await form('/tips', { token, date: '2026-06-24', daypart: 'dinner', cash_tips: '40' });
+  assert.strictEqual(res.status, 403, 'no job named, no submission');
+  assert.match(await res.text(), /Choose which job you worked/);
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-06-24'").get().n, 0);
+});
+
+test('2D-1: with exactly one eligible job, naming it is not required', async () => {
+  // Rosa is a server and nothing else. There is no choice, so a post without a
+  // position is not ambiguous and is accepted as the one job she has.
+  const { token } = await signIn('2468');
+  const res = await form('/tips', { token, date: '2026-06-25', daypart: 'dinner', cash_tips: '45' });
+  assert.strictEqual(res.status, 302, 'accepted');
+  const sh = db.prepare("SELECT id FROM shifts WHERE date='2026-06-25' AND daypart='dinner'").get();
+  assert.strictEqual(db.prepare('SELECT role FROM work WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, empId('Rosa Diaz')).role, 'server', 'filed as the only job she holds');
+});
+
+test('2D-1: no eligible job means no form and no write, by either door', async () => {
+  const start = await form('/tips/start', { pin: '9753' });          // Cara, kitchen only
+  const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+  const token = decodeURIComponent(cookie.split('=')[1]);
+  assert.strictEqual((await fetch(`${BASE}/portal/tips`, { headers: { cookie }, redirect: 'manual' })).status, 302,
+    'the form is closed to her');
+  assert.strictEqual((await form('/tips', { token, position: 'kitchen', date: '2026-06-26', daypart: 'dinner', cash_tips: '9' })).status,
+    403, 'and so is the write, filing her own job');
+  assert.strictEqual((await form('/tips', { employee_id: empId('Cara Vega'), pin: '9753',
+    position: 'kitchen', date: '2026-06-26', daypart: 'dinner', cash_tips: '9' })).status,
+    403, 'the PIN door included');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-06-26'").get().n, 0, 'nothing written');
+});
+
+test('2D-1: tip-pool participation is untouched by any of this', async () => {
+  // Submission eligibility and pool participation share a column today and are
+  // different business rules. A busser is the pairing that makes conflating
+  // them dangerous: asked to hand in nothing, and still paid a share of every
+  // service. This asserts the second rule did not move when the first did.
+  assert.strictEqual(db.prepare("SELECT takes_tips FROM positions WHERE slug='busser'").get().takes_tips, 0,
+    'a busser is not asked to hand anything in');
+  const { TIPOUT_ROLES } = require('../src/engine');
+  assert.ok(TIPOUT_ROLES.includes('busser'), 'and is still among the roles a tip-out reaches');
+  for (const r of ['kitchen', 'barista', 'bartender']) {
+    assert.ok(TIPOUT_ROLES.includes(r), `${r} too — the allocation list is unchanged`);
+  }
+  // The two rules are decided in different files, from different functions.
+  const engine = fs.readFileSync(path.join(__dirname, '..', 'src', 'engine.js'), 'utf8');
+  assert.ok(!engine.includes('canSubmitSalesTips'),
+    'the engine does not consult the submission rule');
+  assert.ok(!engine.includes('tipsEligibility'),
+    'nor the portal authorisation helper');
 });
