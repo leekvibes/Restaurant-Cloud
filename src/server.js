@@ -4011,10 +4011,72 @@ app.get('/portal', (req, res) => {
 // somebody saved may still post; both do exactly the same thing, and both
 // refuse a position that is not asked to submit — hiding the row is not a
 // permission, the route saying no is.
+/**
+ * May this person hand in sales or tips?
+ *
+ * ONE answer, asked by every route in the workflow — the two that open the
+ * form and, the point of this function, the one that writes.
+ *
+ * The comment above used to claim "hiding the row is not a permission, the
+ * route saying no is". It was true of the openers and false of the writer:
+ * `POST /tips` authenticated the person and then wrote, so a position that is
+ * not asked for tips could still file them by posting straight at it. A form
+ * you cannot open is not a permission either.
+ *
+ * The position is re-read from the database here, from the employee row the
+ * token or PIN resolved to. Nothing the browser sends is consulted — `position`
+ * arrives in the body of every submission and is a claim about which job they
+ * worked, not about whether they may file at all.
+ *
+ * @param  emp a server-resolved employee row
+ * @return {ok, msg, shape, position} — `ok` false means write nothing.
+ */
+function tipsEligibility(emp) {
+  // shapeFor is the single source of truth and stays that way. Everything a
+  // future Settings → Staff Portal → Sales & tips screen would control — an
+  // on/off switch for the whole feature, an eligible-positions list, whether
+  // cash or card may be entered — belongs INSIDE this function, so adding it
+  // later touches one place rather than four routes. See docs, §10.
+  const who = portalWho(emp);
+  if (!who.shape.tips) {
+    return { ok: false, shape: who.shape, position: who.position,
+      // Says what is true and nothing about how it was decided. No position
+      // slug, no flag name, no table.
+      msg: 'Your position does not hand in sales or tips. If that is wrong, ask your manager.' };
+  }
+  return { ok: true, shape: who.shape, position: who.position, msg: '' };
+}
+
+/** A browser navigating, as against something posting straight at the route. */
+const wantsHtml = (req) => String(req.headers.accept || '').includes('text/html');
+
+/**
+ * One refusal, in the shape the caller can use: a readable page for a browser,
+ * a status and a short reason for anything else. 403 either way — the session
+ * is fine and re-authenticating would not help, which is exactly what 403 says
+ * and 401 does not. The cookie is left alone.
+ */
+function refuseTips(req, res, msg) {
+  if (!wantsHtml(req)) return res.status(403).json({ ok: false, error: msg });
+  return res.status(403).send(portalPage('Sales & tips', `
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
+    <div class="pt-body tc-body">
+      <div class="tcc tcc-blocked">
+        <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+          <span class="tcc-state">Not for your position</span></div>
+        <p class="tcc-big">${esc(msg)}</p>
+      </div>
+      <a class="tc-btn tc-btn-go tc-btn-big" href="/portal">Back to your portal</a>
+    </div>`));
+}
+
 const openTips = (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
-  if (!who.shape.tips) return res.redirect('/portal');
+  // Opening is navigation, so an ineligible person is sent home rather than
+  // shown an error — they arrived by tapping something, and the row they
+  // tapped should not have been there. The WRITE refuses with a status.
+  if (!tipsEligibility(who.emp).ok) return res.redirect('/portal');
   res.send(tipsFormPage(who.emp));
 };
 app.get('/portal/tips', openTips);
@@ -6651,6 +6713,23 @@ app.post('/tips', (req, res) => {
     return fail(req.body.employee_id
       ? "That PIN doesn't match the name selected. Check it and try again — nothing was saved."
       : 'That took too long and timed out. Enter your PIN and try again — nothing was saved.');
+  }
+
+  // Authenticated is not authorised.
+  //
+  // Both doors above prove WHO this is; neither asks whether they hand tips in.
+  // This is the same question the form-opening routes ask, from the same
+  // function, and it has to be asked here because this is the route that
+  // writes — a form somebody cannot open is not a permission when the action
+  // behind it accepts a bare POST.
+  //
+  // It sits above everything, including the date check, because the very next
+  // thing this route does after that is `s.getOrIgnore` — which CREATES a
+  // shift. An ineligible submission must not leave a shift row behind as
+  // evidence that it was tried.
+  {
+    const gate = tipsEligibility(emp);
+    if (!gate.ok) return refuseTips(req, res, gate.msg);
   }
 
   const date = String(req.body.date || '').slice(0, 10);

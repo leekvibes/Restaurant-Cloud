@@ -856,3 +856,112 @@ bespoke `.tsx-per` nav, `.tsx-sum*`, `.tsx-status`, `.tsx-week`, `.tsx-wtot`,
 `.tsx-body`, `.tsx-top/title`, plus twelve `.ts-*` blocks already dead before
 this phase — **68 CSS rules**, each verified unreferenced across `src/` first.
 `.tsx-arrow` / `.tsx-today` stay: the owner payroll timesheet still uses them.
+
+---
+
+## 9. PHASE 2D AUDIT — the rest of the Employee Portal (read-only)
+
+Audited 2026-08-05 against `158310e`. No code, CSS, routes, schema or behaviour
+changed. Covers everything Phases 2B/2C did not.
+
+### 9.1 Screens
+
+| Screen | Route | Reached by | Gate |
+|---|---|---|---|
+| Home / hub | `GET /portal` | Tab 1, every "Home" crumb | any employee |
+| Sign-in | `GET /tips`, `POST /tips/start` | cold open, sign-out, session timeout | public |
+| Tips receipt | `GET /tips?done=1&…` | only after `POST /tips` | querystring only |
+| Submit sales or tips | `GET|POST /portal/tips` → `tipsFormPage` | Home row, More menu | `shape.tips` |
+| Submit (write) | `POST /tips` | the form's own action | **token or PIN — no shape check** |
+| Earnings | `GET /portal/earnings` | Tab 4 "Pay", Home row, hub last-shift card | any |
+| Shift pay detail | `GET /portal/earnings/:id` | tapping a past shift | any (own shifts only) |
+| Specials & 86 | `GET /portal/specials` | Home row, More menu | any |
+| Report out of stock | `GET|POST /portal/stock` | Home row, More menu | any |
+| Notifications | `GET /portal/notifications` | "See all", hub line, More menu | any |
+| Sign out | `GET /portal/out` | Home foot, More menu | any |
+| Push subscribe/unsub/test | `POST /portal/push/*` | the hub's own control | any (JSON) |
+
+### 9.2 Does not exist in the portal
+
+**Documents, Account/profile, Policies, Help, PIN change.** No routes, no pages,
+no menu entries. Documents exist owner-side only (`/c/documents`). An employee
+cannot see their own position, wage, PIN or contact details anywhere.
+
+### 9.3 Shape gates
+
+`shapeFor(position)` returns exactly four flags: `tips` (= `position.takes_tips
+!== 0`), and `earnings` / `specials` / `stock`, all hard-coded `true`. So there
+is **one** real gate in the whole portal, and it controls one row plus the
+form-opening routes. `portalShape` is a module-level variable set by
+`requirePortal` so `portalPage()` can filter the More menu.
+
+### 9.4 Overlays with no route
+
+`.tp` three-step wizard (`data-when="1|2|3"`), the stock composer (client-side
+list, posts as JSON in one field), the push control, the More `<details>`.
+
+### 9.5 Findings
+
+1. **`POST /tips` has no shape gate.** `openTips` redirects a non-tipped
+   position away from the form, and a comment there states "hiding the row is
+   not a permission, the route saying no is" — but the route that *writes* is
+   `POST /tips`, and it checks only the token/PIN. Self-only and fully audited,
+   so this is data hygiene rather than privilege escalation.
+2. **Two period selectors.** Earnings uses `.pp-nav` / `payPeriodsFor()` (8);
+   Timesheet uses `.tsp` / `tsViewPeriods()` (26). Different markup, different
+   depth, same concept.
+3. **Home duplicates the tab bar.** Time clock, Pay and Submit are rows on the
+   hub *and* tabs at the foot; Specials and Stock are rows *and* More entries.
+4. **`/portal/earnings` runs `aggregatePayroll` for the whole roster** and then
+   filters to one person (`periodPayFor`). Correct, and the reason the figure
+   can never disagree with payroll — but it is the roster's work for one row.
+5. **Legacy `.pt-*` styling throughout.** Home, Earnings, Specials, Stock,
+   Notifications and the tips wizard predate the Phase 2B/2C components and use
+   `.pt-row`, `.pt-line`, `.pt-stat`, `.pt-kick`, `.tp-*` instead of `.tcc`,
+   `.tc-row`, `.pes`, `.tc-chip`.
+6. **Three "what happened" surfaces**: hub "What's new" (clears on read),
+   `/portal/notifications` (kept), and `/portal/requests` (decisions). A
+   timesheet decision appears in two of them.
+7. **The tips receipt is querystring-driven** (`/tips?done=1&name=…&cash=…`),
+   so its figures are re-displayable and editable from the URL. Display only —
+   nothing is read back from it — but it is the one portal screen whose numbers
+   do not come from the database.
+8. `legacyAuth` **is** throttled through `pinCheck`, same as every other PIN
+   door. Not a finding; recorded because it looks like one.
+
+---
+
+## 10. Recommended future setting — Staff Portal → Sales & tips
+
+**Not implemented.** Recorded so the shape of `tipsEligibility()` is understood
+as deliberate rather than accidental.
+
+Phase 2D-0 put one function between every route in the tips workflow and the
+decision to accept a submission:
+
+```js
+tipsEligibility(emp) → { ok, msg, shape, position }
+```
+
+Today it asks `shapeFor(position).tips` and nothing else. Everything below
+belongs **inside that function**, so adding it later touches one place instead
+of the three routes that call it. Nothing about the routes hard-codes the
+current rule.
+
+Proposed home: **Owner workspace → Settings → Staff Portal → Sales & tips**.
+
+| Control | Shape of the answer | Notes |
+|---|---|---|
+| Enable employee sales/tip submission | one flag | off ⇒ `tipsEligibility` refuses everyone; the hub row and More entry disappear with it, because both already read the same function |
+| Eligible positions | a set of position slugs | would replace `takes_tips` as the source for *this* question. `takes_tips` also drives pooling, so the two must not be silently merged |
+| Sales entry required | flag, per position | validated in the route, not the browser — today "servers report sales" is inferred from the filing role |
+| Cash tips allowed / Card tips allowed | two flags | the route already treats a blank card figure as "not stated" rather than zero; a disallowed field must be refused, not ignored |
+| Corrections allowed | flag | today resubmission always corrects in place. Turning this off needs a rule for what happens to the second submission, which `tip_submissions` already records append-only |
+| Manager approval required | flag | the largest of these. It needs a pending state, a queue, and a decision path — the correction-request machinery in `time_corrections` is the closest existing model |
+
+**Two cautions for whoever builds it.** `takes_tips` currently answers two
+different questions — who hands tips in, and who receives from the pool. A
+busser is `takes_tips = 0` and still takes a share every service. Splitting the
+first into a portal setting must not disturb the second. And eligibility is
+resolved from the employee's *primary* position; see §9.5 and the multi-position
+note in the 2D-0 report.
