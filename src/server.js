@@ -3026,62 +3026,29 @@ app.use(['/tips', '/tips/start'], (req, res, next) => {
 app.get('/tips', (req, res) => {
   // Success screen after a submit.
   if (req.query.done === '1') {
-    const card = String(req.query.card || '');
-    const cash = String(req.query.cash || '0.00');
-    const tot = (Number(cash) || 0) + (card === '' ? 0 : Number(card) || 0);
-    const row = (k, v) => `<div class="tp-tot-r"><span>${k}</span><b>${v}</b></div>`;
-    // Thousands separators, same as everywhere else money is printed. "$1280.50"
-    // is a figure you have to stop and parse; "$1,280.50" you just read.
-    const usd = (v) => '$' + (Number(v) || 0).toLocaleString('en-US',
-      { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const body = `
-      <div class="tp">
-        ${/* This was <span></span> — a deliberate blank where the back button
-               goes, because at step 3 there is nothing to step back TO. But
-               "nothing to step back to" is not "nowhere to go": the only way
-               off this screen was "Log another shift", and people were closing
-               the app and reopening it to reach the time clock. */''}
-        <div class="tp-navbar">
-          <a class="tp-back" href="/portal">&lsaquo; Home</a>
-          <span class="tp-navt">Recorded</span>
-          <span class="tp-count"><b>3</b> / 3</span>
+    // Compatibility only. This screen used to build every figure on it out of
+    // the query string — money that anyone could retype in the address bar and
+    // see reflected back as though the restaurant had recorded it. It shows no
+    // amounts at all now. The real receipt reads the stored row and lives at
+    // /portal/tips/receipt/:id, behind the session that proves whose it is.
+    const signedIn = portalUser(req);
+    if (signedIn) {
+      const last = db.prepare(`SELECT id FROM tip_submissions WHERE employee_id = ?
+                                 ORDER BY created_at DESC, id DESC LIMIT 1`).get(signedIn.id);
+      if (last) return res.redirect(`/portal/tips/receipt/${last.id}`);
+      return res.redirect('/portal/tips');
+    }
+    return res.send(portalPage('Sales & tips', `
+      ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
+      <div class="pt-body tc-body st-body">
+        <div class="tcc tcc-ok">
+          <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+            <span class="tcc-state">Recorded</span></div>
+          <h1 class="tcc-big" id="st-receipt-h" tabindex="-1">Your report was recorded</h1>
         </div>
-
-        <div class="tp-body">
-          <div class="tp-prog"><span class="on"></span><span class="on"></span><span class="on"></span></div>
-          <p class="tp-done-k">Sent to your manager</p>
-          <h1 class="tp-h">Thanks${req.query.name ? ', ' + esc(req.query.name) : ''}.</h1>
-          <p class="tp-lead">Your tips are logged. You'll get an email with your full breakdown
-            once your manager closes the shift.</p>
-
-          <div class="tp-receipt">
-            <div class="tp-tot-h">What you sent</div>
-            ${row('Date', esc(req.query.date || '') + (req.query.shift ? ' &middot; ' + esc(req.query.shift) : ''))}
-            ${req.query.moved === '1'
-              ? '<p class="tp-anchor">Filed to the shift you clocked in for, so your hours and your tips stay together.</p>'
-              : ''}
-            ${req.query.position ? row('Worked as', esc(String(req.query.position).replace(/^./, (c) => c.toUpperCase()))) : ''}
-            ${req.query.sales ? row('Sales rung', esc(usd(req.query.sales))) : ''}
-            ${row('Cash tips', esc(usd(cash)))}
-            ${card !== '' ? row('Card tips', esc(usd(card))) : ''}
-            <div class="tp-tot-r sum"><span>Total tips</span><b>${esc(usd(tot))}</b></div>
-          </div>
-
-          <p class="tp-help">Wrong? Submit again with the right details &mdash; the newest one wins,
-            and your manager can correct anything.</p>
-        </div>
-
-        ${/* What somebody actually does next. Clocking out is the other half
-               of closing out a shift, and it was three taps and a relaunch
-               away. Logging another shift is the rarer case, so it is the
-               quieter button. */''}
-        <div class="tp-foot tp-foot-2">
-          <a class="tp-go" href="/portal/clock">Go to the time clock</a>
-          <a class="tp-go2" href="/tips">Log another shift</a>
-        </div>
-        <div class="tp-build">${esc(RESTAURANT)} &middot; v${esc(BUILD)}</div>
-      </div>`;
-    return res.send(layout('Recorded', body, { bare: true, staff: true }));
+        <p class="st-sub">Sign in to your portal to see exactly what was stored.</p>
+        <a class="tc-btn tc-btn-go tc-btn-big" href="/portal">Go to your portal</a>
+      </div>`));
   }
 
   // Sign in. Nobody's name is on the page until a PIN is verified, so an open
@@ -4615,17 +4582,835 @@ function refuseTips(req, res, msg) {
     </div>`));
 }
 
+// ===========================================================================
+// Sales & tips — the submission workspace, the write, and the receipt.
+// ===========================================================================
+//
+// One workspace, one write, one durable receipt. What used to be three hidden
+// wizard steps and a success screen built entirely out of querystring values.
+//
+// The money rules below are not cosmetic. `server_sales.cash_tips_cents` means
+// two DIFFERENT things depending on the job filed under, and the engine is
+// where that is decided (engine.js):
+//
+//   role === 'server'  -> servers[]  cashTips is SUBTRACTED from what reaches
+//                                    the paycheck. It is money already in
+//                                    their pocket.
+//   anything else      -> support[]  cashTips is SUMMED into `staffCash` and
+//                                    lands in the shared cash jar, split by
+//                                    hours. "nobody keeps their own."
+//
+// Same column, opposite meaning. One label for both would be wrong for one of
+// them, so the workspace asks two different questions and stores the answer in
+// the one place the engine already reads. No new field: a nicer label is not a
+// reason to add a column the engine would then have to learn.
+
+/** Cap on a single figure. A shift's takings, not a lifetime's. */
+const MONEY_MAX_CENTS = 100000000; // $1,000,000
+
+/**
+ * The one strict money grammar for this workflow.
+ *
+ * `parseFloat` was answering questions nobody asked it: it read '12abc' as 12,
+ * '1e3' as 1000, '-50' as a negative amount somebody could file, and rounded
+ * '12.999' up to $13.00 without saying so. Every one of those reaches payroll.
+ *
+ * Four honest outcomes instead of a number-or-zero:
+ *
+ *   absent  — the field was not in the body at all
+ *   blank   — it was there and empty; the employee said nothing
+ *   ok      — a real amount, exact integer cents (0 included)
+ *   invalid — refuse it and say so; never guess, never round, never zero it
+ *
+ * `blank` and `ok`+0 are deliberately different answers. That difference is
+ * the whole card-tips rule below.
+ */
+function parseMoney(raw) {
+  if (raw === undefined || raw === null) return { state: 'absent', cents: null, text: '' };
+  const text = String(raw);
+  const s = text.trim();
+  if (s === '') return { state: 'blank', cents: null, text: '' };
+  // Digits, optionally a point and one or two more. That single expression is
+  // what rejects the minus sign, the dollar sign, the comma, the second
+  // decimal point, the exponent, the trailing letters and the third decimal —
+  // rather than five separate checks that can each be forgotten.
+  if (!/^\d{1,9}(\.\d{1,2})?$/.test(s)) {
+    return { state: 'invalid', cents: null, text,
+      msg: 'Enter an amount like 12 or 12.50 — no $ sign, no minus, at most two decimals.' };
+  }
+  const [whole, frac = ''] = s.split('.');
+  // Integer arithmetic on the two halves. `12.10 * 100` is 1209.9999... in
+  // binary floating point; this cannot drift because it never multiplies a
+  // fraction. Extra precision was already refused above, so nothing is lost.
+  const cents = Number(whole) * 100 + Number((frac + '00').slice(0, 2));
+  if (!Number.isSafeInteger(cents) || cents > MONEY_MAX_CENTS) {
+    return { state: 'invalid', cents: null, text,
+      msg: 'That amount is too large. Check it and enter it again.' };
+  }
+  return { state: 'ok', cents, text: s };
+}
+
+/**
+ * What this JOB is asked to report.
+ *
+ * Read off the one discriminator the engine itself uses — `work.role ===
+ * 'server'` in shiftInputs() — rather than a second list that could drift out
+ * of step with it. If the engine ever splits that branch further, this
+ * function changes with it and the templates do not.
+ *
+ * Proven, not assumed:
+ *   sales categories   the engine reads food/coffee/alcohol from servers[]
+ *                      ONLY. A support row's sales columns are never looked
+ *                      at, so asking a barista for them collects a number
+ *                      that no calculation will ever use.
+ *   card tips          read from both branches.
+ *   server cash kept   servers[] only — the paycheck subtraction.
+ *   pooled cash        support[] only — the shared jar.
+ */
+function filingCapabilities(slug) {
+  const isServer = slug === 'server';
+  return {
+    position: slug,
+    reports_food_sales: isServer,
+    reports_coffee_sales: isServer,
+    reports_alcohol_sales: isServer,
+    reports_card_tips: true,
+    reports_server_cash_kept: isServer,
+    reports_pooled_cash: !isServer,
+    // Sales are written only when something was entered, so a blank form never
+    // wipes a figure. That is existing behaviour and stays.
+    requires_sales: false,
+    can_correct_submission: true,
+  };
+}
+
+/**
+ * Normalised field definitions. Semantic key, the column it lands in, what the
+ * employee is actually being asked, and what blank means — in one place, so a
+ * template never has to know which job it is rendering for.
+ */
+const TIP_FIELDS = [
+  { key: 'food', name: 'food', stored: 'food_cents', cap: 'reports_food_sales',
+    group: 'sales', label: 'Kitchen / food sales',
+    hint: 'Food you rang in on this shift.',
+    blank: 'Leave blank if you are not reporting sales.' },
+  { key: 'coffee', name: 'coffee', stored: 'coffee_cents', cap: 'reports_coffee_sales',
+    group: 'sales', label: 'Coffee &amp; beverage sales',
+    hint: 'Coffee and non-alcoholic drinks.',
+    blank: 'Leave blank if you are not reporting sales.' },
+  { key: 'alcohol', name: 'alcohol', stored: 'alcohol_cents', cap: 'reports_alcohol_sales',
+    group: 'sales', label: 'Alcohol sales', optional: true,
+    hint: 'Leave blank if there were none.',
+    blank: 'Leave blank if there were none.' },
+  { key: 'card_tips', name: 'card_tips', stored: 'card_tips_cents', cap: 'reports_card_tips',
+    group: 'tips', label: 'Card tips', triState: true,
+    hint: 'Leave blank to keep the amount already on file. Enter 0 if there were none.',
+    blank: 'Not entered — whatever is on file stays.' },
+  { key: 'cash_kept', name: 'cash_tips', stored: 'cash_tips_cents', cap: 'reports_server_cash_kept',
+    group: 'tips', label: 'Cash tips you already took home',
+    hint: 'This amount is excluded from the tips sent through payroll.',
+    blank: 'Leave blank if you took none.' },
+  { key: 'pooled_cash', name: 'cash_tips', stored: 'cash_tips_cents', cap: 'reports_pooled_cash',
+    group: 'tips', label: 'Pooled cash tips',
+    hint: 'Cash tips collected for the pool during this shift. This is not money you keep — it is split with the rest of the team.',
+    blank: 'Leave blank if none was collected.' },
+];
+
+/** The fields this job is asked for, in render order. */
+const fieldsFor = (caps) => TIP_FIELDS.filter((f) => caps[f.cap]);
+
+/**
+ * Shifts this person could file against, best answer first.
+ *
+ * A shift qualifies because THEY are on it — a work row or a punch of their
+ * own. Nothing here is reachable by naming a shift id in a URL.
+ */
+const tipsShiftsQ = db.prepare(`
+  SELECT sh.id, sh.date, sh.daypart, sh.status,
+         wk.role AS work_role,
+         (SELECT COUNT(*) FROM tip_submissions ts
+            WHERE ts.shift_id = sh.id AND ts.employee_id = @emp) AS subs,
+         (SELECT COUNT(*) FROM time_entries te
+            WHERE te.shift_id = sh.id AND te.employee_id = @emp) AS punches,
+         (SELECT COUNT(*) FROM time_entries te
+            WHERE te.shift_id = sh.id AND te.employee_id = @emp
+              AND te.clock_out_at IS NULL AND te.status IN ('active','on_break')) AS open_punches
+    FROM shifts sh
+    LEFT JOIN work wk ON wk.shift_id = sh.id AND wk.employee_id = @emp
+   WHERE wk.employee_id IS NOT NULL
+      OR EXISTS (SELECT 1 FROM time_entries te
+                   WHERE te.shift_id = sh.id AND te.employee_id = @emp)
+   ORDER BY sh.date DESC, sh.daypart DESC
+   LIMIT 40`);
+
+/** The current stored figures for one person on one shift. */
+const storedSalesQ = db.prepare(
+  'SELECT * FROM server_sales WHERE shift_id = ? AND employee_id = ?');
+/**
+ * The latest audit row. This is the ONLY place the card-tips tri-state
+ * survives: server_sales.card_tips_cents is NOT NULL DEFAULT 0, so once a row
+ * exists a stored 0 cannot be told apart from "never said". tip_submissions
+ * keeps the column nullable, and null there means not entered.
+ */
+const lastSubmissionQ = db.prepare(`SELECT * FROM tip_submissions
+   WHERE shift_id = ? AND employee_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`);
+const submissionByIdQ = db.prepare('SELECT * FROM tip_submissions WHERE id = ?');
+const earlierSubmissionsQ = db.prepare(
+  'SELECT COUNT(*) n FROM tip_submissions WHERE shift_id = ? AND employee_id = ? AND id < ?');
+
+/**
+ * What is on file for this person on this shift, and whether they have filed
+ * before. `cardState` is the tri-state, read from the audit row because that
+ * is the only record that can express "not entered".
+ */
+function storedReportFor(shiftId, empId) {
+  const sales = storedSalesQ.get(shiftId, empId) || null;
+  const last = lastSubmissionQ.get(shiftId, empId) || null;
+  const filed = !!last;
+  const cardState = !filed ? 'unstated'
+    : last.card_tips_cents == null ? 'unstated'
+      : last.card_tips_cents === 0 ? 'zero' : 'amount';
+  return { sales, last, filed, cardState };
+}
+
+/** Business date + service, in the words the portal already uses elsewhere. */
+const shiftTitle = (sh) => `${dp(sh.daypart)} · ${niceDate(sh.date)}`;
+
+/**
+ * Build the whole workspace model on the server. Every decision the page
+ * renders — which shift is current, which fields to show, whether this is a
+ * correction — is made here from database rows, and repeated on the write.
+ */
+function tipsWorkspace(emp, opts = {}) {
+  const gate = tipsEligibility(emp);
+  if (!gate.ok) return { ok: false, msg: gate.msg };
+
+  const rows = tipsShiftsQ.all({ emp: emp.id });
+  const anchor = TC.anchorEntryFor(emp.id);
+  const anchorShift = anchor && anchor.shift_id ? anchor.shift_id : null;
+  const anchorOpen = !!(anchor && anchor.clock_out_at == null);
+
+  const choices = rows.map((r) => ({
+    id: r.id, date: r.date, daypart: r.daypart,
+    role: r.work_role || null,
+    filed: r.subs > 0,
+    current: r.id === anchorShift && anchorOpen,
+    recorded: r.punches > 0 || !!r.work_role,
+    title: shiftTitle(r),
+  }));
+
+  // Priority: the shift they are standing in, then recorded shifts still
+  // owing a report, then everything already filed (available to correct).
+  const rank = (c) => (c.current ? 0 : (!c.filed ? 1 : 2));
+  choices.sort((a, b) => rank(a) - rank(b)
+    || (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+  // Preselect only when there is one obvious answer. A wrong guess here files
+  // somebody's money against the wrong night.
+  let selected = null;
+  if (opts.shiftId) selected = choices.find((c) => c.id === Number(opts.shiftId)) || null;
+  if (!selected) {
+    const cur = choices.find((c) => c.current);
+    const owing = choices.filter((c) => !c.filed);
+    if (cur) selected = cur;
+    else if (owing.length === 1) selected = owing[0];
+  }
+
+  // The filing position. One eligible job is chosen for them; several must be
+  // picked, because that choice decides kept-vs-pooled.
+  const eligibleSlugs = gate.eligible;
+  let position = null;
+  const asked = opts.position && String(opts.position).trim();
+  if (asked && eligibleSlugs.includes(asked)) position = asked;
+  else if (selected && selected.role && eligibleSlugs.includes(selected.role)) position = selected.role;
+  else if (eligibleSlugs.length === 1) position = eligibleSlugs[0];
+
+  const caps = position ? filingCapabilities(position) : null;
+  const stored = selected ? storedReportFor(selected.id, emp.id) : null;
+
+  return {
+    ok: true, emp, choices, selected, position, caps, stored,
+    eligible: eligibleSlugs.map((slug) => positions.bySlug.get(slug)).filter(Boolean),
+    manual: !!opts.manual,
+    dayparts: DAYPARTS,
+  };
+}
+
+/** One money input, with its label, hint and any error tied to it properly. */
+function tipsField(f, value, err) {
+  const id = `st-${f.key}`;
+  const desc = `${id}-hint`;
+  const errId = `${id}-err`;
+  return `
+    <div class="st-f${err ? ' is-bad' : ''}">
+      <label class="st-lab" for="${id}">${f.label}${
+  f.optional ? ' <i class="st-opt">· optional</i>' : ''}</label>
+      <div class="st-in">
+        <span class="st-cur" aria-hidden="true">$</span>
+        <input id="${id}" name="${f.name}" type="text" inputmode="decimal"
+               autocomplete="off" data-st-money data-st-key="${f.key}"
+               value="${esc(value || '')}" placeholder="0.00"
+               aria-describedby="${desc}${err ? ` ${errId}` : ''}"${
+  err ? ' aria-invalid="true"' : ''}>
+      </div>
+      <p class="st-hint" id="${desc}">${f.hint}</p>
+      ${err ? `<p class="st-err" id="${errId}">${esc(err)}</p>` : ''}
+    </div>`;
+}
+
+/** How a card-tip state reads to a person. Never a bare 0 for "never said". */
+const cardStateText = (state, cents) => (state === 'unstated' ? 'Not entered'
+  : state === 'zero' ? '$0.00' : money(cents || 0));
+
+/**
+ * The submission workspace. One page: choose the shift, enter the figures,
+ * read the review, send it. No hidden steps — there is nothing to tab into
+ * that is not on the screen.
+ */
+function tipsWorkspacePage(model, opts = {}) {
+  const { emp, choices, selected, position, caps, stored } = model;
+  const errs = opts.errs || {};
+  const vals = opts.vals || {};
+  const manual = !!opts.manual;
+  const correcting = !!(stored && stored.filed);
+
+  const posName = (slug) => {
+    const p = positions.bySlug.get(slug);
+    return p ? p.name : slug;
+  };
+
+  // --- shift choice ---------------------------------------------------------
+  const choiceRow = (c) => `
+    <label class="st-ch${selected && selected.id === c.id ? ' is-on' : ''}">
+      <input type="radio" name="shift_id" value="${c.id}"${
+  selected && selected.id === c.id ? ' checked' : ''}
+             data-st-shift aria-describedby="st-ch-${c.id}-m">
+      <span class="st-ch-b">
+        <b>${c.current ? 'Current shift · ' : ''}${esc(shiftTitle(c))}</b>
+        <i id="st-ch-${c.id}-m">${c.current ? 'You are clocked in now'
+    : c.filed ? 'Already submitted — you can correct it'
+      : c.role ? `Worked as ${esc(posName(c.role))}` : 'Recorded shift'}</i>
+      </span>
+    </label>`;
+
+  const shiftBlock = manual ? `
+    <div class="st-sec" id="st-manual">
+      <h2 class="st-h">Which shift</h2>
+      <p class="st-sub">Reporting a shift that is not listed. This files your sales
+        and tips only — it does not add a clock-in, hours or wages.</p>
+      <div class="st-f${errs.date ? ' is-bad' : ''}">
+        <label class="st-lab" for="st-date">Date worked</label>
+        <input id="st-date" name="date" type="date" value="${esc(vals.date || '')}"
+               required aria-describedby="st-date-h${errs.date ? ' st-date-e' : ''}"${
+  errs.date ? ' aria-invalid="true"' : ''}>
+        <p class="st-hint" id="st-date-h">The business date of the shift you worked.</p>
+        ${errs.date ? `<p class="st-err" id="st-date-e">${esc(errs.date)}</p>` : ''}
+      </div>
+      <div class="st-f${errs.daypart ? ' is-bad' : ''}">
+        <label class="st-lab" for="st-dp">Service</label>
+        <select id="st-dp" name="daypart" required
+                aria-describedby="st-dp-h${errs.daypart ? ' st-dp-e' : ''}"${
+  errs.daypart ? ' aria-invalid="true"' : ''}>
+          <option value="">Choose a service</option>
+          ${DAYPARTS.map((d) => `<option value="${d}"${
+    vals.daypart === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+        </select>
+        <p class="st-hint" id="st-dp-h">Café or dinner.</p>
+        ${errs.daypart ? `<p class="st-err" id="st-dp-e">${esc(errs.daypart)}</p>` : ''}
+      </div>
+      <input type="hidden" name="mode" value="manual">
+      <a class="st-alt" href="/portal/tips">Back to your recorded shifts</a>
+    </div>` : `
+    <div class="st-sec">
+      <h2 class="st-h">Which shift</h2>
+      ${choices.length ? `<div class="st-chs" role="radiogroup" aria-label="Shift to report">
+        ${choices.slice(0, 12).map(choiceRow).join('')}
+      </div>` : `<p class="st-sub">No recorded shifts yet.</p>`}
+      <a class="st-alt" href="/portal/tips?manual=1">Report a shift not listed</a>
+    </div>`;
+
+  // --- filing position ------------------------------------------------------
+  const many = model.eligible.length > 1;
+  const posBlock = `
+    <div class="st-sec">
+      <h2 class="st-h">Which job</h2>
+      ${many ? `
+        <div class="st-f${errs.position ? ' is-bad' : ''}">
+          <label class="st-lab" for="st-pos">Filing as</label>
+          <select id="st-pos" name="position" required data-st-pos
+                  aria-describedby="st-pos-h${errs.position ? ' st-pos-e' : ''}"${
+  errs.position ? ' aria-invalid="true"' : ''}>
+            <option value="">Choose the job you worked</option>
+            ${model.eligible.map((p) => `<option value="${esc(p.slug)}"${
+    position === p.slug ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <p class="st-hint" id="st-pos-h">This decides whether your cash is yours
+            or the pool's, so it has to be the job you actually worked.</p>
+          ${errs.position ? `<p class="st-err" id="st-pos-e">${esc(errs.position)}</p>` : ''}
+        </div>` : `
+        <input type="hidden" name="position" value="${esc(position || '')}">
+        <p class="st-sub">Filing as <b>${esc(posName(position))}</b>.</p>`}
+    </div>`;
+
+  // --- the money ------------------------------------------------------------
+  const fields = caps ? fieldsFor(caps) : [];
+  const sales = fields.filter((f) => f.group === 'sales');
+  const tips = fields.filter((f) => f.group === 'tips');
+  const valueFor = (f) => {
+    if (vals[f.key] !== undefined) return vals[f.key];
+    if (!stored || !stored.sales) return '';
+    // Prefilling a correction with what is on file. Card is the exception:
+    // "not entered" must not come back as 0.00 and get filed as a real zero.
+    if (f.key === 'card_tips' && stored.cardState === 'unstated') return '';
+    const c = stored.sales[f.stored];
+    return c ? (c / 100).toFixed(2) : (c === 0 && stored.filed ? '0.00' : '');
+  };
+
+  const moneyBlock = !caps ? '' : `
+    ${sales.length ? `<div class="st-sec">
+      <h2 class="st-h">Your sales</h2>
+      <p class="st-sub">These go to different tip pools, so they are asked for separately.</p>
+      ${sales.map((f) => tipsField(f, valueFor(f), errs[f.key])).join('')}
+    </div>` : ''}
+    <div class="st-sec">
+      <h2 class="st-h">Your tips</h2>
+      ${tips.map((f) => tipsField(f, valueFor(f), errs[f.key])).join('')}
+      <div class="st-f">
+        <label class="st-lab" for="st-note">Note <i class="st-opt">· optional</i></label>
+        <textarea id="st-note" name="note" rows="2" maxlength="500"
+                  aria-describedby="st-note-h">${esc(vals.note !== undefined ? vals.note
+    : (stored && stored.last && stored.last.note) || '')}</textarea>
+        <p class="st-hint" id="st-note-h">Anything a manager should know about this shift.</p>
+      </div>
+    </div>`;
+
+  // --- review ---------------------------------------------------------------
+  const reviewRows = !caps ? '' : `
+    <div class="tc-row"><span>Shift</span><b id="st-r-shift">${
+  selected ? esc(shiftTitle(selected)) : manual ? 'Not chosen yet' : 'Choose a shift'}</b></div>
+    <div class="tc-row"><span>Filing as</span><b id="st-r-pos">${
+  position ? esc(posName(position)) : 'Choose a job'}</b></div>
+    ${sales.map((f) => `<div class="tc-row"><span>${f.label}</span><b data-st-r="${f.key}">—</b></div>`).join('')}
+    ${tips.map((f) => `<div class="tc-row"><span>${f.label}</span><b data-st-r="${f.key}">${
+  f.triState ? 'Not entered' : '—'}</b></div>`).join('')}`;
+
+  const correctionBlock = !correcting ? '' : `
+    <div class="tcc tcc-warn st-corr">
+      <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+        <span class="tcc-state">Previously submitted</span></div>
+      <p class="tcc-big">You already sent a report for this shift.</p>
+      <div class="tc-rows">
+        ${(caps && fieldsFor(caps) || []).map((f) => {
+    const c = stored.sales ? stored.sales[f.stored] : null;
+    const txt = f.triState ? cardStateText(stored.cardState, c) : money(c || 0);
+    return `<div class="tc-row"><span>${f.label} on file</span><b>${txt}</b></div>`;
+  }).join('')}
+      </div>
+      <label class="st-confirm${errs.confirm ? ' is-bad' : ''}">
+        <input type="checkbox" name="confirm_update" value="1" data-st-confirm
+               ${vals.confirm_update ? 'checked' : ''}
+               aria-describedby="st-confirm-h${errs.confirm ? ' st-confirm-e' : ''}">
+        <span>Replace the current values with what I entered above.</span>
+      </label>
+      <p class="st-hint" id="st-confirm-h">This replaces the current values.
+        Your earlier submission stays in the audit history.</p>
+      ${errs.confirm ? `<p class="st-err" id="st-confirm-e">${esc(errs.confirm)}</p>` : ''}
+    </div>`;
+
+  const body = `
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
+    <div class="pt-body tc-body st-body">
+      <h1 class="st-title">Submit sales &amp; tips</h1>
+      <p class="st-lede">Report one shift.</p>
+      ${opts.top ? `<div class="tcc tcc-blocked" role="alert"><p class="tcc-big">${
+  esc(opts.top)}</p></div>` : ''}
+      <form method="post" action="/portal/tips/submit" id="st-form" novalidate>
+        ${/* The session cookie is what authenticates this form. The signed
+             token rides along because the legacy door at POST /tips still
+             accepts it, and dropping it here would quietly retire an
+             authentication path that other clients are still using. */''}
+        <input type="hidden" name="token" value="${esc(tipsToken(emp.id))}">
+        ${shiftBlock}
+        ${posBlock}
+        ${caps ? moneyBlock : `<div class="st-sec"><p class="st-sub">Choose the job
+          you worked and the fields for it will appear.</p></div>`}
+        ${correctionBlock}
+        <div class="st-sec st-review">
+          <h2 class="st-h" id="st-review-h">Review</h2>
+          <div class="tc-rows" aria-labelledby="st-review-h">${reviewRows}</div>
+        </div>
+        <button class="tc-btn tc-btn-go tc-btn-big st-send" type="submit" data-st-send>
+          ${correcting ? 'Update report' : 'Submit report'}
+        </button>
+        <p class="pt-sr" aria-live="polite" id="st-live"></p>
+      </form>
+    </div>
+    ${stScript()}`;
+  return portalPage('Sales & tips', body);
+}
+
+/**
+ * The workspace's own behaviour. Live review, one submit, and focus put on the
+ * first thing that is wrong.
+ *
+ * Everything here is a courtesy. The figures it echoes into the review are
+ * re-parsed on the server by the same grammar before anything is stored, so a
+ * browser that runs none of this still cannot file a bad number — it just has
+ * to read the answer on the next screen instead of this one.
+ */
+const stScript = () => `<script>(function(){
+  var form = document.getElementById('st-form');
+  if (!form) return;
+  var MONEY = /^\\d{1,9}(\\.\\d{1,2})?$/;
+  var usd = function (c) { return '$' + (c / 100).toLocaleString('en-US',
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+  function cents(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (s === '' || !MONEY.test(s)) return null;
+    var p = s.split('.');
+    return Number(p[0]) * 100 + Number(((p[1] || '') + '00').slice(0, 2));
+  }
+  function review() {
+    var ins = form.querySelectorAll('[data-st-money]');
+    for (var i = 0; i < ins.length; i++) {
+      var el = ins[i];
+      var out = form.querySelector('[data-st-r="' + el.getAttribute('data-st-key') + '"]');
+      if (!out) continue;
+      var raw = String(el.value || '').trim();
+      var c = cents(raw);
+      // Blank on the card field is a real answer, not a missing one. Say the
+      // same words the server and the receipt will use.
+      if (raw === '') out.textContent = out.getAttribute('data-blank') || (
+        el.getAttribute('data-st-key') === 'card_tips' ? 'Not entered' : '—');
+      else out.textContent = c === null ? 'Check this amount' : usd(c);
+    }
+    var pos = form.querySelector('[data-st-pos]');
+    var rp = document.getElementById('st-r-pos');
+    if (pos && rp && pos.selectedIndex > 0) rp.textContent = pos.options[pos.selectedIndex].text;
+    var sh = form.querySelector('[data-st-shift]:checked');
+    var rs = document.getElementById('st-r-shift');
+    if (sh && rs) {
+      var b = sh.parentNode.querySelector('b');
+      if (b) rs.textContent = b.textContent.replace(/^Current shift · /, '');
+    }
+  }
+  form.addEventListener('input', review);
+  form.addEventListener('change', function (e) {
+    review();
+    // Which job decides which fields exist, and which shift decides whether
+    // this is a correction. Both are server answers, so ask the server.
+    var t = e.target;
+    if (t && (t.hasAttribute('data-st-pos') || t.hasAttribute('data-st-shift'))) {
+      var p = new URLSearchParams();
+      var sh = form.querySelector('[data-st-shift]:checked');
+      var po = form.querySelector('[data-st-pos]');
+      if (sh) p.set('shift', sh.value);
+      if (po && po.value) p.set('position', po.value);
+      location.href = '/portal/tips?' + p.toString();
+    }
+  });
+  review();
+  // One submit. A second tap on a slow connection used to file a second report.
+  var sending = false;
+  form.addEventListener('submit', function (e) {
+    if (sending) { e.preventDefault(); return; }
+    sending = true;
+    var btn = form.querySelector('[data-st-send]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+    var live = document.getElementById('st-live');
+    if (live) live.textContent = 'Sending your report.';
+  });
+  // After a refusal the page comes back with the fields marked. Put the cursor
+  // on the first one rather than making somebody hunt for it.
+  var bad = form.querySelector('[aria-invalid="true"]');
+  if (bad) { try { bad.focus({ preventScroll: false }); } catch (err) { bad.focus(); } }
+})();</scr` + `ipt>`;
+
+/**
+ * The workspace routes. POST is here too because the old form posted to
+ * `/portal/tips` to open itself; keeping it means an old page in somebody's
+ * pocket still lands somewhere sensible instead of a 404.
+ */
 const openTips = (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   // Opening is navigation, so an ineligible person is sent home rather than
   // shown an error — they arrived by tapping something, and the row they
   // tapped should not have been there. The WRITE refuses with a status.
-  if (!tipsEligibility(who.emp).ok) return res.redirect('/portal');
-  res.send(tipsFormPage(who.emp));
+  const model = tipsWorkspace(who.emp, {
+    shiftId: req.query.shift, position: req.query.position, manual: req.query.manual === '1',
+  });
+  if (!model.ok) return res.redirect('/portal');
+  res.send(tipsWorkspacePage(model, { manual: model.manual }));
 };
 app.get('/portal/tips', openTips);
 app.post('/portal/tips', openTips);
+
+/**
+ * The write. One core, both doors — the portal workspace and the legacy PIN
+ * form — so the strict money grammar, the authorization and the audit row
+ * cannot differ depending on which page somebody happened to be on.
+ *
+ * Order matters and is the whole safety story:
+ *
+ *   1. authorize        (caller has already proved WHO; this asks MAY THEY)
+ *   2. parse every figure
+ *   3. resolve the shift
+ *   4. write, in one transaction
+ *
+ * Parsing sits above resolution because resolution CREATES a shift row. A
+ * report with a typo in it must not leave a shift behind as evidence it was
+ * attempted, and an authorization failure must leave nothing at all.
+ */
+function writeSalesTips(req, emp, opts = {}) {
+  const body = req.body || {};
+
+  // 1. May they file, and under which job? Never read back off the body.
+  const gate = tipsEligibility(emp, body.position);
+  if (!gate.ok) return { ok: false, refuse: gate.msg };
+  // Several jobs they could file under and no choice made. This is a REFUSAL,
+  // not a field error: which job this was decides whether the cash is theirs
+  // or the pool's, the route will not pick, and it has answered 403 to this
+  // since 2D-1. A softer answer here would be a change to an authorization
+  // decision dressed up as a nicer form.
+  if (!gate.position) {
+    return { ok: false, refuse: 'Choose which job you worked, then send it again.' };
+  }
+  const position = gate.position.slug;
+  const caps = filingCapabilities(position);
+  const fields = fieldsFor(caps);
+
+  // 2. Every figure, strictly. Collect all the errors rather than stopping at
+  //    the first, so somebody fixes one screen rather than four in a row.
+  const errs = {};
+  const vals = {};
+  const parsed = {};
+  for (const f of fields) {
+    const p = parseMoney(body[f.name]);
+    parsed[f.key] = p;
+    vals[f.key] = p.text;
+    if (p.state === 'invalid') errs[f.key] = p.msg;
+  }
+  vals.note = String(body.note || '');
+  vals.confirm_update = !!body.confirm_update;
+  vals.date = String(body.date || '').slice(0, 10);
+  vals.daypart = String(body.daypart || '');
+
+  // 3. Which shift. Three doors, in trust order.
+  let sh = null;
+  let manual = false;
+  const wantId = Number(body.shift_id) || 0;
+  if (wantId) {
+    // A shift id off a form is an untrusted identifier like any other. It is
+    // honoured only when this employee is genuinely on that shift — and the
+    // date and service then come from the ROW, never from the body, so a
+    // rewritten form cannot move a recorded shift to another night.
+    const owned = tipsShiftsQ.all({ emp: emp.id }).some((r) => r.id === wantId);
+    if (!owned) return { ok: false, refuse: 'That shift is not one of yours.' };
+    sh = s.shiftById.get(wantId) || null;
+  }
+  if (!sh && String(body.mode || '') === 'manual') {
+    manual = true;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date) || Number.isNaN(Date.parse(vals.date))) {
+      errs.date = 'Choose the date you worked.';
+    }
+    if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
+  }
+  if (!sh && !manual) {
+    // The legacy door and any form without an explicit choice: anchor to the
+    // punch, exactly as before. The clock is a better witness than a phone at
+    // the end of a long night.
+    const anchor = TC.anchorEntryFor(emp.id);
+    if (anchor && anchor.shift_id) sh = s.shiftById.get(anchor.shift_id) || null;
+    if (!sh) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date)) errs.date = 'Choose the date you worked.';
+      if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
+      manual = true;
+    }
+  }
+
+  // Nothing has touched the database yet, and nothing will if anything above
+  // is wrong.
+  if (Object.keys(errs).length) return { ok: false, errs, vals, position };
+
+  // 4. Resolve or create the shared shift. getOrIgnore is the idempotency
+  //    boundary and the UNIQUE(date, daypart) index is what makes two people
+  //    reporting the same service concurrently land on one row rather than
+  //    two.
+  if (!sh) {
+    s.getOrIgnore.run(vals.date, vals.daypart);
+    sh = s.findShift.get(vals.date, vals.daypart);
+  }
+  if (!sh) return { ok: false, errs: { date: 'That shift could not be opened. Try again.' } };
+  policyForShift(sh); // lock in the tip-out policy version current now
+
+  // Correction or first report is the SERVER's answer, read fresh. A posted
+  // flag would let a stale tab claim "new" and quietly overwrite.
+  const before = storedReportFor(sh.id, emp.id);
+  if (before.filed && opts.requireConfirm && !body.confirm_update) {
+    return { ok: false,
+      errs: { confirm: 'Tick the box to confirm you are replacing the current values.' },
+      vals, position, shiftId: sh.id };
+  }
+
+  // A double tap sends the same body twice. Rather than a second audit row
+  // saying nothing new, an identical repeat within the minute returns the
+  // receipt that already exists. Genuine corrections differ in at least one
+  // figure and are never swallowed by this.
+  if (before.filed && before.last) {
+    const same = fields.every((f) => {
+      const p = parsed[f.key];
+      const was = before.last[f.stored];
+      if (f.triState) {
+        return p.state === 'ok' ? was === p.cents : was == null;
+      }
+      return (p.state === 'ok' ? p.cents : 0) === (was || 0);
+    });
+    const age = Date.now() - Date.parse(`${String(before.last.created_at).replace(' ', 'T')}Z`);
+    if (same && Number.isFinite(age) && age >= 0 && age < 60000) {
+      return { ok: true, submissionId: before.last.id, shift: sh, correction: true, repeat: true };
+    }
+  }
+
+  // Cash: whichever question this job was asked, it lands in the one column
+  // the engine reads. Blank means none — this field has never been tri-state
+  // and making it so now would change what every existing row means.
+  const cashP = parsed.cash_kept || parsed.pooled_cash;
+  const cash = cashP && cashP.state === 'ok' ? cashP.cents : 0;
+  const cardP = parsed.card_tips;
+  const salesEntered = ['food', 'coffee', 'alcohol']
+    .some((k) => parsed[k] && parsed[k].state === 'ok');
+  const centsOf = (k) => (parsed[k] && parsed[k].state === 'ok' ? parsed[k].cents : 0);
+
+  let submissionId = null;
+  db.transaction(() => {
+    w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
+    w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
+    // Card keeps its three states. Blank leaves whatever is on file alone —
+    // it may be the POS's figure or a manager's, and a form that always posted
+    // a zero would silently wipe it.
+    if (cardP && cardP.state === 'ok') {
+      w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: cardP.cents });
+    }
+    w.setNote.run({ shift_id: sh.id, employee_id: emp.id,
+      note: String(body.note || '').trim().slice(0, 500) || null });
+    if (caps.reports_food_sales && salesEntered) {
+      w.setSales.run({ shift_id: sh.id, employee_id: emp.id,
+        food_cents: centsOf('food'), coffee_cents: centsOf('coffee'), alcohol_cents: centsOf('alcohol') });
+    }
+    const info = submissions.add.run({
+      shift_id: sh.id, employee_id: emp.id, role: position,
+      cash_tips_cents: cash,
+      card_tips_cents: cardP && cardP.state === 'ok' ? cardP.cents : null,
+      food_cents: caps.reports_food_sales && salesEntered ? centsOf('food') : null,
+      coffee_cents: caps.reports_food_sales && salesEntered ? centsOf('coffee') : null,
+      alcohol_cents: caps.reports_food_sales && salesEntered ? centsOf('alcohol') : null,
+      note: String(body.note || '').trim() || null,
+      source: 'staff',
+    });
+    submissionId = Number(info.lastInsertRowid);
+  })();
+
+  // Best effort, after the money is safely down. A notification must never be
+  // the reason a report fails.
+  try {
+    const salesTotal = salesEntered ? (centsOf('food') + centsOf('coffee') + centsOf('alcohol')) : null;
+    PORTAL.adminNotify('shift', `${emp.name.split(' ')[0]} submitted for ${dp(sh.daypart)}`,
+      { body: `${dp(sh.daypart)} · ${sh.date}${salesTotal != null ? ` · ${money(salesTotal)} sales` : ''}`,
+        href: `/shifts/${sh.id}` });
+    const roll = dashQ.oneRollup.get(sh.id);
+    if (roll && roll.status !== 'emailed' && roll.people > 0 && roll.submitters >= roll.people) {
+      PORTAL.adminNotifyOnce(`shift_ready:${sh.id}`, 'shift_ready',
+        `${whenOf(sh.date, sh.daypart)} — everyone's in`,
+        { body: `All ${roll.people} submitted. Ready to review and send.`, href: `/shifts/${sh.id}` });
+    }
+  } catch { /* the submission still stands */ }
+
+  return { ok: true, submissionId, shift: sh, correction: before.filed, manual };
+}
+
+app.post('/portal/tips/submit', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const out = writeSalesTips(req, who.emp, { requireConfirm: true });
+  if (out.refuse) return refuseTips(req, res, out.refuse);
+  if (!out.ok) {
+    const model = tipsWorkspace(who.emp, {
+      shiftId: out.shiftId || req.body.shift_id,
+      position: out.position || req.body.position,
+      manual: String(req.body.mode || '') === 'manual',
+    });
+    if (!model.ok) return refuseTips(req, res, model.msg);
+    return res.status(400).send(tipsWorkspacePage(model, {
+      errs: out.errs, vals: out.vals, manual: model.manual,
+      top: 'Nothing was saved. Check the highlighted fields and send it again.',
+    }));
+  }
+  res.redirect(`/portal/tips/receipt/${out.submissionId}`);
+});
+
+/**
+ * The receipt. Every figure on it is read back out of the row that was
+ * written — change any query parameter you like and the numbers do not move,
+ * because none of them come from the URL.
+ */
+app.get('/portal/tips/receipt/:id', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const row = submissionByIdQ.get(Number(req.params.id) || 0);
+  // Missing and somebody else's answer identically. "Not yours" and "not
+  // there" must not be tellable apart from the outside.
+  if (!row || row.employee_id !== who.emp.id) {
+    return res.status(404).send(portalPage('Sales & tips', `
+      ${portalTop({ href: '/portal/tips', label: 'Sales & tips' }, 'Receipt')}
+      <div class="pt-body tc-body">
+        <div class="tcc tcc-blocked">
+          <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+            <span class="tcc-state">Not found</span></div>
+          <p class="tcc-big">That receipt is not available.</p>
+        </div>
+        <a class="tc-btn tc-btn-go tc-btn-big" href="/portal/tips">Submit sales &amp; tips</a>
+      </div>`));
+  }
+  const sh = s.shiftById.get(row.shift_id);
+  const caps = filingCapabilities(row.role);
+  const earlier = earlierSubmissionsQ.get(row.shift_id, who.emp.id, row.id).n;
+  const cardState = row.card_tips_cents == null ? 'unstated'
+    : row.card_tips_cents === 0 ? 'zero' : 'amount';
+  const rowFor = (f) => {
+    if (f.triState) return `<div class="tc-row"><span>${f.label}</span><b>${
+      cardStateText(cardState, row.card_tips_cents)}</b></div>`;
+    const c = row[f.stored];
+    if (c == null) return '';
+    return `<div class="tc-row"><span>${f.label}</span><b>${money(c)}</b></div>`;
+  };
+  const when = String(row.created_at || '').replace(' ', ' at ');
+  const body = `
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
+    <div class="pt-body tc-body st-body">
+      <div class="tcc tcc-ok">
+        <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+          <span class="tcc-state">Recorded</span></div>
+        <h1 class="tcc-big" id="st-receipt-h" tabindex="-1">${
+  earlier > 0 ? 'Your report was updated' : 'Your report was recorded'}</h1>
+      </div>
+      <div class="st-sec">
+        <h2 class="st-h">What was recorded</h2>
+        <div class="tc-rows">
+          <div class="tc-row"><span>Shift</span><b>${sh ? esc(shiftTitle(sh)) : '—'}</b></div>
+          <div class="tc-row"><span>Filing as</span><b>${esc(
+    (positions.bySlug.get(row.role) || {}).name || row.role || '—')}</b></div>
+          ${fieldsFor(caps).map(rowFor).join('')}
+          ${row.note ? `<div class="tc-row"><span>Note</span><b>${esc(row.note)}</b></div>` : ''}
+          <div class="tc-row"><span>Recorded</span><b>${esc(when)}</b></div>
+        </div>
+      </div>
+      <a class="tc-btn tc-btn-go tc-btn-big" href="/portal">Back to your portal</a>
+      <a class="st-alt" href="/portal/tips">Report another shift</a>
+    </div>
+    <script>(function(){var h=document.getElementById('st-receipt-h');if(h)h.focus();})();</script>`;
+  res.send(portalPage('Sales & tips', body));
+});
 
 // Push notifications: a device turns them on (subscribe) or off (unsubscribe).
 // Both carry a PushSubscription as JSON and are tied to the signed-in person.
@@ -7428,128 +8213,30 @@ app.post('/tips', (req, res) => {
       : 'That took too long and timed out. Enter your PIN and try again — nothing was saved.');
   }
 
-  // Authenticated is not authorised.
+  // The legacy PIN door, writing through the SAME core as the portal
+  // workspace. Authentication is what differs between the two doors;
+  // authorization, the money grammar and the audit row must not.
   //
-  // Both doors above prove WHO this is; neither asks whether they hand tips in.
-  // This is the same question the form-opening routes ask, from the same
-  // function, and it has to be asked here because this is the route that
-  // writes — a form somebody cannot open is not a permission when the action
-  // behind it accepts a bare POST.
-  //
-  // It sits above everything, including the date check, because the very next
-  // thing this route does after that is `s.getOrIgnore` — which CREATES a
-  // shift. An ineligible submission must not leave a shift row behind as
-  // evidence that it was tried.
-  {
-    const gate = tipsEligibility(emp, req.body.position);
-    if (!gate.ok) return refuseTips(req, res, gate.msg);
-    // Several jobs they could file under and no choice made. The route will
-    // not pick: which job this was decides whether the tips are kept or
-    // pooled, and guessing it wrong is a real amount of somebody's money.
-    if (!gate.position) {
-      return refuseTips(req, res, 'Choose which job you worked, then send it again.');
-    }
-    // From here on, the filing position is the resolved row — never req.body.
-    req.filingPosition = gate.position.slug;
+  // No confirmation is required here because this door has no correction UI to
+  // confirm with — resubmitting has always been how a PIN user fixes a typo,
+  // and that behaviour is preserved exactly.
+  const out = writeSalesTips(req, emp, { requireConfirm: false });
+  if (out.refuse) return refuseTips(req, res, out.refuse);
+  if (!out.ok) {
+    // The legacy door answers a refusal the way it always has: the form back,
+    // 200, with the reason on it. Nothing was written — writeSalesTips refuses
+    // before it resolves a shift, so not even an empty shift row is left.
+    const first = Object.values(out.errs)[0] || 'Check the amounts and send it again.';
+    return res.send(tipsFormPage(emp, { err: first }));
   }
-
-  const date = String(req.body.date || '').slice(0, 10);
-  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !daypart) {
-    return res.send(tipsFormPage(emp, { err: 'Please choose the date and which shift you worked.' }));
+  // Somebody signed in to the portal gets the real receipt. The PIN door has
+  // no session to prove ownership with, so it gets the neutral confirmation —
+  // which shows no figures at all rather than figures off a URL.
+  const signedIn = portalUser(req);
+  if (signedIn && signedIn.id === emp.id) {
+    return res.redirect(`/portal/tips/receipt/${out.submissionId}`);
   }
-
-  // Anchor to their punch when there is one, and only then fall back to the
-  // form. The date and service on the form are what somebody tapped on a phone
-  // at the end of a long night; the punch is what the clock actually recorded.
-  // When the two disagree the punch wins — otherwise the hours land on one
-  // shift and the money on another, and neither page can show the whole night.
-  //
-  // This is not a guess about what they meant. It is what they did.
-  const anchor = TC.anchorEntryFor(emp.id);
-  let sh = anchor && anchor.shift_id ? s.shiftById.get(anchor.shift_id) : null;
-  const moved = sh && (sh.date !== date || sh.daypart !== daypart);
-  if (!sh) {
-    // Find the shift — or start it. Staff often report before the manager has
-    // opened the close, which is what used to leave the picker empty.
-    s.getOrIgnore.run(date, daypart);
-    sh = s.findShift.get(date, daypart);
-  }
-  policyForShift(sh); // lock in the tip-out policy version that's current now
-
-  // What they say they worked drives whether their tips are kept (server) or
-  // pooled (support). If you've already put them on the shift, your role wins.
-  // Only a job they're actually assigned — a hand-crafted POST can't file
-  // itself as a server (and keep the tips) when they're rostered as support.
-  // Resolved by tipsEligibility above, from a slug it checked against what
-  // this person actually holds. Never read back off the body — the old line
-  // here re-derived it and would silently fall back to `emp.role`, which after
-  // a per-position eligibility check is the one answer that can contradict the
-  // check that just passed.
-  const position = req.filingPosition;
-  w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: position });
-  const cash = toCents(req.body.cash_tips);
-  w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: cash, by: 'staff' });
-  const cardRaw = String(req.body.card_tips || '').trim();
-  if (cardRaw !== '') w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(cardRaw) });
-  // Blank clears a previous note rather than being ignored — resubmitting is
-  // how someone corrects themselves, and a stale note would mislead you.
-  w.setNote.run({ shift_id: sh.id, employee_id: emp.id, note: String(req.body.note || '').trim().slice(0, 500) || null });
-
-  // Servers report their own sales as part of closing. Only write if they
-  // actually entered something, so a blank form never wipes your numbers.
-  let salesNote = '';
-  if (position === 'server') {
-    const anySales = ['food', 'coffee', 'alcohol'].some((k) => String(req.body[k] || '').trim() !== '');
-    if (anySales) {
-      w.setSales.run({
-        shift_id: sh.id, employee_id: emp.id,
-        food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee), alcohol_cents: toCents(req.body.alcohol),
-      });
-      salesNote = (toCents(req.body.food) + toCents(req.body.coffee) + toCents(req.body.alcohol)) / 100;
-    }
-  }
-
-  // Log it before redirecting. Append-only, so a resubmission to fix a typo
-  // leaves both the original and the correction visible.
-  submissions.add.run({
-    shift_id: sh.id, employee_id: emp.id, role: position,
-    cash_tips_cents: cash,
-    card_tips_cents: cardRaw === '' ? null : toCents(cardRaw),
-    food_cents: position === 'server' ? toCents(req.body.food) : null,
-    coffee_cents: position === 'server' ? toCents(req.body.coffee) : null,
-    alcohol_cents: position === 'server' ? toCents(req.body.alcohol) : null,
-    note: String(req.body.note || '').trim() || null,
-    source: 'staff',
-  });
-
-  // Tell the back office someone handed in their shift — who, and for which
-  // service — so a manager knows submissions are coming in. Links to the shift
-  // so they can review it. Best effort; a notification must not fail the report.
-  PORTAL.adminNotify('shift', `${emp.name.split(' ')[0]} submitted for ${dp(sh.daypart)}`,
-    { body: `${dp(sh.daypart)} · ${sh.date}${salesNote !== '' ? ` · $${Number(salesNote).toFixed(2)} sales` : ''}`,
-      href: `/shifts/${sh.id}` });
-
-  // If that was the last person outstanding, the shift is fully in and ready to
-  // close — tell the office once (not again on every later correction).
-  try {
-    const roll = dashQ.oneRollup.get(sh.id);
-    if (roll && roll.status !== 'emailed' && roll.people > 0 && roll.submitters >= roll.people) {
-      PORTAL.adminNotifyOnce(`shift_ready:${sh.id}`, 'shift_ready',
-        `${whenOf(sh.date, sh.daypart)} — everyone's in`,
-        { body: `All ${roll.people} submitted. Ready to review and send.`, href: `/shifts/${sh.id}` });
-    }
-  } catch { /* the submission still stands */ }
-
-  const p = new URLSearchParams({
-    done: '1', name: emp.name.split(' ')[0], cash: (cash / 100).toFixed(2),
-    card: cardRaw === '' ? '' : (toCents(cardRaw) / 100).toFixed(2),
-    // The shift it actually landed on, which is the punch's when there was one.
-    shift: dp(sh.daypart), date: sh.date, position,
-    sales: salesNote === '' ? '' : Number(salesNote).toFixed(2),
-    ...(moved ? { moved: '1' } : {}),
-  });
-  res.redirect('/tips?' + p.toString());
+  return res.redirect('/tips?done=1');
 });
 
 // ---------------------------------------------------------------------------

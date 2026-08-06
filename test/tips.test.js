@@ -128,16 +128,17 @@ test('neither service is preselected', async () => {
   // somebody's tips against a service they did not work — which shows up as a
   // pool that does not balance, days later, with no clue where it came from.
   //
-  // Matched against real <input> tags only: a looser regex over the whole page
-  // hits `input[name="daypart"]:checked` inside the step script and reports a
-  // preselection that is not there.
-  const { html } = await signIn('2468');
-  const radios = [...html.matchAll(/<input[^>]*name="daypart"[^>]*>/g)].map((m) => m[0]);
-  assert.strictEqual(radios.length, 2, 'café and dinner');
-  for (const r of radios) assert.ok(!/\bchecked\b/.test(r), `not preselected: ${r}`);
-  assert.ok(radios.every((r) => /\brequired\b/.test(r)), 'and one of them must be chosen');
+  // 2F moved the service question into the manual path: normally you pick a
+  // shift the clock already recorded, and only "a shift not listed" asks for a
+  // date and service outright. The rule is unchanged wherever it is asked.
+  const { cookie } = await signIn('2468');
+  const html = await (await fetch(`${BASE}/portal/tips?manual=1`, { headers: { cookie } })).text();
+  const opts = [...html.matchAll(/<option value="(cafe|dinner)"[^>]*>/g)].map((m) => m[0]);
+  assert.strictEqual(opts.length, 2, 'cafe and dinner');
+  for (const o of opts) assert.ok(!/\bselected\b/.test(o), `not preselected: ${o}`);
+  assert.match(html, /<option value="">Choose a service<\/option>/, 'the empty answer is the one showing');
+  assert.match(html, /<select id="st-dp" name="daypart" required/, 'and one of them must be chosen');
 });
-
 test('a report with no service chosen is refused', async () => {
   // The browser blocks this, and the browser is not the guard — a phone with
   // no JavaScript, or a stale cached page, posts straight past it.
@@ -145,11 +146,10 @@ test('a report with no service chosen is refused', async () => {
   const res = await form('/tips', { token, position: 'server', date: '2026-07-20', daypart: '', cash_tips: '40' });
   assert.strictEqual(res.status, 200, 'the form comes back rather than saving');
   const html = await res.text();
-  assert.match(html, /choose the date and which shift/i);
+  assert.match(html, /which service you worked/i);
   const n = db.prepare("SELECT COUNT(*) n FROM shifts WHERE date = '2026-07-20'").get().n;
   assert.strictEqual(n, 0, 'and no shift was opened');
 });
-
 test('a full report lands on the right service, for the right person', async () => {
   const { token } = await signIn('2468');
   const res = await form('/tips', {
@@ -196,23 +196,22 @@ test('a posted role never wins over the assigned one', async () => {
 });
 
 test('with no JavaScript the whole form is still there', async () => {
-  // The two steps are one form that a script switches between. If that script
-  // never runs — old phone, blocked, cached wrong — the page has to degrade to
-  // the single long form it replaced, with every field still posting.
-  const { html } = await signIn('2468');
-  for (const name of ['token', 'position', 'date', 'daypart', 'food', 'coffee', 'alcohol',
+  // 2F: one page, so there is nothing for a script to switch between and
+  // nothing that fails to appear when it does not run. Every field the write
+  // needs is in the markup as sent. The date and service live on the manual
+  // path — that is the only page that asks for them.
+  const { cookie } = await signIn('2468');
+  const main = await (await fetch(`${BASE}/portal/tips`, { headers: { cookie } })).text();
+  for (const name of ['token', 'position', 'food', 'coffee', 'alcohol',
     'cash_tips', 'card_tips', 'note']) {
-    assert.match(html, new RegExp(`name="${name}"`), `${name} is in the markup`);
+    assert.match(main, new RegExp(`name="${name}"`), `${name} is in the markup`);
   }
-  // Nothing is hidden by an attribute in the markup — only by script, later.
-  for (const id of ['step1', 'step2']) {
-    const m = html.match(new RegExp(`<div id="${id}"[^>]*>`));
-    assert.ok(m, `${id} exists`);
-    assert.ok(!/\bhidden\b/.test(m[0]), `${id} is not hidden in the markup, only by script`);
+  const manual = await (await fetch(`${BASE}/portal/tips?manual=1`, { headers: { cookie } })).text();
+  for (const name of ['date', 'daypart']) {
+    assert.match(manual, new RegExp(`name="${name}"`), `${name} is on the manual path`);
   }
-  assert.match(html, /type="submit" form="report"/, 'and a submit that posts it');
+  assert.match(main, /<button class="[^"]*st-send" type="submit"/, 'and a submit that posts it');
 });
-
 test('the sign-in keypad draws exactly as many cells as a PIN has digits', async () => {
   // The screen has its own keypad — no text input to focus, so the phone's
   // keyboard never opens and nothing zooms. The PIN rides on a hidden field
@@ -466,7 +465,9 @@ test('2D-0: the route accepts exactly what the real form posts', async () => {
   // The guard against the two drifting apart again. Scrapes every field the
   // rendered form carries and posts THOSE — so a route that starts demanding
   // something the form does not render fails here rather than in service.
-  const { html, token } = await signIn('2468');
+  // Scraped from the manual path, which is the one that carries every field.
+  const { cookie, token } = await signIn('2468');
+  const html = await (await fetch(`${BASE}/portal/tips?manual=1`, { headers: { cookie } })).text();
   const body = {};
   for (const m of html.matchAll(/name="([a-z_]+)"(?:[^>]*?value="([^"]*)")?/g)) {
     if (!(m[1] in body)) body[m[1]] = m[2] !== undefined ? m[2] : '';
@@ -477,9 +478,9 @@ test('2D-0: the route accepts exactly what the real form posts', async () => {
   Object.assign(body, { token, date: '2026-06-11', daypart: 'dinner', position: 'server', cash_tips: '25' });
   const res = await form('/tips', body);
   assert.strictEqual(res.status, 302, 'the form payload is accepted as-is');
-  assert.match(decodeURIComponent(res.headers.get('location')), /done=1/, 'and lands on the receipt');
+  const where = decodeURIComponent(res.headers.get('location'));
+  assert.match(where, /\/portal\/tips\/receipt\/\d+|done=1/, 'and lands on a receipt');
 });
-
 // --- 2D-1: eligibility belongs to the job being filed ------------------------
 
 test('2D-1: kitchen primary with a server job may file the server one', async () => {
@@ -492,7 +493,7 @@ test('2D-1: kitchen primary with a server job may file the server one', async ()
   // Only the job that qualifies is offered. Kitchen is hers and is not on it.
   assert.ok(!/<option value="kitchen"/.test(html) && !/value="kitchen"/.test(html),
     'kitchen is not offered as something to file');
-  assert.match(html, /name="position" id="tip-position" value="server"/,
+  assert.match(html, /<input type="hidden" name="position" value="server">/,
     'and with one eligible job it is simply chosen');
 
   const res = await form('/tips', { token, position: 'server', date: '2026-06-20', daypart: 'dinner', cash_tips: '80' });
@@ -587,4 +588,322 @@ test('2D-1: tip-pool participation is untouched by any of this', async () => {
     'the engine does not consult the submission rule');
   assert.ok(!engine.includes('tipsEligibility'),
     'nor the portal authorisation helper');
+});
+
+// ===========================================================================
+// PHASE 2F — the sales & tips workspace, the strict money grammar, and a
+// receipt whose numbers come out of the database rather than the URL.
+// ===========================================================================
+
+/** A writable handle. The shared `db` above is deliberately read-only. */
+const writable = () => new (require('better-sqlite3'))(DB);
+
+/** Everything stored for one person on one shift, or nulls. */
+const stored = (name, date, daypart) => {
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, daypart);
+  if (!sh) return null;
+  const id = empId(name);
+  return {
+    shift: sh.id,
+    sales: db.prepare('SELECT * FROM server_sales WHERE shift_id=? AND employee_id=?').get(sh.id, id) || null,
+    work: db.prepare('SELECT * FROM work WHERE shift_id=? AND employee_id=?').get(sh.id, id) || null,
+    subs: db.prepare('SELECT * FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id').all(sh.id, id),
+    punches: db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id=? AND employee_id=?').get(sh.id, id).n,
+  };
+};
+
+// --- the money grammar ------------------------------------------------------
+
+test('2F: every amount the grammar accepts is stored to the exact cent', async () => {
+  const cases = [['12', 1200], ['12.5', 1250], ['12.50', 1250], ['0', 0], ['0.00', 0],
+    ['  8 ', 800], ['999999.99', 99999999]];
+  let d = 1;
+  for (const [text, cents] of cases) {
+    const date = `2026-09-${String(d++).padStart(2, '0')}`;
+    const { token } = await signIn('2468');
+    const res = await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+      mode: 'manual', cash_tips: text });
+    assert.strictEqual(res.status, 302, `"${text}" is accepted`);
+    assert.strictEqual(stored('Rosa Diaz', date, 'dinner').sales.cash_tips_cents, cents,
+      `"${text}" stores ${cents} cents`);
+  }
+});
+
+test('2F: everything the grammar refuses is refused, and nothing is written', async () => {
+  // Each of these used to become a number. parseFloat read '12abc' as 12,
+  // '1e3' as a thousand dollars, '-50' as a negative somebody could file, and
+  // rounded '12.999' up to $13.00 without saying a word.
+  const bad = ['-50', '12.999', '12abc', '1e3', '$20', '1,200', '12.5.5', 'NaN',
+    'Infinity', '99999999999', '.5', '12.'];
+  let d = 1;
+  for (const text of bad) {
+    const date = `2026-10-${String(d++).padStart(2, '0')}`;
+    const { token } = await signIn('2468');
+    const res = await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+      mode: 'manual', cash_tips: text });
+    assert.strictEqual(res.status, 200, `"${text}" comes back as the form, not a redirect`);
+    assert.strictEqual(stored('Rosa Diaz', date, 'dinner'), null,
+      `"${text}" left no shift, no work row and no figures`);
+  }
+});
+
+test('2F: a refused amount is never silently rounded or zeroed', async () => {
+  // The two failure modes that hurt most, stated as their own assertion: a
+  // rejected figure must not arrive as 1300 (rounded) or as 0 (swallowed).
+  const { token } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date: '2026-10-20', daypart: 'dinner',
+    mode: 'manual', cash_tips: '12.999' });
+  assert.strictEqual(stored('Rosa Diaz', '2026-10-20', 'dinner'), null,
+    'not 1300, not 0 — nothing at all');
+});
+
+// --- the card-tip tri-state -------------------------------------------------
+
+test('2F: blank card tips leave what is on file alone; an explicit 0 replaces it', async () => {
+  const date = '2026-09-20';
+  const { token } = await signIn('2468');
+  // First report states $30 on card.
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '10', card_tips: '30' });
+  let s = stored('Rosa Diaz', date, 'dinner');
+  assert.strictEqual(s.sales.card_tips_cents, 3000, 'stated and stored');
+  assert.strictEqual(s.subs[0].card_tips_cents, 3000, 'and stated in the audit row');
+
+  // A correction that leaves card blank must not wipe the $30. Blank is "I am
+  // not updating this", and the figure may be the POS's or a manager's.
+  const a = await signIn('2468');
+  await form('/tips', { token: a.token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '15', card_tips: '' });
+  s = stored('Rosa Diaz', date, 'dinner');
+  assert.strictEqual(s.sales.card_tips_cents, 3000, 'blank preserved the stored amount');
+  assert.strictEqual(s.subs[1].card_tips_cents, null, 'and the audit row records "not entered"');
+  assert.strictEqual(s.sales.cash_tips_cents, 1500, 'while the cash correction did land');
+
+  // Absent entirely behaves the same as blank.
+  const b = await signIn('2468');
+  await form('/tips', { token: b.token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '16' });
+  assert.strictEqual(stored('Rosa Diaz', date, 'dinner').sales.card_tips_cents, 3000,
+    'absent preserved it too');
+
+  // An explicit zero is a statement, and it replaces.
+  const c = await signIn('2468');
+  await form('/tips', { token: c.token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '16', card_tips: '0' });
+  s = stored('Rosa Diaz', date, 'dinner');
+  assert.strictEqual(s.sales.card_tips_cents, 0, 'zero replaced it');
+  assert.strictEqual(s.subs[3].card_tips_cents, 0, 'and zero is what the audit row says');
+});
+
+// --- cash means two different things ----------------------------------------
+
+test('2F: server cash kept and pooled cash are asked as different questions', async () => {
+  const w = writable();
+  w.prepare("INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Bea Nolan','barista',1400,1,'2026')").run();
+  w.close();
+  const server = (await signIn('2468')).html;
+  const barista = (await signIn('2026')).html;
+
+  assert.match(server, /already took home/, 'the server is asked what they kept');
+  assert.match(server, /excluded from the tips sent through payroll/,
+    'and told what that does');
+  assert.ok(!/Pooled cash tips/.test(server), 'and is not asked about the pool');
+
+  assert.match(barista, /Pooled cash tips/, 'the barista is asked what the pool collected');
+  assert.match(barista, /not money you keep/, 'and told it is not theirs');
+  assert.ok(!/already took home/.test(barista), 'and is not asked what they kept');
+
+  // Both answers land in the ONE column the engine reads. The difference is
+  // what the engine does with it, which is decided by the role on the work row.
+  const { token } = await signIn('2026');
+  await form('/tips', { token, position: 'barista', date: '2026-09-21', daypart: 'dinner',
+    mode: 'manual', cash_tips: '44' });
+  const s = stored('Bea Nolan', '2026-09-21', 'dinner');
+  assert.strictEqual(s.sales.cash_tips_cents, 4400, 'stored in the established column');
+  assert.strictEqual(s.work.role, 'barista', 'against the role that makes it pooled');
+});
+
+// --- manual reports create money, never time --------------------------------
+
+test('2F: a manual report files the money and fabricates no time or wages', async () => {
+  const date = '2026-09-22';
+  const { token } = await signIn('8642');   // Mia Reyes, server, no punch that day
+  const res = await form('/tips', { token, position: 'server', date, daypart: 'cafe',
+    mode: 'manual', food: '400', cash_tips: '20' });
+  assert.strictEqual(res.status, 302, 'it files');
+  const s = stored('Mia Reyes', date, 'cafe');
+  assert.strictEqual(s.sales.food_cents, 40000, 'the sales are recorded');
+  assert.strictEqual(s.punches, 0, 'no punch was invented');
+  assert.strictEqual(s.work.hours, 0, 'no hours were invented');
+  assert.strictEqual(s.work.hours_source, null, 'and nothing claims to have set them');
+  assert.strictEqual(s.work.hourly_rate_cents, 0, 'no wage was invented');
+});
+
+test('2F: a manual report cannot name a service that does not exist', async () => {
+  const { token } = await signIn('8642');
+  const res = await form('/tips', { token, position: 'server', date: '2026-09-23',
+    daypart: 'brunch', mode: 'manual', cash_tips: '20' });
+  assert.strictEqual(res.status, 200, 'refused');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-09-23'").get().n, 0,
+    'and no shift was opened for it');
+});
+
+// --- corrections keep their history -----------------------------------------
+
+test('2F: a correction updates the figures and appends to the audit history', async () => {
+  const date = '2026-09-24';
+  const { token } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '50', food: '100' });
+  const first = stored('Rosa Diaz', date, 'dinner');
+  assert.strictEqual(first.subs.length, 1);
+
+  const b = await signIn('2468');
+  await form('/tips', { token: b.token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '55', food: '120' });
+  const after = stored('Rosa Diaz', date, 'dinner');
+  assert.strictEqual(after.sales.cash_tips_cents, 5500, 'the current figure is the new one');
+  assert.strictEqual(after.subs.length, 2, 'and a second audit row was appended');
+  assert.strictEqual(after.subs[0].cash_tips_cents, 5000, 'the first row still says what it said');
+  assert.strictEqual(after.subs[0].id, first.subs[0].id, 'it is the same row, not a rewrite');
+});
+
+test('2F: the portal will not overwrite an existing report without a confirmation', async () => {
+  const date = '2026-09-25';
+  const { token, cookie } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '50' });
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner');
+
+  // No confirmation ticked: refused, and the stored figure does not move.
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(sh.id), cash_tips: '99' }).toString(),
+  });
+  assert.strictEqual(res.status, 400, 'refused');
+  assert.match(await res.text(), /Tick the box/, 'and says why');
+  assert.strictEqual(stored('Rosa Diaz', date, 'dinner').sales.cash_tips_cents, 5000,
+    'nothing was overwritten');
+
+  // Ticked: it lands.
+  const ok = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(sh.id),
+      cash_tips: '99', confirm_update: '1' }).toString(),
+  });
+  assert.strictEqual(ok.status, 302);
+  assert.strictEqual(stored('Rosa Diaz', date, 'dinner').sales.cash_tips_cents, 9900);
+});
+
+// --- the receipt ------------------------------------------------------------
+
+test('2F: the receipt reads the database, and the query string cannot move it', async () => {
+  const date = '2026-09-26';
+  const { token, cookie } = await signIn('2468');
+  const res = await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '37.25', card_tips: '18' });
+  const id = stored('Rosa Diaz', date, 'dinner').subs[0].id;
+
+  const clean = await (await fetch(`${BASE}/portal/tips/receipt/${id}`, { headers: { cookie } })).text();
+  assert.match(clean, /\$37\.25/, 'the stored cash is on it');
+  assert.match(clean, /\$18\.00/, 'and the stored card');
+
+  const tampered = await (await fetch(
+    `${BASE}/portal/tips/receipt/${id}?cash=999.99&card=888.88&sales=777.77`,
+    { headers: { cookie } })).text();
+  assert.match(tampered, /\$37\.25/, 'the figures are unchanged');
+  for (const n of ['999.99', '888.88', '777.77']) {
+    assert.ok(!tampered.includes(n), `${n} was ignored`);
+  }
+});
+
+test('2F: a receipt belongs to one person and nobody else can open it', async () => {
+  const date = '2026-09-27';
+  const { token } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '12' });
+  const id = stored('Rosa Diaz', date, 'dinner').subs[0].id;
+
+  const other = await signIn('8642');            // Mia, a different server
+  const res = await fetch(`${BASE}/portal/tips/receipt/${id}`,
+    { headers: { cookie: other.cookie }, redirect: 'manual' });
+  assert.strictEqual(res.status, 404, "somebody else's receipt is not found");
+  const html = await res.text();
+  assert.ok(!html.includes('12.00'), 'and leaks no figure from it');
+
+  // A receipt that never existed answers identically — "not yours" and "not
+  // there" must not be tellable apart from outside.
+  const missing = await fetch(`${BASE}/portal/tips/receipt/99999999`,
+    { headers: { cookie: other.cookie }, redirect: 'manual' });
+  assert.strictEqual(missing.status, 404, 'same answer');
+});
+
+test('2F: the receipt says "not entered" rather than showing a card tip of zero', async () => {
+  const date = '2026-09-28';
+  const { token, cookie } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '20' });          // card left out entirely
+  const id = stored('Rosa Diaz', date, 'dinner').subs[0].id;
+  const html = await (await fetch(`${BASE}/portal/tips/receipt/${id}`, { headers: { cookie } })).text();
+  assert.match(html, /Card tips<\/span><b>Not entered<\/b>/,
+    'never said is not the same as said nothing was taken');
+});
+
+// --- integrity --------------------------------------------------------------
+
+test('2F: an authorization failure leaves no shift and no financial record', async () => {
+  // Cara is kitchen only, so she cannot open the form at all — signIn would
+  // fail on that. The PIN door is the one that still accepts a bare POST, and
+  // it is the door this is really about.
+  const res = await form('/tips', { employee_id: empId('Cara Vega'), pin: '9753',
+    position: 'kitchen', date: '2026-09-29', daypart: 'dinner', mode: 'manual', cash_tips: '80' });
+  assert.strictEqual(res.status, 403, 'refused');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE date='2026-09-29'").get().n, 0,
+    'and not even an empty shift row was left behind as evidence it was tried');
+});
+
+test('2F: a shift id that is not theirs is refused outright', async () => {
+  const date = '2026-09-30';
+  const { token } = await signIn('2468');
+  await form('/tips', { token, position: 'server', date, daypart: 'dinner',
+    mode: 'manual', cash_tips: '10' });
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner');
+
+  const other = await signIn('8642');
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie: other.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(sh.id), cash_tips: '5' }).toString(),
+  });
+  assert.strictEqual(res.status, 403, 'a shift somebody else is on is not a shift you may file against');
+  assert.strictEqual(stored('Mia Reyes', date, 'dinner').sales, null, 'and nothing was written for them');
+});
+
+test('2F: a double tap files one report, not two', async () => {
+  const date = '2026-10-25';
+  const { token } = await signIn('2468');
+  const body = { token, position: 'server', date, daypart: 'dinner', mode: 'manual', cash_tips: '31' };
+  await form('/tips', body);
+  const again = await signIn('2468');
+  await form('/tips', { ...body, token: again.token });
+  const s = stored('Rosa Diaz', date, 'dinner');
+  assert.strictEqual(s.subs.length, 1, 'the identical repeat did not append a second audit row');
+  assert.strictEqual(s.sales.cash_tips_cents, 3100);
+});
+
+test('2F: two people reporting the same service land on one shared shift', async () => {
+  const date = '2026-10-26';
+  const a = await signIn('2468');
+  const b = await signIn('8642');
+  await Promise.all([
+    form('/tips', { token: a.token, position: 'server', date, daypart: 'dinner', mode: 'manual', cash_tips: '10' }),
+    form('/tips', { token: b.token, position: 'server', date, daypart: 'dinner', mode: 'manual', cash_tips: '20' }),
+  ]);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM shifts WHERE date=?').get(date).n, 1,
+    'UNIQUE(date, daypart) and getOrIgnore held');
+  const sh = db.prepare('SELECT id FROM shifts WHERE date=?').get(date);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM work WHERE shift_id=?').get(sh.id).n, 2,
+    'and both of them are on it');
 });

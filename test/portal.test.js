@@ -155,53 +155,69 @@ test('the way in reads the same whoever opens it', async () => {
 });
 
 test('a server is asked for sales, a barista is not', async () => {
-  // The distinction survives the shared wording — it just lives where it
-  // belongs, in the form rather than on the button. And it is in the HTML as
-  // sent: a barista who is slow to run the script must not see a flash of
-  // sales fields and start filling them in.
+  // 2F: the sales categories feed tip POOLS, and the engine reads them from
+  // server rows only (shiftInputs branches on role === 'server'). A barista's
+  // sales columns are never read by any calculation, so asking for them
+  // collects a number that goes nowhere. The fields are absent from the HTML
+  // as sent — not hidden by a script a slow phone has yet to run.
   const server = await tipForm(await signIn('5555'));      // one job, and it is server
   const barista = await tipForm(await signIn('3333'));
-  assert.match(server, /id="server-sales"(?!\s*hidden)/, 'a server opens on the sales section');
-  assert.match(barista, /id="server-sales" hidden/, 'a barista opens with it already gone');
-  assert.match(barista, /id="row-sales" hidden/, 'and it is out of their running total too');
+  for (const f of ['st-food', 'st-coffee', 'st-alcohol']) {
+    assert.match(server, new RegExp(`id="${f}"`), `a server is asked for ${f}`);
+    assert.ok(!barista.includes(`id="${f}"`), `a barista is not asked for ${f}`);
+  }
+  // And cash is a DIFFERENT question for each, because the one column means
+  // opposite things: kept by the server, pooled by the barista.
+  assert.match(server, /already took home/, 'the server is asked what they kept');
+  assert.ok(!/already took home/.test(barista), 'the barista is not');
+  assert.match(barista, /Pooled cash tips/, 'the barista is asked what the pool collected');
+  assert.ok(!/Pooled cash tips/.test(server), 'the server is not');
 
-  // Two eligible jobs means nothing is assumed, including this. Bella's sales
-  // block stays shut until she says which job she worked — the script opens it
-  // when she picks Server.
+  // Two eligible jobs means nothing is assumed, including this.
   const both = await tipForm(await signIn('1111'));
-  assert.match(both, /id="server-sales" hidden/, 'somebody with a choice to make opens on neither');
+  assert.ok(!both.includes('id="st-food"'), 'somebody with a choice to make is asked for neither');
 });
-
 test('one job goes straight through, two get a choice', async () => {
   // Nobody should have to answer "what did you work" when there is only one
   // answer, and nobody with two jobs should have it guessed for them — how
   // they are paid hangs on it.
   const one = await tipForm(await signIn('3333'));
-  assert.match(one, /<input type="hidden" name="position" id="tip-position" value="barista"/,
+  assert.match(one, /<input type="hidden" name="position" value="barista">/,
     'a barista is simply a barista');
-  assert.ok(!/<select name="position"/.test(one), 'and is asked nothing');
+  assert.ok(!/<select id="st-pos"/.test(one), 'and is asked nothing');
 
   const both = await tipForm(await signIn('1111'));
-  assert.match(both, /<select name="position" id="tip-position"/, 'two jobs, so she picks');
+  assert.match(both, /<select id="st-pos" name="position"/, 'two jobs, so she picks');
   for (const r of ['server', 'barista']) {
     assert.match(both, new RegExp(`<option value="${r}"`), `${r} is on the menu`);
   }
   // And genuinely picks: no preselection, because which job she worked decides
-  // whether the tips are hers or the pool's.
+  // whether the cash is hers or the pool's.
   assert.ok(!/<option value="(server|barista)"[^>]*selected/.test(both), 'nothing is chosen for her');
-  assert.match(both, /<option value="">Which job\?<\/option>/, 'she is asked outright');
+  assert.match(both, /<option value="">Choose the job you worked<\/option>/, 'she is asked outright');
 });
 
-test('the report has a way back to the hub', async () => {
-  // Steps two and three have always had Back. Step one had only "Not you?",
-  // which signs you out — so anyone who opened the form to look at it had to
-  // end their session to leave.
+test('the workspace has no hidden steps left to tab into', async () => {
+  // 2F replaced a three-step wizard whose later steps sat in the markup the
+  // whole time. A panel that is off-screen but still focusable is a trap for a
+  // keyboard or a screen reader, and there is no longer one to fall into.
   const html = await tipForm(await signIn('1111'));
-  assert.match(html, /href="\/portal"/, 'step one gets you home');
-  assert.match(html, /class="tp-back" data-goto="1"/, 'the later steps keep theirs');
+  for (const id of ['step1', 'step2', 'step3']) {
+    assert.ok(!html.includes(`id="${id}"`), `${id} is gone, not merely hidden`);
+  }
+  // Only the form itself — the shared nav sheet below it is legitimately
+  // hidden until somebody opens it, and it is not part of this workflow.
+  const formPart = (html.split('<form')[1] || '').split('</form>')[0];
+  assert.ok(!/\shidden(?![-\w=])/.test(formPart), 'nothing inside the form is hidden at all');
 });
-
-
+test('the report has a way back to the hub', async () => {
+  // Anyone who opened the form to look at it must be able to leave without
+  // ending their session. The old step one offered only "Not you?", which
+  // signs you out.
+  const html = await tipForm(await signIn('1111'));
+  assert.match(html, /href="\/portal"/, 'there is a way home');
+  assert.ok(!/Not you\?/.test(html), 'and leaving does not mean signing out');
+});
 test('every role gets the same home, minus what does not apply', async () => {
   // One layout, not three. Submitting is a row among the others now — a staff
   // member could not find it as a headline block — so the difference between a
@@ -324,7 +340,7 @@ test('the submit row opens the form on a plain tap', async () => {
   const cookie = await signIn('1111');
   const res = await fetch(`${BASE}/portal/tips`, { headers: { cookie }, redirect: 'manual' });
   assert.strictEqual(res.status, 200, 'GET opens the form');
-  assert.match(await res.text(), /End-of-shift report/, 'which is the report');
+  assert.match(await res.text(), /Submit sales &amp; tips/, 'which is the workspace');
 });
 
 test('a cook is shown what they received, without a tip-out they never paid', async () => {
@@ -1101,19 +1117,19 @@ test('the back link follows the trail, not just the parent', async () => {
   assert.ok(!/history\.back\(\)/.test(hub), 'and the hub ships no back script');
 });
 
-test('the tips receipt lets you out — to the clock, or home', async () => {
-  // This is the one people reported: submit your tips, and the only button was
-  // "Log another shift". Clocking out is the other half of closing out a shift
-  // and it was a relaunch away.
-  const html = await (await fetch(`${BASE}/tips?done=1&cash=40.00&card=25.50&date=2026-07-27`)).text();
-  assert.match(html, /Recorded|Thanks/, 'it is the receipt');
-  assert.match(html, /href="\/portal\/clock"[^>]*>[^<]*time clock/i, 'the clock is one tap');
-  assert.match(html, /class="tp-back" href="\/portal"/, 'and there is a way home in the header');
-  assert.match(html, /href="\/tips"[^>]*>[^<]*another shift/i, 'logging another is still there');
-  // The blank that used to sit where the back button goes.
-  assert.ok(!/<div class="tp-navbar">\s*<span><\/span>/.test(html), 'no empty slot where the way out belongs');
+test('the legacy receipt URL shows no money taken from the URL', async () => {
+  // 2F: this screen used to build every figure on it out of the query string.
+  // Anyone could retype the numbers in the address bar and be shown them back
+  // as though the restaurant had recorded them. It shows no amounts at all
+  // now — the real receipt reads the stored row, behind a session that proves
+  // whose it is.
+  const html = await (await fetch(`${BASE}/tips?done=1&cash=40.00&card=25.50&sales=999.99`)).text();
+  assert.match(html, /ecorded/, 'it still confirms the report');
+  for (const n of ['40.00', '25.50', '999.99']) {
+    assert.ok(!html.includes(n), `${n} came off the URL and is not shown back`);
+  }
+  assert.match(html, /href="\/portal"/, 'and there is a way out');
 });
-
 // ===========================================================================
 // PHASE 2E-1 — proving the Pay archive rather than asserting it.
 // ===========================================================================

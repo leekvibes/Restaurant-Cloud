@@ -1160,3 +1160,164 @@ visibility · pay-statement availability · pay-finalized notifications.
 
 Taxes, deductions, benefits, downloadable pay statements and net pay require a
 future Payroll/pay-statement model. They are not display rows to be handcrafted.
+
+---
+
+## §13 — Phase 2F: Employee Sales & Tips submission
+
+### Routes
+
+| Route | What it is |
+|---|---|
+| `GET /portal/tips` | The submission workspace. One page. `?shift=<id>` selects a shift, `?position=<slug>` a filing job, `?manual=1` the manual path. |
+| `POST /portal/tips` | Same handler — an old page in somebody's pocket lands somewhere sensible. |
+| `POST /portal/tips/submit` | The write, session-authenticated. Requires a confirmation to overwrite. |
+| `GET /portal/tips/receipt/:id` | The durable receipt. `:id` is a `tip_submissions.id`. Registered before any generic parameter route. |
+| `POST /tips` | The legacy PIN door. Same write core, no confirmation (it has no correction UI to confirm with). |
+| `GET /tips?done=1` | Compatibility only. Shows **no amounts**. Redirects a signed-in employee to their real receipt. |
+
+### The rule that shapes everything
+
+`server_sales.cash_tips_cents` means **two opposite things** depending on the
+job on the `work` row, and `engine.js` is where that is decided:
+
+- `role === 'server'` → `servers[]`, and `cashTips` is **subtracted** from what
+  reaches the paycheck. Money already in their pocket.
+- anything else → `support[]`, and `cashTips` is **summed into `staffCash`**,
+  lands in the shared cash jar and is split by hours. *"nobody keeps their own."*
+
+So the workspace asks two different questions and stores the answer in the one
+column the engine already reads. **No new field was added** — a nicer label is
+not a reason to add a column the engine would then have to learn.
+
+### Filing-position capability matrix
+
+Derived from the single discriminator the engine itself uses (`shiftInputs`
+branches on `role === 'server'`), not from a second list that could drift.
+
+| Capability | server | any other eligible position |
+|---|---|---|
+| `reports_food_sales` | yes | **no** — support sales columns are never read by any calculation |
+| `reports_coffee_sales` | yes | no |
+| `reports_alcohol_sales` | yes (optional) | no |
+| `reports_card_tips` | yes | yes |
+| `reports_server_cash_kept` | yes | no |
+| `reports_pooled_cash` | no | yes |
+| `requires_sales` | no — a blank form never wipes a stored figure | no |
+| `can_correct_submission` | yes | yes |
+
+### Sales categories
+
+`food` → *Kitchen / food sales*, `coffee` → *Coffee & beverage sales*,
+`alcohol` → *Alcohol sales* (optional). These are **tip-allocation categories,
+not payment methods** — alcohol drives the bar pot, coffee the barista pot.
+They are never renamed to cash/card sales and never combined.
+
+### Card-tip tri-state
+
+| Posted | Meaning | Stored |
+|---|---|---|
+| absent | not stated | `server_sales` untouched; audit row records `NULL` |
+| blank | not stated | as above |
+| `0` | the employee states there were none | `0` written; audit row `0` |
+| positive | a stated amount | written; audit row carries it |
+
+The tri-state survives **only in `tip_submissions`** — `server_sales.card_tips_cents`
+is `NOT NULL DEFAULT 0`, so once a row exists a stored `0` cannot be told apart
+from "never said". The workspace, review and receipt all read the state from the
+latest audit row and print **"Not entered"** rather than `$0.00`.
+
+### Shift-reporting modes
+
+1. **Current active shift** — an open punch. Shown first, labelled `Current shift · …`.
+   Submitting does **not** clock anybody out, modify the punch, guess an end
+   time, finalise hours, calculate wages, or complete a Timesheet.
+2. **Recorded past shift** — an employee-owned punch or work row. Date and
+   daypart come from the **row**, never from the body.
+3. **Manual** — *"Report a shift not listed"*. Validated date + established
+   daypart + held-and-eligible position. Resolves or creates the shared shift
+   via `getOrIgnore()`. **Creates no punch, no hours, no wage, no overtime and
+   no Timesheet completion** — proven by test, which asserts
+   `punches = 0`, `hours = 0`, `hours_source = NULL`, `hourly_rate_cents = 0`.
+4. **Correction** — see below.
+
+Priority order: current → recorded and unreported → manual → already submitted.
+Preselected only when there is exactly one obvious answer.
+
+### Strict money grammar
+
+One parser, `parseMoney()`, replacing `parseFloat` for this workflow. Four
+outcomes: `absent`, `blank`, `ok` (exact integer cents, 0 included), `invalid`.
+
+Accepted: `0`, `0.00`, `12`, `12.5`, `12.50`, surrounding whitespace.
+Rejected: negatives, `12.999`, `12abc`, `1e3`, `$20`, `1,200`, `12.5.5`, `.5`,
+`12.`, `NaN`, `Infinity`, anything over $1,000,000.
+
+A rejected figure is **refused, never rounded, truncated or turned into zero**,
+and refusal happens *before* the shift is resolved — so a typo leaves no shift
+row behind as evidence it was attempted.
+
+Cents are computed as `whole * 100 + frac` on the two string halves, so no
+binary floating-point value ever touches stored money.
+
+### Correction and audit
+
+Existing behaviour preserved exactly: the current `server_sales`/`work` values
+are updated and a **new `tip_submissions` row is appended**; earlier rows are
+never deleted or mutated. The workspace makes it explicit — `Previously
+submitted`, the values on file, an `Update report` button, and a required
+confirmation reading *"This replaces the current values. Your earlier
+submission stays in the audit history."*
+
+The server decides new-vs-correction by re-reading the database. A posted
+`isCorrection` flag is never trusted.
+
+**Stale-edit limitation, documented not fixed:** the schema carries no version
+or updated-at on `server_sales`, so two people editing the same row cannot be
+told apart and last-write wins. No optimistic-locking column was added. The
+audit history means nothing is lost, only that the *current* value is the last
+one written.
+
+### Concurrency and idempotency
+
+- `UNIQUE(date, daypart)` plus `getOrIgnore()` remain the idempotency boundary;
+  two people reporting the same service concurrently resolve to one shift
+  (proven by test).
+- An **identical** repeat within 60 seconds returns the existing receipt rather
+  than appending a second audit row. Genuine corrections differ in at least one
+  figure and are never swallowed.
+- The write runs in one `db.transaction`.
+- Authorization failure and validation failure both write nothing at all.
+
+### Receipt authority
+
+Every figure on `/portal/tips/receipt/:id` is read back out of the stored row.
+Changing any query parameter changes nothing (proven by test). A receipt
+belongs to one employee; a foreign id and a missing id return the **same** 404,
+so "not yours" and "not there" cannot be told apart from outside.
+
+### Reporting window
+
+**There is no write-time cutoff, and this phase deliberately keeps it that way.**
+Two separate things, not to be conflated:
+
+- Home reminder window: **7 days**
+- Write eligibility: **unlimited**
+
+### Future settings — Owner workspace → Settings → Staff Portal → Sales & tips
+
+Not implemented. Everything below belongs inside `tipsEligibility()` /
+`filingCapabilities()` so adding it touches one place rather than every route:
+submission enabled; eligible filing positions; reporting window; required
+categories by position; card-tip reporting; server cash reporting; pooled cash
+reporting; correction availability; all-zero report policy; late-report
+behaviour; high-value warnings; receipt visibility; manager approval if ever added.
+
+### Deviation from the brief
+
+The legacy PIN form (`tipsFormPage`, the old three-step wizard) and its `.tp-*`
+CSS are **still present**, because `GET /tips` is still the PIN door — an
+authentication surface the brief requires preserving. The wizard is gone from
+the portal workflow; removing the markup entirely would retire the PIN door
+with it. Its write now goes through the same core, so the money grammar,
+authorization and audit behaviour cannot differ between the two doors.

@@ -1323,3 +1323,67 @@ body.bare {
 .pt-state.ok { background: var(--pt-ok-soft); }
 .pt-state.warn { background: var(--pt-warn-soft); }
 .pt-state.idle { background: var(--pt-page); border: 1px solid var(--pt-line); }
+
+/* ---------------------------------------------------------------------------
+   Sales & tips submission workspace  (Phase 2F)
+   One page, no hidden steps. Everything below sits inside .pt, so the custom
+   properties resolve — a sibling of .pt inherits none of them.
+   --------------------------------------------------------------------------- */
+.st-body { width: 100%; max-width: 560px; margin-left: auto; margin-right: auto; }
+.st-title { font-size: 26px; line-height: 1.15; margin: 4px 0 2px; color: var(--pt-ink); }
+.st-lede { margin: 0 0 18px; color: var(--pt-muted); font-size: 15px; }
+.st-sec { margin: 0 0 22px; }
+.st-h { font-size: 13px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--pt-muted); margin: 0 0 10px; font-weight: 700; }
+.st-sub { margin: 0 0 12px; color: var(--pt-muted); font-size: 14px; line-height: 1.45; }
+
+/* Shift choices. The whole row is the target — a 44px radio is not a phone
+   control, and at the end of a shift nobody is aiming carefully. */
+.st-chs { display: flex; flex-direction: column; gap: 10px; }
+.st-ch { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px;
+  background: var(--pt-field); border: 1px solid var(--pt-line); border-radius: 14px;
+  cursor: pointer; }
+.st-ch.is-on { border-color: var(--pt-green); box-shadow: inset 0 0 0 1px var(--pt-green); }
+.st-ch input { margin: 2px 0 0; width: 20px; height: 20px; flex: none; accent-color: var(--pt-green); }
+.st-ch-b { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.st-ch-b b { font-size: 16px; color: var(--pt-ink); font-weight: 650; }
+.st-ch-b i { font-style: normal; font-size: 13px; color: var(--pt-muted); }
+
+/* Money and text fields. */
+.st-f { margin: 0 0 16px; }
+.st-lab { display: block; font-size: 15px; color: var(--pt-ink); font-weight: 600; margin: 0 0 6px; }
+.st-opt { font-style: normal; font-weight: 400; color: var(--pt-muted); }
+.st-in { position: relative; display: flex; align-items: center; }
+.st-cur { position: absolute; left: 14px; color: var(--pt-muted); font-size: 17px; pointer-events: none; }
+.st-in input { width: 100%; padding: 14px 14px 14px 30px; font-size: 17px; }
+.st-f input, .st-f select, .st-f textarea {
+  width: 100%; background: var(--pt-field); color: var(--pt-ink);
+  border: 1px solid var(--pt-line); border-radius: 12px; padding: 14px;
+  font: inherit; font-size: 17px; /* 17px+ stops iOS zooming the page on focus */ }
+.st-f textarea { resize: vertical; }
+.st-f input:focus, .st-f select:focus, .st-f textarea:focus {
+  outline: 2px solid var(--pt-green); outline-offset: 1px; }
+.st-f.is-bad input, .st-f.is-bad select { border-color: var(--pt-red); }
+.st-hint { margin: 6px 0 0; font-size: 13px; color: var(--pt-muted); line-height: 1.45; }
+/* Errors carry a mark as well as a colour — colour alone is not a message. */
+.st-err { margin: 6px 0 0; font-size: 13px; color: var(--pt-red); font-weight: 600; }
+.st-err::before { content: "! "; }
+
+.st-alt { display: inline-block; margin: 6px 0 0; font-size: 15px;
+  color: var(--pt-green); text-decoration: underline; }
+
+/* Correction. The word "Previously submitted" carries the state; the tone is
+   only reinforcement. */
+.st-corr { margin: 0 0 22px; }
+.st-confirm { display: flex; align-items: flex-start; gap: 10px; margin: 14px 0 0;
+  font-size: 15px; color: var(--pt-ink); cursor: pointer; }
+.st-confirm input { width: 22px; height: 22px; margin: 1px 0 0; flex: none; accent-color: var(--pt-green); }
+.st-confirm.is-bad { color: var(--pt-red); }
+
+.st-review .tc-rows { background: var(--pt-field); border-radius: 14px; padding: 4px 16px; }
+/* Clears the bottom tab bar and the home indicator. */
+.st-send { margin: 4px 0 calc(24px + env(safe-area-inset-bottom)); }
+
+@media (min-width: 768px) {
+  .st-title { font-size: 30px; }
+}
