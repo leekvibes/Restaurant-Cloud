@@ -3914,7 +3914,35 @@ const SHIFT_DONE = 'emailed';
 // for when that line moves again.
 const HISTORY_FROM = process.env.PORTAL_HISTORY_FROM || '2026-07-18';
 
-function earningsFor(empId, limit = 400) {
+/**
+ * How many finished shifts this person has. One COUNT, no engine.
+ *
+ * The history archive needs a total to say "page 2 of 6" with, and it must not
+ * get that by loading the history.
+ */
+const earningsCount = (empId) => db.prepare(`SELECT COUNT(*) n
+  FROM shifts sh JOIN work w ON w.shift_id = sh.id
+  WHERE w.employee_id = ? AND sh.status = '${SHIFT_DONE}' AND sh.date >= ?`)
+  .get(empId, HISTORY_FROM).n;
+
+/**
+ * One page of shifts, costed.
+ *
+ * The paging is done by SQL, not by loading everything and slicing. That
+ * distinction is the whole scalability story here: costing a shift means
+ * running the tip engine over it, and this function used to be called with a
+ * limit of 400 to render a page that showed twenty rows — four hundred engine
+ * runs, every time somebody opened Pay, growing with every shift they ever
+ * worked. Now it runs the engine exactly `limit` times.
+ *
+ * Ordering is (date DESC, shift id DESC): the id is the tie-breaker, so two
+ * shifts on one date can never swap places between page 1 and page 2 and
+ * quietly hide a row or show it twice.
+ *
+ * The shape of a row is unchanged, so every existing caller and every existing
+ * bookmark still works.
+ */
+function earningsFor(empId, limit = 400, offset = 0) {
   // w.hours comes along because somebody who is in neither payout list — a
   // cook on a night with no kitchen pot — still worked, and their hours are
   // the only thing their screen has to show. Reading them from the work row
@@ -3931,7 +3959,8 @@ function earningsFor(empId, limit = 400) {
     JOIN employees e ON e.id = w.employee_id
     LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
     WHERE w.employee_id = ? AND sh.status = '${SHIFT_DONE}' AND sh.date >= ?
-    ORDER BY sh.date DESC, sh.id DESC LIMIT ?`).all(empId, HISTORY_FROM, limit);
+    ORDER BY sh.date DESC, sh.id DESC LIMIT ? OFFSET ?`)
+    .all(empId, HISTORY_FROM, limit, offset);
 
   const out = [];
   for (const sh of worked) {
@@ -4828,23 +4857,6 @@ function shiftBreakdown(x) {
 // One shift on its own, reached by tapping any row in the history. Recomputed
 // from the same list the page is built from, so a shift you can see is a shift
 // you can open; anything else falls back to the full list rather than 404ing.
-app.get('/portal/earnings/:id', (req, res) => {
-  const who = requirePortal(req, res);
-  if (!who) return;
-  const { emp } = who;
-  const id = Number(req.params.id);
-  const x = earningsFor(emp.id, 400).find((e) => e.shift.id === id);
-  if (!x) return res.redirect('/portal/earnings');
-  res.send(portalPage('Your shift', `
-    ${portalTop({ href: '/portal/earnings', label: 'Earnings' }, 'Shift pay')}
-    <div class="pt-body">
-      <h1 class="pt-title">${esc(niceDate(x.shift.date))}</h1>
-      <div class="pt-kick"><span>${esc(dp(x.shift.daypart))} service</span></div>
-      ${shiftBreakdown(x)}
-    </div>
-    <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
-});
-
 /**
  * One person's pay period, exactly as their emailed summary states it.
  *
@@ -4864,153 +4876,307 @@ function periodPayFor(empId, period) {
 /** The periods a person can look back over, newest first. */
 const payPeriodsFor = () => recentPeriods(8);
 
+// ---------------------------------------------------------------------------
+// PAY — one period at a time, with the archive on its own page.
+//
+// Three views: the selected pay period, a paginated shift history, and one
+// shift. They were one page, which worked at ten shifts and stopped working at
+// a hundred — the page loaded and costed every shift a person had ever worked
+// in order to render a summary and twenty rows.
+//
+// Every figure comes from aggregatePayroll through periodPayFor. Nothing here
+// re-derives pay from the rows on screen; if the display and the cheque ever
+// disagree, that is a bug in one place rather than a difference of opinion
+// between two.
+// ---------------------------------------------------------------------------
+
+/**
+ * What `takeHome` actually is, said once so every screen says it the same way.
+ *
+ * It is `wage + paycheckTips` — straight time, plus the overtime premium, plus
+ * the tips routed to the cheque. It is a GROSS figure: this app models no
+ * deductions, no tax, no benefits, so the money that reaches somebody's bank is
+ * less than this and nothing here knows by how much.
+ *
+ * The old page called it "On this check" and "Total on this check", which reads
+ * as the cheque amount. It is not, and the gap is somebody's withholding. Until
+ * a real pay-statement model exists, this is labelled as what it is.
+ */
+const PAY_GROSS_LABEL = 'Gross pay';
+const PAY_GROSS_NOTE = 'Before tax and deductions. What reaches your bank will be less.';
+
+/**
+ * The state of a period, from what the data can actually prove.
+ *
+ * `sendRecord` means the payroll summary was SENT — the owner ran the period.
+ * It is not proof of a bank transfer, so nothing here says "Paid". Saying less
+ * than you know is recoverable; saying more is not.
+ */
+function payPeriodStatus(period, pay, todayIso) {
+  const sent = sendRecord(period.start);
+  if (!pay) return { key: 'none', label: 'No pay recorded', tone: 'off', note: '', settled: false };
+  if (sent) {
+    return { key: 'sent', label: 'Sent to payroll', tone: 'done',
+      note: `Your manager sent this period on ${String(sent.sent_at).slice(0, 10)}.`,
+      sentAt: String(sent.sent_at).slice(0, 10), settled: true };
+  }
+  if (todayIso <= period.end) {
+    return { key: 'running', label: 'Still running', tone: 'off',
+      note: 'This period has not ended. These figures will keep changing.', settled: false };
+  }
+  return { key: 'pending', label: 'Not sent yet', tone: 'warn',
+    note: 'This period has ended and your manager has not sent it yet. The figures can still change.',
+    settled: false };
+}
+
+/** One period, normalised. Formatting happens in the renderer, not here. */
+function payPeriodModel(emp, period, todayIso) {
+  const pay = period ? periodPayFor(emp.id, period) : null;
+  const status = payPeriodStatus(period, pay, todayIso);
+  // Only rows the data supports. A zero line on a screen about somebody's pay
+  // reads as a statement about their pay.
+  const payment = !pay ? [] : [
+    ['Wages', pay.wage - (pay.otPay || 0)],
+    ...(pay.otPay ? [['Overtime wages', pay.otPay]] : []),
+    ...(pay.paycheckTips ? [['Card tips', pay.paycheckTips]] : []),
+  ].filter(([, v]) => v);
+  const separate = !pay || !pay.cashTips ? [] : [['Cash tips', pay.cashTips]];
+  return {
+    key: period ? period.start : null,
+    start: period ? period.start : null,
+    end: period ? period.end : null,
+    label: period ? labelFor(period) : '',
+    status,
+    grossCents: pay ? pay.takeHome : 0,
+    payment,
+    separate,
+    separateTotal: separate.reduce((a, [, v]) => a + v, 0),
+    hours: pay ? { total: pay.hours, ot: pay.otHours || 0,
+      wk1: pay.wk1Hours || 0, wk2: pay.wk2Hours || 0, shifts: pay.shifts } : null,
+    timesheetHref: period ? `/portal/timesheet?p=${encodeURIComponent(period.start)}` : null,
+  };
+}
+
+/** One row in a list of shifts. The same shape on Pay and in the archive. */
+const shiftRowModel = (x) => ({
+  id: x.shift.id,
+  date: x.shift.date,
+  position: posName(x.role || x.shift.worked_role),
+  service: x.shift.daypart ? dp(x.shift.daypart) : '',
+  hours: x.hours || 0,
+  wageCents: x.wage || 0,
+  tipsCents: x.kept || 0,
+  kind: x.kind,
+  href: `/portal/earnings/${x.shift.id}`,
+});
+
+const payMoney = (c) => money(c || 0);
+const payHrs = (h) => `${Number(h || 0) % 1 ? Number(h).toFixed(2).replace(/0$/, '') : Number(h || 0)}h`;
+
+/** One shift row, rendered. */
+const payShiftRow = (r, from) => `
+  <a class="tc-row" href="${r.href}${from ? `?from=${from}` : ''}">
+    <span class="tc-row-l">
+      <b>${esc(niceDate(r.date))}${r.service ? ` · ${esc(r.service)}` : ''}</b>
+      <i>${esc(r.position)} · ${esc(payHrs(r.hours))}${r.wageCents ? ` · ${esc(payMoney(r.wageCents))} wages` : ''}</i></span>
+    <span class="tc-row-r"><b>${r.tipsCents ? esc(payMoney(r.tipsCents)) : esc(payHrs(r.hours))}</b>
+      <i>${r.tipsCents ? 'tips' : 'worked'}</i></span>
+  </a>`;
+
 app.get('/portal/earnings', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const { emp } = who;
-  const all = earningsFor(emp.id, 400);
-  const last = all[0];
-  const paid = all.filter((x) => x.kind !== 'hours');
-  const keptTotal = paid.reduce((a, x) => a + x.kept, 0);
-  const avg = paid.length ? Math.round(keptTotal / paid.length) : 0;
-  // Hours are counted over every shift, tipped or not — they are the part of
-  // the record that is the same for a cook and a server.
-  const hoursTotal = all.reduce((a, x) => a + (Number(x.hours) || 0), 0);
-  const wageTotal = all.reduce((a, x) => a + (x.wage || 0), 0);
-  const since = all.length ? all[all.length - 1].shift.date : null;
-
-  // The rate a past-shift subtitle reads, and the hours·rate line under it.
-  const rateOf = (x) => (x.salaried ? 'salaried' : x.rate ? `${money(x.rate)}/hr` : 'no rate set');
-  const worked = (x) => `${hrsShort(x.hours)} &middot; ${rateOf(x)}`;
-
-  // Somebody who received nothing has their hours to show, not a zero.
-  //
-  // The engine lists a person on a shift's support side whether or not any of
-  // the tip-out reached them — a training position sits there with nothing,
-  // and so does anyone whose share worked out at zero. Leading with "You kept
-  // $0.00" tells them the one thing they already know and hides the one thing
-  // they came for. It also read, to the person holding the phone, like an
-  // answer about their pay rather than an absence of tips.
-  //
-  // Deliberately not keyed on the position's takes_tips setting: that says who
-  // is ASKED to hand tips in, and a busser is set to 0 while still receiving a
-  // share every service. What matters here is only whether anything arrived.
-  const gotNothing = (x) => !x.kept && !x.collected;
-
-  // The all-time figures, split into the two rows the design asks for: the
-  // money and hours totals on top, the counts centered underneath. Built as a
-  // list so a cook (no tips) simply has fewer cells rather than a different
-  // layout.
-  //
-  // Rounded to whole dollars here, unlike the exact per-shift figures. Three
-  // mono amounts with cents do not fit three-across on a phone — "$6,813.33"
-  // collides with its neighbour — and a running total is a sense of the size,
-  // not a figure anyone reconciles to the penny.
-  const money0 = (c) => '$' + Math.round((c || 0) / 100).toLocaleString('en-US');
-  const topStats = [
-    keptTotal ? [money0(keptTotal), 'kept total'] : null,
-    [hrsShort(hoursTotal).replace(' hrs', ''), 'hours'],
-    wageTotal ? [money0(wageTotal), 'hours pay'] : null,
-  ].filter(Boolean);
-  const botStats = [
-    [String(all.length), `shift${all.length === 1 ? '' : 's'}`],
-    keptTotal ? [money0(avg), 'avg tips / shift'] : null,
-  ].filter(Boolean);
-  const statCell = ([v, k]) => `<div class="pt-stat"><b>${v}</b><span>${k}</span></div>`;
-
-  // --- the pay period, at the top, because it is the number people came for --
-  //
-  // This is what the emailed summary says, on a page. It opens on the last
-  // period that has ENDED rather than the one running: a fortnight still being
-  // worked has a total that will be wrong by the end of the night, and the
-  // figure somebody wants to check is the one they were actually paid.
-  const payPeriods = payPeriodsFor();
+  const periods = payPeriodsFor();
   const todayIso = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
-  const defaultIdx = Math.max(0, payPeriods.findIndex((x) => todayIso > x.end));
-  const pIdx = (() => {
-    const asked = payPeriods.findIndex((x) => x.start === req.query.p);
-    return asked >= 0 ? asked : defaultIdx;
-  })();
-  const period = payPeriods[pIdx];
-  const pay = period ? periodPayFor(emp.id, period) : null;
-  const sent = period ? sendRecord(period.start) : null;
-  const payLink = (i) => `/portal/earnings?p=${payPeriods[i].start}`;
+  // Opens on the last period that has ENDED. A fortnight still being worked has
+  // a total that will be wrong by closing time, and the figure somebody came to
+  // check is the one they were actually paid.
+  const defaultIdx = Math.max(0, periods.findIndex((x) => todayIso > x.end));
+  const asked = periods.findIndex((x) => x.start === req.query.p);
+  const idx = asked >= 0 ? asked : defaultIdx;
+  const period = periods[idx];
+  const m = payPeriodModel(emp, period, todayIso);
 
-  const payCard = !period ? '' : `
-    <div class="pt-kick pt-kick-sec"><span>Pay period</span></div>
-    <nav class="pp-nav">
-      <a class="pp-arrow${pIdx + 1 < payPeriods.length ? '' : ' off'}"
-         href="${pIdx + 1 < payPeriods.length ? payLink(pIdx + 1) : '#'}" aria-label="Earlier period">‹</a>
-      <b class="pp-range">${esc(labelFor(period))}</b>
-      <a class="pp-arrow${pIdx > 0 ? '' : ' off'}"
-         href="${pIdx > 0 ? payLink(pIdx - 1) : '#'}" aria-label="Later period">›</a>
-    </nav>
-    ${!pay ? `<p class="pt-quiet">You have nothing recorded in this period.</p>` : `
-    <div class="pp-hero">
-      <span>On this check</span>
-      <b>${money(pay.takeHome)}</b>
-      <i>${sent ? `Sent ${esc(String(sent.sent_at).slice(0, 10))}`
-        : todayIso > period.end ? 'Not sent yet' : 'This period is still running'}</i>
-    </div>
-    <div class="pt-line"><span>Shifts worked</span><b>${pay.shifts}</b></div>
-    <div class="pt-line"><span>Total hours</span><b>${pay.hours}</b></div>
-    ${pay.wk1Hours || pay.wk2Hours
-      ? `<p class="pt-fine">Week 1: ${pay.wk1Hours} hrs · Week 2: ${pay.wk2Hours} hrs</p>` : ''}
-    ${pay.otHours ? `<div class="pt-line"><span>Of that, overtime</span><b>${pay.otHours} hrs</b></div>` : ''}
+  // Only the shifts inside this period, costed. Not the archive.
+  const mine = period
+    ? earningsFor(emp.id, 60).filter((x) => x.shift.date >= period.start && x.shift.date <= period.end)
+    : [];
+  const rows = mine.map(shiftRowModel);
+  const link = (i) => `/portal/earnings?p=${encodeURIComponent(periods[i].start)}`;
 
-    <div class="pt-kick pt-kick-sec"><span>On your paycheck</span></div>
-    ${/* Zero lines are left off. This page's rule — a cook opening it sees "You
-           worked", not "You kept $0.00" — is that on a screen about pay a zero
-           reads as a statement about their pay. A kitchen hand gets no card
-           tips, and a "Card tips $0.00" line tells them nothing they did not
-           know while implying it might have been otherwise. */''}
-    ${pay.wage ? `<div class="pt-line"><span>Wages</span><b>${money(pay.wage)}</b></div>` : ''}
-    ${pay.otPay ? `<p class="pt-fine">Includes ${money(pay.otPay)} of overtime pay.</p>` : ''}
-    ${pay.paycheckTips ? `<div class="pt-line"><span>Card tips</span><b>${money(pay.paycheckTips)}</b></div>` : ''}
-    <div class="pt-line"><span>Total on this check</span><b class="ok">${money(pay.takeHome)}</b></div>
+  res.send(portalPage('Pay', `
+    ${portalTop(null, 'Pay')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">Pay</h1>
 
-    ${pay.cashTips ? `
-      <div class="pt-kick pt-kick-sec"><span>Already paid to you</span></div>
-      <div class="pt-line"><span>Cash tips</span><b>${money(pay.cashTips)}</b></div>
-      <p class="pt-fine">You already have this — it is not on the check.</p>` : ''}
-    <p class="pt-fine">This adds up the shifts below — it isn't extra pay.</p>`}`;
+      ${!period ? '' : `<nav class="tsp">
+        <a class="tsp-arrow${idx + 1 < periods.length ? '' : ' off'}"
+           href="${idx + 1 < periods.length ? link(idx + 1) : '#'}"
+           aria-label="Earlier pay period">←</a>
+        <select class="tsp-sel" data-pay-period aria-label="Pay period">
+          ${periods.map((p) => `<option value="${esc(p.start)}"${p.start === period.start ? ' selected' : ''}>${esc(labelFor(p))}</option>`).join('')}
+        </select>
+        ${/* Never into a period that has not begun. */''}
+        <a class="tsp-arrow${idx > 0 ? '' : ' off'}"
+           href="${idx > 0 ? link(idx - 1) : '#'}" aria-label="Later pay period">→</a>
+      </nav>`}
 
-  res.send(portalPage("What you've earned", `
-    ${portalTop({ href: '/portal', label: 'Home' }, 'Earnings')}
-    <div class="pt-body">
-      <h1 class="pt-title">What you've earned</h1>
-      ${payCard}
-      ${last ? `
-        <div class="pt-kick"><span>Your last shift · ${esc(niceDate(last.shift.date))} ${esc(dp(last.shift.daypart))}</span></div>
-        ${shiftBreakdown(last)}`
-      : `<p class="pt-quiet">Nothing recorded yet. Once your manager sends a shift
-          you worked, what you made shows up here.</p>`}
+      ${!period || m.status.key === 'none' ? `<div class="tc-empty">
+        <b>No pay recorded${period ? ' for this period' : ' yet'}</b>
+        <span>${period ? 'You have nothing on this period.' : 'Once your manager sends a period you worked, it shows up here.'}</span>
+      </div>` : `
+      <section class="tcc tcc-${m.status.tone}">
+        <h2 class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+          <span class="tcc-state">${esc(m.status.label)}</span></h2>
+        <div class="tcc-clock">${esc(payMoney(m.grossCents))}</div>
+        <div class="tcc-cap">${esc(PAY_GROSS_LABEL.toLowerCase())} · ${esc(m.label)}</div>
+        ${m.status.note ? `<p class="tcc-note${m.status.tone === 'warn' ? ' tcc-note-warn' : ''}">${esc(m.status.note)}</p>` : ''}
+        <p class="tcc-note">${esc(PAY_GROSS_NOTE)}</p>
+      </section>
 
-      ${all.length ? `
-      <div class="pt-kick"><span>All time</span>${since ? `<span>Since ${esc(niceDate(since))}</span>` : ''}</div>
-      <div class="pt-stats">
-        <div class="pt-stat-row">${topStats.map(statCell).join('')}</div>
-        ${botStats.length ? `<div class="pt-stat-row bot">${botStats.map(statCell).join('')}</div>` : ''}
+      ${m.hours ? `<h2 class="tc-kick tc-kick-sec">This period<b>${esc(payHrs(m.hours.total))}</b></h2>
+      <div class="tcc tcc-plain">
+        <div class="tcc-facts">
+          <div class="tcc-f"><span>Shifts worked</span><b>${m.hours.shifts}</b></div>
+          <div class="tcc-f"><span>Hours</span><b>${esc(payHrs(m.hours.total))}</b></div>
+          ${m.hours.ot ? `<div class="tcc-f"><span>Overtime</span><b>${esc(payHrs(m.hours.ot))}</b></div>` : ''}
+          ${m.hours.wk1 || m.hours.wk2 ? `<div class="tcc-f"><span>Week 1 · Week 2</span>
+            <b>${esc(payHrs(m.hours.wk1))} · ${esc(payHrs(m.hours.wk2))}</b></div>` : ''}
+        </div>
+        <div class="tcc-acts">
+          <a class="tc-btn tc-btn-quiet tc-btn-big" href="${m.timesheetHref}">View timesheet</a>
+        </div>
       </div>` : ''}
 
-      ${all.length > 1 ? `
-      <div class="pt-kick"><span>Past shifts</span><span>${all.length - 1}</span></div>
-      <div class="pt-past">
-        ${all.slice(1).map((x) => `<a class="pt-pastrow" href="/portal/earnings/${x.shift.id}">
-          <span class="pt-pr-m">
-            <span class="pt-pd">${esc(niceDate(x.shift.date))}</span>
-            <span class="pt-ps">${esc(dp(x.shift.daypart))}</span>
-            <b class="${x.kind === 'hours' || gotNothing(x) ? '' : 'ok'}">${x.kind === 'hours' || gotNothing(x)
-              ? hrsShort(x.hours) : money(x.kept)}</b>
-            <span class="pt-chev">›</span>
-          </span>
-          <span class="pt-pr-s">
-            <span>${worked(x)}${x.salaried || !x.rate ? '' : ` &middot; ${money(x.wage)} hours pay`}</span>
-          </span>
-        </a>`).join('')}
+      ${m.payment.length ? `<h2 class="tc-kick tc-kick-sec">On this payment</h2>
+      <div class="tcc tcc-plain">
+        <div class="tcc-facts">
+          ${m.payment.map(([k, v]) => `<div class="tcc-f"><span>${esc(k)}</span><b>${esc(payMoney(v))}</b></div>`).join('')}
+        </div>
+        <div class="pes-total"><span>${esc(PAY_GROSS_LABEL)}</span><b>${esc(payMoney(m.grossCents))}</b></div>
       </div>` : ''}
+
+      ${m.separate.length ? `<h2 class="tc-kick tc-kick-sec">Already received</h2>
+      <div class="tcc tcc-plain">
+        <div class="tcc-facts">
+          ${m.separate.map(([k, v]) => `<div class="tcc-f"><span>${esc(k)}</span><b>${esc(payMoney(v))}</b></div>`).join('')}
+        </div>
+        ${/* Said once. The old page said it three times in three places. */''}
+        <p class="tcc-note">This money was paid separately and is not included in the payment above.</p>
+      </div>` : ''}
+
+      ${rows.length ? `<h2 class="tc-kick tc-kick-sec">Shifts in this period<b>${rows.length}</b></h2>
+        <div class="tc-rows">${rows.map((r) => payShiftRow(r, 'pay')).join('')}</div>`
+        : `<div class="tc-empty"><b>No shifts in this period</b>
+             <span>Nothing has been sent for this fortnight yet.</span></div>`}
+      `}
+
+      <a class="tc-more" href="/portal/earnings/shifts">View all shift history ›</a>
     </div>
-    <p class="pt-foot">These amounts land in your emailed shift receipt too.</p>`));
+    <script>
+      var sel = document.querySelector('[data-pay-period]');
+      if (sel) sel.addEventListener('change', function () {
+        location.href = '/portal/earnings?p=' + encodeURIComponent(sel.value);
+      });
+    </script>`));
+});
+
+/**
+ * The archive.
+ *
+ * Registered BEFORE /portal/earnings/:id, or Express would read "shifts" as an
+ * id and hand this page to the detail route.
+ *
+ * Server-side paging: one COUNT and one page of rows. Nothing loads a person's
+ * whole history to show twenty lines of it.
+ */
+const PAY_PAGE = 20;
+
+app.get('/portal/earnings/shifts', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const total = earningsCount(emp.id);
+  const pages = Math.max(1, Math.ceil(total / PAY_PAGE));
+  // A nonsense page lands on a real one rather than an error or an empty grid.
+  const asked = Math.floor(Number(req.query.page));
+  const page = Number.isFinite(asked) && asked >= 1 ? Math.min(asked, pages) : 1;
+  const rows = earningsFor(emp.id, PAY_PAGE, (page - 1) * PAY_PAGE).map(shiftRowModel);
+  const to = (n) => `/portal/earnings/shifts?page=${n}`;
+
+  res.send(portalPage('Shift history', `
+    ${portalTop({ href: '/portal/earnings', label: 'Pay' }, 'Shift history')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">Shift history</h1>
+      ${total ? `<p class="tc-note">${total} shift${total === 1 ? '' : 's'} recorded.</p>
+        <div class="tc-rows">${rows.map((r) => payShiftRow(r, 'shifts')).join('')}</div>
+        ${pages > 1 ? `<nav class="pay-pager" aria-label="Shift history pages">
+          <a class="tsp-arrow${page > 1 ? '' : ' off'}"
+             href="${page > 1 ? to(page - 1) : '#'}"
+             ${page > 1 ? '' : 'aria-disabled="true" tabindex="-1"'} aria-label="Previous page">←</a>
+          <span class="pay-pager-n" aria-current="page">Page ${page} of ${pages}</span>
+          <a class="tsp-arrow${page < pages ? '' : ' off'}"
+             href="${page < pages ? to(page + 1) : '#'}"
+             ${page < pages ? '' : 'aria-disabled="true" tabindex="-1"'} aria-label="Next page">→</a>
+        </nav>` : ''}`
+        : `<div class="tc-empty"><b>No past shifts yet</b>
+             <span>Once your manager sends a shift you worked, it shows up here.</span></div>`}
+    </div>`));
+});
+
+/**
+ * One shift, as a receipt.
+ *
+ * Registered LAST of the three, so /portal/earnings/shifts is matched by its
+ * own route rather than arriving here as an id of "shifts".
+ *
+ * The heading no longer leads with a single big number. What a shift is worth
+ * is two different things — hours pay and tips — and the old page put "Total
+ * tips" at the top in the largest type with wages far below it, which reads as
+ * the shift's earnings. They are shown as two figures because that is what the
+ * data supports; there is no combined total here, because a combined total
+ * would be a new number this app does not otherwise compute.
+ */
+app.get('/portal/earnings/:id', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.redirect('/portal/earnings');
+  // Self-only, and it always was: the list this searches is built from
+  // `w.employee_id = ?`. Somebody else's shift id simply is not in it.
+  const x = earningsFor(emp.id, 400).find((e) => e.shift.id === id);
+  if (!x) return res.redirect('/portal/earnings');
+
+  // Where Back goes. A closed set of two — never a URL from the query string,
+  // which is how an open redirect gets built by accident.
+  const back = req.query.from === 'shifts'
+    ? { href: '/portal/earnings/shifts', label: 'Shift history' }
+    : { href: '/portal/earnings', label: 'Pay' };
+
+  res.send(portalPage('Shift pay', `
+    ${portalTop(back, 'Shift pay')}
+    <div class="pt-body tc-body">
+      <h1 class="tc-h">${esc(niceDate(x.shift.date))}</h1>
+      <div class="tcc tcc-plain">
+        <div class="tcc-facts">
+          <div class="tcc-f"><span>Position</span><b>${esc(posName(x.role || x.shift.worked_role))}</b></div>
+          <div class="tcc-f"><span>Service</span><b>${x.shift.daypart ? esc(dp(x.shift.daypart)) : '—'}</b></div>
+          <div class="tcc-f"><span>Hours worked</span><b>${esc(payHrs(x.hours))}</b></div>
+          ${/* One rate, only when one rate is what the record holds. A salaried
+                 person is not paid by the hour and is not shown an hourly
+                 figure they are not paid by. */''}
+          ${x.salaried ? '<div class="tcc-f"><span>Pay</span><b>Salaried</b></div>'
+            : x.rate ? `<div class="tcc-f"><span>Rate</span><b>${esc(money(x.rate))}/hr</b></div>` : ''}
+          ${x.wage ? `<div class="tcc-f"><span>Hours pay</span><b>${esc(payMoney(x.wage))}</b></div>` : ''}
+          ${x.kept ? `<div class="tcc-f"><span>Tips</span><b>${esc(payMoney(x.kept))}</b></div>` : ''}
+        </div>
+      </div>
+      ${/* The engine's own itemisation — the same object the nightly email is
+             rendered from, so the two cannot drift. */''}
+      ${shiftBreakdown(x)}
+    </div>`));
 });
 
 // ---------------------------------------------------------------------------

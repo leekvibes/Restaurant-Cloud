@@ -57,6 +57,23 @@ async function signIn(pin) {
   return cookie;
 }
 const asStaff = (p, cookie) => fetch(BASE + p, { headers: { cookie } });
+
+/**
+ * The shift breakdown moved to its own page in Phase 2E.
+ *
+ * Pay shows one pay period at a time; the itemisation of a single shift is at
+ * /portal/earnings/:id. These assertions are about the breakdown, so they
+ * follow it rather than being deleted.
+ */
+const shiftPage = async (cookie, name, date = '2026-07-22') => {
+  // The seeded shift, by date. "Newest" would drift as other tests add shifts,
+  // and these assertions are about the figures on THIS one.
+  const id = db.prepare(`SELECT sh.id FROM shifts sh JOIN work w ON w.shift_id = sh.id
+    JOIN employees e ON e.id = w.employee_id
+    WHERE e.name = ? AND sh.date = ? AND sh.status = 'emailed'
+    ORDER BY sh.id DESC LIMIT 1`).get(name, date).id;
+  return (await asStaff(`/portal/earnings/${id}`, cookie)).text();
+};
 /** The report form itself — what the hub's Start button opens. */
 const tipForm = async (cookie) => (await form('/portal/tips', {}, { cookie })).text();
 
@@ -250,7 +267,7 @@ test('the money on a server\'s screen reconciles the way the engine defines it',
   // rather than on arithmetic, and a test that breaks for the wrong reason
   // gets deleted. What is checked instead is the identity the engine itself
   // holds to — if the portal ever grew its own sums, these stop adding up.
-  const html = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+  const html = await shiftPage(await signIn('1111'), 'Bella Reyes');
   const num = (v) => Math.round(Number(String(v).replace(/[$,−-]/g, '')) * 100);
   const grab = (label) => {
     const m = html.match(new RegExp(label + '[\\s\\S]{0,140}?(−?\\$[\\d,]+\\.\\d{2})'));
@@ -315,7 +332,7 @@ test('a cook is shown what they received, without a tip-out they never paid', as
   // so the honest screen for a cook is what came to them, not a blank. What it
   // must not show is "tipped out to support", which is money leaving, and a
   // cook is the support it leaves towards.
-  const html = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
+  const html = await shiftPage(await signIn('2222'), 'Marco Diaz');
   // "Total tips", the way their own email heads it — a cook does not "keep"
   // tips after a tip-out, they receive a share, and the two screens describing
   // that money now use one word for it.
@@ -337,7 +354,7 @@ test('a finished shift is one the app has actually finished', async () => {
   const statuses = db.prepare('SELECT DISTINCT status FROM shifts').all().map((r) => r.status);
   assert.ok(!statuses.includes('sent'), `the app writes ${statuses.join('/')} — never 'sent'`);
 
-  const html = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+  const html = await shiftPage(await signIn('1111'), 'Bella Reyes');
   assert.ok(!/Nothing recorded yet/.test(html), 'a server who worked a finished shift sees it');
   assert.match(html, /You kept/, 'with what they kept');
 });
@@ -375,7 +392,9 @@ test('history starts where the manager says it starts', async () => {
       body: new URLSearchParams({ pin: '1111' }).toString(),
     });
     const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
-    const cut = await (await fetch(`http://127.0.0.1:${port}/portal/earnings`, { headers: { cookie } })).text();
+    // Checked on the archive: Pay shows one pay period, and the floor is a
+    // statement about history, which is the page history lives on now.
+    const cut = await (await fetch(`http://127.0.0.1:${port}/portal/earnings/shifts`, { headers: { cookie } })).text();
     assert.ok(!/Jun 2/.test(cut), 'the June shift is behind the floor');
     assert.match(cut, /Jul 22/, 'and July is still there');
   } finally {
@@ -389,7 +408,7 @@ test('a shift shows the hours and the rate it was worked at', async () => {
   // "What did I make" is two questions for anybody paid hourly, and the
   // portal only ever answered the tips half.
   db.prepare('UPDATE employees SET hourly_rate_cents = 1650 WHERE name = ?').run('Marco Diaz');
-  const html = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
+  const html = await shiftPage(await signIn('2222'), 'Marco Diaz');
   assert.match(html, /8 hrs/, 'the hours they worked');
   assert.match(html, /\$16\.50\/hr/, 'the rate behind them');
   assert.match(html, /\$132\.00/, 'and what those hours came to');
@@ -400,20 +419,15 @@ test('somebody who received nothing is shown their hours, not a zero', async () 
   // including positions no tip-out ever reaches. Leading with "You kept $0.00"
   // answers a question they did not ask and buries the one they did — and on a
   // screen about pay, a zero reads like a statement about their pay.
-  const html = await (await asStaff('/portal/earnings', await signIn('4444'))).text();
+  const html = await shiftPage(await signIn('4444'), 'Nico Vance');
   assert.match(html, /You worked/, 'the headline is what they did');
   assert.match(html, /4 hrs/, 'and it is their actual hours from the shift');
   assert.ok(!/\$0\.00/.test(html), 'no zero anywhere on it');
-  // They do get an all-time panel — hours are a record worth keeping even when
-  // no tip ever reached them. What it must not carry is money columns that
-  // could only ever read zero.
-  assert.match(html, /All time/, 'their hours still add up to something');
-  assert.ok(!/kept total|avg tips/.test(html), 'without money columns that can only be zero');
 
   // The rule is "nothing arrived", not "this position does not hand tips in".
   // A busser hands nothing in and still gets a share every service, so keying
   // it on that setting would hide real money from the person who earned it.
-  const cook = await (await asStaff('/portal/earnings', await signIn('2222'))).text();
+  const cook = await shiftPage(await signIn('2222'), 'Marco Diaz');
   assert.match(cook, /Total tips/, 'a cook who receives a share still sees it');
   assert.ok(!/You worked/.test(cook), 'and is not demoted to an hours line');
 });
@@ -878,7 +892,7 @@ test("the portal breaks a shift down the way that night's email does", async () 
   // are actually there and that the itemised tip-out adds up to the total it
   // used to show alone, which is the arithmetic that would break first if the
   // portal ever grew its own.
-  const html = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+  const html = await shiftPage(await signIn('1111'), 'Bella Reyes');
 
   for (const section of ['Your sales', 'Your tips', 'Tip-out', 'How it reaches you']) {
     assert.match(html, new RegExp(section), `the ${section} section is on the page`);
@@ -891,7 +905,9 @@ test("the portal breaks a shift down the way that night's email does", async () 
   // Scoped to the shift breakdown. The page now opens with a pay-PERIOD card
   // that has its own Card tips line, and a page-wide scrape would compare the
   // fortnight's figures against the night's.
-  const shiftHtml = html.slice(html.indexOf('Your last shift'));
+  // The whole page is the shift now — there is no "Your last shift" section to
+  // slice from, because Pay no longer carries one shift's breakdown inline.
+  const shiftHtml = html;
   const grab = (label) => {
     const m = shiftHtml.match(new RegExp(label + '[\\s\\S]{0,140}?(−?\\$[\\d,]+\\.\\d{2})'));
     return m ? num(m[1]) : null;
@@ -1023,8 +1039,11 @@ test('every portal sub-page wears the same header, with a way back', async () =>
 
   // Every screen a person can reach by tapping. The hub is deliberately absent
   // — it is where back GOES, so it is the one page without one.
+  // Pay joined the hub as a page without a back link: it is a bottom tab, so
+  // it is a destination rather than somewhere you drilled into. Its own
+  // sub-pages (shift history, shift detail) do carry one, and are checked here.
   const pages = [
-    '/portal/earnings', '/portal/specials', '/portal/stock', '/portal/clock',
+    '/portal/earnings/shifts', '/portal/specials', '/portal/stock', '/portal/clock',
     '/portal/clock/history', '/portal/requests', '/portal/timesheet',
     `/portal/timesheet/day/${today}`,
   ];

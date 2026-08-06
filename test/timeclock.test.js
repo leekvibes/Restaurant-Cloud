@@ -2472,14 +2472,25 @@ test('the pay period on their own page is the one the email states', async () =>
   const html = await text(`/portal/earnings?p=${per.start}`, { cookie });
 
   assert.match(html, /Pay period/i, 'the period is on the page');
-  assert.match(html, /On this check/, 'with the figure they came for');
+  // Relabelled in Phase 2E. `takeHome` is wage + paycheck tips with no
+  // deductions modelled anywhere — it is GROSS. "On this check" read as the
+  // cheque amount, and the gap between the two is somebody's withholding.
+  assert.match(html, /Gross pay/, 'with the figure they came for, named for what it is');
+  assert.match(html, /Before tax and deductions/, 'and what it is not');
+  assert.ok(!/On this check/.test(html), 'never implying a settled cheque amount');
   assert.match(html, /Shifts worked/, 'and what makes it up');
-  assert.match(html, /Total on this check/);
+  // The payment section's total is the same gross figure, and it reconciles
+  // with the rows above it rather than being a second sum.
+  assert.match(html, /On this payment/, 'the breakdown is headed for what it is');
   // 10 hours at $20 is $200 — the same arithmetic aggregatePayroll does for the
   // email, because it IS aggregatePayroll.
   assert.match(html, /\$200\.00/, 'the figure matches the aggregation the email uses');
   // The arrows reach earlier periods rather than stranding them on one.
-  assert.match(html, /class="pp-arrow[^"]*" *\n? *href="\/portal\/earnings\?p=/, 'and they can look back');
+  // The legacy .pp-nav gave way to the shared .tsp period selector, so Pay,
+  // Timesheet and the clock all move between periods the same way.
+  assert.match(html, /class="tsp-arrow[^"]*"\s*\n?\s*href="\/portal\/earnings\?p=/,
+    'and they can look back');
+  assert.match(html, /<select class="tsp-sel" data-pay-period/, 'or jump straight to one');
 });
 
 test('a preview run is not a send — nothing is recorded and nobody is told', async () => {
