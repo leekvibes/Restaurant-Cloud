@@ -1605,7 +1605,10 @@ test('Home shows the board and keeps the full one a tap away', async () => {
     await form('/staff-portal/special', { name: `Qb Dish ${i}`, price: '10.00' });
   }
   const html = briefing(await homeOf(cookie));
-  assert.match(html, /id="hb-sp-h">Specials/, 'the section');
+  // Specials and 86'd are two halves of ONE service board module now, so the
+  // section is the board and Specials is a labelled part inside it.
+  assert.match(html, /id="hb-board-h">Service board/, 'the service board module');
+  assert.match(html, /class="hb-lab">Specials/, 'with a Specials part inside it');
   // Capped, and honest about being capped. Counted by rendered rows rather
   // than by dish name: which four appear depends on the board's own order, and
   // the invariant is that Home stays short — not which dishes win.

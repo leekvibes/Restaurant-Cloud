@@ -4116,29 +4116,29 @@ app.get('/portal', (req, res) => {
   };
 
   const attentionRow = (a) => `
-    <a class="hb-act" href="${a.href}">
-      <span class="hb-act-l"><b>${esc(a.label)}</b><i>${esc(a.description)}</i></span>
+    <a class="hb-row hb-row-act" href="${a.href}">
+      <span class="hb-row-l"><b>${esc(a.label)}</b><i>${esc(a.description)}</i></span>
       <span class="tc-chip ${CHIP[a.tone] || ''}">${esc(a.status)}</span>
     </a>`;
 
   const updateRow = (u) => `
-    <a class="hb-upd" href="${u.href}">
-      <span class="hb-upd-l"><b>${esc(u.label)}</b><i>${esc(u.description)}</i></span>
-      <span class="hb-upd-r" aria-hidden="true">&rsaquo;</span>
+    <a class="hb-row" href="${u.href}">
+      <span class="hb-row-l"><b>${esc(u.label)}</b><i>${esc(u.description)}</i></span>
+      <span class="hb-row-r" aria-hidden="true">&rsaquo;</span>
     </a>`;
 
   const newsRow = (e) => `
-    <a class="hb-upd" href="${esc(e.href || '/portal/notifications')}">
-      <span class="hb-upd-l"><b>${esc(e.title)}${e.unread
+    <a class="hb-row" href="${esc(e.href || '/portal/notifications')}">
+      <span class="hb-row-l"><b>${esc(e.title)}${e.unread
     ? '<span class="pt-new-dot" aria-hidden="true"></span><span class="pt-sr">Unread</span>' : ''}</b>
         ${e.body ? `<i>${esc(e.body)}</i>` : ''}</span>
-      <span class="hb-upd-r"><i>${esc(atTime(e.created_at))}</i></span>
+      <span class="hb-row-r"><i>${esc(atTime(e.created_at))}</i></span>
     </a>`;
 
   const toolRow = (t) => `
-    <a class="hb-upd" href="${t.href}">
-      <span class="hb-upd-l"><b>${esc(t.label)}</b><i>${esc(t.description)}</i></span>
-      <span class="hb-upd-r" aria-hidden="true">&rsaquo;</span>
+    <a class="hb-row" href="${t.href}">
+      <span class="hb-row-l"><b>${esc(t.label)}</b><i>${esc(t.description)}</i></span>
+      <span class="hb-row-r" aria-hidden="true">&rsaquo;</span>
     </a>`;
 
   const secondary = [...m.updates, ...m.notifications];
@@ -4162,43 +4162,52 @@ app.get('/portal', (req, res) => {
         Thanks — ${sentN === 1 ? 'that item is' : `those ${sentN} items are`} with your manager.
       </div>` : ''}
 
-      ${m.notes.length ? `<section class="hb-sec" aria-labelledby="hb-notes-h">
+      ${/* ONE surface per concept, not one per row. Everything below is a
+            .hb-mod: a white panel on the page's off-white, with its heading
+            attached to its own top edge rather than floating above it. Rows
+            inside a module are flat and separated by a hairline — a card
+            around every note, dish and update would be the same undivided
+            scroll with more borders in it. */''}
+
+      ${m.notes.length ? `<section class="hb-mod hb-mod-brief" aria-labelledby="hb-notes-h">
         <h2 class="pt-sr" id="hb-notes-h">Notes from your manager</h2>
-        ${m.notes.map(noteBlock).join('')}
+        <div class="hb-mod-b">${m.notes.map(noteBlock).join('')}</div>
       </section>` : ''}
 
-      ${m.specials.length ? `<section class="hb-sec" aria-labelledby="hb-sp-h">
-        <h2 class="hb-h2" id="hb-sp-h">Specials <span class="hb-n">${m.specials.length}</span></h2>
-        ${dishList(m.specials, dishRow, 'Specials')}
+      ${m.specials.length || m.eightySixed.length ? `
+      <section class="hb-mod" aria-labelledby="hb-board-h">
+        <h2 class="pt-sr" id="hb-board-h">Service board</h2>
+        ${m.specials.length ? `
+          <div class="hb-part">
+            <h3 class="hb-lab">Specials <span class="hb-n">${m.specials.length}</span></h3>
+            ${dishList(m.specials, dishRow, 'Specials')}
+          </div>` : ''}
+        ${m.eightySixed.length ? `
+          <div class="hb-part hb-part-bad">
+            <h3 class="hb-lab hb-lab-bad">86&rsquo;d &mdash; don&rsquo;t offer
+              <span class="hb-n">${m.eightySixed.length}</span></h3>
+            ${dishList(m.eightySixed, offRow, "86'd — don't offer")}
+          </div>` : ''}
+        <a class="hb-foot" href="/portal/specials">View all specials &amp; 86&rsquo;d &rsaquo;</a>
       </section>` : ''}
 
-      ${m.eightySixed.length ? `<section class="hb-sec" aria-labelledby="hb-86-h">
-        <h2 class="hb-h2 hb-h2-bad" id="hb-86-h">86&rsquo;d &mdash; don&rsquo;t offer
-          <span class="hb-n">${m.eightySixed.length}</span></h2>
-        ${dishList(m.eightySixed, offRow, "86'd — don't offer")}
+      ${m.attention.length ? `<section class="hb-mod hb-mod-act" aria-labelledby="hb-at-h">
+        <h2 class="hb-lab" id="hb-at-h">Needs you <span class="hb-n">${m.attention.length}</span></h2>
+        <div class="hb-rows">${m.attention.map(attentionRow).join('')}</div>
       </section>` : ''}
 
-      ${m.specials.length || m.eightySixed.length
-    ? '<a class="hb-board" href="/portal/specials">View all specials &amp; 86&rsquo;d &rsaquo;</a>' : ''}
-
-      ${m.attention.length ? `<section class="hb-sec" aria-labelledby="hb-at-h">
-        <h2 class="hb-h2" id="hb-at-h">Needs you
-          <span class="hb-n">${m.attention.length}</span></h2>
-        <div class="hb-acts">${m.attention.map(attentionRow).join('')}</div>
-      </section>` : ''}
-
-      ${secondary.length ? `<section class="hb-sec" aria-labelledby="hb-up-h">
-        <h2 class="hb-h2 hb-h2-q" id="hb-up-h">Updates</h2>
-        <div class="hb-upds">
+      ${secondary.length ? `<section class="hb-mod hb-mod-q" aria-labelledby="hb-up-h">
+        <h2 class="hb-lab hb-lab-q" id="hb-up-h">Updates</h2>
+        <div class="hb-rows">
           ${m.updates.map(updateRow).join('')}
           ${m.notifications.map(newsRow).join('')}
         </div>
-        <a class="hb-board" href="/portal/notifications">See all notifications &rsaquo;</a>
+        <a class="hb-foot" href="/portal/notifications">See all notifications &rsaquo;</a>
       </section>` : ''}
 
-      ${m.roleActions.length ? `<section class="hb-sec" aria-labelledby="hb-do-h">
-        <h2 class="hb-h2 hb-h2-q" id="hb-do-h">Other things you can do</h2>
-        <div class="hb-upds">${m.roleActions.map(toolRow).join('')}</div>
+      ${m.roleActions.length ? `<section class="hb-mod hb-mod-q" aria-labelledby="hb-do-h">
+        <h2 class="hb-lab hb-lab-q" id="hb-do-h">Other things you can do</h2>
+        <div class="hb-rows">${m.roleActions.map(toolRow).join('')}</div>
       </section>` : ''}
 
       ${quiet ? `<div class="tc-empty">

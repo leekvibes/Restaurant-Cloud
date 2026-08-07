@@ -3464,8 +3464,8 @@ test('2D: Home is reachable, accessible and fits a phone', async () => {
   assert.ok(!/<table/.test(html), 'no table on a phone screen');
   // Every class Home uses has to exist, or it renders as unstyled boxes.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
-  for (const c of ['hb', 'hb-h1', 'hb-h2', 'hb-note', 'hb-note-b', 'hb-dish', 'hb-off-k',
-    'hb-act', 'hb-upd', 'hb-board', 'hb-sent', 'tc-empty', 'pt-sr', 'pt-new-dot']) {
+  for (const c of ['hb', 'hb-h1', 'hb-mod', 'hb-lab', 'hb-note', 'hb-note-b', 'hb-dish',
+    'hb-off-k', 'hb-row', 'hb-foot', 'hb-sent', 'tc-empty', 'pt-sr', 'pt-new-dot']) {
     assert.ok(css.includes(`.${c}`), `staff.css defines .${c}`);
   }
 });
