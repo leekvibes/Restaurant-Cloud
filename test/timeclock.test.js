@@ -1222,34 +1222,36 @@ test('the time clock page still opens with everything wired', async () => {
 // ===========================================================================
 
 test('the portal hub offers one time-clock entry, not two', async () => {
+  // The invariant is unchanged: Home must not compete with the clock. What
+  // changed is how it honours it. Home used to summarise the clock in a card
+  // whose one action opened /portal/clock; it now says nothing about the clock
+  // at all unless something is wrong, because Time clock is a tab and
+  // "clocked out" is not news at the start of a shift.
   const cookie = await signIn('3111');
   const hub = await text('/portal', { cookie });
-  assert.match(hub, /Time clock/, 'the clock is on the hub');
-  // Scoped to the hub's own action rows. The shell's bottom nav carries a
-  // Timesheet tab on every screen — that is persistent chrome, not a second
-  // destination competing with the clock in the list of things to do here.
-  // Home summarises the clock and hands off to it — one status card, one
-  // action, and that action opens /portal/clock. The bottom nav's Timesheet
-  // tab is persistent chrome on every screen, not a second destination
-  // competing with the clock in a list of things to do here.
-  const body = (hub.match(/<div class="pt-body tc-body">[\s\S]*?(?=<nav class="pt-tabs)/) || [hub])[0];
-  assert.match(body, /class="tcc tcc-/, 'the status card is the clock entry');
-  assert.strictEqual((body.match(/href="\/portal\/clock"/g) || []).length, 1,
-    'exactly one way into the clock from Home, and it is the card');
-  assert.ok(!/class="tc-row" href="\/portal\/timesheet"/.test(body),
-    'and the timesheet is not a Home row');
+  const body = (hub.match(/<main class="pt-body tc-body hb"[\s\S]*?(?=<nav class="pt-tabs)/) || [hub])[0];
+  assert.ok(!/class="tcc tcc-/.test(body), 'no clock card on Home any more');
+  assert.strictEqual((body.match(/href="\/portal\/clock"/g) || []).length, 0,
+    'and no route into the clock from a calm Home — the tab is the way');
+  // The tab is still there, on every screen.
+  const tabs = (hub.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
+  assert.ok(tabs.includes('href="/portal/clock"') && /Time clock/.test(tabs),
+    'the Time clock tab is intact');
 });
-
-test('the hub tile says where the person stands', async () => {
+test('the clock page says where the person stands', async () => {
+  // This used to read Home. Home is a pre-shift briefing now and deliberately
+  // carries no status block — but the state itself must still be readable, and
+  // the clock is where it lives.
   const cookie = await signIn('3111');
   await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
-  const on = await text('/portal', { cookie });
-  assert.match(on, /On the clock|Working/, 'it reads as working');
+  const on = await text('/portal/clock', { cookie });
+  assert.match(on, /On the clock|Working|Clock out/, 'it reads as working');
+  const home = await text('/portal', { cookie });
+  assert.ok(!/class="tcc tcc-on"/.test(home), 'and Home does not repeat it');
   await post('/portal/clock/out', { pin: '3111' }, { cookie });
-  const off = await text('/portal', { cookie });
-  assert.match(off, /Clocked out/, 'and as clocked out afterwards');
+  const off = await text('/portal/clock', { cookie });
+  assert.match(off, /Clocked out|Clock in/, 'and as clocked out afterwards');
 });
-
 test('the clock page carries today, the action, and both shortcuts', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal/clock', { cookie });
@@ -3266,40 +3268,32 @@ test('2C: the day page answers with the day total it was opened for', async () =
 
 /** Home's own body — the tab bar is chrome on every screen, not Home content. */
 const homeBody = (html) =>
-  (html.match(/<div class="pt-body tc-body">[\s\S]*?(?=<nav class="pt-tabs)/) || [html])[0];
+  (html.match(/<main class="pt-body tc-body hb"[\s\S]*?(?=<nav class="pt-tabs)/) || [html])[0];
 
-test('2D: Home reads clocked out, working and on break from the clock itself', async () => {
+test('2D: an ordinary clock state gets no room on Home', async () => {
+  // Clocked out, working, on break — all normal, none of them something to do
+  // before service. The card that used to announce them is gone and nothing
+  // replaced it.
   const emp = 250;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3250',1500,1)")
     .run(emp, 'Home States');
   const cookie = await signIn('3250');
 
   const out = homeBody(await text('/portal', { cookie }));
-  assert.match(out, /class="tcc tcc-off"/, 'clocked out is the neutral card');
-  assert.match(out, />Clocked out</, 'named');
-  assert.match(out, /href="\/portal\/clock">Clock in</, 'with one action');
-  assert.ok(!/data-since/.test(out), 'and nothing ticking');
+  assert.ok(!/class="tcc tcc-off"/.test(out), 'no clocked-out card');
+  assert.ok(!/href="\/portal\/clock">Clock in</.test(out), 'and no clock-in action');
+  assert.ok(!/data-since/.test(out), 'nothing ticking');
 
   await post('/portal/clock/in', { daypart: 'dinner' }, { cookie });
   const on = homeBody(await text('/portal', { cookie }));
-  assert.match(on, /class="tcc tcc-on"/, 'working is green');
-  assert.match(on, />Working</, 'named');
-  assert.match(on, /class="tcc-clock" aria-hidden="true"\s+data-since="\d+" data-now="\d+"/,
-    'the live figure is server-anchored and hidden from screen readers');
-  assert.match(on, /Position<\/span><b>Server/, 'position');
-  assert.match(on, /Open time clock/, 'and Home hands off rather than duplicating the controls');
-  assert.ok(!/Start break|Clock out/.test(on), 'no clock controls on Home');
-
-  await post('/portal/clock/break/start', {}, { cookie });
-  const brk = homeBody(await text('/portal', { cookie }));
-  assert.match(brk, /class="tcc tcc-break"/, 'on break is amber');
-  assert.match(brk, />On break</, 'named');
-  assert.match(brk, /Open time clock/, 'one action');
-  await post('/portal/clock/break/end', {}, { cookie });
+  assert.ok(!/class="tcc tcc-on"/.test(on), 'working is not a Home card either');
+  assert.ok(!/data-since/.test(on), 'and still nothing ticking');
   await post('/portal/clock/out', {}, { cookie });
 });
-
-test('2D: a shift left open past the threshold reads as a warning on Home', async () => {
+test('2D: a shift left open past the threshold still reaches the employee', async () => {
+  // The exception that survives the card. A forgotten punch is a real thing to
+  // fix, so it moved into the actionable list rather than disappearing with
+  // the status block.
   const emp = 251;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3251',1500,1)")
     .run(emp, 'Home Stale');
@@ -3308,23 +3302,22 @@ test('2D: a shift left open past the threshold reads as a warning on Home', asyn
   db.prepare("UPDATE time_entries SET clock_in_at = datetime('now','-20 hours') WHERE id = ?")
     .run(activeOf(emp).id);
   const html = homeBody(await text('/portal', { cookie }));
-  assert.match(html, /class="tcc tcc-warn"/, 'amber, not red — they are not blocked');
-  assert.match(html, />Still clocked in</, 'named for what it is');
+  assert.match(html, /Needs you/, 'it is in the actionable section');
+  assert.match(html, /still clocked in/i, 'named for what it is');
   assert.match(html, /over 16 hours/, 'with the threshold');
+  assert.match(html, /href="\/portal\/clock"/, 'and somewhere to go and fix it');
   await post('/portal/clock/out', {}, { cookie });
 });
-
-test('2D: no position at all is the only red state, and it is not actionable here', async () => {
+test('2D: no position at all is still said plainly, and still not their fault', async () => {
   const emp = 252;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'',?,1500,1)")
     .run(emp, 'Home No Position', '3252');
   const cookie = await signIn('3252');
   const html = homeBody(await text('/portal', { cookie }));
-  assert.match(html, /class="tcc tcc-blocked"/, 'red');
+  assert.match(html, /cannot clock in/i, 'the blocked state reaches them');
   assert.match(html, /No position is assigned to you/, 'said plainly');
-  assert.ok(!/tc-btn-go/.test(html.split('tcc-facts')[0] || html), 'with no action they cannot complete');
+  assert.match(html, /Ask your manager/, 'with the one thing that fixes it');
 });
-
 test('2D: nothing waiting is a finished screen, not an empty one', async () => {
   const emp = 253;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3253',1500,1)")
@@ -3332,11 +3325,10 @@ test('2D: nothing waiting is a finished screen, not an empty one', async () => {
   const cookie = await signIn('3253');
   await text('/portal', { cookie });                    // first visit sets the baseline
   const html = homeBody(await text('/portal', { cookie }));
-  assert.match(html, /You&rsquo;re all caught up|You’re all caught up/, 'the calm state');
-  assert.ok(!/Needs your attention/.test(html), 'no attention section');
+  assert.match(html, /Nothing to read before this shift/, 'the calm state');
+  assert.ok(!/Needs you<|Needs your attention/.test(html), 'no attention section');
   assert.ok(!/\$\d/.test(html), 'and no invented statistics');
 });
-
 test('2D: attention items are ordered by urgency, not by module', async () => {
   const emp = 254;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3254',1500,1)")
@@ -3356,12 +3348,19 @@ test('2D: attention items are ordered by urgency, not by module', async () => {
   const cookie = await signIn('3254');
   const html = homeBody(await text('/portal', { cookie }));
 
-  assert.match(html, /Needs your attention/, 'the section is there');
-  const first = html.indexOf('A shift needs fixing');
-  const later = html.indexOf('Changed shift times');
-  assert.ok(first > -1 && later > -1, 'both items rendered');
-  assert.ok(first < later, 'the blocking problem comes before the answered request');
-  assert.match(html, /class="tc-chip bad">Fix</, 'with a chip that says what to do');
+  assert.match(html, /Needs you/, 'the actionable section is there');
+  // The classification, which is the point of the redesign: a blocking problem
+  // is something to do and stays in Needs you; a decision that has already
+  // been applied is something to know and moves to Updates. Both are still on
+  // the page — nothing was deleted to tidy the heading.
+  const acts = (html.split('>Needs you')[1] || '').split('</section>')[0];
+  const upds = (html.split('>Updates<')[1] || '').split('</section>')[0];
+  assert.match(acts, /needs fixing|still clocked in/i, 'the blocking problem is actionable');
+  assert.ok(!/needs fixing/i.test(upds), 'and is not duplicated into Updates');
+  assert.match(upds, /approved|rejected|declined/i, 'the answered request is kept, as an update');
+  assert.ok(html.indexOf('>Needs you') < html.indexOf('>Updates<'),
+    'and what can be acted on comes before what merely happened');
+  assert.match(acts, /class="tc-chip bad">Fix</, 'with a chip that says what to do');
   assert.ok(!/<details/.test(html), 'and nothing actionable is hidden behind a disclosure');
   db.prepare("UPDATE time_entries SET clock_out_at = datetime(clock_in_at, '+8 hours'), status='complete' WHERE id=?").run(eid);
 });
@@ -3430,39 +3429,46 @@ test('2D: Home is not a second copy of the bottom navigation', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal', { cookie });
   const body = homeBody(html);
-  for (const gone of ['Your hours &amp; pay', 'Specials &amp; 86 board', 'Your time history']) {
+  // Pay and time history are still tabs or More items and must not be repeated
+  // as Home rows. Specials is the deliberate exception: it is on Home as
+  // CONTENT — the dishes themselves, part of the briefing — never as a
+  // navigation row duplicating the More sheet.
+  for (const gone of ['Your hours &amp; pay', 'Your time history']) {
     assert.ok(!body.includes(gone), `"${gone}" is not a Home row — it is a tab or in More`);
   }
-  // The tab bar itself is untouched: five tabs, same order, same routes.
+  assert.ok(!/>Specials &amp; 86 board</.test(body),
+    'and Specials is not a nav row on Home either');
   const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
   assert.ok(tabs, 'the tab bar rendered');
   for (const [href, label] of [['/portal', 'Home'], ['/portal/clock', 'Time clock'],
     ['/portal/earnings', 'Pay']]) {
     assert.ok(tabs.includes(`href="${href}"`) && tabs.includes(`>${label}<`), `${label} tab intact`);
   }
-  assert.match(tabs, />Schedule</, 'Schedule holds its place');
-  assert.match(tabs, /data-portal-more/, 'and More opens the shared sheet');
 });
-
 test('2D: Home is reachable, accessible and fits a phone', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal', { cookie });
   assert.match(html, /class="pt-crumb"/, 'the shared header');
   assert.ok(!/class="pt-back"/.test(html), 'with no way back to itself');
-  assert.match(html, /<h1 class="tc-h">/, 'one h1');
-  assert.strictEqual((html.match(/<h1 /g) || []).length, 1, 'and only one');
-  assert.match(html, /<h2 class="tcc-top">/, 'the status card is a heading, not a div');
+  assert.match(html, /<main class="pt-body tc-body hb"/, 'a real main landmark');
+  assert.match(html, /<h1 class="hb-h1">Before your shift<\/h1>/,
+    'and an h1 that names the page rather than greeting you');
+  assert.strictEqual((html.match(/<h1 /g) || []).length, 1, 'only one');
+  // Heading order: h1, then section h2s, then note titles at h3. No level skipped.
+  const levels = [...html.matchAll(/<h([1-3])[ >]/g)].map((m) => Number(m[1]));
+  for (let i = 1; i < levels.length; i += 1) {
+    assert.ok(levels[i] <= levels[i - 1] + 1, `heading level ${levels[i]} does not skip`);
+  }
   assert.match(html, /viewport-fit=cover/, 'safe area');
   assert.match(html, /class="pt has-tabs"/, 'room reserved for the tab bar');
   assert.ok(!/<table/.test(html), 'no table on a phone screen');
   // Every class Home uses has to exist, or it renders as unstyled boxes.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
-  for (const c of ['tcc', 'tc-row', 'tc-rows', 'tc-chip', 'tc-kick-sec', 'tc-empty',
-    'tc-more', 'pt-sr', 'pt-new-dot', 'pt-push-row']) {
+  for (const c of ['hb', 'hb-h1', 'hb-h2', 'hb-note', 'hb-note-b', 'hb-dish', 'hb-off-k',
+    'hb-act', 'hb-upd', 'hb-board', 'hb-sent', 'tc-empty', 'pt-sr', 'pt-new-dot']) {
     assert.ok(css.includes(`.${c}`), `staff.css defines .${c}`);
   }
 });
-
 test('2D: Home never shows a raw label or anything owner-only', async () => {
   const cookie = await signIn('3254');
   const body = homeBody(await text('/portal', { cookie }));

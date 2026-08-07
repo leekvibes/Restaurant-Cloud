@@ -3198,6 +3198,17 @@ function setPortalCookie(req, res, empId) {
 
 /** The person this request belongs to, or null. Same token, same expiry. */
 const portalUser = (req) => readTipsToken(readCookie(req, PORTAL_COOKIE));
+/**
+ * The name of the one-time "your report is in" cookie.
+ *
+ * A query parameter was the obvious thing and the wrong one: /portal?sent=3
+ * can be typed, so the page would congratulate somebody for a report they
+ * never filed. This is set by the POST that actually succeeded and cleared by
+ * the render that shows it, so it survives exactly one page load. It carries a
+ * count and nothing else — there is no state worth forging in it.
+ */
+const STOCK_SENT_COOKIE = 'zwin_sent';
+
 
 /**
  * Everything the portal needs to know about who is asking.
@@ -3876,44 +3887,32 @@ function homeModel(emp) {
   const serverNow = TC.toDate(TC.nowUtc()).getTime();
   const pName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
 
-  // --- 1. status ----------------------------------------------------------
-  // The same states and the same words as the Phase 2B clock, from the same
-  // function. Home summarises; the clock stays the place things are done, so
-  // every state here has exactly one action and it opens the clock.
+  // --- 1. exceptional clock states ----------------------------------------
+  // Home is a briefing, not a clock. The big card is gone — Time clock is a
+  // tab, and "Clocked out" is not news. What survives is the two states an
+  // employee genuinely has to act on, and they go where actions live.
   const active = st.active;
-  let status;
-  if (active && active.status === 'on_break') {
-    const br = TC.q.openBreak.get(active.id);
-    status = { tone: 'break', state: 'On break',
-      live: { since: TC.toDate(br.start_at).getTime(), now: serverNow },
-      caption: `on break since ${TC.clockFace(br.start_at)}`,
-      facts: [['Clocked in', TC.clockFace(active.clock_in_at)]],
-      primary: { href: '/portal/clock', label: 'Open time clock' } };
-  } else if (active) {
-    const stale = looksStale(active);
-    status = { tone: stale ? 'warn' : 'on', state: stale ? 'Still clocked in' : 'Working',
-      live: { since: TC.toDate(active.clock_in_at).getTime(), now: serverNow },
-      caption: `since ${TC.clockFace(active.clock_in_at)}`,
-      facts: [['Position', pName(active.position)],
-        ['Service', active.daypart ? dp(active.daypart) : '—']],
-      note: stale ? `That is over ${staleHours()} hours. If you forgot to clock out, do it now.` : '',
-      primary: { href: '/portal/clock', label: 'Open time clock' } };
-  } else if (!clockPositionsFor(emp).length) {
-    // The only red state Home has, and the only one they cannot act on here.
-    status = { tone: 'blocked', state: 'Cannot clock in', live: null,
-      big: 'No position is assigned to you.',
-      note: 'Ask your manager to add your position, then you can clock in.',
-      facts: [], primary: null };
-  } else {
-    status = { tone: 'off', state: 'Clocked out', live: null,
-      caption: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
-      facts: st.todayMin ? [['Worked today', TC.hm(st.todayMin)]] : [],
-      primary: { href: '/portal/clock', label: 'Clock in' } };
-  }
+  const stale = active ? looksStale(active) : false;
+  const cannotClock = !active && !clockPositionsFor(emp).length;
 
   // --- 2. attention -------------------------------------------------------
-  const attention = [];
+  const attention = [];   // the employee can do something about these now
+  const updates = [];     // true, worth knowing, and nothing to do about it
   const add = (o) => attention.push(o);
+  const inform = (o) => updates.push(o);
+
+  // The clock states that outlived the card.
+  if (stale) {
+    add({ key: 'clock:stale', dedup: `entry:${active.id}`, type: 'timeclock',
+      priority: ATTN.BLOCKING, label: 'You are still clocked in',
+      description: `Since ${TC.clockFace(active.clock_in_at)} — over ${staleHours()} hours. If you forgot to clock out, do it now.`,
+      status: 'Clock out', tone: 'bad', href: '/portal/clock' });
+  }
+  if (cannotClock) {
+    add({ key: 'clock:blocked', type: 'timeclock', priority: ATTN.BLOCKING,
+      label: 'You cannot clock in yet', description: 'No position is assigned to you. Ask your manager to add it.',
+      status: 'Blocked', tone: 'bad', href: '/portal/clock' });
+  }
 
   // Blocking time or payroll problems — but not the punch they are standing
   // on. Being on the clock is today, not a fault.
@@ -3959,7 +3958,10 @@ function homeModel(emp) {
     WHERE employee_id = ? AND decision <> 'pending'
       AND decided_at >= datetime('now','-14 days') ORDER BY decided_at DESC`).all(emp.id);
   for (const c of decided.slice(0, 3)) {
-    add({ key: `corr:${c.id}`, type: 'requests', priority: ATTN.ANSWERED,
+    // Informational: a decision that has already been applied needs nothing
+    // from them. It stayed under "Needs your attention" for months and was the
+    // main reason that heading stopped meaning anything.
+    inform({ key: `corr:${c.id}`, type: 'requests', priority: ATTN.ANSWERED,
       label: `${reqKind(c)} — ${(REQ_STATE[c.decision] || c.decision).toLowerCase()}`,
       description: c.decision_note || (c.decision === 'approved'
         ? 'Your manager applied it.' : 'Open it to see why.'),
@@ -3975,7 +3977,8 @@ function homeModel(emp) {
       status: 'Ready', tone: 'info', href: `/portal/timesheet?p=${st.period.start}` });
   }
   if (st.pending.length) {
-    add({ key: 'corr:pending', type: 'requests', priority: ATTN.REMINDER,
+    // Waiting on somebody else is not an action.
+    inform({ key: 'corr:pending', type: 'requests', priority: ATTN.REMINDER,
       label: st.pending.length === 1 ? 'A request is with your manager'
         : `${st.pending.length} requests are with your manager`,
       description: 'Nothing changes until they answer.', status: 'Waiting', tone: 'info',
@@ -3983,6 +3986,7 @@ function homeModel(emp) {
   }
 
   attention.sort((a, b) => a.priority - b.priority);
+  updates.sort((a, b) => a.priority - b.priority);
 
   // --- 3. what happened ---------------------------------------------------
   // ONE source: the rows /portal/notifications reads. Home shows the newest few
@@ -4015,6 +4019,13 @@ function homeModel(emp) {
   // and is still on /portal/notifications.
   const shown = new Set(attention.map((a) => a.dedup).filter(Boolean));
   const notifications = (firstEver ? unseen : PORTAL.q.eventsFor.all({ id: emp.id }))
+    // A before-shift note has its own section at the top of this page now,
+    // rendered from portal_notes in full. The event the posting raised is the
+    // SAME message in a 160-character preview, and showing both put one note
+    // on Home twice — which is the duplication this phase set out to end.
+    // Suppressed here only: the row is untouched, still unread if it was, and
+    // still on /portal/notifications where the history lives.
+    .filter((e) => e.kind !== 'note')
     .filter((e) => { const k = eventDedupKey(e); return !k || !shown.has(k); })
     .slice(0, 3).map((e) => ({ ...e, unread: unseenIds.has(e.id) }));
   if (unseen.length) PORTAL.q.markSeen.run({ id: emp.id });
@@ -4034,7 +4045,24 @@ function homeModel(emp) {
   roleActions.push({ key: 'stock', label: 'Report out of stock',
     description: 'Out of something, or running low', href: '/portal/stock' });
 
-  return { status, attention, notifications, roleActions,
+  // --- 5. the briefing ----------------------------------------------------
+  // Straight from portal_notes, the table the owner actually writes to — not
+  // from the notification feed, which only ever carried a 160-character
+  // preview and only for notes that happened to be live the day they were
+  // posted. A note scheduled for next Tuesday now simply appears on Tuesday.
+  //
+  // notesFor already orders urgent → caution → fyi, then by id: the order the
+  // owner would read them out in.
+  const notes = PORTAL.q.notesFor.all({ on: today });
+
+  // The official board. Evergreen by decision: a special stays until it is
+  // taken down, so there is no date filter here and must not be one.
+  const board = PORTAL.q.specialsAll.all();
+  const specials = board.filter((b) => !b.eighty_sixed_at);
+  const eightySixed = board.filter((b) => b.eighty_sixed_at);
+
+  return { notes, specials, eightySixed, attention, updates, notifications, roleActions,
+    working: !!active, onBreak: !!(active && active.status === 'on_break'),
     push: { configured: !!PORTAL.VAPID_PUBLIC, vapid: PORTAL.VAPID_PUBLIC || '' } };
 }
 
@@ -4046,94 +4074,139 @@ app.get('/portal', (req, res) => {
   const now = new Date();
   const CHIP = { bad: 'bad', warn: 'warn', ok: 'ok', info: '' };
 
-  const statusCard = (s) => `
-    <section class="tcc tcc-${s.tone}">
-      <h2 class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
-        <span class="tcc-state">${esc(s.state)}</span></h2>
-      ${s.live
-        ? `${/* The ticking figure is hidden from screen readers and a static
-                 equivalent sits beside it. A counter inside a live region
-                 announces itself every second, which is unusable. */''}
-           <div class="tcc-clock" aria-hidden="true"
-             data-since="${s.live.since}" data-now="${s.live.now}">0:00</div>
-           <p class="pt-sr">${esc(s.state)}, ${esc(s.caption || '')}</p>`
-        : ''}
-      ${s.big ? `<p class="tcc-big">${esc(s.big)}</p>` : ''}
-      ${s.caption ? `<div class="tcc-cap">${esc(s.caption)}</div>` : ''}
-      ${s.facts.length ? `<div class="tcc-facts">${s.facts.map(([k, v]) =>
-        `<div class="tcc-f"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
-      ${s.note ? `<p class="tcc-note${s.tone === 'warn' ? ' tcc-note-warn' : ''}">${esc(s.note)}</p>` : ''}
-      ${s.primary ? `<div class="tcc-acts">
-        <a class="tc-btn tc-btn-go tc-btn-big" href="${s.primary.href}">${esc(s.primary.label)}</a>
-      </div>` : ''}
-    </section>`;
+  // Tone carries a WORD as well as a colour. "Urgent" in red and "urgent" in
+  // grey are the same instruction to somebody who cannot tell them apart.
+  const TONE = { urgent: 'Urgent', caution: 'Heads up', fyi: 'For information' };
+
+  /**
+   * A note, as written. `white-space: pre-wrap` in the stylesheet is what makes
+   * the owner's paragraphs survive; esc() is what makes it safe to do that.
+   * Nothing is truncated here — the whole point of the phase is that the stored
+   * body is the message.
+   */
+  const noteBlock = (n) => `
+    <article class="hb-note hb-${esc(n.tone || 'fyi')}">
+      <p class="hb-note-k">${esc(TONE[n.tone] || TONE.fyi)}</p>
+      <h3 class="hb-note-t">${esc(n.title)}</h3>
+      ${n.body ? `<div class="hb-note-b">${esc(n.body)}</div>` : ''}
+    </article>`;
+
+  const dishRow = (d) => `
+    <li class="hb-dish">
+      <span class="hb-dish-n">${esc(d.name)}</span>
+      ${d.price_cents != null ? `<span class="hb-dish-p">${money(d.price_cents)}</span>` : ''}
+      ${d.low_note ? `<span class="hb-dish-l">${esc(d.low_note)}</span>` : ''}
+    </li>`;
+
+  // 86'd rows say "86'd" in words and carry a struck-through name, so the state
+  // survives greyscale, a colourblind reader and a screen reader alike.
+  const offRow = (d) => `
+    <li class="hb-dish hb-off">
+      <span class="hb-dish-n"><s>${esc(d.name)}</s></span>
+      <span class="hb-off-k">86&rsquo;d</span>
+      ${d.sold_out_note ? `<span class="hb-dish-l">${esc(d.sold_out_note)}</span>` : ''}
+    </li>`;
+
+  const HOME_DISHES = 4;   // enough to scan at a glance; the board has the rest
+  const dishList = (list, row, label) => {
+    const shown = list.slice(0, HOME_DISHES);
+    const more = list.length - shown.length;
+    return `<ul class="hb-dishes" aria-label="${label}">${shown.map(row).join('')}</ul>${
+      more ? `<p class="hb-more-n">${more} more on the board</p>` : ''}`;
+  };
 
   const attentionRow = (a) => `
-    <a class="tc-row" href="${a.href}">
-      <span class="tc-row-l"><b>${esc(a.label)}</b><i>${esc(a.description)}</i></span>
-      <span class="tc-row-r"><span class="tc-chip ${CHIP[a.tone] || ''}">${esc(a.status)}</span></span>
+    <a class="hb-act" href="${a.href}">
+      <span class="hb-act-l"><b>${esc(a.label)}</b><i>${esc(a.description)}</i></span>
+      <span class="tc-chip ${CHIP[a.tone] || ''}">${esc(a.status)}</span>
     </a>`;
 
-  const noteRow = (e) => `
-    <a class="tc-row" href="${esc(e.href || '/portal/notifications')}">
-      <span class="tc-row-l"><b>${esc(e.title)}${e.unread
-        ? '<span class="pt-new-dot" aria-hidden="true"></span><span class="pt-sr">Unread</span>' : ''}</b>
+  const updateRow = (u) => `
+    <a class="hb-upd" href="${u.href}">
+      <span class="hb-upd-l"><b>${esc(u.label)}</b><i>${esc(u.description)}</i></span>
+      <span class="hb-upd-r" aria-hidden="true">&rsaquo;</span>
+    </a>`;
+
+  const newsRow = (e) => `
+    <a class="hb-upd" href="${esc(e.href || '/portal/notifications')}">
+      <span class="hb-upd-l"><b>${esc(e.title)}${e.unread
+    ? '<span class="pt-new-dot" aria-hidden="true"></span><span class="pt-sr">Unread</span>' : ''}</b>
         ${e.body ? `<i>${esc(e.body)}</i>` : ''}</span>
-      <span class="tc-row-r"><i>${esc(atTime(e.created_at))}</i></span>
+      <span class="hb-upd-r"><i>${esc(atTime(e.created_at))}</i></span>
     </a>`;
 
   const toolRow = (t) => `
-    <a class="tc-row" href="${t.href}">
-      <span class="tc-row-l"><b>${esc(t.label)}</b><i>${esc(t.description)}</i></span>
-      <span class="tc-row-r"><i aria-hidden="true">›</i></span>
+    <a class="hb-upd" href="${t.href}">
+      <span class="hb-upd-l"><b>${esc(t.label)}</b><i>${esc(t.description)}</i></span>
+      <span class="hb-upd-r" aria-hidden="true">&rsaquo;</span>
     </a>`;
 
-  const quiet = !m.attention.length && !m.notifications.length;
+  const secondary = [...m.updates, ...m.notifications];
+  const quiet = !m.notes.length && !m.specials.length && !m.eightySixed.length
+    && !m.attention.length && !secondary.length;
+
+  // A real, one-time confirmation. Set as a short cookie by the POST that
+  // succeeded and cleared the moment it is read, so a refresh does not replay
+  // it and a query parameter cannot fabricate it.
+  const sent = readCookie(req, STOCK_SENT_COOKIE);
+  if (sent) res.clearCookie(STOCK_SENT_COOKIE, { path: '/' });
+  const sentN = sent && /^\d{1,3}$/.test(sent) ? Number(sent) : 0;
 
   res.send(portalPage('Your portal', `
     ${portalTop(null, 'Home')}
-    <div class="pt-body tc-body">
-      <h1 class="tc-h">${esc(GREETING(now.getHours()))}, ${esc(firstName(emp.name))}.</h1>
+    <main class="pt-body tc-body hb" id="main">
+      <p class="hb-hi">${esc(GREETING(now.getHours()))}, ${esc(firstName(emp.name))}.</p>
+      <h1 class="hb-h1">Before your shift</h1>
 
-      ${statusCard(m.status)}
-
-      ${m.attention.length ? `
-        <h2 class="tc-kick tc-kick-sec">Needs your attention<b>${m.attention.length}</b></h2>
-        <div class="tc-rows">${m.attention.map(attentionRow).join('')}</div>` : ''}
-
-      ${m.notifications.length ? `
-        <h2 class="tc-kick tc-kick-sec">What happened</h2>
-        <div class="tc-rows">${m.notifications.map(noteRow).join('')}</div>
-        <a class="tc-more" href="/portal/notifications">See all notifications ›</a>` : ''}
-
-      ${quiet ? `<div class="tc-empty">
-        <b>You&rsquo;re all caught up</b>
-        <span>Nothing needs you right now. Anything your manager sends will show up here.</span>
+      ${sentN ? `<div class="hb-sent" role="status">
+        Thanks — ${sentN === 1 ? 'that item is' : `those ${sentN} items are`} with your manager.
       </div>` : ''}
 
-      ${m.roleActions.length ? `
-        <h2 class="tc-kick tc-kick-sec">Other things you can do</h2>
-        <div class="tc-rows">${m.roleActions.map(toolRow).join('')}</div>` : ''}
+      ${m.notes.length ? `<section class="hb-sec" aria-labelledby="hb-notes-h">
+        <h2 class="pt-sr" id="hb-notes-h">Notes from your manager</h2>
+        ${m.notes.map(noteBlock).join('')}
+      </section>` : ''}
 
-      ${m.push.configured ? pushRow(m.push.vapid) : ''}
-    </div>
-    ${m.status.live ? `<script>
-      // Anchored to the SERVER's clock, like every other counter in the portal:
-      // the page carries both the punch and what time the server thinks it is,
-      // so a phone an hour fast still reads true.
-      (function () {
-        var el = document.querySelector('.tcc-clock[data-since]');
-        if (!el) return;
-        var skew = Date.now() - Number(el.getAttribute('data-now'));
-        function tick() {
-          var s = Math.max(0, Math.floor((Date.now() - skew - Number(el.getAttribute('data-since'))) / 1000));
-          var h = Math.floor(s / 3600), mn = Math.floor((s % 3600) / 60), ss = s % 60;
-          var p = function (n) { return n < 10 ? '0' + n : String(n); };
-          el.textContent = h ? h + ':' + p(mn) + ':' + p(ss) : mn + ':' + p(ss);
-        }
-        tick(); setInterval(tick, 1000);
-      })();
-    </script>` : ''}`));
+      ${m.specials.length ? `<section class="hb-sec" aria-labelledby="hb-sp-h">
+        <h2 class="hb-h2" id="hb-sp-h">Specials <span class="hb-n">${m.specials.length}</span></h2>
+        ${dishList(m.specials, dishRow, 'Specials')}
+      </section>` : ''}
+
+      ${m.eightySixed.length ? `<section class="hb-sec" aria-labelledby="hb-86-h">
+        <h2 class="hb-h2 hb-h2-bad" id="hb-86-h">86&rsquo;d &mdash; don&rsquo;t offer
+          <span class="hb-n">${m.eightySixed.length}</span></h2>
+        ${dishList(m.eightySixed, offRow, "86'd — don't offer")}
+      </section>` : ''}
+
+      ${m.specials.length || m.eightySixed.length
+    ? '<a class="hb-board" href="/portal/specials">View all specials &amp; 86&rsquo;d &rsaquo;</a>' : ''}
+
+      ${m.attention.length ? `<section class="hb-sec" aria-labelledby="hb-at-h">
+        <h2 class="hb-h2" id="hb-at-h">Needs you
+          <span class="hb-n">${m.attention.length}</span></h2>
+        <div class="hb-acts">${m.attention.map(attentionRow).join('')}</div>
+      </section>` : ''}
+
+      ${secondary.length ? `<section class="hb-sec" aria-labelledby="hb-up-h">
+        <h2 class="hb-h2 hb-h2-q" id="hb-up-h">Updates</h2>
+        <div class="hb-upds">
+          ${m.updates.map(updateRow).join('')}
+          ${m.notifications.map(newsRow).join('')}
+        </div>
+        <a class="hb-board" href="/portal/notifications">See all notifications &rsaquo;</a>
+      </section>` : ''}
+
+      ${m.roleActions.length ? `<section class="hb-sec" aria-labelledby="hb-do-h">
+        <h2 class="hb-h2 hb-h2-q" id="hb-do-h">Other things you can do</h2>
+        <div class="hb-upds">${m.roleActions.map(toolRow).join('')}</div>
+      </section>` : ''}
+
+      ${quiet ? `<div class="tc-empty">
+        <b>Nothing to read before this shift</b>
+        <span>No notes, no specials and nothing needs you. Anything your manager
+          posts will show up here.</span>
+      </div>` : ''}
+    </main>`));
 });
 
 // Opening the submission form. Available as GET so the hub can link to it the
@@ -5981,7 +6054,13 @@ app.post('/portal/stock', (req, res) => {
       { body: n === 1 ? names[0] : `${names[0]} +${n - 1} more`, href: '/staff-portal' });
   }
 
-  res.redirect('/portal?sent=' + n);
+  // One-time, cookie-borne, and only ever set here — after the rows are in.
+  if (n > 0) {
+    res.cookie(STOCK_SENT_COOKIE, String(n), {
+      path: '/', httpOnly: true, sameSite: 'lax', maxAge: 60000,
+    });
+  }
+  res.redirect('/portal');
 });
 
 // ---------------------------------------------------------------------------
@@ -7342,6 +7421,13 @@ app.get('/portal/notifications', (req, res) => {
           </a>`).join('')}
         </div>`).join('')
         : '<p class="tc-note">Nothing yet. Anything your manager sends you shows up here.</p>'}
+      ${/* The device controls live here now, not on Home. Turning push on is
+             a thing you do once per phone; a pre-shift briefing is a thing you
+             read every shift, and the two do not belong on one screen. This is
+             the existing notifications page reached from More — no new
+             settings module, and the behaviour is byte-for-byte the same
+             component. */''}
+      ${PORTAL.VAPID_PUBLIC ? pushRow(PORTAL.VAPID_PUBLIC) : ''}
       <p class="pt-fine">Pay summaries, timesheet decisions and answers to your
         requests are kept here — the board notes and specials are on their own pages too.</p>
     </div>`));
@@ -13137,7 +13223,25 @@ app.get('/staff-portal', (req, res) => {
       <span class="pa-do">${isLive ? '<span class="bs-tag ok">live</span>' : '<span class="bs-tag">expired</span>'}
         <form method="post" action="/staff-portal/note/${n.id}/delete" style="margin:0">
           <button class="bs-act danger" type="submit">Delete</button></form></span>
-    </div>`;
+    </div>
+    ${/* Edit in place. Same row, same id — a note somebody has already read
+          stays the same note, and fixing a typo no longer means deleting and
+          re-posting, which was how two copies of one message happened. */''}
+    <details class="bs-fold pa-note-edit">
+      <summary>Edit</summary>
+      <form method="post" action="/staff-portal/note/${n.id}/edit" class="pa-add pa-form">
+        <label class="fld wide">Note<input name="title" required value="${esc(n.title)}"></label>
+        <label class="fld wide">The note<textarea name="body" rows="5">${esc(n.body || '')}</textarea></label>
+        <label class="fld wide">How urgent<select name="tone">
+          ${PORTAL.TONES.map((tn) => `<option value="${tn}"${tn === n.tone ? ' selected' : ''}>${
+    tn === 'urgent' ? 'Urgent — red' : tn === 'caution' ? 'Caution — amber' : 'For information — grey'
+  }</option>`).join('')}
+        </select></label>
+        <label class="fld">Show from<input name="starts_on" type="date" value="${esc(n.starts_on)}" required></label>
+        <label class="fld">Until<input name="ends_on" type="date" value="${esc(n.ends_on || '')}"></label>
+        <button class="bs-btn" type="submit">Save changes</button>
+      </form>
+    </details>`;
   };
 
   // --- the four bodies ------------------------------------------------------
@@ -13252,8 +13356,8 @@ app.get('/staff-portal', (req, res) => {
         <div class="bs-kick2"><span>Post a note</span></div>
         <form method="post" action="/staff-portal/note" class="pa-add pa-form">
           <label class="fld wide">Note<input name="title" required placeholder="Private event 7&ndash;9pm"></label>
-          <label class="fld wide">One line<input name="body"
-            placeholder="Back room booked. Keep walk-ins to the front."></label>
+          <label class="fld wide">The note<textarea name="body" rows="5"
+            placeholder="Back room booked from 7. Keep walk-ins to the front.&#10;&#10;Paragraphs work — write as much as you need."></textarea></label>
           <label class="fld wide">How urgent<select name="tone">
             <option value="urgent">Urgent &mdash; red</option>
             <option value="caution">Caution &mdash; amber</option>
@@ -13457,33 +13561,87 @@ app.post('/staff-portal/special/:id/delete', (req, res) => {
   backTo(res, 'board', 'Removed from the board.', dayOf(req));
 });
 
-app.post('/staff-portal/note', (req, res) => {
-  if (!portalGuard(req, res)) return;
-  const title = String(req.body.title || '').trim();
-  if (!title) return backTo(res, 'notes', 'A note needs something to say.', { err: '1' });
+/**
+ * How long a before-shift note may be.
+ *
+ * 16 KB, which is roughly 2,700 words — far past any briefing a restaurant
+ * actually writes, and deliberately so: the limit exists to stop a paste
+ * accident becoming a database row, not to ration what the owner may say. It
+ * sits well under express.urlencoded's 100 KB default, so the failure a person
+ * meets is always this message rather than a body-size error from the router.
+ *
+ * The old numbers were 120 and 240 and they SLICED. Somebody typed three
+ * paragraphs, saw "Posted", and the floor read the first two sentences.
+ */
+const NOTE_TITLE_MAX = 200;
+const NOTE_BODY_MAX = 16384;
+/** What a push preview may carry. Nothing to do with what is stored. */
+const NOTE_PUSH_PREVIEW = 160;
+
+/** Shared by create and edit: parse, validate, refuse rather than shorten. */
+function readNoteForm(body) {
+  const title = String(body.title || '').trim();
+  if (!title) return { err: 'A note needs something to say.' };
+  if (title.length > NOTE_TITLE_MAX) {
+    return { err: `That heading is ${title.length} characters. Keep it under ${NOTE_TITLE_MAX} — the detail belongs in the note itself.` };
+  }
+  // Normalise the line endings a browser sends so what is stored is what gets
+  // rendered, and count what will actually be stored.
+  const text = String(body.body || '').replace(/\r\n/g, '\n').trim();
+  if (text.length > NOTE_BODY_MAX) {
+    return { err: `That note is ${text.length.toLocaleString('en-US')} characters. The limit is ${NOTE_BODY_MAX.toLocaleString('en-US')} — nothing was saved, so copy it somewhere before shortening it.` };
+  }
   const today = isoDate(startOfToday());
-  const starts = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.starts_on || '')) ? req.body.starts_on : isoDate(startOfToday());
-  const ends = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.ends_on || '')) ? req.body.ends_on : null;
-  PORTAL.q.addNote.run({
-    title: title.slice(0, 120),
-    body: String(req.body.body || '').trim().slice(0, 240) || null,
-    tone: PORTAL.TONES.includes(req.body.tone) ? req.body.tone : 'fyi',
+  const starts = /^\d{4}-\d{2}-\d{2}$/.test(String(body.starts_on || '')) ? body.starts_on : today;
+  const ends = /^\d{4}-\d{2}-\d{2}$/.test(String(body.ends_on || '')) ? body.ends_on : null;
+  return {
+    title,
+    body: text || null,
+    tone: PORTAL.TONES.includes(body.tone) ? body.tone : 'fyi',
     starts_on: starts,
     // An end before the start would render the note invisible the moment it is
     // written, which reads as the post having failed.
     ends_on: ends && ends >= starts ? ends : null,
-    created_by: 'manager',
+    today,
+  };
+}
+
+app.post('/staff-portal/note', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const n = readNoteForm(req.body);
+  if (n.err) return backTo(res, 'notes', n.err, { err: '1' });
+  PORTAL.q.addNote.run({
+    title: n.title, body: n.body, tone: n.tone,
+    starts_on: n.starts_on, ends_on: n.ends_on, created_by: 'manager',
   });
   // Only tell the floor when the note is live today — a note post-dated to next
-  // week, or one that already ended, is not news now. It will still show in the
-  // before-shift list on the day it starts.
-  const effEnds = ends && ends >= starts ? ends : null;
-  if (starts <= today && (!effEnds || effEnds >= today)) {
-    PORTAL.notify('note', title.slice(0, 120), {
-      body: String(req.body.body || '').trim().slice(0, 160) || null, href: '/portal',
+  // week, or one that already ended, is not news now. It shows on Home the day
+  // it starts either way, because Home reads portal_notes directly.
+  //
+  // The preview is short because a push payload is short. It has nothing to do
+  // with what was stored, which is the whole note.
+  if (n.starts_on <= n.today && (!n.ends_on || n.ends_on >= n.today)) {
+    PORTAL.notify('note', n.title.slice(0, 120), {
+      body: n.body ? n.body.slice(0, NOTE_PUSH_PREVIEW) : null, href: '/portal',
     });
   }
   backTo(res, 'notes', 'Posted — it shows until it expires.');
+});
+
+app.post('/staff-portal/note/:id/edit', (req, res) => {
+  if (!portalGuard(req, res)) return;
+  const id = Number(req.params.id) || 0;
+  const existing = PORTAL.q.oneNote.get(id);
+  if (!existing) return backTo(res, 'notes', 'That note is no longer there.', { err: '1' });
+  const n = readNoteForm(req.body);
+  if (n.err) return backTo(res, 'notes', n.err, { err: '1' });
+  // In place. Same row, same id — a correction is not a second announcement,
+  // and it raises no notification: the floor was already told once.
+  PORTAL.q.updateNote.run({
+    id, title: n.title, body: n.body, tone: n.tone,
+    starts_on: n.starts_on, ends_on: n.ends_on,
+  });
+  backTo(res, 'notes', 'Updated.');
 });
 
 app.post('/staff-portal/note/:id/delete', (req, res) => {

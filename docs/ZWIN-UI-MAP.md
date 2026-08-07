@@ -1391,3 +1391,116 @@ duplicate audit row with identical values. The stored current values are the
 same either way. This is a separate concern from stale edits, where two tabs
 carrying different figures both write, both audit rows survive, and the last
 completed write is current (last-write-wins, unchanged, no locking column added).
+
+---
+
+## §14 — Employee Portal Home: the pre-shift briefing
+
+Home is no longer a clock screen. It answers one question — *what does this
+employee need to know before starting service?* — in this order:
+
+1. **Before your shift** — owner notes
+2. **Specials**
+3. **86'd — don't offer**
+4. **Needs you** — actionable only
+5. **Updates** and other things you can do
+
+A section with nothing in it does not render, so a quiet Home is short rather
+than a column of empty headings.
+
+### Before-shift notes come from `portal_notes`
+
+`homeModel()` calls `PORTAL.q.notesFor` — the date-windowed query the Phase-2G
+audit found had **never been called**. Notes previously reached employees only
+as a 160-character line in the notification feed, and only if they happened to
+be live the day they were posted; one scheduled for next Tuesday appeared
+nowhere, ever. Now the full stored body renders, ordered urgent → caution →
+fyi then by id, tone shown as a **word** (`Urgent` / `Heads up` / `For
+information`) as well as a coloured bar. `white-space: pre-wrap` preserves the
+owner's paragraphs; `overflow-wrap: anywhere` stops a pasted URL widening the
+page. `esc()` throughout.
+
+`kind='note'` events are suppressed from Home's Updates preview — the note
+already has its own section above, and showing both put one note on the page
+twice. The row is untouched and still on `/portal/notifications`.
+
+### Note length
+
+| | |
+|---|---|
+| Title | **200** characters, refused above |
+| Body | **16,384** characters (16 KB), refused above |
+| Push preview | 160 characters — a payload limit, not a storage limit |
+
+16 KB is about 2,700 words: far past any briefing a restaurant writes, and
+comfortably under `express.urlencoded`'s 100 KB default so the error an owner
+meets is always the clear one rather than a router body-size failure. The old
+limits were 120 and 240 and they **sliced silently** — three paragraphs went
+in, "Posted" came back, and the floor read two sentences. Over-limit input is
+now refused with the actual character count and nothing is written.
+
+The authoring field is a `<textarea>`. `\r\n` is normalised to `\n` on write.
+
+### Editing
+
+`POST /staff-portal/note/:id/edit` updates in place via `PORTAL.q.updateNote`.
+The id does not move, so a note somebody has already read stays the same note,
+and an edit raises **no** notification — the floor was told once. Delete-and-
+repost was previously the only way to fix a typo, which is how two copies of
+one message happened.
+
+**Limitation:** `portal_notes` stores one row per note with no version column,
+so an edit replaces the previous wording and there is no edit history. No audit
+subsystem was added for this.
+
+**Duplicates are never resolved by text.** Two notes with identical wording are
+two records and both render — matching words are not evidence of a mistake.
+
+### Specials and 86'd
+
+Evergreen by decision: `specialsAll` has no date filter and must not gain one.
+A special stays until the owner removes it. Home shows the first **4** with
+"*n* more on the board" and a link to `/portal/specials`, which remains the
+complete board.
+
+86'd items use the official `portal_specials.eighty_sixed_at` state only. They
+carry a struck-through name and the word `86'D`, so the state survives
+greyscale and a screen reader; `sold_out_note` is shown.
+
+**Employee stock reports (`portal_stock`) are never shown to other employees.**
+Floor → owner stays floor → owner; reporting something out does not create an
+official 86.
+
+### Attention versus Updates
+
+*Needs you* means the employee can do something now: blocking clock issue,
+outstanding sales & tips, returned timesheet, timesheet ready, plus the two
+states that outlived the clock card — **still clocked in** past the stale
+threshold, and **cannot clock in** with no position assigned.
+
+*Updates* keeps what is true but needs nothing: a decided correction, a request
+waiting on a manager. Nothing was deleted to tidy the heading.
+
+### The clock card is gone
+
+Time clock is a tab. "Clocked out" is not news at the start of a shift, and no
+block replaced the card.
+
+### Stock-report confirmation
+
+`POST /portal/stock` used to redirect to `/portal?sent=n`, which Home ignored —
+a dead success path, and one a typed URL could have faked. It now sets a
+one-time `httpOnly` `zwin_sent` cookie, cleared by the render that shows it: a
+refresh does not replay it and a query parameter cannot fabricate it.
+
+### Notification controls
+
+Moved from Home to `/portal/notifications`, reached from More. Turning push on
+is a once-per-phone setting; a briefing is read every shift. Subscriptions stay
+endpoint-keyed, multi-device behaviour unchanged, no new settings module.
+
+### Authorization
+
+`portalGuard` hardened — see `mayManagePortal()` in `src/server.js`. Owner board
+and note writes require an authenticated back-office user when `APP_PASSWORD`
+is set; local development with no password stays open by design.

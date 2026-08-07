@@ -1472,7 +1472,10 @@ test('2F-I: filing clears its own reminder and leaves the others alone', async (
     'the sales & tips item no longer reads as outstanding');
   assert.strictEqual((after.match(/href="\/portal\/(clock|earnings|specials|stock)/g) || []).length, others,
     'and nothing unrelated moved');
-  assert.match(after, /Working|Clocked in|Clock out/i, 'the clock still shows them on shift');
+  // Home is a pre-shift briefing now and says nothing about an ordinary clock
+  // state, so the punch is checked where it lives.
+  const clock = await (await fetch(`${BASE}/portal/clock`, { headers: { cookie } })).text();
+  assert.match(clock, /Working|Clocked in|Clock out/i, 'the clock still shows them on shift');
 
   // Correcting it does not bring the reminder back.
   const b = await signIn('5162');

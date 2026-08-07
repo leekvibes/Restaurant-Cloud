@@ -239,6 +239,13 @@ const q = {
   notesAll: db.prepare('SELECT * FROM portal_notes ORDER BY starts_on DESC, id DESC'),
   addNote: db.prepare(`INSERT INTO portal_notes (title, body, tone, starts_on, ends_on, created_by)
     VALUES (@title, @body, @tone, @starts_on, @ends_on, @created_by)`),
+  oneNote: db.prepare('SELECT * FROM portal_notes WHERE id = ?'),
+  // Edit in place. The id does not move, so a note somebody has already read
+  // stays the same note — correcting a typo is not a new announcement, and
+  // delete-and-repost was the only way to do it before.
+  updateNote: db.prepare(`UPDATE portal_notes
+    SET title = @title, body = @body, tone = @tone, starts_on = @starts_on, ends_on = @ends_on
+    WHERE id = @id`),
   delNote: db.prepare('DELETE FROM portal_notes WHERE id = ?'),
 
   // --- specials ------------------------------------------------------------

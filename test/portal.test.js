@@ -242,10 +242,14 @@ test('every role gets the same home, minus what does not apply', async () => {
   // Scoped to Home's own body. The More menu is persistent chrome rendered on
   // every portal screen and carries Specials — that is navigation, not a Home
   // shortcut competing with it.
-  const body = (cook.match(/<div class="pt-body tc-body">[\s\S]*?<\/div>\s*(?=<script|<nav class="pt-tabs)/) || [cook])[0];
-  for (const gone of ['Your hours &amp; pay', 'Specials &amp; 86 board']) {
+  const body = (cook.match(/<main class="pt-body tc-body hb"[\s\S]*?(?=<nav class="pt-tabs)/) || [cook])[0];
+  for (const gone of ['Your hours &amp; pay']) {
     assert.ok(!body.includes(gone), `"${gone}" is no longer a Home shortcut row`);
   }
+  // Specials reaches Home as CONTENT — the dishes, part of the briefing — and
+  // must still never appear as a navigation row duplicating the More sheet.
+  assert.ok(!/>Specials &amp; 86 board</.test(body),
+    'Specials is briefing content on Home, not a shortcut row');
   for (const href of ['/portal/earnings', '/portal/specials', '/portal/timesheet']) {
     assert.strictEqual((await asStaff(href, cookie)).status, 200, `${href} still opens from its tab`);
   }
@@ -676,25 +680,24 @@ test('signing out of the portal actually ends it', async () => {
   assert.match(out.headers.get('set-cookie') || '', /zwin_portal=;/, 'the cookie is cleared');
 });
 
-test("the floor gets a What's-new heads-up when a special is posted", async () => {
+test("the floor gets an Updates heads-up when a special is posted", async () => {
+  // The section is called Updates now and it is secondary — before-shift notes
+  // come straight from portal_notes and no longer depend on this feed. What it
+  // still has to do is unchanged: show what arrived since you last looked,
+  // mark it unread once, and stop marking it after you have seen it.
   const cookie = await signIn('1111');
-  // First visit sets their baseline — a returning user, not brand-new, is the
-  // one who should be told about something posted *after* they last looked.
   await (await asStaff('/portal', cookie)).text();
   await form('/staff-portal/special', { name: 'Qqx Heads-up branzino', price: '30.00' });
   const first = await (await asStaff('/portal', cookie)).text();
-  assert.match(first, /What happened/, 'the what-happened preview shows');
+  assert.match(first, /Updates/, 'the secondary feed shows');
   assert.match(first, /Qqx Heads-up branzino/, 'naming the special');
   assert.match(first, /pt-new-dot/, 'marked unread the first time');
   assert.match(first, /Unread/, 'with a word for anybody who cannot see the dot');
-  // Opening the hub is reading it. The item stays — this is a preview of what
-  // happened, not a queue that empties — but it stops being marked unread.
   const second = await (await asStaff('/portal', cookie)).text();
   assert.match(second, /Qqx Heads-up branzino/, 'it is still recent, so it is still shown');
   assert.ok(!/pt-new-dot/.test(second), 'but no longer flagged as new');
   assert.match(second, /See all notifications/, 'with the whole feed one tap away');
 });
-
 test('an earnings notification reaches only the person it is for', async () => {
   const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get('1111');
   assert.ok(me, 'the test employee exists');
@@ -713,10 +716,15 @@ test('an earnings notification reaches only the person it is for', async () => {
 });
 
 test('a device can turn on push, and it is stored against the person', async () => {
+  // The control moved off Home to /portal/notifications, reached from More:
+  // turning push on is a once-per-phone setting, and a pre-shift briefing is
+  // read every shift. Everything about the subscription itself is unchanged.
   const cookie = await signIn('1111');
-  const hub = await (await asStaff('/portal', cookie)).text();
-  assert.match(hub, /id="ptpush"/, 'the turn-on control is on the hub');
-  assert.match(hub, /data-vapid="/, 'with a public key to subscribe against');
+  const home = await (await asStaff('/portal', cookie)).text();
+  assert.ok(!/id="ptpush"/.test(home), 'device settings are not on Home any more');
+  const settings = await (await asStaff('/portal/notifications', cookie)).text();
+  assert.match(settings, /id="ptpush"/, 'the turn-on control is where notifications live');
+  assert.match(settings, /data-vapid="/, 'with a public key to subscribe against');
 
   const sub = { endpoint: 'https://example.com/push/qqx-1', keys: { p256dh: 'x', auth: 'y' } };
   const r = await fetch(BASE + '/portal/push/subscribe', {
@@ -729,13 +737,11 @@ test('a device can turn on push, and it is stored against the person', async () 
   assert.ok(row, 'the subscription is stored');
   assert.strictEqual(row.employee_id, me.id, 'against the signed-in person');
 
-  // And turning it off removes that device.
   await fetch(BASE + '/portal/push/unsubscribe', {
     method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ endpoint: sub.endpoint }),
   });
   assert.ok(!db.prepare('SELECT 1 FROM portal_push WHERE endpoint = ?').get(sub.endpoint), 'unsubscribe removes it');
 });
-
 // --- admin (back-office) notifications -------------------------------------
 // A parallel feed for the owner and managers, in its own admin_* tables. Two
 // things matter: the office is told when operational milestones happen, and
@@ -885,17 +891,22 @@ test('overriding a duplicate-invoice warning notifies the office', async () => {
 
 test('a brand-new user starts clean — no backlog, only what arrives after them', async () => {
   db.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Fresh Newbie','server',900,1,'9090')").run();
-  // Posted before they ever sign in — the backlog a new arrival must NOT be shown.
   await form('/staff-portal/special', { name: 'Zzq Before-you-arrived special', price: '20.00' });
   const cookie = await signIn('9090');
   const first = await (await asStaff('/portal', cookie)).text();
-  assert.ok(!/Zzq Before-you-arrived special/.test(first), 'the pre-existing backlog is not shown as new');
-  // But anything posted after their first visit still reaches them.
+  // The rule is about the NOTIFICATION backlog, and it still holds: a new
+  // arrival is not handed a history of announcements posted before they were
+  // hired. The board is a different thing — a special that is still running is
+  // still running, and somebody starting today needs to know about it. So the
+  // assertion is scoped to the Updates feed rather than to the whole page.
+  const updates = (first.split('>Updates<')[1] || '').split('</section>')[0];
+  assert.ok(!/Zzq Before-you-arrived special/.test(updates),
+    'the pre-existing backlog is not shown as new');
   await form('/staff-portal/special', { name: 'Zzq After-you-arrived special', price: '22.00' });
   const second = await (await asStaff('/portal', cookie)).text();
-  assert.match(second, /Zzq After-you-arrived special/, 'genuinely new notifications still show');
+  const updates2 = (second.split('>Updates<')[1] || '').split('</section>')[0];
+  assert.match(updates2, /Zzq After-you-arrived special/, 'genuinely new notifications still show');
 });
-
 test("the portal breaks a shift down the way that night's email does", async () => {
   // The ask, in the owner's words: the same breakdown on the portal as in the
   // email people get, matching whatever position they are. The portal used to
@@ -1470,4 +1481,202 @@ test('2E-2: a shift that cannot be costed is kept, not dropped', async () => {
   // And the page states it in words a person can act on, with nothing internal.
   assert.match(src, /Earnings unavailable/, 'the state has a name');
   assert.match(src, /couldn.t calculate this shift.s earnings/i, 'and a plain explanation');
+});
+
+// ===========================================================================
+// HOME — the pre-shift briefing.
+// ===========================================================================
+
+const noteRows = () => db.prepare('SELECT * FROM portal_notes ORDER BY id').all();
+const homeOf = async (cookie) => (await asStaff('/portal', cookie)).text();
+/** Home's own body — the shell's nav carries links that are not Home's. */
+const briefing = (html) =>
+  (html.match(/<main class="pt-body tc-body hb"[\s\S]*?(?=<nav class="pt-tabs)/) || [html])[0];
+
+test('Home reads before-shift notes from the note table, not the news feed', async () => {
+  const cookie = await signIn('1111');
+  await form('/staff-portal/note', { title: 'Qn Live note', body: 'Line one.\r\n\r\nLine two.', tone: 'urgent' });
+  const html = briefing(await homeOf(cookie));
+  assert.match(html, /Qn Live note/, 'the note is on Home');
+  assert.match(html, /Line one\./, 'with its body');
+  assert.match(html, /Line two\./, 'all of it');
+  // Tone in words as well as colour.
+  assert.match(html, /class="hb-note hb-urgent"/, 'toned');
+  assert.match(html, /Urgent/, 'and said in words, not only in red');
+  // Newlines survive as newlines, and the stylesheet is what renders them.
+  assert.match(html, /Line one\.\n\nLine two\./, 'paragraphs preserved');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  assert.match(css, /\.hb-note-b[^}]*white-space:\s*pre-wrap/, 'rendered as written');
+  assert.match(css, /\.hb-note-b[^}]*overflow-wrap:\s*anywhere/, 'and a long word cannot push the page sideways');
+});
+
+test('a note scheduled for later appears later, and an expired one stops', async () => {
+  const cookie = await signIn('1111');
+  const D = require('../src/dates');
+  const today = D.isoDate(D.startOfToday());
+  await form('/staff-portal/note', { title: 'Qn Future note', starts_on: D.addDays(today, 3) });
+  await form('/staff-portal/note', { title: 'Qn Past note',
+    starts_on: D.addDays(today, -5), ends_on: D.addDays(today, -2) });
+  const html = briefing(await homeOf(cookie));
+  assert.ok(!/Qn Future note/.test(html), 'not yet');
+  assert.ok(!/Qn Past note/.test(html), 'and not any more');
+  // Both are still real rows — nothing was deleted to hide them.
+  assert.ok(noteRows().some((n) => n.title === 'Qn Future note'), 'the future note is stored');
+  assert.ok(noteRows().some((n) => n.title === 'Qn Past note'), 'so is the expired one');
+});
+
+test('a long note is stored whole, and an over-long one is refused outright', async () => {
+  const long = 'A busy Friday. '.repeat(600);            // ~9 KB, comfortably legal
+  const r = await form('/staff-portal/note', { title: 'Qn Long note', body: long });
+  assert.ok(r.status < 400, 'accepted');
+  const stored = noteRows().find((n) => n.title === 'Qn Long note');
+  assert.strictEqual(stored.body.length, long.trim().length, 'stored whole — not sliced at 240');
+
+  // And what the push preview carries is a separate, shorter thing.
+  const ev = db.prepare("SELECT * FROM portal_events WHERE kind='note' AND title='Qn Long note'").get();
+  if (ev) {
+    assert.ok(ev.body.length <= 160, 'the preview is short');
+    assert.ok(stored.body.length > ev.body.length, 'and the stored note is not');
+  }
+
+  const before = noteRows().length;
+  const tooBig = 'x'.repeat(16385);
+  const bad = await form('/staff-portal/note', { title: 'Qn Too big', body: tooBig });
+  assert.strictEqual(noteRows().length, before, 'nothing was written');
+  const where = decodeURIComponent(bad.headers.get('location') || '');
+  assert.match(where, /16,384|limit is/, 'and the owner is told the limit');
+  assert.match(where, /err=1/, 'as a refusal, not a success');
+});
+
+test('a note is escaped, not executed', async () => {
+  const cookie = await signIn('1111');
+  await form('/staff-portal/note', { title: 'Qn <script>alert(1)</script>', body: '<b>bold</b> & co' });
+  const html = briefing(await homeOf(cookie));
+  assert.ok(!/<script>alert\(1\)<\/script>/.test(html), 'no live script');
+  assert.match(html, /&lt;script&gt;/, 'shown as text');
+  assert.match(html, /&lt;b&gt;bold&lt;\/b&gt; &amp; co/, 'and so is the body');
+});
+
+test('editing a note changes that note — it does not make a second one', async () => {
+  const cookie = await signIn('1111');
+  await form('/staff-portal/note', { title: 'Qn Edit me', body: 'First wording.' });
+  const mine = noteRows().filter((n) => n.title === 'Qn Edit me');
+  assert.strictEqual(mine.length, 1, 'one row to start with');
+  const id = mine[0].id;
+
+  await form(`/staff-portal/note/${id}/edit`, { title: 'Qn Edited', body: 'Second wording.', tone: 'caution' });
+  const after = noteRows().filter((n) => n.id === id);
+  assert.strictEqual(after.length, 1, 'still one row');
+  assert.strictEqual(after[0].title, 'Qn Edited', 'with the new heading');
+  assert.strictEqual(after[0].body, 'Second wording.', 'and the new body');
+  assert.strictEqual(after[0].tone, 'caution', 'and the new tone');
+  assert.strictEqual(noteRows().filter((n) => n.title === 'Qn Edit me').length, 0,
+    'the old wording is gone, not sitting alongside it');
+
+  const html = briefing(await homeOf(cookie));
+  assert.strictEqual((html.match(/Qn Edited/g) || []).length, 1, 'and it renders once');
+});
+
+test('two separate notes may say exactly the same thing', async () => {
+  const cookie = await signIn('1111');
+  const same = { title: 'Qn Same words', body: 'Private event tonight.' };
+  await form('/staff-portal/note', same);
+  await form('/staff-portal/note', same);
+  const both = noteRows().filter((n) => n.title === 'Qn Same words');
+  assert.strictEqual(both.length, 2, 'two records, because they are two records');
+  assert.notStrictEqual(both[0].id, both[1].id, 'with their own identities');
+  const html = briefing(await homeOf(cookie));
+  assert.strictEqual((html.match(/Qn Same words/g) || []).length, 2,
+    'and Home shows both — matching text is not evidence of a duplicate');
+});
+
+test('one note record cannot be multiplied by the news feed', async () => {
+  // The old failure mode: a note reaching Home twice, once from portal_notes
+  // and once as the notification the posting raised.
+  const cookie = await signIn('1111');
+  await form('/staff-portal/note', { title: 'Qn Once only', body: 'Just the once.' });
+  const html = briefing(await homeOf(cookie));
+  assert.strictEqual((html.match(/Qn Once only/g) || []).length, 1, 'exactly one appearance');
+});
+
+test('Home shows the board and keeps the full one a tap away', async () => {
+  const cookie = await signIn('1111');
+  for (let i = 1; i <= 6; i += 1) {
+    await form('/staff-portal/special', { name: `Qb Dish ${i}`, price: '10.00' });
+  }
+  const html = briefing(await homeOf(cookie));
+  assert.match(html, /id="hb-sp-h">Specials/, 'the section');
+  // Capped, and honest about being capped. Counted by rendered rows rather
+  // than by dish name: which four appear depends on the board's own order, and
+  // the invariant is that Home stays short — not which dishes win.
+  const total = db.prepare('SELECT COUNT(*) n FROM portal_specials WHERE eighty_sixed_at IS NULL').get().n;
+  assert.ok(total > 4, `the board has more than fits (${total})`);
+  const rows = (html.match(/class="hb-dish"/g) || []).length;
+  assert.ok(rows > 0, 'with dishes on it');
+  assert.ok(rows <= 4, `Home stays compact — rendered ${rows}`);
+  assert.match(html, /more on the board/, 'and says there are more');
+  assert.match(html, /href="\/portal\/specials"/, 'with the full board one tap away');
+  assert.strictEqual((await asStaff('/portal/specials', cookie)).status, 200, 'which still opens');
+});
+
+test("86'd reads as 86'd without relying on the colour", async () => {
+  const cookie = await signIn('1111');
+  await form('/staff-portal/special', { name: 'Qb Gone dish', price: '18.00' });
+  const sp = db.prepare("SELECT id FROM portal_specials WHERE name='Qb Gone dish'").get();
+  await form(`/staff-portal/special/${sp.id}/86`, { note: 'last one went at 7' });
+  const html = briefing(await homeOf(cookie));
+  assert.match(html, /86&rsquo;d &mdash; don&rsquo;t offer/, 'its own heading');
+  assert.match(html, /<s>Qb Gone dish<\/s>/, 'struck through, which survives greyscale');
+  assert.match(html, /class="hb-off-k">86&rsquo;d</, 'and labelled in words');
+  assert.match(html, /last one went at 7/, 'with the note the manager left');
+});
+
+test('an employee stock report stays private and never becomes an official 86', async () => {
+  const mine = await signIn('1111');
+  const theirs = await signIn('2222');
+  const before = db.prepare('SELECT COUNT(*) n FROM portal_specials').get().n;
+  const r = await fetch(BASE + '/portal/stock', {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie: mine, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ items: JSON.stringify([{ item: 'Qs Secret shortage', status: 'out' }]) }).toString(),
+  });
+  assert.strictEqual(r.status, 302, 'it files');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM portal_specials').get().n, before,
+    'and creates no official board row');
+
+  const other = briefing(await homeOf(theirs));
+  assert.ok(!/Qs Secret shortage/.test(other), 'another employee never sees it');
+  assert.ok(!/Qs Secret shortage/.test(await (await asStaff('/portal/specials', theirs)).text()),
+    'not on the board either');
+});
+
+test('a real stock report confirms once; a typed URL confirms never', async () => {
+  const cookie = await signIn('1111');
+  // Forged first: the parameter that used to be the whole mechanism.
+  const forged = briefing(await (await asStaff('/portal?sent=3', cookie)).text());
+  assert.ok(!/with your manager/.test(forged), 'a query parameter fabricates nothing');
+
+  const r = await fetch(BASE + '/portal/stock', {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ items: JSON.stringify([{ item: 'Qs Real shortage', status: 'out' }]) }).toString(),
+  });
+  const set = r.headers.get('set-cookie') || '';
+  assert.match(set, /zwin_sent=/, 'the successful POST is what sets it');
+  const sentCookie = `${cookie}; ${set.split(';')[0]}`;
+  const first = briefing(await (await fetch(BASE + '/portal', { headers: { cookie: sentCookie } })).text());
+  assert.match(first, /with your manager/, 'and the next page confirms it');
+  // Once. A refresh without the cookie — which is what a refresh is, because
+  // reading it cleared it — says nothing.
+  const second = briefing(await homeOf(cookie));
+  assert.ok(!/with your manager/.test(second), 'a refresh does not replay it');
+});
+
+test('Home has no clock card and no clock action', async () => {
+  const cookie = await signIn('1111');
+  const html = briefing(await homeOf(cookie));
+  assert.ok(!/class="tcc tcc-/.test(html), 'the card is gone');
+  assert.ok(!/>Clock in</.test(html), 'and so is the action');
+  assert.ok(!/data-since/.test(html), 'nothing ticking');
+  assert.ok(!/Clocked out/.test(html), 'and no block replaced it');
 });
