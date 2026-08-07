@@ -30,6 +30,9 @@
 const { db } = require('./db');
 const { isoDate, addDays } = require('./dates');
 const TC = require('./timeclock');
+// Read only, and only periodFor(). The pay period owns the definition of a
+// workweek; the scheduler borrows it rather than keeping a second one.
+const P = require('./periods');
 
 // ---------------------------------------------------------------------------
 // Schema. This module owns it, the way timeclock.js owns its own, so the file
@@ -186,6 +189,13 @@ const q = {
       AND starts_at < @ends_at AND ends_at > @starts_at`),
 
   breaksFor: db.prepare('SELECT * FROM scheduled_breaks WHERE scheduled_shift_id = ? ORDER BY id'),
+  // ONE statement for any number of shifts. A board week is ~40 shifts; asking
+  // per shift is 40 round trips to answer one question. json_each takes the ids
+  // as a bound JSON array, so this stays a single prepared statement instead of
+  // SQL assembled per call with a different placeholder count each time.
+  breaksForMany: db.prepare(`SELECT b.* FROM scheduled_breaks b
+    JOIN json_each(?) j ON j.value = b.scheduled_shift_id
+    ORDER BY b.scheduled_shift_id, b.id`),
   addBreak: db.prepare(`INSERT INTO scheduled_breaks
     (scheduled_shift_id, minutes, planned_start_at, paid, note)
     VALUES (@scheduled_shift_id, @minutes, @planned_start_at, @paid, @note)`),
@@ -212,6 +222,10 @@ const q = {
 const emp = {
   byId: db.prepare('SELECT * FROM employees WHERE id = ?'),
   heldRoles: db.prepare('SELECT role FROM employee_roles WHERE employee_id = ?'),
+  manyById: db.prepare(`SELECT e.* FROM employees e
+    JOIN json_each(?) j ON j.value = e.id`),
+  manyRoles: db.prepare(`SELECT r.employee_id, r.role FROM employee_roles r
+    JOIN json_each(?) j ON j.value = r.employee_id`),
 };
 
 /**
@@ -228,6 +242,28 @@ function heldPositions(employeeId) {
   if (!e) return [];
   const extra = emp.heldRoles.all(employeeId).map((r) => r.role);
   return [...new Set([e.role, ...extra])].filter((r) => r && r !== 'manager');
+}
+
+/**
+ * heldPositions for many employees at once.
+ *
+ * Same rule, same exclusion of 'manager', one pair of queries instead of two
+ * per person. The board needs this for every name in the week.
+ */
+function heldPositionsFor(ids) {
+  const list = [...new Set((ids || []).filter((n) => n != null).map(Number))];
+  const out = {};
+  if (!list.length) return out;
+  const json = JSON.stringify(list);
+  const extra = {};
+  for (const r of emp.manyRoles.all(json)) {
+    (extra[r.employee_id] || (extra[r.employee_id] = [])).push(r.role);
+  }
+  for (const e of emp.manyById.all(json)) {
+    out[e.id] = [...new Set([e.role, ...(extra[e.id] || [])])]
+      .filter((r) => r && r !== 'manager');
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,9 +301,69 @@ function validate({ employeeId, position, startsAt, endsAt }) {
   }
   // A whole day is already implausible for one shift; anything past it is a
   // typo in the date, which would otherwise sit on the board for a week.
-  const hours = (Date.parse(`${endsAt.replace(' ', 'T')}Z`)
-    - Date.parse(`${startsAt.replace(' ', 'T')}Z`)) / 3600000;
-  if (hours > 24) throw new ScheduleError('That shift is longer than a day — check the dates.', 'time');
+  if (minutesBetween(startsAt, endsAt) > 24 * 60) {
+    throw new ScheduleError('That shift is longer than a day — check the dates.', 'time');
+  }
+}
+
+/**
+ * D5 — planned breaks are checked, not quietly discarded.
+ *
+ * A planned start is OPTIONAL and stays that way: a manager usually knows
+ * somebody gets half an hour, not when they will take it. The rule is that a
+ * break which HAS a start must have a workable one.
+ *
+ * Until now `writeBreaks` dropped anything with minutes <= 0 without a word, so
+ * a mistyped break vanished and the shift silently kept its full paid hours.
+ * Refusal is the honest answer.
+ *
+ * `alreadyUtc` distinguishes form input (local, needs converting) from stamps
+ * already in the database (copy, duplicate, re-check after a time change). It
+ * is passed explicitly rather than guessed from the string's shape.
+ */
+function normalizeBreaks(breaks, startsAt, endsAt, alreadyUtc = false) {
+  const list = breaks || [];
+  if (!list.length) return [];
+  const span = minutesBetween(startsAt, endsAt);
+  const out = [];
+  let total = 0;
+
+  for (const b of list) {
+    const minutes = Math.round(Number(b.minutes));
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      throw new ScheduleError('A break needs a length in minutes.', 'break');
+    }
+    total += minutes;
+    if (total > span) {
+      throw new ScheduleError(
+        list.length > 1
+          ? 'Those breaks add up to more than the shift.'
+          : 'That break is longer than the shift.',
+        'break',
+      );
+    }
+
+    const raw = b.plannedStartAt !== undefined ? b.plannedStartAt : b.planned_start_at;
+    let plannedStartAt = null;
+    if (raw) {
+      plannedStartAt = alreadyUtc ? String(raw) : toUtc(raw);
+      // String comparison is exact on 'YYYY-MM-DD HH:MM:SS' UTC stamps.
+      if (plannedStartAt < startsAt) {
+        throw new ScheduleError('A break cannot start before the shift does.', 'break');
+      }
+      if (addMinutesUtc(plannedStartAt, minutes) > endsAt) {
+        throw new ScheduleError('A break cannot run past the end of the shift.', 'break');
+      }
+    }
+
+    out.push({
+      minutes,
+      planned_start_at: plannedStartAt,
+      paid: b.paid ? 1 : 0,
+      note: String(b.note || '').trim() || null,
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +391,10 @@ function create(input) {
   // punch against it lands on the same business date.
   const daypart = DAYPARTS.includes(input.daypart) ? input.daypart : serviceFor(startsAt);
   const businessDate = businessDateFor(startsAt);
+  // Before the transaction, not inside it. A rollback would be correct either
+  // way; refusing first means the shift is never half-created in the first
+  // place, and the error names the break rather than the write.
+  const breakRows = normalizeBreaks(input.breaks, startsAt, endsAt);
 
   let id = null;
   db.transaction(() => {
@@ -305,7 +405,7 @@ function create(input) {
       created_by: input.createdBy || null,
     });
     id = Number(info.lastInsertRowid);
-    writeBreaks(id, input.breaks);
+    writeBreaks(id, breakRows);
   })();
   return byId(id);
 }
@@ -339,6 +439,17 @@ function edit(id, patch) {
   const businessDate = startsAt !== row.starts_at ? businessDateFor(startsAt) : row.business_date;
   const note = patch.note !== undefined ? (String(patch.note || '').trim() || null) : row.note;
 
+  let breakRows = null;
+  if (patch.breaks !== undefined) {
+    breakRows = normalizeBreaks(patch.breaks, startsAt, endsAt);
+  } else if (startsAt !== row.starts_at || endsAt !== row.ends_at) {
+    // The breaks were valid against the OLD span. Shorten an 8-hour shift to
+    // twenty minutes and an untouched hour-long break would survive it, making
+    // paid hours negative on the board and in every total built from them.
+    // Validate in place; do not silently rewrite what the manager did not edit.
+    normalizeBreaks(q.breaksFor.all(id), startsAt, endsAt, true);
+  }
+
   const material = employeeId !== row.employee_id
     || position !== row.position
     || startsAt !== row.starts_at
@@ -352,7 +463,7 @@ function edit(id, patch) {
       starts_at: startsAt, ends_at: endsAt, daypart, note,
       changed_after_publish: row.status === 'published' && material ? 1 : row.changed_after_publish,
     });
-    if (patch.breaks !== undefined) writeBreaks(id, patch.breaks);
+    if (breakRows) writeBreaks(id, breakRows);
   })();
   return byId(id);
 }
@@ -430,17 +541,125 @@ function byId(id) {
   return { ...row, breaks: q.breaksFor.all(id) };
 }
 
-/** The manager board: everything not cancelled, in a date range. */
-function inRange(from, to) {
-  return q.inRange.all(from, to).map((r) => ({ ...r, breaks: q.breaksFor.all(r.id) }));
+/** Attach planned breaks to a set of shifts in one query, not one each. */
+function withBreaks(rows) {
+  if (!rows.length) return rows;
+  const grouped = {};
+  for (const b of q.breaksForMany.all(JSON.stringify(rows.map((r) => r.id)))) {
+    (grouped[b.scheduled_shift_id] || (grouped[b.scheduled_shift_id] = [])).push(b);
+  }
+  return rows.map((r) => ({ ...r, breaks: grouped[r.id] || [] }));
 }
 
-/** A Monday-anchored week. */
+/**
+ * The manager board: everything not cancelled, in a date range.
+ *
+ * D1 — two queries for a week, not one per shift. Batched rather than cached:
+ * a cache would go stale the moment a break is edited, and the board is the
+ * screen that has to be right immediately after an edit.
+ */
+function inRange(from, to) {
+  return withBreaks(q.inRange.all(from, to));
+}
+
+/**
+ * Which week a business date falls in — THE definition, used everywhere.
+ *
+ * Not Monday. Not Saturday. The pay period's own workweek, because that is the
+ * seven days overtime is measured against:
+ *
+ *   reports.js:120   const midDate = shiftDate(from, 7);
+ *                    const weekKey = (d) => (d < midDate ? 'wk1' : 'wk2');
+ *
+ * The OT workweek is the period start and start + 7, whatever weekday that is —
+ * a Saturday, as the anchor currently stands. A board showing Monday to Sunday
+ * would total a different seven days from the one deciding whether hour 41 is
+ * paid at time and a half, and nobody would notice until a pay run.
+ *
+ * Derived from periods.js rather than restated here, so moving the anchor or
+ * the period length moves the board with it and changes no scheduler code.
+ *
+ * Pure ISO-date arithmetic: no getDay(), no bare `new Date(string)`, nothing
+ * that reads the server's zone.
+ */
+function weekWindowFor(businessDate) {
+  const p = P.periodFor(businessDate);
+  const offset = daysApart(p.start, businessDate);
+  const start = addDays(p.start, Math.floor(offset / 7) * 7);
+  // A period whose length is not a whole number of weeks leaves a short final
+  // stretch. Clamp to the period rather than running a week past its end and
+  // colliding with the next one.
+  const end = addDays(start, 6);
+  return { start, end: end > p.end ? p.end : end };
+}
+
+/** The week window plus the shifts in it, for the board. */
 function weekFor(anyDate) {
-  const d = new Date(`${anyDate}T00:00:00`);
-  const back = (d.getDay() + 6) % 7;                    // Monday = 0
-  const start = addDays(anyDate, -back);
-  return { start, end: addDays(start, 6), shifts: inRange(start, addDays(start, 6)) };
+  const { start, end } = weekWindowFor(anyDate);
+  return { start, end, shifts: inRange(start, end) };
+}
+
+// ---------------------------------------------------------------------------
+// Hours (D4, Q3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Two different numbers, both kept.
+ *
+ *   span = how long the person is at work
+ *   paid = span minus the breaks they are NOT paid for
+ *
+ * They are not interchangeable. Span is what a manager pictures when they place
+ * an 11-to-7; paid is what the hours cost. Collapsing them into one figure means
+ * one of the two screens is lying, and which one depends on where you look.
+ *
+ * Nothing here writes, and nothing here is payroll. These are PLANNED minutes —
+ * what was intended. Paid hours come from the clock, through aggregatePayroll,
+ * and this module never feeds it.
+ */
+function spanMinutes(shift) {
+  return minutesBetween(shift.starts_at, shift.ends_at);
+}
+
+function paidMinutes(shift) {
+  const unpaid = (shift.breaks || [])
+    .filter((b) => !b.paid)
+    .reduce((n, b) => n + Number(b.minutes || 0), 0);
+  // Clamped as a floor, not as a fix. normalizeBreaks makes a break longer than
+  // its shift impossible; if that ever fails, the board shows 0 rather than a
+  // negative that would look like a real figure.
+  return Math.max(0, spanMinutes(shift) - unpaid);
+}
+
+/**
+ * Week totals for the board — per employee, per day, and overall.
+ *
+ * Cancelled shifts are excluded: a plan that was called off is not hours. Open
+ * shifts (no employee) are counted in the day and grand totals under the key
+ * 'open', so a week's staffing does not silently shrink by ignoring them.
+ */
+function weekTotals(shifts) {
+  const blank = () => ({ spanMinutes: 0, paidMinutes: 0, count: 0 });
+  const bump = (bucket, span, paid) => {
+    bucket.spanMinutes += span; bucket.paidMinutes += paid; bucket.count += 1;
+  };
+
+  const byEmployee = {}; const byDate = {}; const byCell = {};
+  const total = blank();
+
+  for (const s of shifts) {
+    if (s.status === 'cancelled') continue;
+    const span = spanMinutes(s);
+    const paid = paidMinutes(s);
+    const who = s.employee_id == null ? 'open' : String(s.employee_id);
+    const day = s.business_date;
+
+    bump(byEmployee[who] || (byEmployee[who] = blank()), span, paid);
+    bump(byDate[day] || (byDate[day] = blank()), span, paid);
+    bump(byCell[`${who}|${day}`] || (byCell[`${who}|${day}`] = blank()), span, paid);
+    bump(total, span, paid);
+  }
+  return { byEmployee, byDate, byCell, total };
 }
 
 /** How far back and forward an employee's own schedule reaches. */
@@ -474,6 +693,48 @@ function overlapsFor(shift) {
 }
 
 /**
+ * Duplicate one shift into the same cell — same person, same day, same times.
+ *
+ * The common case is a split shift or a second person on the same station, and
+ * making a manager retype an identical row is how a scheduler earns its
+ * reputation. Deliberately not a drawer: one click, one row, edit after.
+ *
+ * The daypart is CARRIED, not re-derived. A copy of this exact shift is this
+ * exact shift; if a manager hand-set it to cafe, the duplicate is cafe too.
+ * (copyWeek re-derives because a new week is a new plan. Same rule, read from
+ * opposite ends: the stamp follows the shift, not the calendar.)
+ */
+function duplicate(id, opts = {}) {
+  const src = byId(id);
+  if (!src) throw new ScheduleError('That shift is no longer there.', 'missing');
+  if (src.status === 'cancelled') throw new ScheduleError('That shift was cancelled.', 'cancelled');
+
+  // Re-checked, not assumed. The original may have been placed weeks ago and
+  // the person has since left the position or the roster.
+  validate({
+    employeeId: src.employee_id, position: src.position,
+    startsAt: src.starts_at, endsAt: src.ends_at,
+  });
+  const breakRows = normalizeBreaks(src.breaks, src.starts_at, src.ends_at, true);
+
+  let made = null;
+  db.transaction(() => {
+    const info = q.insert.run({
+      employee_id: src.employee_id, position: src.position,
+      business_date: src.business_date,
+      starts_at: src.starts_at, ends_at: src.ends_at,
+      daypart: src.daypart,
+      // Always a draft, whatever the original was. A duplicate has never been
+      // published, so it must not inherit a published status or the hint flag.
+      status: 'draft', note: src.note, created_by: opts.createdBy || null,
+    });
+    made = Number(info.lastInsertRowid);
+    writeBreaks(made, breakRows);
+  })();
+  return byId(made);
+}
+
+/**
  * Copy a week's plan onto another week.
  *
  * Restaurants repeat: this Tuesday looks like last Tuesday, and hand-placing
@@ -484,24 +745,56 @@ function overlapsFor(shift) {
  * not double the schedule.
  */
 function copyWeek(fromStart, toStart, opts = {}) {
-  const offset = Math.round(
-    (Date.parse(`${toStart}T00:00:00Z`) - Date.parse(`${fromStart}T00:00:00Z`)) / 86400000,
-  );
+  // Both bounded by the same week definition the board uses, so a short final
+  // week of a period cannot pull shifts out of the next one — and so that any
+  // day in a week means that week, which is what a manager clicking a board
+  // column expects.
+  const from = weekWindowFor(fromStart);
+  const to = weekWindowFor(toStart);
+  // Measured between the WEEK STARTS, not the dates handed in. Otherwise
+  // copying Tuesday's week onto Friday's week would slide every shift three
+  // days sideways.
+  const offset = daysApart(from.start, to.start);
   if (!Number.isFinite(offset) || offset === 0) {
     throw new ScheduleError('Choose a different week to copy into.', 'range');
   }
-  const source = inRange(fromStart, addDays(fromStart, 6));
-  const existing = inRange(toStart, addDays(toStart, 6));
+  const source = inRange(from.start, from.end);
+  const existing = inRange(to.start, to.end);
   const seen = new Set(existing.map((s) => `${s.employee_id}|${s.starts_at}|${s.position}`));
 
   const made = []; const skipped = [];
   db.transaction(() => {
     for (const s of source) {
-      if (s.employee_id != null && !s.employee_active) { skipped.push({ id: s.id, why: 'inactive' }); continue; }
       const starts = shiftUtcByDays(s.starts_at, offset);
       const ends = shiftUtcByDays(s.ends_at, offset);
+      const landing = businessDateFor(starts);
+
+      // D6 — the SAME rule as the drawer, called rather than restated. This is
+      // the whole fix: copyWeek used to insert straight through q.insert and so
+      // could place a shift the create form would have refused — somebody who
+      // had left the position, or left the roster entirely.
+      try {
+        validate({ employeeId: s.employee_id, position: s.position, startsAt: starts, endsAt: ends });
+      } catch (e) {
+        // The error's own wording, so the report reads 'They are not assigned
+        // to that position' rather than a code the manager has to decode.
+        skipped.push({ id: s.id, who: s.employee_name, why: e.message, code: e.code });
+        continue;
+      }
+
+      if (landing < to.start || landing > to.end) {
+        skipped.push({
+          id: s.id, who: s.employee_name,
+          why: 'That day falls outside the week being copied into.', code: 'range',
+        });
+        continue;
+      }
       if (seen.has(`${s.employee_id}|${starts}|${s.position}`)) {
-        skipped.push({ id: s.id, why: 'already there' }); continue;
+        skipped.push({
+          id: s.id, who: s.employee_name,
+          why: 'That shift is already on the target week.', code: 'duplicate',
+        });
+        continue;
       }
       const info = q.insert.run({
         employee_id: s.employee_id, position: s.position,
@@ -513,13 +806,13 @@ function copyWeek(fromStart, toStart, opts = {}) {
         status: 'draft', note: s.note, created_by: opts.createdBy || null,
       });
       const id = Number(info.lastInsertRowid);
-      for (const b of s.breaks) {
-        q.addBreak.run({
-          scheduled_shift_id: id, minutes: b.minutes,
+      writeBreaks(id, normalizeBreaks(
+        s.breaks.map((b) => ({
+          ...b,
           planned_start_at: b.planned_start_at ? shiftUtcByDays(b.planned_start_at, offset) : null,
-          paid: b.paid, note: b.note,
-        });
-      }
+        })),
+        starts, ends, true,
+      ));
       seen.add(`${s.employee_id}|${starts}|${s.position}`);
       made.push(id);
     }
@@ -533,6 +826,27 @@ function copyWeek(fromStart, toStart, opts = {}) {
 
 const DAYPARTS = ['cafe', 'dinner'];
 
+/**
+ * Whole days between two ISO dates.
+ *
+ * Parsed as explicit UTC. `new Date('2026-08-07T00:00:00')` without the Z is
+ * parsed in the SERVER's zone, which is right until the server moves and wrong
+ * silently when it does — and across a DST boundary two such parses are an
+ * hour apart, which a naive divide turns into a fractional day.
+ */
+const daysApart = (a, b) => Math.round(
+  (Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000,
+);
+
+const parseUtc = (s) => Date.parse(`${String(s).replace(' ', 'T')}Z`);
+const fmtUtc = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+
+/** Whole minutes between two UTC stamps. */
+const minutesBetween = (a, b) => Math.round((parseUtc(b) - parseUtc(a)) / 60000);
+
+/** Move a UTC stamp forward by minutes. */
+const addMinutesUtc = (utc, mins) => fmtUtc(parseUtc(utc) + mins * 60000);
+
 /** Move a UTC stamp by whole days, keeping the clock time. */
 function shiftUtcByDays(utc, days) {
   const d = new Date(`${String(utc).replace(' ', 'T')}Z`);
@@ -540,23 +854,18 @@ function shiftUtcByDays(utc, days) {
   return d.toISOString().slice(0, 19).replace('T', ' ');
 }
 
-function writeBreaks(shiftId, breaks) {
+/** Writes rows that normalizeBreaks has already checked. Validates nothing. */
+function writeBreaks(shiftId, rows) {
   q.clearBreaks.run(shiftId);
-  for (const b of breaks || []) {
-    const minutes = Math.round(Number(b.minutes));
-    if (!Number.isFinite(minutes) || minutes <= 0) continue;
-    q.addBreak.run({
-      scheduled_shift_id: shiftId, minutes,
-      planned_start_at: b.plannedStartAt ? toUtc(b.plannedStartAt) : null,
-      paid: b.paid ? 1 : 0, note: String(b.note || '').trim() || null,
-    });
-  }
+  for (const r of rows) q.addBreak.run({ scheduled_shift_id: shiftId, ...r });
 }
 
 module.exports = {
-  create, edit, cancel, publish,
-  byId, inRange, weekFor, publishedFor, overlapsFor, copyWeek,
-  serviceFor, businessDateFor, heldPositions,
+  create, edit, cancel, publish, duplicate,
+  byId, inRange, weekFor, weekWindowFor, weekTotals,
+  publishedFor, overlapsFor, copyWeek,
+  spanMinutes, paidMinutes,
+  serviceFor, businessDateFor, heldPositions, heldPositionsFor,
   q, DAYPARTS, STATUSES, ScheduleError,
   WINDOW_BACK, WINDOW_FORWARD,
 };

@@ -24,6 +24,7 @@ process.env.ZWIN_SKIP_BACKFILL = '1';
 
 const { db } = require('../src/db');
 const S = require('../src/scheduler');
+const P = require('../src/periods');
 const TC = require('../src/timeclock');
 const { addDays, isoDate, startOfToday } = require('../src/dates');
 
@@ -366,6 +367,9 @@ test('copying a week produces drafts, never published shifts', () => {
   S.publish(src.id);
   assert.strictEqual(S.byId(src.id).status, 'published', 'the source is published');
 
+  // copyWeek takes any day and copies the WEEK it falls in, so `made` can hold
+  // other shifts that share the week. Find the copy of the one placed here
+  // rather than assuming it is first.
   const { made } = S.copyWeek(from, to);
   assert.ok(made.length >= 1, 'something was copied');
   for (const id of made) {
@@ -373,7 +377,12 @@ test('copying a week produces drafts, never published shifts', () => {
   }
   assert.strictEqual(S.publishedFor(SERVER, { from: to, to: addDays(to, 6) }).length, 0,
     'and nothing reached the employee');
-  assert.strictEqual(S.byId(made[0]).breaks.length, 1, 'planned breaks come along');
+
+  const mine = made.map((id) => S.byId(id))
+    .find((c) => c.business_date === to && c.employee_id === SERVER);
+  assert.ok(mine, 'the shift placed by this test was copied');
+  assert.strictEqual(mine.breaks.length, 1, 'planned breaks come along');
+  assert.strictEqual(mine.breaks[0].minutes, 30, 'with their length intact');
 });
 
 test('copying the same week twice does not double the schedule', () => {
@@ -398,7 +407,14 @@ test('copying skips anybody who has gone inactive since', () => {
 
   const { made, skipped } = S.copyWeek(from, to);
   assert.strictEqual(made.length, 0, 'nothing copied for a person who has left');
-  assert.ok(skipped.some((s) => s.why === 'inactive'), 'and it says so');
+
+  // D6/Q5 — the skip comes from validate(), the same rule the create drawer
+  // runs, so the reason is a sentence a manager can read and the code is what
+  // the UI groups on.
+  const hit = skipped.find((s) => s.code === 'inactive');
+  assert.ok(hit, 'the skip is reported with the rule that caused it');
+  assert.match(hit.why, /not active/i, 'in words, not a code');
+  assert.ok(hit.why.length > 'inactive'.length, 'a sentence, not a label');
   db.prepare('UPDATE employees SET active = 1 WHERE id = ?').run(BARISTA);
 });
 
@@ -424,4 +440,277 @@ test('the employee window is a rolling tail, not a calendar week', () => {
   S.publish(o.id);
   assert.strictEqual(S.publishedFor(SERVER).filter((r) => r.business_date === old).length, 0,
     'but a shift from six weeks ago is Pay’s question, not the schedule’s');
+});
+
+// ===========================================================================
+// PHASE 2 — the manager board's domain
+//
+// Six defects the Phase 2 audit found, each with the test that would have
+// caught it. These are domain tests: no route, no markup, no CSS.
+// ===========================================================================
+
+// --- D2 / D3: the week ------------------------------------------------------
+
+test('D2: the board week is the pay-period workweek, not a hard-coded Monday', () => {
+  const w = S.weekWindowFor(TODAY);
+  const p = P.periodFor(TODAY);
+  const off = Math.round(
+    (Date.parse(`${w.start}T00:00:00Z`) - Date.parse(`${p.start}T00:00:00Z`)) / 86400000,
+  );
+  // This is the whole point: aggregatePayroll splits overtime at period start
+  // and start + 7. A board week that is not a multiple of 7 from the anchor
+  // totals a different seven days from the one that decides overtime.
+  assert.strictEqual(off % 7, 0, 'the week is aligned to the pay period');
+  assert.ok(w.start >= p.start && w.end <= p.end, 'and never spills out of its period');
+});
+
+test('D2: every day of a week resolves to the same window', () => {
+  const w = S.weekWindowFor(TODAY);
+  const seen = new Set();
+  for (let d = w.start; d <= w.end; d = addDays(d, 1)) {
+    seen.add(`${S.weekWindowFor(d).start}|${S.weekWindowFor(d).end}`);
+  }
+  assert.strictEqual(seen.size, 1, 'seven days, one week');
+});
+
+test('D2: moving the pay-period anchor moves the board with it', () => {
+  const before = S.weekWindowFor(TODAY).start;
+  const original = P.anchor();
+  try {
+    P.setSetting('period_anchor', addDays(original, 1));
+    assert.strictEqual(S.weekWindowFor(TODAY).start, addDays(before, 1),
+      'the board follows the anchor rather than restating a weekday');
+  } finally {
+    P.setSetting('period_anchor', original);
+  }
+  assert.strictEqual(S.weekWindowFor(TODAY).start, before, 'and moves back');
+});
+
+test('D3: weeks tile without gap or overlap across the DST change', () => {
+  // 2026-11-01 in America/New_York. The old code read the server clock through
+  // `new Date(str)` and `getDay()`; an hour of drift there is a whole day here.
+  let d = '2026-10-18';
+  let w = S.weekWindowFor(d);
+  for (let i = 0; i < 6; i++) {
+    assert.ok(w.start <= d && d <= w.end, `${d} is inside its own week`);
+    const next = S.weekWindowFor(addDays(w.end, 1));
+    assert.strictEqual(next.start, addDays(w.end, 1), 'the next week starts the day after');
+    d = next.start; w = next;
+  }
+});
+
+// --- D1: one query for a week's breaks --------------------------------------
+
+test('D1: a week of shifts costs one break query, not one per shift', () => {
+  const week = S.weekWindowFor(addDays(TODAY, 70));
+  for (let i = 0; i < 12; i++) {
+    S.create({
+      employeeId: i % 2 ? SERVER : BARISTA, position: i % 2 ? 'server' : 'barista',
+      startsAt: at(addDays(week.start, i % 6), '09:00'),
+      endsAt: at(addDays(week.start, i % 6), '15:00'),
+      breaks: [{ minutes: 30 }],
+    });
+  }
+
+  const one = S.q.breaksFor; const many = S.q.breaksForMany;
+  const realOne = one.all.bind(one); const realMany = many.all.bind(many);
+  let perShift = 0; let batched = 0;
+  one.all = (...a) => { perShift += 1; return realOne(...a); };
+  many.all = (...a) => { batched += 1; return realMany(...a); };
+  try {
+    const board = S.weekFor(week.start);
+    assert.ok(board.shifts.length >= 12, 'a full week is on the board');
+    assert.strictEqual(perShift, 0, 'no per-shift break query survives');
+    assert.strictEqual(batched, 1, 'one batch query, whatever the shift count');
+    assert.ok(board.shifts.every((s) => Array.isArray(s.breaks)),
+      'and every shift still carries its breaks');
+    assert.ok(board.shifts.some((s) => s.breaks.length === 1), 'with the right ones attached');
+  } finally {
+    delete one.all; delete many.all;
+  }
+});
+
+// --- D4 / Q3: two hour figures ----------------------------------------------
+
+test('Q3: an unpaid break reduces paid hours and a paid break does not', () => {
+  const day = addDays(TODAY, 77);
+  const unpaid = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '09:00'), endsAt: at(day, '17:00'), breaks: [{ minutes: 30 }] });
+  const paid = S.create({ employeeId: BARISTA, position: 'barista',
+    startsAt: at(day, '09:00'), endsAt: at(day, '17:00'), breaks: [{ minutes: 30, paid: true }] });
+
+  assert.strictEqual(S.spanMinutes(unpaid), 480, 'the span is how long she is there');
+  assert.strictEqual(S.paidMinutes(unpaid), 450, 'the paid time is the span less the unpaid break');
+  assert.strictEqual(S.spanMinutes(paid), 480, 'the same span');
+  assert.strictEqual(S.paidMinutes(paid), 480, 'but a paid break is still paid time');
+});
+
+test('D4: week totals keep span and paid apart, and exclude cancellations', () => {
+  const day = addDays(TODAY, 78);
+  const a = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '09:00'), endsAt: at(day, '17:00'), breaks: [{ minutes: 30 }] });
+  const b = S.create({ employeeId: BARISTA, position: 'barista',
+    startsAt: at(day, '09:00'), endsAt: at(day, '13:00') });
+  const gone = S.create({ employeeId: SERVER, position: 'busser',
+    startsAt: at(day, '18:00'), endsAt: at(day, '22:00') });
+  S.cancel(gone.id);
+
+  const t = S.weekTotals([S.byId(a.id), S.byId(b.id), S.byId(gone.id)]);
+  assert.strictEqual(t.total.spanMinutes, 480 + 240, 'the cancelled plan is not hours');
+  assert.strictEqual(t.total.paidMinutes, 450 + 240, 'and paid is not span');
+  assert.strictEqual(t.total.count, 2, 'two live shifts');
+  assert.strictEqual(t.byEmployee[String(SERVER)].paidMinutes, 450, 'per person');
+  assert.strictEqual(t.byDate[day].count, 2, 'per day');
+  assert.strictEqual(t.byCell[`${SERVER}|${day}`].count, 1, 'and per cell');
+});
+
+test('D4: an open shift is counted, under its own key', () => {
+  const day = addDays(TODAY, 79);
+  const open = { employee_id: null, business_date: day, status: 'draft', breaks: [],
+    starts_at: '2026-10-25 14:00:00', ends_at: '2026-10-25 18:00:00' };
+  const t = S.weekTotals([open]);
+  assert.strictEqual(t.byEmployee.open.spanMinutes, 240,
+    'a shift nobody has claimed is still four hours of staffing');
+  assert.strictEqual(t.total.count, 1, 'and it is in the week total');
+});
+
+// --- D5: breaks are checked, not quietly discarded --------------------------
+
+const day5 = addDays(TODAY, 84);
+const shift5 = (breaks) => ({ employeeId: SERVER, position: 'server',
+  startsAt: at(day5, '09:00'), endsAt: at(day5, '17:00'), breaks });
+
+test('D5: a break longer than its shift is refused', () => {
+  assert.throws(() => S.create(shift5([{ minutes: 600 }])),
+    (e) => e.code === 'break' && /longer than the shift/i.test(e.message));
+});
+
+test('D5: breaks that add up past the shift are refused', () => {
+  assert.throws(() => S.create(shift5([{ minutes: 300 }, { minutes: 300 }])),
+    (e) => e.code === 'break' && /add up/i.test(e.message));
+});
+
+test('D5: a zero or negative break is refused, not silently dropped', () => {
+  // The old writeBreaks did `if (minutes <= 0) continue` — the break vanished
+  // and the shift kept its full paid hours with nobody told.
+  for (const bad of [0, -30, NaN, 'lunch']) {
+    assert.throws(() => S.create(shift5([{ minutes: bad }])),
+      (e) => e.code === 'break', `a break of ${bad} is refused`);
+  }
+});
+
+test('D5: a duration-only break stays legal — a planned start is optional', () => {
+  const s = S.create(shift5([{ minutes: 30 }]));
+  assert.strictEqual(s.breaks.length, 1, 'half an hour, time unspecified, is a real plan');
+  assert.strictEqual(s.breaks[0].planned_start_at, null, 'and stays unspecified');
+});
+
+test('D5: a planned start outside the shift is refused', () => {
+  assert.throws(() => S.create(shift5([{ minutes: 30, plannedStartAt: at(day5, '08:00') }])),
+    (e) => e.code === 'break' && /before the shift/i.test(e.message));
+  assert.throws(() => S.create(shift5([{ minutes: 30, plannedStartAt: at(day5, '16:45') }])),
+    (e) => e.code === 'break' && /past the end/i.test(e.message));
+  const ok = S.create(shift5([{ minutes: 30, plannedStartAt: at(day5, '12:00') }]));
+  assert.ok(ok.breaks[0].planned_start_at, 'and one inside is kept');
+});
+
+test('D5: shortening a shift under an existing break is refused', () => {
+  const s = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day5, '09:00'), endsAt: at(day5, '17:00'), breaks: [{ minutes: 60 }] });
+  const was = S.byId(s.id);
+  assert.throws(
+    () => S.edit(s.id, { endsAt: at(day5, '09:30') }),
+    (e) => e.code === 'break',
+    'an hour of break cannot survive inside half an hour of shift',
+  );
+  const now = S.byId(s.id);
+  assert.strictEqual(now.ends_at, was.ends_at, 'the refusal wrote nothing');
+  assert.strictEqual(now.breaks.length, 1, 'and left the break alone');
+  assert.strictEqual(now.breaks[0].minutes, 60, 'at its full length');
+
+  // The same edit is fine once the break fits.
+  const ok = S.edit(s.id, { endsAt: at(day5, '11:00'), breaks: [{ minutes: 30 }] });
+  assert.strictEqual(S.paidMinutes(ok), 90, 'two hours less half an hour of break');
+});
+
+// --- D6: one eligibility rule -----------------------------------------------
+
+test('D6: copying runs the same eligibility rule as the create drawer', () => {
+  const from = addDays(TODAY, 112);
+  const to = addDays(from, 7);
+  // Placed while she still bussed, copied after she stopped. An `active` check
+  // alone would wave this through — only validate() knows about positions.
+  S.create({ employeeId: SERVER, position: 'busser',
+    startsAt: at(from, '10:00'), endsAt: at(from, '14:00') });
+  db.prepare('DELETE FROM employee_roles WHERE employee_id = ? AND role = ?').run(SERVER, 'busser');
+  try {
+    const { made, skipped } = S.copyWeek(from, to);
+    assert.strictEqual(made.length, 0, 'nothing is placed that the drawer would refuse');
+    const hit = skipped.find((s) => s.code === 'qualification');
+    assert.ok(hit, 'and the skip names the rule');
+    assert.match(hit.why, /not assigned to that position/i, 'in a sentence');
+  } finally {
+    db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+      .run(SERVER, 'busser', 1100);
+  }
+});
+
+// --- duplicate ---------------------------------------------------------------
+
+test('duplicate lands in the same cell as a fresh draft, breaks and all', () => {
+  // Inside the employee's 90-day forward window, because the last assertion is
+  // about what she actually sees.
+  const day = addDays(TODAY, 88);
+  const src = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '16:00'), endsAt: at(day, '22:00'),
+    breaks: [{ minutes: 30 }], note: 'section 4' });
+  S.publish(src.id);
+
+  const copy = S.duplicate(src.id);
+  assert.notStrictEqual(copy.id, src.id, 'a second row');
+  assert.strictEqual(copy.employee_id, src.employee_id, 'same person');
+  assert.strictEqual(copy.business_date, src.business_date, 'same day');
+  assert.strictEqual(copy.starts_at, src.starts_at, 'same start');
+  assert.strictEqual(copy.ends_at, src.ends_at, 'same end');
+  assert.strictEqual(copy.daypart, S.byId(src.id).daypart, 'and the same service stamp');
+  assert.strictEqual(copy.breaks.length, 1, 'the break comes with it');
+  assert.strictEqual(copy.status, 'draft', 'but it has never been published');
+  assert.strictEqual(copy.changed_after_publish, 0, 'and carries no edit flag');
+  assert.strictEqual(S.publishedFor(SERVER).filter((r) => r.business_date === day).length, 1,
+    'the employee still sees one shift, not two');
+});
+
+test('duplicate re-checks eligibility rather than trusting the original', () => {
+  const day = addDays(TODAY, 92);
+  const src = S.create({ employeeId: BARISTA, position: 'barista',
+    startsAt: at(day, '09:00'), endsAt: at(day, '15:00') });
+  db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(BARISTA);
+  try {
+    assert.throws(() => S.duplicate(src.id), (e) => e.code === 'inactive',
+      'a shift placed weeks ago is not permission to place another today');
+  } finally {
+    db.prepare('UPDATE employees SET active = 1 WHERE id = ?').run(BARISTA);
+  }
+});
+
+test('duplicating a cancelled shift is refused', () => {
+  const day = addDays(TODAY, 93);
+  const s = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '16:00'), endsAt: at(day, '22:00') });
+  S.cancel(s.id);
+  assert.throws(() => S.duplicate(s.id), (e) => e.code === 'cancelled');
+});
+
+// --- the invariant, extended to the new writers ------------------------------
+
+test('INV1: duplicate and copyWeek write nothing to time, work or payroll', () => {
+  const from = addDays(TODAY, 98);
+  const s = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(from, '16:00'), endsAt: at(from, '22:00'), breaks: [{ minutes: 30 }] });
+
+  const before = footprint();
+  S.duplicate(s.id);
+  S.copyWeek(from, addDays(from, 7));
+  assert.deepStrictEqual(footprint(), before,
+    'planning at any scale is still only a plan');
 });
