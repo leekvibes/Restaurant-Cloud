@@ -3521,7 +3521,12 @@ test('2D-1: Schedule is present, locked, and never the current tab', async () =>
     assert.ok(!/pt-tab-locked[^>]*aria-current/.test(tabs), 'Schedule is never current');
   }
   const html = await text('/portal', { cookie });
-  assert.match(html, /class="pt-tab pt-tab-locked" data-portal-locked="schedule"/, 'it is a button, not a dead link');
+  // Asserted as three independent facts rather than one attribute ORDER, so a
+  // new attribute on the element cannot fail a test about what the element IS.
+  const sched = (html.match(/<button[^>]*data-portal-locked="schedule"[^>]*>/) || [''])[0];
+  assert.ok(sched, 'it is a button, not a dead link');
+  assert.match(sched, /class="[^"]*pt-tab-locked/, 'carrying the locked treatment');
+  assert.ok(!/href=/.test(sched), 'and going nowhere on its own');
   assert.match(html, /aria-label="Schedule, coming soon"/, 'with a spoken state');
   assert.match(html, /aria-haspopup="dialog"/, 'that says it opens information');
   assert.ok(!/pt-tab-locked[^>]*disabled/.test(html), 'and is not disabled — it has to be tappable');

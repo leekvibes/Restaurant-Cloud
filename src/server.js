@@ -3420,10 +3420,10 @@ function portalTabs(path) {
     // are. Not `disabled` either: that would stop it opening the sheet that
     // explains itself, which is the whole point of it being there.
     if (t.availability === 'locked') {
-      return `<button type="button" class="pt-tab pt-tab-locked" data-portal-locked="${esc(t.key)}"
+      return `<button type="button" class="pt-tab pt-tab-locked" data-tab="${esc(t.key)}" data-portal-locked="${esc(t.key)}"
         aria-haspopup="dialog" aria-label="${esc(t.accessibilityLabel || t.label)}">${label}${PT_LOCK}</button>`;
     }
-    return `<button type="button" class="pt-tab" id="pt-more-btn" data-portal-more
+    return `<button type="button" class="pt-tab" id="pt-more-btn" data-tab="${esc(t.key)}" data-portal-more
       aria-haspopup="dialog" aria-expanded="false">${label}</button>`;
   };
 
@@ -3431,7 +3431,7 @@ function portalTabs(path) {
   // built in one place rather than patched.
   const anchor = (t) => {
     const on = t.availability === 'available' && t.key === current;
-    return `<a class="pt-tab${on ? ' on' : ''}" href="${t.href}"${on ? ' aria-current="page"' : ''}>
+    return `<a class="pt-tab${on ? ' on' : ''}" data-tab="${esc(t.key)}" href="${t.href}"${on ? ' aria-current="page"' : ''}>
       <span class="pt-tab-g" aria-hidden="true">${t.icon}</span><span>${esc(t.label)}</span></a>`;
   };
 
@@ -4211,7 +4211,7 @@ app.get('/portal', (req, res) => {
         <a class="hb-foot" href="/portal/notifications">See all notifications &rsaquo;</a>
       </section>` : ''}
 
-      ${m.roleActions.length ? `<section class="hb-mod hb-mod-q" aria-labelledby="hb-do-h">
+      ${m.roleActions.length ? `<section class="hb-mod hb-mod-q hb-mod-do" aria-labelledby="hb-do-h">
         <h2 class="hb-lab hb-lab-q" id="hb-do-h">Other things you can do</h2>
         <div class="hb-rows">${m.roleActions.map(toolRow).join('')}</div>
       </section>` : ''}

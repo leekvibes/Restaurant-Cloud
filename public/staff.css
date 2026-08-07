@@ -1061,13 +1061,23 @@ body.bare {
 }
 .pt-tab-g { font-size: 18px; line-height: 1; }
 .pt-tabs > .pt-tab { background: none; border: 0; font-family: inherit; position: relative; }
-.pt-tabs > .pt-tab.on { color: var(--pt-blue); font-weight: 650; }
+/* Slate at rest, Zwin blue when you are on it — ONE selected treatment, not
+   three competing ones. The tie to the bar's top edge is the one that survives
+   greyscale: a solid 2px mark reads as position even when the blue does not. */
+.pt-tabs > .pt-tab { color: var(--pt-second); }
+.pt-tabs > .pt-tab .pt-tab-g { color: var(--pt-muted); }
+.pt-tabs > .pt-tab-locked, .pt-tabs > .pt-tab-locked .pt-tab-g { color: var(--pt-faint); }
+.pt-tabs > .pt-tab.on, .pt-tabs > .pt-tab.on .pt-tab-g { color: var(--pt-blue); }
+/* Weight as well as hue: my own greyscale check caught this rule going missing
+   in the rewrite, which left the active tab identical to the others once the
+   blue was removed. The 2px tie and this are what carry it without colour. */
+.pt-tabs > .pt-tab.on { font-weight: 700; }
 .pt-tabs > .pt-tab.on .pt-tab-g { transform: translateY(-1px); }
 /* The active tab is tied to the bar's top edge, so "where I am" reads from the
    chrome as well as from a colour somebody may not distinguish. */
 .pt-tabs > .pt-tab.on::before {
   content: ""; position: absolute; top: -1px; left: 22%; right: 22%; height: 2px;
-  background: var(--pt-blue); border-radius: 0 0 2px 2px;
+  background: currentColor; border-radius: 0 0 2px 2px;
 }
 
 /* Locked destination: readable, tappable, and unmistakably not where you are.
@@ -1309,15 +1319,25 @@ body.bare {
 }
 /* The briefing is the reason to open Home. It gets the page's one piece of
    emphasis: a marginally firmer edge and a little more room inside. */
+/* The briefing stays white. Tone belongs to the MESSAGE, not the container —
+   one warning must not turn the whole briefing amber. */
 .hb-mod-brief { border-color: var(--pt-dot); }
 .hb-mod-brief .hb-mod-b { padding: calc(var(--hb-pad) + 2px) var(--hb-pad); }
 /* Actionable outranks informational, said with a rail rather than a hue — the
    row text stays the colour it is everywhere else. */
-.hb-mod-act { box-shadow: inset 3px 0 0 var(--pt-green); }
+/* Something you can act on. The rail carries it; the tint is barely there and
+   the text stays navy. */
+.hb-mod-act { box-shadow: inset 3px 0 0 var(--pt-green); background: #fbfefc; }
 /* Secondary modules sit ON the page rather than above it: no fill, a hairline
    instead of a line. That one difference is what puts Updates and the action
    list at the bottom of the hierarchy without dimming their text. */
-.hb-mod-q { background: transparent; border-color: var(--pt-hair); }
+/* Updates and the action list recede on purpose: a cool grey that is quieter
+   than white against an off-white page, with slate type. */
+.hb-mod-q { background: #fafbfc; border-color: var(--pt-hair); }
+/* The secondary action list stays plainly neutral — only its chevrons pick up
+   the blue, so the affordance is coloured and the surface is not. */
+.hb-mod-do { background: var(--pt-field); }
+.hb-mod-do .hb-row-r { color: var(--pt-blue); }
 .hb-mod-b { padding: var(--hb-pad); }
 
 /* A heading belongs to its module: attached to the top edge, not floating
@@ -1337,9 +1357,15 @@ body.bare {
 
 /* Two halves of one service board: divided, and the second half on a whisper
    of tint so "cannot sell" is a different place, not just a heading. */
-.hb-part { padding: 0 var(--hb-pad) 16px; }
-.hb-part .hb-lab { padding-left: 0; padding-right: 0; }
-.hb-part-bad { border-top: 1px solid var(--pt-line); background: #fcfcfd; }
+/* The service board reads cool: this is menu information. A perceptible shift
+   off white, no more — the dish names must still be the loudest thing in it. */
+.hb-part { padding: 0 var(--hb-pad) 16px; background: #fafcff; }
+.hb-part .hb-lab { padding-left: 0; padding-right: 0; color: var(--pt-blue); }
+.hb-part .hb-n { background: #eaf1fc; color: var(--pt-blue); }
+/* And "cannot sell" is warm, with a red-shifted separator so the boundary
+   between the two halves is the thing you notice first. */
+.hb-part-bad { border-top: 1px solid #f3dedb; background: #fffafa; }
+.hb-part-bad .hb-lab { color: var(--pt-red); }
 
 /* The note. The module supplies the boundary, so the rail is the only thing
    left doing tone. */
@@ -1366,7 +1392,8 @@ body.bare {
 .hb-dish:last-child { border-bottom: 0; padding-bottom: 0; }
 .hb-dish-n { font-size: 15.5px; color: var(--pt-ink); font-weight: 600;
   overflow-wrap: anywhere; min-width: 0; line-height: 1.35; }
-.hb-dish-p { font-size: 15px; color: var(--pt-muted); margin-left: auto;
+/* Slate, never blue: a price is a fact, not a link. */
+.hb-dish-p { font-size: 15px; color: var(--pt-second); margin-left: auto;
   padding-left: 8px; font-variant-numeric: tabular-nums; }
 .hb-dish-l { flex-basis: 100%; font-size: 13px; color: var(--pt-muted);
   overflow-wrap: anywhere; line-height: 1.45; }
