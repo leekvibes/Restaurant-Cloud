@@ -40,7 +40,14 @@ let Database;
 let db;
 
 const { isoDate, startOfToday } = require('../src/dates');
-const today = () => isoDate(startOfToday());
+// The BUSINESS date, not the calendar one. Home asks portal_notes for notes
+// live on the business date — so between midnight and the 4am cutoff, "today"
+// is still last night. A test that used the calendar date passed for twenty
+// hours a day and failed for four, which is how this was found.
+const today = () => {
+  const TC = require('../src/timeclock');
+  return TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+};
 
 const form = async (p, body, headers = {}) => fetch(BASE + p, {
   method: 'POST', redirect: 'manual',
@@ -589,7 +596,9 @@ test('the board is evergreen — a special stays up until it is deleted', async 
 });
 
 test('a note stops showing the day after it expires', async () => {
-  const yesterday = isoDate(new Date(startOfToday().getTime() - 86400000));
+  // Yesterday relative to the BUSINESS date, since that is what the note
+  // window is measured against.
+  const yesterday = require('../src/dates').addDays(today(), -1);
   await form('/staff-portal/note', { title: 'Qqx Stale notice', body: 'Old news.', tone: 'fyi',
     starts_on: yesterday, ends_on: yesterday });
   await form('/staff-portal/note', { title: 'Qqx Live notice', body: 'Today only.', tone: 'urgent',

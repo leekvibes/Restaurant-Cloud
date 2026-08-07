@@ -13604,7 +13604,13 @@ function readNoteForm(body) {
   if (text.length > NOTE_BODY_MAX) {
     return { err: `That note is ${text.length.toLocaleString('en-US')} characters. The limit is ${NOTE_BODY_MAX.toLocaleString('en-US')} — nothing was saved, so copy it somewhere before shortening it.` };
   }
-  const today = isoDate(startOfToday());
+  // The BUSINESS date, not the calendar one — the same day Home asks
+  // portal_notes for. They are the same number for twenty hours out of
+  // twenty-four and differ between midnight and the 4am cutoff, which is
+  // exactly when a closing manager posts a note for the night in progress.
+  // Defaulting to the calendar date there filed the note against tomorrow and
+  // made it invisible until 4am, while last night's stayed up.
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
   const starts = /^\d{4}-\d{2}-\d{2}$/.test(String(body.starts_on || '')) ? body.starts_on : today;
   const ends = /^\d{4}-\d{2}-\d{2}$/.test(String(body.ends_on || '')) ? body.ends_on : null;
   return {
