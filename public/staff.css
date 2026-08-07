@@ -1064,10 +1064,27 @@ body.bare {
 /* Slate at rest, Zwin blue when you are on it — ONE selected treatment, not
    three competing ones. The tie to the bar's top edge is the one that survives
    greyscale: a solid 2px mark reads as position even when the blue does not. */
+/* Colour on the ICONS, one hue per section; labels stay slate.
+   Five coloured WORDS would be a rainbow of text and unreadable at 10.5px.
+   Five coloured marks above five grey words is a bar you can hit by shape and
+   colour without reading it, which is what a tab bar is for at the end of a
+   shift. The hues are the palette's own — no new colours.
+   Colour alone never carries "where I am": the active tab also has the 2px tie
+   above it and weight 700, both of which survive greyscale. */
 .pt-tabs > .pt-tab { color: var(--pt-second); }
-.pt-tabs > .pt-tab .pt-tab-g { color: var(--pt-muted); }
+.pt-tabs > .pt-tab[data-tab="home"]  .pt-tab-g { color: var(--pt-blue); }
+.pt-tabs > .pt-tab[data-tab="clock"] .pt-tab-g { color: var(--pt-green); }
+.pt-tabs > .pt-tab[data-tab="pay"]   .pt-tab-g { color: var(--pt-amber); }
+.pt-tabs > .pt-tab[data-tab="more"]  .pt-tab-g { color: var(--pt-second); }
+/* Schedule stays dimmed. It is locked, and a tab that looks as live as the
+   others is a promise the app cannot keep. */
 .pt-tabs > .pt-tab-locked, .pt-tabs > .pt-tab-locked .pt-tab-g { color: var(--pt-faint); }
+/* On the tab you are standing on, the label picks up that section's hue too,
+   so the mark and the word read as one thing. */
 .pt-tabs > .pt-tab.on, .pt-tabs > .pt-tab.on .pt-tab-g { color: var(--pt-blue); }
+.pt-tabs > .pt-tab.on[data-tab="clock"], .pt-tabs > .pt-tab.on[data-tab="clock"] .pt-tab-g { color: var(--pt-green); }
+.pt-tabs > .pt-tab.on[data-tab="pay"],   .pt-tabs > .pt-tab.on[data-tab="pay"]   .pt-tab-g { color: var(--pt-amber); }
+.pt-tabs > .pt-tab.on[data-tab="more"],  .pt-tabs > .pt-tab.on[data-tab="more"]  .pt-tab-g { color: var(--pt-ink); }
 /* Weight as well as hue: my own greyscale check caught this rule going missing
    in the rewrite, which left the active tab identical to the others once the
    blue was removed. The 2px tie and this are what carry it without colour. */
