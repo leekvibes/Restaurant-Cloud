@@ -574,7 +574,7 @@ test('the grid carries the layer, and the rows stay real links underneath it', a
   assert.ok(html.indexOf('id="tso"') < html.indexOf("getElementById('tso')"),
     'and the layer exists in the document before the script goes looking for it');
   // With no JavaScript the rows are ordinary links to the full page.
-  assert.match(html, /class="tsg-row" id="p-\d+" href="\/payroll\/timesheets\/\d+\?p=/,
+  assert.match(html, /class="tsg-row egrid-row" id="p-\d+" href="\/payroll\/timesheets\/\d+\?p=/,
     'every row is still a real link');
 });
 
@@ -1030,7 +1030,7 @@ test('the column count follows the period rather than a hardcoded fortnight', as
   await seedGridPeriod();
   const per = gridPeriod();
   const html = await text(`/payroll/timesheets?p=${per.start}`);
-  const cols = (html.match(/--tsg-cols:(\d+)/) || [])[1];
+  const cols = (html.match(/--egrid-cols:(\d+)/) || [])[1];
   const days = Math.round((Date.parse(per.end) - Date.parse(per.start)) / 864e5) + 1;
   assert.strictEqual(Number(cols), days, 'the CSS column count is derived from the period');
 });
@@ -1047,7 +1047,7 @@ test('week separators fall on real Mondays, not every seventh cell', async () =>
     if (d.toISOString().slice(0, 10) > per.end) break;
     if (d.getUTCDay() === 1) mondays++;
   }
-  const heads = (html.match(/class="tsg-dh tsg-wk"/g) || []).length;
+  const heads = (html.match(/class="tsg-dh tsg-wk egrid-dh"/g) || []).length;
   assert.strictEqual(heads, mondays, `${mondays} separator(s) in the header, on the Mondays`);
 });
 
@@ -1067,10 +1067,10 @@ test('the row total is the sum of its own cells', async () => {
   await seedGridPeriod();
   const per = gridPeriod();
   const html = await text(`/payroll/timesheets?p=${per.start}`);
-  const row = (html.match(/<a class="tsg-row"[\s\S]*?<\/a>/) || [])[0];
+  const row = (html.match(/<a class="tsg-row egrid-row"[\s\S]*?<\/a>/) || [])[0];
   assert.ok(row, 'there is at least one row');
   const cells = [...row.matchAll(/data-h="([\d.]+)"/g)].map((m) => Number(m[1]));
-  const shown = Number((row.match(/class="tsg-tot"><b>([\d.]+)</) || [])[1]);
+  const shown = Number((row.match(/class="tsg-tot egrid-tail"><b>([\d.]+)</) || [])[1]);
   const summed = Math.round(cells.reduce((a, b) => a + b, 0) * 100) / 100;
   assert.ok(Math.abs(summed - shown) < 0.05, `total ${shown} matches the cells ${summed}`);
 });
@@ -1085,11 +1085,33 @@ test('the frozen columns are actually frozen', () => {
     assert.ok(m, `${sel} has a rule of its own`);
     return m[1];
   };
-  assert.match(rule('.tsg-scroll'), /overflow-x:\s*auto/, 'the grid owns its scroll container');
-  assert.match(rule('.tsg-emp'), /position:\s*sticky/);
-  assert.match(rule('.tsg-emp'), /left:\s*0/, 'the name stays put');
-  assert.match(rule('.tsg-tot'), /right:\s*0/, 'and so does the period total');
-  assert.match(rule('.tsg-dh'), /top:\s*0/, 'the dates stay put vertically');
+  // These declarations moved out of .tsg- and into the .egrid- primitive when
+  // the Schedule board needed the same frame. The properties are the point,
+  // not which class holds them — but the composition IS a claim, so it gets
+  // asserted too rather than assumed. A Timesheets grid that stopped carrying
+  // the primitive would keep every .egrid- rule green while rendering unfrozen.
+  assert.match(rule('.egrid-scroll'), /overflow-x:\s*auto/, 'the grid owns its scroll container');
+  assert.match(rule('.egrid-lead'), /position:\s*sticky/);
+  assert.match(rule('.egrid-lead'), /left:\s*0/, 'the name stays put');
+  assert.match(rule('.egrid-tail'), /right:\s*0/, 'and so does the period total');
+  assert.match(rule('.egrid-dh'), /top:\s*0/, 'the dates stay put vertically');
+
+  // Nothing in the grid may draw over the sidebar (40), nav (55) or masthead (60).
+  const zs = [...css.matchAll(/\.egrid[^{]*\{[^}]*z-index:\s*(\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(zs.length >= 3, 'the sticky pieces declare a stacking order');
+  assert.ok(Math.max(...zs) <= 20, `the grid stays under the chrome (highest was ${Math.max(...zs)})`);
+});
+
+test('the Timesheets grid actually carries the shared frame', async () => {
+  await seedGridPeriod();
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}`);
+  assert.match(html, /class="tsg-scroll egrid-scroll"/, 'the scroll container is the shared one');
+  assert.match(html, /class="tsg egrid"/, 'and so is the grid');
+  assert.match(html, /class="tsg-emp tsg-corner egrid-lead egrid-corner"/, 'the corner is both');
+  assert.match(html, /class="tsg-emp egrid-lead"/, 'the name column is frozen by the primitive');
+  assert.match(html, /class="tsg-tot egrid-tail"/, 'and so is the period total');
+  assert.match(html, /class="tsg-c[^"]* egrid-c"/, 'every cell takes the shared padding');
 });
 
 test('somebody who left mid-period is still in the grid', async () => {
@@ -1166,12 +1188,12 @@ test('the status filter narrows the grid and says how far', async () => {
   await seedGridPeriod();
   const per = gridPeriod();
   const all = await text(`/payroll/timesheets?p=${per.start}`);
-  const rows = (all.match(/class="tsg-row"/g) || []).length;
+  const rows = (all.match(/class="tsg-row egrid-row"/g) || []).length;
   assert.ok(rows > 0, 'there are rows to narrow');
 
   const none = await text(`/payroll/timesheets?p=${per.start}&st=approved`);
   assert.match(none, /shown|No timesheets|nothing/i, 'a filter that matches nobody says so');
-  assert.strictEqual((none.match(/class="tsg-row"/g) || []).length, 0, 'and shows no rows');
+  assert.strictEqual((none.match(/class="tsg-row egrid-row"/g) || []).length, 0, 'and shows no rows');
 });
 
 test('the employee walker carries the period and stops at the ends', async () => {

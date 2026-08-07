@@ -4252,35 +4252,55 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    the labels to be constants, and these labels are dates — data, not CSS. Name
    and period total stay frozen at both edges so the two figures that matter are
    never off-screen. */
-.tsg-panel { padding-bottom: 6px; }
-.tsg-scroll { overflow-x: auto; max-width: 100%; min-width: 0; }
-.tsg {
+/* --- .egrid- : the structure, on its own ---------------------------------
+   Extracted from .tsg- so a second employee-by-day grid does not fork it. The
+   two grids that exist disagree about what a CELL is — Timesheets puts one
+   number in it, Schedule puts shift cards in it — but they must never disagree
+   about the frame: where the scroll lives, what stays frozen, and how high the
+   sticky pieces may stack. Those three are the ones that break silently when
+   copied, and one of them takes the sidebar with it.
+
+   Compose, do not replace: an element carries .egrid-lead AND .tsg-emp. The
+   primitive owns the position, the component owns the look. */
+.egrid-scroll { overflow-x: auto; max-width: 100%; min-width: 0; }
+.egrid {
   display: grid;
-  grid-template-columns: 132px repeat(var(--tsg-cols), minmax(46px, 1fr)) 96px;
+  grid-template-columns:
+    var(--egrid-lead-w, 132px) repeat(var(--egrid-cols), minmax(46px, 1fr)) var(--egrid-tail-w, 96px);
   width: max-content; min-width: 100%;
 }
-.tsg-head, .tsg-row { display: contents; }
-
-.tsg-dh, .tsg-c, .tsg-emp, .tsg-tot {
+.egrid-head, .egrid-row { display: contents; }
+.egrid-dh, .egrid-c, .egrid-lead, .egrid-tail {
   padding: 7px 8px; border-bottom: 1px solid var(--rule-light);
   font-size: 12.5px; line-height: 1.25;
 }
-.tsg-dh {
+.egrid-dh {
   position: sticky; top: 0; z-index: 2;
   background: var(--panel); text-align: center;
   border-bottom: 1px solid var(--rule);
 }
+/* Frozen at both edges. z-index stays at or below 20 so the grid never draws
+   over the sidebar (40), the nav (55) or the masthead (60). */
+.egrid-lead { position: sticky; left: 0; z-index: 3; background: var(--panel);
+  border-right: 1px solid var(--rule); }
+.egrid-tail { position: sticky; right: 0; z-index: 3; background: var(--panel);
+  border-left: 1px solid var(--rule); text-align: right; }
+.egrid-corner { z-index: 4; }
+@media (max-width: 760px) {
+  .egrid {
+    grid-template-columns:
+      var(--egrid-lead-sm, 108px) repeat(var(--egrid-cols), minmax(40px, 1fr)) var(--egrid-tail-sm, 84px);
+  }
+  .egrid-dh, .egrid-c, .egrid-lead, .egrid-tail { padding: 6px 5px; font-size: 12px; }
+}
+
+/* --- .tsg- : what Timesheets adds on top --------------------------------- */
+.tsg-panel { padding-bottom: 6px; }
 .tsg-dh b { display: block; font-family: var(--mono); font-size: 12px; color: var(--ink); font-weight: 600; }
 .tsg-dh i { display: block; font-style: normal; font-size: 9.5px; letter-spacing: .05em;
   text-transform: uppercase; color: var(--muted); }
 
-/* Frozen at both edges. z-index stays at or below 20 so the grid never draws
-   over the sidebar (40), the nav (55) or the masthead (60). */
-.tsg-emp { position: sticky; left: 0; z-index: 3; background: var(--panel);
-  border-right: 1px solid var(--rule); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tsg-tot { position: sticky; right: 0; z-index: 3; background: var(--panel);
-  border-left: 1px solid var(--rule); text-align: right; }
-.tsg-corner { z-index: 4; }
+.tsg-emp { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tsg-emp b { display: block; font-size: 13px; color: var(--ink); }
 .tsg-emp i { display: block; font-style: normal; font-size: 10.5px; color: var(--muted); }
 .tsg-tot b { font-family: var(--mono); font-size: 13px; color: var(--ink); }
@@ -4307,11 +4327,7 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .tsg-pop i { display: block; font-style: normal; color: var(--muted); font-size: 11px; }
 .tsg-foot { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; padding: 0 2px; }
 
-@media (max-width: 760px) {
-  .tsg { grid-template-columns: 108px repeat(var(--tsg-cols), minmax(40px, 1fr)) 84px; }
-  .tsg-dh, .tsg-c, .tsg-emp, .tsg-tot { padding: 6px 5px; font-size: 12px; }
-  .tsg-emp b { font-size: 12px; }
-}
+@media (max-width: 760px) { .tsg-emp b { font-size: 12px; } }
 .tsg-pop a { display: inline-block; margin-top: 6px; color: var(--accent); font-size: 11.5px; }
 
 /* --- who is on right now --------------------------------------------------

@@ -19271,27 +19271,27 @@ app.get('/payroll/timesheets', (req, res) => {
       // No punch, but the shift sheet has hours for that day — the months
       // before the clock existed. Marked so it never reads as clocked time.
       if ((!c || !c.entries) && shMin) {
-        return `<span class="tsg-c tsg-sh${wk}" data-d="${d}" data-h="${TC.toHours(shMin)}"
+        return `<span class="tsg-c tsg-sh${wk} egrid-c" data-d="${d}" data-h="${TC.toHours(shMin)}"
           data-t="${esc(TC.hm(shMin))} · from the shift sheet, no punch">${TC.toHours(shMin)}</span>`;
       }
-      if (!c || !c.entries) return `<span class="tsg-c tsg-none${wk}" data-d="${d}"></span>`;
+      if (!c || !c.entries) return `<span class="tsg-c tsg-none${wk} egrid-c" data-d="${d}"></span>`;
       // An open punch is NOT the same as a day off, and must never render as
       // one. A running entry has no payable minutes yet, so it would otherwise
       // be indistinguishable from an empty cell — somebody on shift right now
       // reading as though they had not come in.
       if (c.open_entries) {
-        return `<span class="tsg-c tsg-open${wk}" data-d="${d}" data-n="${c.entries}"
+        return `<span class="tsg-c tsg-open${wk} egrid-c" data-d="${d}" data-n="${c.entries}"
           data-t="on the clock now">on</span>`;
       }
       const hrs = TC.toHours(c.payable_min);
-      return `<span class="tsg-c${wk}" data-d="${d}" data-h="${hrs}" data-n="${c.entries}"
+      return `<span class="tsg-c${wk} egrid-c" data-d="${d}" data-h="${hrs}" data-n="${c.entries}"
         data-t="${esc(TC.hm(c.payable_min))}${c.entries > 1 ? ` · ${c.entries} punches` : ''}${c.positions > 1 ? ' · 2 positions' : ''}${c.edited ? ' · edited' : ''}">${hrs}</span>`;
     }).join('');
     const running = days.some((d) => (cells.get(`${r.emp.id}|${d}`) || {}).open_entries);
-    return `<a class="tsg-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
-      <span class="tsg-emp"><b>${esc(r.emp.name)}</b><i>${esc(TC.SHEET_LABEL[r.status] || r.status)}${r.emp.active ? '' : ' · left'}</i></span>
+    return `<a class="tsg-row egrid-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
+      <span class="tsg-emp egrid-lead"><b>${esc(r.emp.name)}</b><i>${esc(TC.SHEET_LABEL[r.status] || r.status)}${r.emp.active ? '' : ' · left'}</i></span>
       ${dayCells}
-      <span class="tsg-tot"><b>${TC.toHours(r.totals.payable) || 0}</b><i>${r.totals.overtime
+      <span class="tsg-tot egrid-tail"><b>${TC.toHours(r.totals.payable) || 0}</b><i>${r.totals.overtime
         ? `+${TC.toHours(r.totals.overtime)} OT` : running ? 'so far' : 'hours'}</i></span>
     </a>`;
   };
@@ -19421,13 +19421,13 @@ app.get('/payroll/timesheets', (req, res) => {
 
       ${filtered.length ? `<section class="bs-panel tsg-panel">
         <div class="bs-sec-h"><span class="bs-kicker">Hours by day</span></div>
-        <div class="tsg-scroll">
-          <div class="tsg" style="--tsg-cols:${days.length}">
-            <div class="tsg-head">
-              <span class="tsg-emp tsg-corner">Who</span>
-              ${days.map((d, i) => `<span class="tsg-dh${isMonday(d) && i ? ' tsg-wk' : ''}"
+        <div class="tsg-scroll egrid-scroll">
+          <div class="tsg egrid" style="--egrid-cols:${days.length}">
+            <div class="tsg-head egrid-head">
+              <span class="tsg-emp tsg-corner egrid-lead egrid-corner">Who</span>
+              ${days.map((d, i) => `<span class="tsg-dh${isMonday(d) && i ? ' tsg-wk' : ''} egrid-dh"
                 ><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></span>`).join('')}
-              <span class="tsg-tot tsg-corner">Period</span>
+              <span class="tsg-tot tsg-corner egrid-tail egrid-corner">Period</span>
             </div>
             ${filtered.map(gridRow).join('')}
           </div>
