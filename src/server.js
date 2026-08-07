@@ -13279,7 +13279,13 @@ app.get('/staff-portal', (req, res) => {
         <a class="bs-act" href="/shifts/${openShift.id}">Open the shift sheet &rarr;</a></div>
       <div class="bs-srows">
         ${expected.map((p) => {
-          const wants = takesTips.get(p.role);
+          // The SAME question `owing` asks, through the same function. This
+          // line used to read a takesTips Map that Phase 2D-1 deleted; the
+          // other caller was updated and this one was not, and because it
+          // lives inside a template literal it only evaluated when there was
+          // an open shift with somebody on it — so the page 500'd during
+          // service and looked fine the rest of the time.
+          const wants = canSubmitSalesTips(positions.bySlug.get(p.role));
           return `<div class="bs-srow pa-hand">
             <span class="pa-what"><b>${esc(p.name)}</b><span>${esc(p.role)}</span></span>
             <span class="pa-do">${!wants

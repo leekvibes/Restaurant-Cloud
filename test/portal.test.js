@@ -486,6 +486,62 @@ test('each tab renders only its own job', async () => {
   }
 });
 
+test('the admin portal survives an OPEN shift with people on it', async () => {
+  // The regression this exists for: the "handed in tonight" block reads a
+  // takesTips Map that Phase 2D-1 (50a08aa) deleted. The other caller was
+  // updated, this one was not, and it lives inside a template literal — so it
+  // only evaluated when `openShift` was truthy AND somebody was on it.
+  //
+  // Which means the page 500'd DURING SERVICE and looked perfectly fine every
+  // other hour of the day. Every existing test here ran without an open shift,
+  // so all of them passed while the owner could not open the page.
+  //
+  // The condition, not the symptom, is what is pinned here.
+  const d = today();
+  const w = new Database(DB);
+  const sid = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES (?, 'dinner', 'open', datetime('now'))")
+    .run(d).lastInsertRowid;
+  const who = w.prepare('SELECT id, role FROM employees ORDER BY id LIMIT 3').all();
+  const ins = w.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,6)');
+  for (const p of who) ins.run(sid, p.id, p.role);
+  w.close();
+
+  try {
+    for (const tab of ['reports', 'board', 'notes', 'positions']) {
+      const res = await fetch(`${BASE}/staff-portal?tab=${tab}`);
+      assert.strictEqual(res.status, 200, `${tab} renders mid-service, not a 500`);
+    }
+    const html = await (await fetch(`${BASE}/staff-portal?tab=reports`)).text();
+    assert.match(html, /Handed in tonight/, 'the block that crashed is actually on the page');
+    // Everybody on the shift is listed, each with a verdict rather than a gap.
+    for (const p of who) {
+      const emp = new Database(DB).prepare('SELECT name FROM employees WHERE id = ?').get(p.id);
+      assert.ok(html.includes(emp.name), `${emp.name} is listed`);
+    }
+    assert.match(html, /nothing to hand in|waiting|sent/,
+      'and the eligibility question was answered, not skipped');
+  } finally {
+    const c = new Database(DB);
+    c.prepare('DELETE FROM work WHERE shift_id = ?').run(sid);
+    c.prepare('DELETE FROM shifts WHERE id = ?').run(sid);
+    c.close();
+  }
+});
+
+test('who owes a submission is asked ONCE, by the same rule in both places', async () => {
+  // The strip counts them and the list names them. They used to be two
+  // different expressions — the count from canSubmitSalesTips, the list from a
+  // Map — which is how one of them could go stale without the other noticing.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const route = src.slice(src.indexOf("app.get('/staff-portal'"), src.indexOf("app.post('/staff-portal/stock"));
+  const asks = (route.match(/canSubmitSalesTips\(/g) || []).length;
+  assert.ok(asks >= 2, `both the count and the list ask the same function (found ${asks})`);
+  // Comments stripped first, or this matches the note explaining the fix and
+  // fails on the very change that made it true.
+  const code = route.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!/\btakesTips\b/.test(code), 'and no CODE reads the Map that no longer exists');
+});
+
 test('the default tab is the one with someone waiting on it', async () => {
   const html = await (await fetch(`${BASE}/staff-portal`)).text();
   assert.match(html, /Everything staff reported from the floor/, 'floor reports open first');
