@@ -1646,13 +1646,13 @@ app.get('/shifts', (req, res) => {
 
   const notSent = st.filter(({ s }) => s.key !== 'sent' && s.key !== 'open').length;
   const headline = all.length
-    ? `Shifts — ${all.length} logged, ${notSent ? `${notSent} still to send.` : 'all sent.'}`
-    : 'No shifts logged yet.';
+    ? `Services — ${all.length} logged, ${notSent ? `${notSent} still to send.` : 'all sent.'}`
+    : 'No services logged yet.';
   const subline = all.length
-    ? (todays.length ? `${todays.length} open now. Staff submissions start a shift on their own.`
-       : notSent ? 'Staff submissions start a shift on their own.'
+    ? (todays.length ? `${todays.length} open now. Staff submissions start a service on their own.`
+       : notSent ? 'Staff submissions start a service on their own.'
        : 'Nothing open, nothing waiting on you.')
-    : 'A shift starts itself the moment a staff member submits their tips.';
+    : 'A service starts itself the moment a staff member submits their tips.';
 
   const body = all.length ? `
     ${statStrip}
@@ -1670,9 +1670,9 @@ app.get('/shifts', (req, res) => {
       <input id="ssearch" class="bs-search-inline" type="search" placeholder="Search a date, month or service…" autocomplete="off">
     </div>
     ${monthBrowser}`
-    : `<p class="bs-clear">Nothing yet. ${canWrite() ? '<a href="/shifts/new">Log a shift →</a>' : ''}</p>`;
+    : `<p class="bs-clear">Nothing yet. ${canWrite() ? '<a href="/shifts/new">Log a service →</a>' : ''}</p>`;
 
-  res.send(layout('Shifts', `
+  res.send(layout('Services', `
     ${flash(req)}
     <div class="bs-page">
       <div class="bs-head">
@@ -1680,7 +1680,7 @@ app.get('/shifts', (req, res) => {
           <h1 class="bs-headline">${esc(headline)}</h1>
           <p class="bs-subline">${esc(subline)}</p>
         </div>
-        ${canWrite() ? '<a class="bs-btn" href="/shifts/new">+ Log a shift</a>' : ''}
+        ${canWrite() ? '<a class="bs-btn" href="/shifts/new">+ Log a service</a>' : ''}
       </div>
       ${body}
     </div>
@@ -1772,8 +1772,8 @@ app.get('/shifts/new', (req, res) => {
     ? `<div class="bs-notice-bar crit"><span class="bs-notice-k">Hold on</span>${esc(req.query.msg || 'Pick a date and service.')}</div>`
     : '';
   const body = `
-    <a class="bs-back" href="/shifts">← Shifts</a>
-    <h1>Log a shift</h1>
+    <a class="bs-back" href="/shifts">← Services</a>
+    <h1>Log a service</h1>
     <p class="bs-lede">Pick the day and which service. You'll enter sales, tips &amp; hours on the next screen.</p>
     ${err}
     <form method="post" action="/shifts" class="bs-newshift">
@@ -1787,7 +1787,7 @@ app.get('/shifts/new', (req, res) => {
       </label>
       <button class="bs-btn bs-newshift-go" type="submit">Start shift →</button>
     </form>`;
-  res.send(layout('Log a shift', body));
+  res.send(layout('Log a service', body));
 });
 
 app.post('/shifts', (req, res) => {
@@ -2058,7 +2058,7 @@ app.get('/shifts/:id', (req, res) => {
               <span class="dist-who">${esc(p.name)}<i>${esc(p.role)} · ${p.hours}h</i></span>
               <span class="dist-amt">${money(p.poolCash + p.poolCard)}</span>
             </div>`).join('')}</div>`
-            : '<div class="panel-empty">Nobody eligible on this shift yet — add support staff and the pool will split across them.</div>'}
+            : '<div class="panel-empty">Nobody eligible on this service yet — add support staff and the pool will split across them.</div>'}
           ${(poolCash + poolCard) > 0 && !eligible.length
             ? `<div class="dist-warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</div>` : ''}
         </div>
@@ -2217,7 +2217,7 @@ app.get('/shifts/:id', (req, res) => {
   const body = `
     ${flash(req)}
     <div class="bs-page bs-sheet">
-      <a class="bs-back" href="/shifts">← Shifts</a>
+      <a class="bs-back" href="/shifts">← Services</a>
       <div class="bs-head">
         <div>
           <h1 class="bs-headline">${verdict}</h1>
@@ -2239,7 +2239,7 @@ app.get('/shifts/:id', (req, res) => {
         <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add employee to shift</button>
         <button type="button" class="bs-tool" onclick="bsTool('read-photo')">Read from a report photo</button>
         <button type="button" class="bs-tool" onclick="bsTool('the-record')">The record</button>
-        <button type="button" class="bs-tool bs-tool-danger" onclick="bsTool('danger')">Delete this shift</button>
+        <button type="button" class="bs-tool bs-tool-danger" onclick="bsTool('danger')">Delete this service</button>
       </div>` : ''}
       <div class="bs-toolpanes">
         ${canWrite() ? `
@@ -2294,7 +2294,7 @@ app.get('/shifts/:id', (req, res) => {
           ${notesSection}
 
         ${canWrite() ? `<details class="bs-x bs-x-danger" id="danger">
-            <summary>Delete this shift</summary>
+            <summary>Delete this service</summary>
             <p class="bs-clear">Removes the shift and everyone's hours, sales and tips on it. Emails already sent cannot be recalled.</p>
             <form method="post" action="/shifts/${sh.id}/delete"
                   onsubmit="return confirm('Delete the ${sh.date} ${dp(sh.daypart)} shift and all ${Object.keys(entries).length} entries on it? This cannot be undone.')">
@@ -2323,7 +2323,7 @@ app.get('/shifts/:id', (req, res) => {
               ${serverStates.map((x) => staffRow(x, true)).join('')}
               ${supportStates.map((x) => staffRow(x, false)).join('')}
             </div>`
-            : '<p class="bs-clear">Nobody on this shift yet. They appear here when they submit, or add them below.</p>'}
+            : '<p class="bs-clear">Nobody on this service yet. They appear here when they submit, or add them below.</p>'}
 
           <p class="bs-sheet-note">${subCount(sh.id)} · <a href="#the-record" onclick="document.getElementById('the-record').open=true">Read the record ▸</a></p>
 
@@ -2461,7 +2461,7 @@ app.post('/shifts/:id/delete', (req, res) => {
   }
   if (TC.shiftHasPunches(sh.id)) {
     return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent(
-      'People clocked time on this shift. Delete their punches on the time clock first — deleting the shift would leave the hours with nowhere to go.'));
+      'People clocked time on this service. Delete their punches on the time clock first — deleting the service would leave the hours with nowhere to go.'));
   }
   s.deleteShift(sh.id);
   res.redirect('/shifts?msg=' + encodeURIComponent(`Deleted the ${sh.date} ${dp(sh.daypart)} shift and everything on it.`));

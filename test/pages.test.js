@@ -773,8 +773,11 @@ test('the shift button is gone from the bar, not just hidden', async () => {
   // handoff removes it; the Shifts page and ⌘K still have it.
   const html = await (await fetch(`${BASE}/shifts`, { redirect: 'manual' })).text();
   const bar = html.slice(html.indexOf('class="bs-masthead"'), html.indexOf('</header>'));
-  assert.ok(!/Log a shift/.test(bar), 'not in the top bar');
-  assert.match(html, /Log a shift/, 'still on the page it belongs to');
+  // Product language: the restaurant-wide (date, daypart) object is a SERVICE.
+  // The rule the test protects is unchanged — the create action belongs to its
+  // own page, not to the global masthead.
+  assert.ok(!/Log a service/.test(bar), 'not in the top bar');
+  assert.match(html, /Log a service/, 'still on the page it belongs to');
 });
 
 test('the mobile dashboard leads with attention and drops the sales figures', () => {

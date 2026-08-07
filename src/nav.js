@@ -20,7 +20,12 @@
 
 const AREAS = [
   { key: 'dashboard', label: 'Dashboard',       paths: ['/'] },
-  { key: 'shifts',    label: 'Shifts & tip-outs', paths: ['/shifts'] },
+  // The restaurant-wide (date, daypart) object is a SERVICE. A scheduled
+  // shift is one employee's planned work — a different thing entirely, and
+  // sharing a word with it made every conversation ambiguous. The KEY stays
+  // put, exactly as 'costs' did when it was relabelled Performance: it is
+  // written into every account's feature list.
+  { key: 'shifts',    label: 'Services & tip-outs', paths: ['/shifts'] },
   { key: 'sales',     label: 'Sales',           paths: ['/sales'] },
   // Renamed from "Cost %" in the UI. The key stays put: it is written into
   // every account's feature list.
@@ -68,7 +73,7 @@ const SECTIONS = [
     ['/', 'dashboard', 'Dashboard', '#2563eb', 'dashboard'],
   ] },
   { title: 'Operations', links: [
-    ['/shifts', 'shifts', 'Shifts', '#4f46e5', 'shifts'],
+    ['/shifts', 'shifts', 'Services', '#4f46e5', 'shifts'],
     ['/sales', 'sales', 'Sales', '#059669', 'sales'],
     ['/costs', 'costs', 'Performance', '#0891b2', 'costs'],
     ['/cash', 'cash', 'Cash', '#d97706', 'cash'],
@@ -116,7 +121,7 @@ for (const s of SECTIONS) {
 /** What the universal create button offers. Each entry names its area so it
  *  disappears for an account that cannot use it. */
 const CREATE_ACTIONS = [
-  { href: '/shifts/new', icon: 'shifts', label: 'Shift', area: 'shifts' },
+  { href: '/shifts/new', icon: 'shifts', label: 'Service', area: 'shifts' },
   { href: '/c/invoices', icon: 'invoices', label: 'Invoice', area: 'trackers' },
   { href: '/c/vendors', icon: 'vendors', label: 'Vendor', area: 'trackers' },
   { href: '/c/products', icon: 'par', label: 'Product', area: 'trackers' },
