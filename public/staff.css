@@ -1342,6 +1342,9 @@ body.bare {
 .hb-off-k { font-size: 10.5px; font-weight: 800; letter-spacing: .06em;
   color: var(--pt-red); border: 1px solid var(--pt-red); border-radius: 4px; padding: 0 5px; }
 .hb-more-n { margin: 8px 0 0; font-size: 13px; color: var(--pt-muted); }
+/* A quiet line, not a giant empty card. It exists to say "there is nothing"
+   rather than to leave somebody wondering where the section went. */
+.hb-none { margin: 0; padding: 2px 0 4px; font-size: 14px; color: var(--pt-muted); }
 
 /* One row treatment for attention, updates and actions. The module already
    contains them; a border each would be the card soup this pass exists to

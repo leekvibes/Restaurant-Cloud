@@ -1683,3 +1683,88 @@ test('Home has no clock card and no clock action', async () => {
   assert.ok(!/data-since/.test(html), 'nothing ticking');
   assert.ok(!/Clocked out/.test(html), 'and no block replaced it');
 });
+
+// ===========================================================================
+// Home cannot lose its sections again.
+//
+// The briefing and the service board are structural: they are on the page
+// whether or not their tables have rows. A section that disappears when its
+// data is empty makes Home a different page every shift, and it is how a
+// perfectly working Home came to look like a regression.
+// ===========================================================================
+
+test('Home keeps every section, in order, whatever the data says', async () => {
+  const cookie = await signIn('1111');
+  const html = briefing(await homeOf(cookie));
+  const order = ['hb-mod-brief', 'hb-board-h', 'hb-at-h', 'hb-up-h', 'hb-do-h']
+    .map((id) => ({ id, at: html.indexOf(id) })).filter((x) => x.at > -1);
+  // Whichever of the optional ones are present, they are in the approved order.
+  for (let i = 1; i < order.length; i += 1) {
+    assert.ok(order[i].at > order[i - 1].at,
+      `${order[i].id} comes after ${order[i - 1].id}`);
+  }
+  // These two are never optional.
+  assert.match(html, /hb-mod-brief/, 'the briefing is structural');
+  assert.match(html, /id="hb-board-h"/, 'and so is the service board');
+  assert.match(html, /View all specials/, 'with its link');
+});
+
+test('an empty board still shows both halves and both quiet lines', async () => {
+  // A fresh database has no notes and no dishes. That is exactly the state
+  // this regression test exists for.
+  const w = new Database(DB);
+  w.prepare('DELETE FROM portal_specials').run();
+  w.prepare('DELETE FROM portal_notes').run();
+  w.close();
+  const cookie = await signIn('1111');
+  const html = briefing(await homeOf(cookie));
+  assert.match(html, /hb-mod-brief/, 'briefing surface present');
+  assert.match(html, /No new briefing notes\./, 'with a quiet line');
+  assert.match(html, /Specials/, 'the Specials half is labelled');
+  assert.match(html, /No current specials\./, 'and says it is empty');
+  assert.match(html, /86&rsquo;d &mdash; don&rsquo;t offer/, "the 86'd half is labelled");
+  assert.match(html, /Nothing is 86&rsquo;d right now\./, 'and says it is empty');
+  // Restrained: a quiet line, not a giant empty card.
+  assert.ok(!/tc-empty/.test(html), 'no oversized empty block');
+});
+
+test('a populated Home carries the briefing, both board halves and the rest', async () => {
+  const cookie = await signIn('1111');
+  await form('/staff-portal/note', { title: 'Qz Note one', body: 'First message.', tone: 'caution' });
+  await form('/staff-portal/note', { title: 'Qz Note two', body: 'Second message.', tone: 'fyi' });
+  await form('/staff-portal/special', { name: 'Qz Running dish', price: '21.00' });
+  await form('/staff-portal/special', { name: 'Qz Gone dish', price: '19.00' });
+  const gone = db.prepare("SELECT id FROM portal_specials WHERE name='Qz Gone dish'").get();
+  await form(`/staff-portal/special/${gone.id}/86`, { note: 'walked at six' });
+
+  const html = briefing(await homeOf(cookie));
+  // Both notes, inside ONE briefing surface.
+  assert.strictEqual((html.match(/hb-mod-brief/g) || []).length, 1, 'one briefing surface');
+  assert.match(html, /Qz Note one/); assert.match(html, /First message\./);
+  assert.match(html, /Qz Note two/); assert.match(html, /Second message\./);
+  assert.ok(!/hb-none/.test(html.split('id="hb-board-h"')[0]), 'and no quiet line while notes exist');
+  // The board, with both states in one module.
+  assert.match(html, /Qz Running dish/, 'the special is on the board');
+  assert.match(html, /<s>Qz Gone dish<\/s>/, "and the 86'd one is struck through");
+  assert.match(html, /86&rsquo;d</, 'and labelled in words');
+  assert.match(html, /walked at six/, 'with the sold-out note');
+  // The note must not also appear in Updates.
+  const upd = (html.split('id="hb-up-h"')[1] || '').split('</section>')[0];
+  assert.ok(!/Qz Note one/.test(upd), 'the note is not duplicated into Updates');
+  // Secondary actions survive.
+  assert.match(html, /Report out of stock/, 'the secondary actions are there');
+});
+
+test('an employee stock report never reaches the Home board', async () => {
+  const mine = await signIn('1111');
+  const theirs = await signIn('2222');
+  await fetch(BASE + '/portal/stock', {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie: mine, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ items: JSON.stringify([{ item: 'Qz Private shortage', status: 'out' }]) }).toString(),
+  });
+  const board = briefing(await homeOf(theirs));
+  assert.ok(!/Qz Private shortage/.test(board), 'not on another employee\'s Home');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM portal_specials WHERE name='Qz Private shortage'").get().n,
+    0, 'and it created no official 86');
+});

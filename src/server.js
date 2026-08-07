@@ -4142,8 +4142,6 @@ app.get('/portal', (req, res) => {
     </a>`;
 
   const secondary = [...m.updates, ...m.notifications];
-  const quiet = !m.notes.length && !m.specials.length && !m.eightySixed.length
-    && !m.attention.length && !secondary.length;
 
   // A real, one-time confirmation. Set as a short cookie by the POST that
   // succeeded and cleared the moment it is read, so a refresh does not replay
@@ -4169,27 +4167,35 @@ app.get('/portal', (req, res) => {
             around every note, dish and update would be the same undivided
             scroll with more borders in it. */''}
 
-      ${m.notes.length ? `<section class="hb-mod hb-mod-brief" aria-labelledby="hb-notes-h">
+      ${/* The briefing and the board are ALWAYS on the page, empty or not.
+            Hiding a section when its table happens to be empty means Home is a
+            different shape every shift, and somebody who saw no board last
+            night has no way to know whether there is nothing on it or whether
+            it has moved. A quiet line answers that; an absent section does
+            not. */''}
+      <section class="hb-mod hb-mod-brief" aria-labelledby="hb-notes-h">
         <h2 class="pt-sr" id="hb-notes-h">Notes from your manager</h2>
-        <div class="hb-mod-b">${m.notes.map(noteBlock).join('')}</div>
-      </section>` : ''}
+        <div class="hb-mod-b">${m.notes.length
+    ? m.notes.map(noteBlock).join('')
+    : '<p class="hb-none">No new briefing notes.</p>'}</div>
+      </section>
 
-      ${m.specials.length || m.eightySixed.length ? `
       <section class="hb-mod" aria-labelledby="hb-board-h">
         <h2 class="pt-sr" id="hb-board-h">Service board</h2>
-        ${m.specials.length ? `
-          <div class="hb-part">
-            <h3 class="hb-lab">Specials <span class="hb-n">${m.specials.length}</span></h3>
-            ${dishList(m.specials, dishRow, 'Specials')}
-          </div>` : ''}
-        ${m.eightySixed.length ? `
-          <div class="hb-part hb-part-bad">
-            <h3 class="hb-lab hb-lab-bad">86&rsquo;d &mdash; don&rsquo;t offer
-              <span class="hb-n">${m.eightySixed.length}</span></h3>
-            ${dishList(m.eightySixed, offRow, "86'd — don't offer")}
-          </div>` : ''}
+        <div class="hb-part">
+          <h3 class="hb-lab">Specials${m.specials.length
+    ? ` <span class="hb-n">${m.specials.length}</span>` : ''}</h3>
+          ${m.specials.length ? dishList(m.specials, dishRow, 'Specials')
+    : '<p class="hb-none">No current specials.</p>'}
+        </div>
+        <div class="hb-part hb-part-bad">
+          <h3 class="hb-lab hb-lab-bad">86&rsquo;d &mdash; don&rsquo;t offer${m.eightySixed.length
+    ? ` <span class="hb-n">${m.eightySixed.length}</span>` : ''}</h3>
+          ${m.eightySixed.length ? dishList(m.eightySixed, offRow, "86'd — don't offer")
+    : '<p class="hb-none">Nothing is 86&rsquo;d right now.</p>'}
+        </div>
         <a class="hb-foot" href="/portal/specials">View all specials &amp; 86&rsquo;d &rsaquo;</a>
-      </section>` : ''}
+      </section>
 
       ${m.attention.length ? `<section class="hb-mod hb-mod-act" aria-labelledby="hb-at-h">
         <h2 class="hb-lab" id="hb-at-h">Needs you <span class="hb-n">${m.attention.length}</span></h2>
@@ -4210,11 +4216,6 @@ app.get('/portal', (req, res) => {
         <div class="hb-rows">${m.roleActions.map(toolRow).join('')}</div>
       </section>` : ''}
 
-      ${quiet ? `<div class="tc-empty">
-        <b>Nothing to read before this shift</b>
-        <span>No notes, no specials and nothing needs you. Anything your manager
-          posts will show up here.</span>
-      </div>` : ''}
     </main>`));
 });
 

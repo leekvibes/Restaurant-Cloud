@@ -3319,16 +3319,26 @@ test('2D: no position at all is still said plainly, and still not their fault', 
   assert.match(html, /Ask your manager/, 'with the one thing that fixes it');
 });
 test('2D: nothing waiting is a finished screen, not an empty one', async () => {
+  // The page keeps its shape when the data is empty. A section that vanishes
+  // because its table happens to be empty makes Home a different page every
+  // shift, and somebody who saw no board last night cannot tell whether there
+  // is nothing on it or whether it moved. A quiet line answers that.
   const emp = 253;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3253',1500,1)")
     .run(emp, 'Home Quiet');
   const cookie = await signIn('3253');
   await text('/portal', { cookie });                    // first visit sets the baseline
   const html = homeBody(await text('/portal', { cookie }));
-  assert.match(html, /Nothing to read before this shift/, 'the calm state');
+  assert.match(html, /hb-mod-brief/, 'the briefing surface is still there');
+  assert.match(html, /No new briefing notes\./, 'saying so quietly');
+  assert.match(html, /id="hb-board-h"/, 'and so is the service board');
+  assert.match(html, /No current specials\./, 'with both halves accounted for');
+  assert.match(html, /Nothing is 86&rsquo;d right now\./, 'including the 86 half');
+  assert.match(html, /View all specials/, 'and the way to the full board');
   assert.ok(!/Needs you<|Needs your attention/.test(html), 'no attention section');
   assert.ok(!/\$\d/.test(html), 'and no invented statistics');
 });
+
 test('2D: attention items are ordered by urgency, not by module', async () => {
   const emp = 254;
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','3254',1500,1)")
