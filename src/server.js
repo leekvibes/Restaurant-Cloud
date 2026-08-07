@@ -5930,7 +5930,10 @@ app.get('/portal/specials', (req, res) => {
 
   res.send(portalPage('Specials & 86 board', `
     ${portalTop({ href: '/portal', label: 'Home' }, 'Specials')}
-    <div class="pt-body">
+    ${/* .tc-body is the 560px centred column every other portal page uses.
+          Without it this page ran edge to edge: a dish list 1,280px wide on a
+          desktop, next to a Home that links to it and is 560. */''}
+    <div class="pt-body tc-body">
       <p class="pt-date">${esc(niceDate(today).toUpperCase())}${when ? ` — UPDATED ${esc(String(when).toUpperCase())}` : ''}</p>
       <h1 class="pt-title">Specials &amp; 86 board</h1>
       <p class="pt-sub">Know these before your shift.</p>
@@ -5975,7 +5978,7 @@ app.get('/portal/stock', (req, res) => {
 
   res.send(portalPage('Report out of stock', `
     ${portalTop({ href: '/portal', label: 'Home' }, 'Out of stock')}
-    <div class="pt-body">
+    <div class="pt-body tc-body">
       <h1 class="pt-title">Out of stock</h1>
       <p class="pt-sub">Add everything you're out of or low on — send it all at once.</p>
 

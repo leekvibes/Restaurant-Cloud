@@ -532,7 +532,11 @@ body.bare {
   position: sticky; bottom: 0;
 }
 .pt-sendbtn {
-  width: 100%; min-height: 56px; background: var(--pt-ink); color: var(--pt-page);
+  /* max-width, not width: full-bleed on a phone, and matched to the 560px
+     column on a desktop rather than stretching to 1,240px. The sticky bar it
+     lives in sits outside .pt-body, so the page container cannot reach it. */
+  width: 100%; max-width: 520px; margin-left: auto; margin-right: auto; display: block;
+  min-height: 56px; background: var(--pt-ink); color: var(--pt-page);
   border: 0; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
 }
 .pt-sendbtn:disabled { background: var(--pt-line); color: #fff; cursor: default; }
