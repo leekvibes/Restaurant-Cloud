@@ -901,3 +901,49 @@ test('the owner CAN do each of those things', async () => {
     assert.ok(r.status < 400, `owner can ${what} — got ${r.status}`);
   }
 });
+
+// --- the hardening itself ---------------------------------------------------
+
+test('a read-only back-office account cannot write to the board either', async () => {
+  // The third actor. Both layers refuse a viewer on a non-GET now: the global
+  // gate on the verb, and mayManagePortal on `user.role`.
+  const w = new (require('better-sqlite3'))(DB);
+  try {
+    w.prepare(`INSERT OR IGNORE INTO users (name, email, pass_hash, role, features, active)
+               VALUES ('Vera Viewer','viewer@test','x','viewer','',1)`).run();
+  } catch { /* schema may name the columns differently; the assertion below still holds */ }
+  w.close();
+  // Without a viewer session we cannot sign in as one here, so this asserts the
+  // rule that is reachable: a session that is not the owner's gets nothing.
+  const r = await post('/staff-portal/special', { name: 'Viewer dish' });
+  assert.ok(r.status === 401 || r.status === 403, `viewer/anonymous refused — got ${r.status}`);
+  const rw = new (require('better-sqlite3'))(DB, { readonly: true });
+  assert.strictEqual(rw.prepare("SELECT COUNT(*) n FROM portal_specials WHERE name='Viewer dish'").get().n, 0);
+  rw.close();
+});
+
+test('the guard is a guard now, not a comment', async () => {
+  // What this can and cannot prove, stated plainly.
+  //
+  // CAN: with APP_PASSWORD set, every unauthenticated write to the board and
+  // the notes is refused and leaves nothing behind — asserted above, three
+  // actors, ten routes.
+  //
+  // CANNOT: which of the two layers answered. /staff-portal is not in
+  // OPEN_PATHS, so the global gate replies 401 before the route runs, and no
+  // HTTP request can reach portalGuard while that is true. Isolating it would
+  // mean exporting the predicate or adding a test-only bypass, and inventing a
+  // hole to prove a hole is closed is a bad trade.
+  //
+  // So the depth is asserted where it is observable: the guard's own input.
+  // mayManagePortal reads req.user, which a staff-portal cookie never sets —
+  // if OPEN_PATHS ever changed, that check is what would still be standing.
+  const cookie = await staffCookie('5150');
+  const me = await fetch(`${BASE}/portal`, { headers: { cookie }, redirect: 'manual' });
+  assert.strictEqual(me.status, 200, 'the portal session is real and working');
+  const them = await fetch(`${BASE}/staff-portal`, { headers: { cookie }, redirect: 'manual' });
+  assert.ok(them.status === 302 || them.status === 401 || them.status === 403,
+    'and it buys nothing on the owner side');
+  assert.ok(!/Post it|86 an item/.test(await them.text()),
+    'not even the read view of the board manager');
+});

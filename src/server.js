@@ -13335,8 +13335,35 @@ const backTo = (res, tab, msg, extra = {}) =>
 /** The board day a form was submitted from, when it sent one. */
 const dayOf = (req) => (/^\d{4}-\d{2}-\d{2}$/.test(String(req.body.d || '')) ? { d: req.body.d } : {});
 
+/**
+ * May this request manage the staff portal — the board, the 86s, the notes?
+ *
+ * Defence in depth, which this did not previously provide. It used to read
+ * `canWrite() && navAllowed('/staff-portal')`, and BOTH of those open with
+ * `!u`: with no back-office user they are true, so the guard granted
+ * everything. Nothing was ever exposed, because /staff-portal is absent from
+ * OPEN_PATHS and the global gate answers 401 first — but that made this
+ * function a comment rather than a guard, and one edit to OPEN_PATHS away from
+ * being the only thing standing there.
+ *
+ * The user comes from `req.user`, which the global gate already resolved. Same
+ * concept, same semantics, no parallel notion of identity — a Staff Portal
+ * cookie is not a back-office session and never sets it.
+ *
+ * The no-password case stays open on purpose. That is how a developer machine
+ * runs, the masthead already warns about it, and tightening it here would
+ * break the local workflow while protecting nothing that APP_PASSWORD does not
+ * already protect everywhere it is set.
+ */
+const mayManagePortal = (user) => {
+  if (!APP_PASSWORD) return true;                    // local development, by design
+  if (!user) return false;                           // anonymous, or a staff-portal session
+  if (user.role === 'viewer') return false;          // read-only accounts never write
+  return canWrite() && navAllowed('/staff-portal');  // feature/nav rules, unchanged
+};
+
 const portalGuard = (req, res) => {
-  if (canWrite() && navAllowed('/staff-portal')) return true;
+  if (mayManagePortal(req.user)) return true;
   res.status(403).end();
   return false;
 };
