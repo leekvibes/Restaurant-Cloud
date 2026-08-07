@@ -4471,6 +4471,19 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    because nothing was lost. With scripting off the rows stay ordinary links to
    the full page, which is also what a bookmark opens. */
 /* --- the review grid ------------------------------------------------------
+   .tsr-, not .tsg-, for the cell family. These two components both grew a
+   class called .tsg-c and one called .tsg-wk, and one stylesheet cannot hold
+   two meanings for a name: the rules below sit LATER in the file, so they were
+   silently winning on the employee-by-day grid above. Measured, before the
+   rename, on a .tsg-c in the grid — text-align left instead of centre, the UI
+   font instead of --mono, padding 6px 7px instead of 7px 8px, and a pointer
+   cursor on a span that is not a control. A week-boundary cell was worse:
+   display:flex, 10.5px, uppercase, letter-spaced, wrongly padded, so every
+   week-boundary column in the grid was a different height from its row.
+
+   The grid keeps .tsg- because it is the shared primitive other screens copy.
+   Anything here that touches a CELL is .tsr-.
+
    A ledger you read across, not a stack of cards you open one at a time. The
    columns are what a reviewer reconciles: when they started, when they
    stopped, what came off for breaks, and how the day divides between regular
@@ -4504,33 +4517,33 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .tsg-empty:hover { opacity: 1; }
 /* "set start" reads as an invitation rather than a value, because there is no
    value there yet. */
-.tsg-mk { color: var(--muted); font-style: italic; }
-.tsg-mk:hover { color: var(--ink); font-style: normal; }
-.tsg-open { color: var(--positive); }
+.tsr-mk { color: var(--muted); font-style: italic; }
+.tsr-mk:hover { color: var(--ink); font-style: normal; }
+.tsr-open { color: var(--positive); }
 
 /* A cell reads as a value and behaves as a control. No boxes until hover, or
    the grid looks like a form to fill in rather than a record to check. */
-.tsg-c {
+.tsr-c {
   font: inherit; font-size: 13px; text-align: left; color: var(--ink);
   background: none; border: 1px solid transparent; padding: 6px 7px; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tsg-c:hover, .tsg-c:focus-visible { border-color: var(--rule); background: var(--paper); }
-.tsg-c.ro { cursor: default; color: var(--muted); border-color: transparent; background: none; }
-.tsg-c.busy { opacity: .5; }
+.tsr-c:hover, .tsr-c:focus-visible { border-color: var(--rule); background: var(--paper); }
+.tsr-c.ro { cursor: default; color: var(--muted); border-color: transparent; background: none; }
+.tsr-c.busy { opacity: .5; }
 /* What replaces a cell while it is being edited. Native time and select
    controls on purpose: on a phone that is the system wheel, and on a desktop
    it types. Both render AM/PM from the browser's own locale. */
-.tsg-in { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--accent);
+.tsr-in { font: inherit; font-size: 13px; padding: 5px 6px; border: 1px solid var(--accent);
   background: var(--paper); color: var(--ink); width: 100%; max-width: 130px; }
 
-.tsg-wk {
+.tsr-wk {
   display: flex; align-items: baseline; gap: 10px; padding: 11px 14px 7px;
   border-bottom: 1px solid var(--rule); background: var(--panel);
   font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
 }
-.tsg-wk b { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--headline); letter-spacing: 0; }
-.tsg-wk i { font-style: normal; font-size: 11px; color: var(--ink); letter-spacing: 0; }
+.tsr-wk b { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--headline); letter-spacing: 0; }
+.tsr-wk i { font-style: normal; font-size: 11px; color: var(--ink); letter-spacing: 0; }
 
 /* Breaks keep their real start and end. They live under the row they belong
    to rather than in a column, because a shift can hold more than one and a

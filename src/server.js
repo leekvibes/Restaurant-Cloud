@@ -19665,13 +19665,13 @@ const tsGridScript = () => `<script>
       }
 
       root.addEventListener('click', function (ev) {
-        var bk = ev.target.closest && ev.target.closest('.tsg-bk');
+        var bk = ev.target.closest && ev.target.closest('.tsr-bk');
         if (bk) {                                        // breaks keep their own times, under the row
           var panel = document.querySelector('[data-brks="' + bk.dataset.brk + '"]');
           if (panel) panel.hidden = !panel.hidden;
           return;
         }
-        var c = ev.target.closest && ev.target.closest('.tsg-c');
+        var c = ev.target.closest && ev.target.closest('.tsr-c');
         if (!c || c.classList.contains('ro') || (open && c === open.el)) return;
         cancel();
         var field = c.dataset.f, text = c.textContent, input;
@@ -19693,7 +19693,7 @@ const tsGridScript = () => `<script>
           input = document.createElement('input');
           input.type = 'time'; input.value = c.dataset.v;
         }
-        input.className = 'tsg-in';
+        input.className = 'tsr-in';
         open = { el: c, text: text };
         c.textContent = ''; c.appendChild(input);
         input.focus();
@@ -19851,11 +19851,11 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               });
               const editable = canWrite();
               const cell = (id, field, shown, value, extra = '') => (editable
-                ? `<button type="button" class="tsg-c" data-e="${id}" data-f="${field}" data-v="${esc(value)}"${extra}>${esc(shown)}</button>`
-                : `<span class="tsg-c ro">${esc(shown)}</span>`);
+                ? `<button type="button" class="tsr-c" data-e="${id}" data-f="${field}" data-v="${esc(value)}"${extra}>${esc(shown)}</button>`
+                : `<span class="tsr-c ro">${esc(shown)}</span>`);
               const newCell = (date, field, shown) => (editable
-                ? `<button type="button" class="tsg-c tsg-mk" data-new="1" data-emp="${emp.id}" data-date="${date}" data-f="${field}" data-v="">${shown}</button>`
-                : `<span class="tsg-c ro">${shown}</span>`);
+                ? `<button type="button" class="tsr-c tsr-mk" data-new="1" data-emp="${emp.id}" data-date="${date}" data-f="${field}" data-v="">${shown}</button>`
+                : `<span class="tsr-c ro">${shown}</span>`);
               const hhmm = (utc) => TC.utcToLocalInput(utc).slice(11, 16);
 
               // Built from the PERIOD, not from the days that happen to have
@@ -19891,8 +19891,8 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                     ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at))
                     : cell(e.id, 'out', 'set end', hhmm(e.clock_in_at))}
                   ${brks.length
-                    ? `<button type="button" class="tsg-c tsg-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`
-                    : '<span class="tsg-c ro">—</span>'}
+                    ? `<button type="button" class="tsr-c tsr-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`
+                    : '<span class="tsr-c ro">—</span>'}
                   <b class="tsg-t">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>
                   <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
                   <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
@@ -19904,7 +19904,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                     ${cell(e.id, 'break_start', TC.clockFace(b.start_at), hhmm(b.start_at), ` data-b="${b.id}"`)}
                     <span class="tsg-to">to</span>
                     ${b.end_at ? cell(e.id, 'break_end', TC.clockFace(b.end_at), hhmm(b.end_at), ` data-b="${b.id}"`)
-                      : '<span class="tsg-c ro">running</span>'}
+                      : '<span class="tsr-c ro">running</span>'}
                     <b>${esc(TC.hm(b.raw_minutes || 0))}</b>
                   </div>`).join('')}
                 </div>` : ''}`;
@@ -19916,10 +19916,10 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               // somebody finally said when it happened.
               const typedRows = (d) => d.extra.map((x) => `<div class="tsg-r tsg-nop">
                 <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
-                <span class="tsg-c ro">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
+                <span class="tsr-c ro">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
                 ${newCell(d.date, 'in', 'set start')}
                 ${newCell(d.date, 'out', 'set end')}
-                <span class="tsg-c ro">—</span>
+                <span class="tsr-c ro">—</span>
                 <b class="tsg-t">${esc(TC.hm(x.minutes))}</b>
                 <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
                 <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
@@ -19928,16 +19928,16 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
 
               const emptyRow = (iso) => `<div class="tsg-r tsg-empty">
                 <span class="tsg-d">${esc(TC.dayLabel(iso))}</span>
-                <span class="tsg-c ro">—</span>
+                <span class="tsr-c ro">—</span>
                 ${newCell(iso, 'in', 'set start')}
-                <span class="tsg-c ro">—</span>
-                <span class="tsg-c ro">—</span>
+                <span class="tsr-c ro">—</span>
+                <span class="tsr-c ro">—</span>
                 <b class="tsg-t">—</b><span class="tsg-reg">—</span><span class="tsg-ot">—</span><span class="tsg-f"></span>
               </div>`;
 
               return groups.slice().reverse().map((g) => {
                 const wk = totalsFor.get(g.index);
-                return `${groups.length > 1 ? `<div class="tsg-wk"><span>Week ${g.index + 1}</span>
+                return `${groups.length > 1 ? `<div class="tsr-wk"><span>Week ${g.index + 1}</span>
                   <b>${esc(TC.hm(wk ? wk.payable : 0))}</b>${wk && wk.overtime ? `<i>${esc(TC.hm(wk.overtime))} OT</i>` : ''}</div>` : ''}
                 ${g.dates.slice().reverse().map((iso) => {
                   const d = found.get(iso);
