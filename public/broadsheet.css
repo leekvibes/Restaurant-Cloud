@@ -4330,6 +4330,68 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 @media (max-width: 760px) { .tsg-emp b { font-size: 12px; } }
 .tsg-pop a { display: inline-block; margin-top: 6px; color: var(--accent); font-size: 11.5px; }
 
+/* --- .swb- : the schedule week board -------------------------------------
+   Composes .egrid- for the frame. What differs from Timesheets is the CELL:
+   this one holds shift CARDS, any number of them, so a row's height is set by
+   its busiest day rather than by one line of text. That is why nothing here
+   sets a fixed row height — a manager who cannot see the second shift in a
+   cell will schedule over it. */
+.swb-draft {
+  margin: 0 0 14px; padding: 8px 12px;
+  border: 1px solid var(--rule); border-left: 3px solid var(--secondary);
+  background: var(--panel); color: var(--ink); font-size: 12.5px;
+}
+.swb-draft b { color: var(--headline); }
+
+.swb-bar { flex-wrap: wrap; margin: 0 0 12px; }
+.swb-sum { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+.swb-scroll { padding-bottom: 4px; }
+.swb-head, .swb-row { display: contents; }
+.swb-dh b { display: block; font-family: var(--mono); font-size: 12px; color: var(--ink); font-weight: 600; }
+.swb-dh i { display: block; font-style: normal; font-size: 9.5px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); }
+/* Today is marked on the board, not just in the range label. A week view with
+   no anchor makes a manager count columns to find Thursday.
+
+   No box-shadow: .bs sets `box-shadow: none !important` on every descendant
+   (line 194), so an inset rule here is dead CSS that measures as none. And not
+   --secondary, which is a MUTED grey (#4d5866) — using it made today render
+   fainter than every other day, the exact opposite of a marker. The colour is
+   --accent and the proof is a measurement, not a reading. */
+.swb-dh.swb-today { border-bottom-color: var(--accent); background: var(--paper); }
+.swb-dh.swb-today b, .swb-dh.swb-today i { color: var(--accent); }
+
+.swb-emp { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.swb-emp b { display: block; font-size: 13px; color: var(--ink); }
+.swb-emp i { display: block; font-style: normal; font-size: 10.5px; color: var(--muted); }
+.swb-tot { text-align: right; }
+.swb-tot b { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+.swb-tot i { display: block; font-style: normal; font-size: 10px; color: var(--muted); }
+
+.swb-c { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
+.swb-c.swb-none::after { content: '·'; color: var(--faint); text-align: center; }
+
+/* A card, not a chip: two lines, because the time alone does not say what
+   somebody is doing and the position alone does not say when. */
+.swb-card {
+  display: block; padding: 4px 6px;
+  border: 1px solid var(--rule); border-left: 2px solid var(--accent);
+  background: var(--paper); text-align: left;
+}
+.swb-card b { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--ink); font-weight: 600; }
+.swb-card i { display: block; font-style: normal; font-size: 10.5px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.swb-foot { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; padding: 0 2px; }
+.swb-foot a { color: var(--accent); }
+
+@media (max-width: 760px) {
+  .swb-sum { margin-left: 0; width: 100%; }
+  .swb-card b { font-size: 11px; }
+  .swb-card i { font-size: 10px; }
+}
+
 /* --- who is on right now --------------------------------------------------
    A ledger rather than a set of cards: the question is "is anything wrong on
    the floor", and that is answered by scanning a column, not by reading nine

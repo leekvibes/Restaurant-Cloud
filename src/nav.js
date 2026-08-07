@@ -26,6 +26,12 @@ const AREAS = [
   // put, exactly as 'costs' did when it was relabelled Performance: it is
   // written into every account's feature list.
   { key: 'shifts',    label: 'Services & tip-outs', paths: ['/shifts'] },
+  // A NEW key, and new keys are closed by default: an account with a
+  // restricted feature list does not have 'schedule' in it, so the gate at
+  // server.js refuses the page until an owner ticks it on the Users page.
+  // That is the intended direction — a planning surface should not appear for
+  // somebody who was only ever given Sales.
+  { key: 'schedule',  label: 'Schedule',        paths: ['/schedule'] },
   { key: 'sales',     label: 'Sales',           paths: ['/sales'] },
   // Renamed from "Cost %" in the UI. The key stays put: it is written into
   // every account's feature list.
@@ -74,6 +80,7 @@ const SECTIONS = [
   ] },
   { title: 'Operations', links: [
     ['/shifts', 'shifts', 'Services', '#4f46e5', 'shifts'],
+    ['/schedule', 'calendar', 'Schedule', '#be185d', 'schedule'],
     ['/sales', 'sales', 'Sales', '#059669', 'sales'],
     ['/costs', 'costs', 'Performance', '#0891b2', 'costs'],
     ['/cash', 'cash', 'Cash', '#d97706', 'cash'],

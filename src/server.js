@@ -19,6 +19,12 @@ const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const OT = require('./overtime');
 const TC = require('./timeclock');
+// The planning domain. Requiring it here is what creates scheduled_shifts,
+// published_schedule and scheduled_breaks — three NEW tables. It reads
+// employees, employee_roles and settings, and writes nothing else: no punch,
+// no work row, no service, nothing Payroll aggregates. See test/scheduler for
+// the invariant that holds it to that.
+const SCH = require('./scheduler');
 const GUARD = require('./guard');
 const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
@@ -17439,6 +17445,138 @@ function tcCanEdit(req, res, entry) {
   }
   return true;
 }
+
+// ===========================================================================
+// SCHEDULE — the manager's week board
+//
+// A PLAN, and only a plan. Nothing on this page writes a punch, an hour, a
+// service or a payroll row; the domain module is the one that guarantees it,
+// and the tests hold it there. What an employee sees comes from
+// published_schedule, which no route here touches yet.
+// ===========================================================================
+
+app.get('/schedule', (req, res) => {
+  if (!navAllowed('/schedule')) {
+    return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  }
+  const cfg = TC.settings();
+  // The business date, never the calendar one. At 1am on a Saturday the week
+  // that matters is still Friday's.
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+
+  // A typo in the querystring must not send the board a decade away and make
+  // the page look broken. Anything unparseable falls back to this week.
+  const asked = MX.isDate(req.query.w) ? req.query.w : today;
+  const far = Math.abs(Math.round(
+    (Date.parse(`${asked}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000,
+  ));
+  const week = SCH.weekWindowFor(far > 730 ? today : asked);
+  const thisWeek = SCH.weekWindowFor(today);
+
+  const days = [];
+  for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
+
+  const shifts = SCH.inRange(week.start, week.end);
+  const totals = SCH.weekTotals(shifts);
+
+  // Everybody active, plus anybody who has a shift this week even if they have
+  // since been deactivated — the same rule the Timesheets grid uses, because a
+  // row that vanishes is a plan nobody can find to cancel.
+  const active = q.allEmployees.all();
+  const byId = new Map(active.map((e) => [e.id, e]));
+  for (const s of shifts) {
+    if (s.employee_id != null && !byId.has(s.employee_id)) {
+      byId.set(s.employee_id, { id: s.employee_id, name: s.employee_name, role: s.position, active: 0 });
+    }
+  }
+  const staff = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+
+  const cells = new Map();
+  for (const s of shifts) {
+    const k = `${s.employee_id == null ? 'open' : s.employee_id}|${s.business_date}`;
+    if (!cells.has(k)) cells.set(k, []);
+    cells.get(k).push(s);
+  }
+  for (const list of cells.values()) list.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+
+  // "9:00 AM" is right for a punch record and wrong for a week board: seven of
+  // those side by side push the grid past the window, so a manager looking at a
+  // WEEK can only see five days of it. Compacted to "9a" / "3:30p", which is
+  // what a paper schedule says. Derived from the same formatter, so a 24-hour
+  // locale (no meridiem to strip) passes through untouched.
+  const hhmm = (utc) => TC.clockFace(utc)
+    .replace(/:00(?=\s*[AaPp][Mm]\b)/, '')
+    .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
+  const hrs = (min) => (min ? TC.toHours(min) : 0);
+
+  const card = (s) => `<span class="swb-card" data-id="${s.id}">
+    <b>${esc(hhmm(s.starts_at))}–${esc(hhmm(s.ends_at))}</b>
+    <i>${esc(posName(s.position))}</i>
+  </span>`;
+
+  const row = (e) => {
+    const wk = totals.byEmployee[String(e.id)];
+    return `<div class="swb-row egrid-row">
+      <span class="swb-emp egrid-lead">
+        <b>${esc(e.name)}</b><i>${esc(posName(e.role))}${e.active ? '' : ' · left'}</i>
+      </span>
+      ${days.map((d) => {
+        const list = cells.get(`${e.id}|${d}`) || [];
+        return `<span class="swb-c egrid-c${list.length ? '' : ' swb-none'}" data-emp="${e.id}" data-d="${d}"
+          >${list.map(card).join('')}</span>`;
+      }).join('')}
+      <span class="swb-tot egrid-tail"><b>${hrs(wk && wk.paidMinutes)}</b><i>hours</i></span>
+    </div>`;
+  };
+
+  // The same period nav the Timesheets page uses, class for class. A manager
+  // moves between these two screens constantly; a second pagination pattern
+  // would be a thing to learn twice for no gain.
+  const arrow = (start, glyph, label) =>
+    `<a class="tsx-arrow" href="/schedule?w=${start}" aria-label="${label}">${glyph}</a>`;
+
+  const body = `<div class="bs-page">
+    <div class="bs-head">
+      <h1>Schedule</h1>
+      <p class="bs-sub">Who is planned to work, week by week. Planning only — this
+        writes no hours and changes no pay.</p>
+    </div>
+
+    <!-- Q6: persistent, not a toast. A manager must be able to tell at a glance
+         whether the floor has seen any of this, and a message that fades cannot
+         answer that question a minute later. -->
+    <p class="swb-draft" role="status"><b>Draft schedule</b> · Not visible to employees</p>
+
+    <nav class="tsm-per swb-bar" aria-label="Week">
+      ${arrow(addDays(week.start, -7), '←', 'Earlier week')}
+      <span class="tsm-range">${esc(TC.dayLabel(week.start))} – ${esc(TC.dayLabel(week.end))}</span>
+      ${arrow(addDays(week.start, 7), '→', 'Later week')}
+      <a class="tsx-today${week.start === thisWeek.start ? ' on' : ''}" href="/schedule">This week</a>
+      <span class="swb-sum">${hrs(totals.total.paidMinutes)} planned hours · ${totals.total.count} shift${totals.total.count === 1 ? '' : 's'}</span>
+    </nav>
+
+    <section class="bs-panel">
+      <div class="swb-scroll egrid-scroll">
+        <div class="swb egrid" style="--egrid-cols:${days.length};--egrid-lead-w:150px">
+          <div class="swb-head egrid-head">
+            <span class="swb-emp egrid-lead egrid-corner">Who</span>
+            ${days.map((d) => `<span class="swb-dh egrid-dh${d === today ? ' swb-today' : ''}"
+              ><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></span>`).join('')}
+            <span class="swb-tot egrid-tail egrid-corner">Week</span>
+          </div>
+          ${staff.length ? staff.map(row).join('')
+            : '<div class="swb-row egrid-row"><span class="swb-emp egrid-lead">Nobody on staff yet</span></div>'}
+        </div>
+      </div>
+    </section>
+
+    <p class="swb-foot">Hours shown are PLANNED and paid — the shift less any unpaid
+      break. What people are actually paid comes from the clock, on
+      <a href="/payroll/timesheets">Timesheets</a>.</p>
+  </div>`;
+
+  res.send(layout('Schedule', body));
+});
 
 app.get('/timeclock', (req, res) => {
   if (!navAllowed('/timeclock')) {
