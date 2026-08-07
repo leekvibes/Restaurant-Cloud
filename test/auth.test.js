@@ -796,3 +796,108 @@ test('an upload path that is not an upload route is refused without a token', as
   assert.strictEqual(res.status, 403,
     'a multipart body on a route with no multer must get the ordinary check, not a free pass');
 });
+
+// ===========================================================================
+// Owner-only board and note routes: who may actually write to them.
+//
+// portalGuard() reads `canWrite() && navAllowed('/staff-portal')`, and BOTH of
+// those return true when there is no back-office user at all — `!u` is the
+// first thing each of them checks. Read alone, the guard grants everything.
+//
+// It is not what stops anybody: /staff-portal is absent from OPEN_PATHS, so
+// the global gate at src/server.js:558 refuses the request before the route is
+// reached. These tests assert the SYSTEM, not the helper, because the system
+// is what a staff member actually meets — and they would catch it if somebody
+// later added /staff-portal to OPEN_PATHS believing portalGuard had it covered.
+// ===========================================================================
+
+/** A signed-in employee — a portal cookie, which is not a back-office session. */
+async function staffCookie(pin) {
+  const r = await post('/tips/start', { pin });
+  const c = (r.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(c, /^zwin_portal=/, 'a portal session, not an owner one');
+  return c;
+}
+
+const OWNER_WRITES = [
+  ['create a special', '/staff-portal/special', { name: 'Forged dish', price: '12.00' }],
+  ['86 something outright', '/staff-portal/special/86-item', { name: 'Forged 86' }],
+  ['edit a special', '/staff-portal/special/1/edit', { name: 'Renamed' }],
+  ['86 a special', '/staff-portal/special/1/86', { note: 'gone' }],
+  ['restore a special', '/staff-portal/special/1/back', {}],
+  ['delete a special', '/staff-portal/special/1/delete', {}],
+  ['resolve a stock report', '/staff-portal/stock/1/resolve', { resolution: 'ordered' }],
+  ['reopen a stock report', '/staff-portal/stock/1/reopen', {}],
+  ['post a before-shift note', '/staff-portal/note', { title: 'Forged note' }],
+  ['delete a before-shift note', '/staff-portal/note/1/delete', {}],
+];
+
+test('an anonymous request cannot write to any owner board or note route', async () => {
+  for (const [what, path, body] of OWNER_WRITES) {
+    const r = await post(path, body);
+    assert.ok(r.status === 401 || r.status === 403,
+      `anonymous cannot ${what} — got ${r.status}`);
+  }
+});
+
+test('a signed-in employee cannot write to any owner board or note route', async () => {
+  // The case that matters: somebody with a real, valid session — just not the
+  // owner's. A portal cookie is not a back-office user, so currentUser(req) is
+  // null and the global gate answers before portalGuard is ever consulted.
+  const cookie = await staffCookie('5150');
+  for (const [what, path, body] of OWNER_WRITES) {
+    const r = await fetch(BASE + path, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(body).toString(),
+    });
+    assert.ok(r.status === 401 || r.status === 403,
+      `an employee cannot ${what} — got ${r.status}`);
+  }
+});
+
+test('and nothing was created by any of those attempts', async () => {
+  const w = new (require('better-sqlite3'))(DB, { readonly: true });
+  const specials = w.prepare("SELECT COUNT(*) n FROM portal_specials WHERE name LIKE 'Forged%'").get().n;
+  const notes = w.prepare("SELECT COUNT(*) n FROM portal_notes WHERE title LIKE 'Forged%'").get().n;
+  w.close();
+  assert.strictEqual(specials, 0, 'no forged special exists');
+  assert.strictEqual(notes, 0, 'no forged note exists');
+});
+
+test('the owner CAN do each of those things', async () => {
+  // The other half: proving the gate is a gate and not a wall. Signing in with
+  // the password is what legitimate admin access looks like today.
+  const login = await post('/login', { password: 'test-manager-password' });
+  const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+  assert.ok(cookie, 'the owner gets a session');
+
+  const owner = (path, body) => fetch(BASE + path, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body).toString(),
+  });
+
+  const mk = await owner('/staff-portal/special', { name: 'Owner dish', price: '9.50' });
+  assert.ok(mk.status < 400, `owner can post a special — got ${mk.status}`);
+  const note = await owner('/staff-portal/note', { title: 'Owner note', body: 'Hello' });
+  assert.ok(note.status < 400, `owner can post a note — got ${note.status}`);
+
+  const w = new (require('better-sqlite3'))(DB, { readonly: true });
+  const sp = w.prepare("SELECT id FROM portal_specials WHERE name = 'Owner dish'").get();
+  const nt = w.prepare("SELECT id FROM portal_notes WHERE title = 'Owner note'").get();
+  w.close();
+  assert.ok(sp, 'the special is really there');
+  assert.ok(nt, 'and the note');
+
+  for (const [what, path, body] of [
+    ['86 it', `/staff-portal/special/${sp.id}/86`, { note: 'sold out' }],
+    ['restore it', `/staff-portal/special/${sp.id}/back`, {}],
+    ['edit it', `/staff-portal/special/${sp.id}/edit`, { name: 'Owner dish v2', price: '10.00' }],
+    ['delete it', `/staff-portal/special/${sp.id}/delete`, {}],
+    ['delete the note', `/staff-portal/note/${nt.id}/delete`, {}],
+  ]) {
+    const r = await owner(path, body);
+    assert.ok(r.status < 400, `owner can ${what} — got ${r.status}`);
+  }
+});
