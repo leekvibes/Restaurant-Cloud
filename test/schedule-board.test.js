@@ -436,6 +436,156 @@ test('copy last week copies drafts, and running it twice does not double them', 
 });
 
 // ===========================================================================
+// Overlap — the approved Phase 2 warning (Q2): warns, never blocks
+// ===========================================================================
+
+/** A far-out week of its own, so these cannot collide with the tests above. */
+const OV = () => dates.addDays(week().start, 56);
+
+test('an overlapping create SAVES, and says so as well as warning', async () => {
+  const day = OV();
+  const first = await post('/schedule/shift', { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '16:00', end: '22:00', break_minutes: '' });
+  assert.strictEqual(flashOf(first).err, false);
+  assert.doesNotMatch(flashOf(first).msg, /overlap/i, 'the first shift has nothing to clash with');
+
+  const second = await post('/schedule/shift', { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '17:00', end: '23:00', break_minutes: '' });
+  const f = flashOf(second);
+  assert.strictEqual(f.err, false, 'NOT an error — the shift was saved');
+  assert.match(f.msg, /^Shift added to the plan\./, 'it says the save happened first');
+  // The exact sentence, not just the word: /overlap/i matched happily while it
+  // read "has another shift that overlap this one".
+  assert.match(f.msg, /Board Server has another shift that overlaps this one\./,
+    'named, and the verb agrees with the count');
+
+  const n = db.prepare(`SELECT COUNT(*) n FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date = ? AND status <> 'cancelled'`).get(E.server, day).n;
+  assert.strictEqual(n, 2, 'BOTH shifts are on the board — a warning is not a refusal');
+});
+
+test('adjacent shifts do not warn', async () => {
+  const day = dates.addDays(OV(), 1);
+  await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '10:00', end: '14:00', break_minutes: '' });
+  const next = await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '14:00', end: '18:00', break_minutes: '' });
+  const f = flashOf(next);
+  assert.strictEqual(f.err, false);
+  assert.doesNotMatch(f.msg, /overlap/i,
+    '10–14 then 14–18 touch at a point; they do not intersect');
+});
+
+test('editing a shift does not report it overlapping ITSELF', async () => {
+  const day = dates.addDays(OV(), 2);
+  await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '09:00', end: '15:00', break_minutes: '' });
+  const only = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.barista, day);
+  const res = await post(`/schedule/shift/${only.id}`, { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '09:30', end: '15:30', break_minutes: '' });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, false);
+  assert.doesNotMatch(f.msg, /overlap/i,
+    'the only shift that day is the one being edited — it cannot clash with itself');
+});
+
+test('editing INTO an overlap saves and warns', async () => {
+  const day = dates.addDays(OV(), 3);
+  await post('/schedule/shift', { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '08:00', end: '12:00', break_minutes: '' });
+  await post('/schedule/shift', { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '18:00', end: '22:00', break_minutes: '' });
+  const late = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+
+  // Drag the evening shift back over the morning one.
+  const res = await post(`/schedule/shift/${late.id}`, { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '11:00', end: '15:00', break_minutes: '' });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, false, 'saved');
+  assert.match(f.msg, /^Shift updated\./);
+  assert.match(f.msg, /overlap/i, 'and warned');
+  assert.strictEqual(SCH.byId(late.id).starts_at.slice(11, 16),
+    TC.localInputToUtc(`${day} 11:00`).slice(11, 16), 'the edit really landed');
+});
+
+test('a duplicate succeeds and does NOT emit the overlap warning', async () => {
+  const day = dates.addDays(OV(), 4);
+  await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '09:00', end: '17:00', break_minutes: '' });
+  const src = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.barista, day);
+
+  const res = await post(`/schedule/shift/${src.id}/duplicate`, { w: day });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, false, 'the duplicate saved');
+  assert.strictEqual(f.msg, 'Duplicated into the same day.', 'and said only that');
+  // A duplicate lands in the same cell at the same times, so it ALWAYS overlaps
+  // its own original. Warning every time would be noise, and noise here teaches
+  // people to skim the warning on create and edit where it means something.
+  assert.doesNotMatch(f.msg, /overlap/i, 'no warning about the thing that was just asked for');
+
+  assert.strictEqual(db.prepare(`SELECT COUNT(*) n FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date = ? AND status <> 'cancelled'`).get(E.barista, day).n, 2,
+    'and both shifts are on the board');
+});
+
+test('an overnight overlap is detected across the midnight boundary', async () => {
+  const day = dates.addDays(OV(), 5);
+  // 8pm–2am, then 1am–5am the following morning. Different business dates, but
+  // the SAME person is in two places for an hour — which is the whole point of
+  // comparing UTC stamps rather than clock times on a date.
+  await post('/schedule/shift', { w: day, employee_id: String(E.multi),
+    position: 'bartender', date: day, start: '20:00', end: '02:00', break_minutes: '' });
+  const res = await post('/schedule/shift', { w: day, employee_id: String(E.multi),
+    position: 'bartender', date: dates.addDays(day, 1), start: '01:00', end: '05:00', break_minutes: '' });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, false, 'saved');
+  assert.match(f.msg, /overlap/i, 'the hour they share is caught even though the dates differ');
+});
+
+test('the overlap warning writes nothing to time, work, payroll or services', async () => {
+  const day = dates.addDays(OV(), 6);
+  const before = footprint();
+  await post('/schedule/shift', { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '16:00', end: '22:00', break_minutes: '' });
+  const res = await post('/schedule/shift', { w: day, employee_id: String(E.server),
+    position: 'server', date: day, start: '17:00', end: '23:00', break_minutes: '' });
+  assert.match(flashOf(res).msg, /overlap/i, 'it warned');
+  assert.deepStrictEqual(footprint(), before,
+    'and warning about a plan is still only reading a plan');
+});
+
+test('the overlap note is wired to create and edit only', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const region = (from, to) => src.slice(src.indexOf(from), src.indexOf(to));
+  assert.match(region("app.post('/schedule/shift'", "app.post('/schedule/shift/:id'"),
+    /sbOverlapNote\(/, 'create warns');
+  assert.match(region("app.post('/schedule/shift/:id'", "app.post('/schedule/shift/:id/delete'"),
+    /sbOverlapNote\(/, 'edit warns');
+  assert.doesNotMatch(region("app.post('/schedule/shift/:id/duplicate'", "app.post('/schedule/copy-week'"),
+    /sbOverlapNote\(/, 'duplicate does not — it always overlaps itself');
+  assert.doesNotMatch(region("app.post('/schedule/copy-week'", "app.get('/timeclock'"),
+    /sbOverlapNote\(/, 'copy-week is outside the approved Q2 scope');
+  assert.strictEqual((src.match(/sbOverlapNote\(/g) || []).length, 3,
+    'one definition and exactly two call sites');
+});
+
+test('overlap is a WARNING, never a validation rule', () => {
+  // If this ever moves into validate() the domain starts refusing split shifts
+  // and doubles, and Phase 4 has to unpick it. Pinned deliberately.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'scheduler.js'), 'utf8');
+  const validate = src.slice(src.indexOf('function validate('), src.indexOf('function normalizeBreaks('));
+  assert.doesNotMatch(validate, /overlap/i, 'validate() knows nothing about overlap');
+  // And the route asks the domain rather than reimplementing the comparison.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(server, /SCH\.overlapsFor\(/, 'the route uses the one implementation');
+  assert.strictEqual((server.match(/starts_at <.*ends_at >/g) || []).length, 0,
+    'and does not carry a second copy of the overlap comparison');
+});
+
+// ===========================================================================
 // The invariants, at the route
 // ===========================================================================
 

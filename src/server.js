@@ -17477,6 +17477,35 @@ const sbTime = (utc) => TC.clockFace(utc)
 
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
 
+const sbEmpName = db.prepare('SELECT name FROM employees WHERE id = ?');
+
+/**
+ * The approved Phase 2 overlap warning (Q2): advisory, and AFTER the write.
+ *
+ * Create and edit only. Duplicate is excluded on purpose (see that route), and
+ * Copy Previous Week is outside the approved Q2 scope.
+ *
+ * Deliberately NOT inside validate(). Overlap is not a hard rule — a split
+ * shift, a double, somebody covering two stations across an hour, are all real
+ * things a manager means to do. Making it a refusal would be wrong today and
+ * Phase 4's conflict engine would then have to unpick it.
+ *
+ * The domain answers the question; this only phrases it. overlapsFor() already
+ * excludes the shift itself (id <> @id), excludes cancelled plans, and uses
+ * strict inequalities — so 4–6 followed by 6–10 is adjacent, not overlapping —
+ * and compares UTC stamps, so a shift running past midnight is handled with no
+ * special case. One implementation, one place.
+ */
+function sbOverlapNote(saved) {
+  if (!saved) return '';
+  const clash = SCH.overlapsFor(saved);
+  if (!clash.length) return '';
+  const who = (sbEmpName.get(saved.employee_id) || {}).name || 'this person';
+  return clash.length === 1
+    ? ` Heads up — ${who} has another shift that overlaps this one.`
+    : ` Heads up — ${who} has ${clash.length} other shifts that overlap this one.`;
+}
+
 /** Which week the board is on, guarding the querystring. */
 function sbWeek(req) {
   const cfg = TC.settings();
@@ -17787,8 +17816,10 @@ app.post('/schedule/shift', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
-    sbBack(res, w, 'Shift added to the plan.');
+    const made = SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
+    // Saved either way. The warning rides along with the success message and
+    // keeps the success styling — it must never read as though the save failed.
+    sbBack(res, w, `Shift added to the plan.${sbOverlapNote(made)}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(res, w, e.message, true);
@@ -17799,8 +17830,8 @@ app.post('/schedule/shift/:id', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    SCH.edit(Number(req.params.id), sbForm(req.body));
-    sbBack(res, w, 'Shift updated.');
+    const saved = SCH.edit(Number(req.params.id), sbForm(req.body));
+    sbBack(res, w, `Shift updated.${sbOverlapNote(saved)}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(res, w, e.message, true);
@@ -17826,6 +17857,12 @@ app.post('/schedule/shift/:id/duplicate', (req, res) => {
   const w = sbWeekOf(req);
   try {
     SCH.duplicate(Number(req.params.id), { createdBy: 'owner' });
+    // Deliberately NO overlap note here. A duplicate lands in the same cell at
+    // the same times, so it always overlaps its own original — the warning
+    // would fire every time and tell the manager the thing they just asked
+    // for. A warning that is always true carries no information; worse, one
+    // that cries wolf here trains people to skim past it on create and edit,
+    // where it means something.
     sbBack(res, w, 'Duplicated into the same day.');
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
