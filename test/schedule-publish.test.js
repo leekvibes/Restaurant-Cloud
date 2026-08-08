@@ -579,6 +579,29 @@ test('the week the header names is the week the page lists', async () => {
   assert.match(landed, /Week summary/, 'with the summary for that week');
 });
 
+test('Publish on create reaches the employee; Save Draft reaches nobody', async () => {
+  const w = nearWeek();
+  const cookie = await signIn(PIN.esther);
+  const before = events(E.esther).length;
+
+  // Save Draft — the default, and the whole point of the two-step model.
+  await post('/schedule/shift', { w: w.start, employee_id: String(E.esther),
+    position: 'server', date: w.start, start: '09:00', end: '15:00', break_minutes: '' });
+  assert.strictEqual(events(E.esther).length, before, 'a draft tells nobody');
+  let html = await text(`/portal/schedule?d=${w.start}`, { cookie });
+  assert.doesNotMatch(html, /9a – 3p/, 'and she cannot see it');
+
+  // Publish — the same form, one flag, and it goes out immediately.
+  await post('/schedule/shift', { w: w.start, employee_id: String(E.esther),
+    position: 'server', date: dates.addDays(w.start, 1), start: '16:00', end: '22:00',
+    break_minutes: '', publish: '1' });
+  assert.strictEqual(events(E.esther).length, before + 1,
+    'publishing on create tells her, once');
+  html = await text(`/portal/schedule?d=${w.start}`, { cookie });
+  assert.match(html, /4p – 10p/, 'and she can see that one');
+  assert.doesNotMatch(html, /9a – 3p/, 'while the draft beside it stays hidden');
+});
+
 test('Only me never contains a coworker, anywhere in the page source', async () => {
   const w = nearWeek();
   const mine = mk(E.esther, w.start, '16:00', '22:00');

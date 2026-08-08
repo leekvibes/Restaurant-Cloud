@@ -1582,7 +1582,16 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
   background: var(--paper);
   font-size: 13px; color: var(--body);
 }
-.bs-notice-bar.crit { border-top-color: var(--danger); }
+/* A refusal has to read as one. This was a 2px rule and a small red word above
+   a grid the eye is already inside — a save that silently did nothing looked
+   exactly like a save that worked. Tinted ground and the message in the
+   headline colour, so it registers without leaving the broadsheet. */
+.bs-notice-bar.crit {
+  border-top-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--paper));
+  border-bottom-color: color-mix(in srgb, var(--danger) 28%, var(--rule));
+}
+.bs-notice-bar.crit .bs-notice-t { color: var(--headline); font-weight: 500; }
 .bs-notice-bar.ok { border-top-color: var(--positive); }
 .bs-notice-k {
   flex-shrink: 0;

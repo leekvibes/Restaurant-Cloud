@@ -17968,6 +17968,17 @@ app.get('/schedule', (req, res) => {
   const employeeOptions = active
     .map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('');
 
+  // What each person is actually allowed to work. The drawer's position list
+  // used to be the same global list for everybody, defaulting to whichever
+  // position happens to sit first in the table — so for every employee who is
+  // not that one thing, opening the drawer and pressing Save produced "They are
+  // not assigned to that position." A refusal you can only discover by being
+  // refused is a worse rule than no rule; the picker offers what will be
+  // accepted instead. Same source as the server's own check, so the two can
+  // never disagree.
+  const held = SCH.heldPositionsFor([...byId.keys()]);
+  const posNames = Object.fromEntries(positions.all.all().map((p) => [p.slug, p.name]));
+
   const body = `<div class="bs-page">
     ${flash(req)}
     <div class="bs-head"><h1>Schedule</h1></div>
@@ -18059,8 +18070,11 @@ app.get('/schedule', (req, res) => {
             </select></label>
         </div>
         <label class="fld wide">Note<input name="note" id="sb-note" maxlength="200"></label>
+        <p class="sb-hint" id="sb-new" hidden>Saving keeps this as a draft &mdash; nobody
+          sees it until the week is published. Publish sends this one shift now.</p>
         <div class="drawer-f">
-          <button class="btn btn-primary" type="submit">Save</button>
+          <button class="btn btn-primary" type="submit" id="sb-save">Save</button>
+          <button class="btn" type="submit" name="publish" value="1" id="sb-savepub" hidden>Publish</button>
           <button class="btn" type="button" onclick="sbDrawer(false)">Cancel</button>
           <span class="sb-danger" id="sb-extra" hidden>
             <button class="btn" type="submit" form="sb-dup">Duplicate</button>
@@ -18091,6 +18105,47 @@ app.get('/schedule', (req, res) => {
         })))};
         var byId = {};
         shifts.forEach(function (s) { byId[s.id] = s; });
+        var held = ${JSON.stringify(held)};
+        var posNames = ${JSON.stringify(posNames)};
+
+        // The position list belongs to the PERSON, not to the table. Rebuilt
+        // whenever the employee changes, so the only positions on offer are the
+        // ones the server will accept. The second argument is the position a
+        // shift already has: kept selectable even if they no longer hold it, or
+        // opening an old shift would silently rewrite it on the next save.
+        function sbPositions(empId, keep) {
+          var sel = document.getElementById('sb-pos');
+          if (!sel) return;
+          var list = (held[empId] || []).slice();
+          if (keep && list.indexOf(keep) === -1) list.unshift(keep);
+          sel.innerHTML = '';
+          if (!list.length) {
+            // Nobody can be scheduled into nothing. Saying so here beats a
+            // refusal after the fact, and an empty required select cannot post.
+            sel.appendChild(new Option('No positions assigned to them', '', true, true));
+            sel.firstChild.disabled = true;
+            return;
+          }
+          list.forEach(function (slug) {
+            sel.appendChild(new Option(posNames[slug] || slug, slug));
+          });
+          sel.value = keep && list.indexOf(keep) > -1 ? keep : list[0];
+        }
+
+        // Changing who it is re-asks what they can work, keeping the current
+        // choice ONLY when the new person also holds it.
+        //
+        // Passing the old value through as the keep argument instead put it
+        // back into the list by force — switching from a barista to a cook
+        // offered, and selected, barista. The escape hatch is for a shift that
+        // already carries a position, not for a leftover selection.
+        var empSel = document.getElementById('sb-emp');
+        if (empSel) empSel.addEventListener('change', function () {
+          var sel = document.getElementById('sb-pos');
+          var want = sel ? sel.value : null;
+          var list = held[empSel.value] || [];
+          sbPositions(empSel.value, list.indexOf(want) > -1 ? want : null);
+        });
 
         function sbDrawer(open) {
           document.body.classList.toggle('drawer-open', !!open);
@@ -18113,6 +18168,13 @@ app.get('/schedule', (req, res) => {
             setVal('sb-emp', add.dataset.emp); setVal('sb-date', add.dataset.d);
             setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
             setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
+            sbPositions(add.dataset.emp, null);
+            // Two ways out of a new shift, and the drawer says which is which.
+            // Save Draft leads: the model is build the week, then send it, and
+            // a misclick on Publish reaches real people.
+            document.getElementById('sb-save').textContent = 'Save Draft';
+            document.getElementById('sb-savepub').hidden = false;
+            document.getElementById('sb-new').hidden = false;
             sbDrawer(true);
             return;
           }
@@ -18122,9 +18184,16 @@ app.get('/schedule', (req, res) => {
           if (!s) return;
           form.action = '/schedule/shift/' + s.id;
           document.getElementById('sb-title').textContent = 'Edit shift';
-          setVal('sb-emp', s.e); setVal('sb-pos', s.p); setVal('sb-date', s.si.slice(0, 10));
+          setVal('sb-emp', s.e); setVal('sb-date', s.si.slice(0, 10));
           setVal('sb-start', s.si.slice(11, 16)); setVal('sb-end', s.ei.slice(11, 16));
           setVal('sb-daypart', s.dp); setVal('sb-brk', s.bm); setVal('sb-brkpaid', s.bp); setVal('sb-note', s.n);
+          // Rebuilt for this person, keeping the position the shift already has.
+          sbPositions(s.e, s.p);
+          // An existing shift is saved, then published separately below — the
+          // create-only pair goes away so there is one Save and one meaning.
+          document.getElementById('sb-save').textContent = 'Save';
+          document.getElementById('sb-savepub').hidden = true;
+          document.getElementById('sb-new').hidden = true;
           // Duplicate and Delete are edit-only, and each posts its own form so
           // neither can be triggered by the drawer's Enter key. Rendered in the
           // markup and merely revealed here — building them as a string put an
@@ -18202,7 +18271,24 @@ app.post('/schedule/shift', (req, res) => {
     const made = SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
     // Saved either way. The warning rides along with the success message and
     // keeps the success styling — it must never read as though the save failed.
-    sbBack(res, w, `Shift added to the plan.${sbOverlapNote(made)}`);
+    const note = sbOverlapNote(made);
+    if (req.body.publish !== '1') {
+      // Says what happened rather than that something happened. "Added to the
+      // plan" left a manager guessing whether the floor had been told.
+      return sbBack(res, w, `Saved as a draft — employees cannot see it yet.${note}`);
+    }
+    // Publish the week the shift LANDS in, which is not always the week on
+    // screen: a shift dated into next week publishes next week, and notifying
+    // about the displayed week would compare the wrong seven days.
+    const week = SCH.weekWindowFor(made.business_date);
+    const before = sbFingerprintsBefore(week, [made.employee_id]);
+    const [result] = SCH.publish(made.id);
+    if (result && result.action === 'skipped-open') {
+      return sbBack(res, w, `Saved as a draft — an open shift has nobody to publish it to yet.${note}`);
+    }
+    const told = sbNotifyPublished(before, week);
+    sbBack(res, w, told ? `Published — the employee has been told.${note}`
+      : `Published. Nothing they can see changed.${note}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(res, w, e.message, true);

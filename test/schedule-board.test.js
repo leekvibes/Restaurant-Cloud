@@ -445,6 +445,107 @@ test('copy last week copies drafts, and running it twice does not double them', 
 /** A far-out week of its own, so these cannot collide with the tests above. */
 const OV = () => dates.addDays(week().start, 56);
 
+// ---------------------------------------------------------------------------
+// The position picker follows the person
+// ---------------------------------------------------------------------------
+
+test('the picker offers only the positions that person can actually work', async () => {
+  const html = await text('/schedule');
+  const m = /var held = (\{.*?\});/.exec(html);
+  assert.ok(m, 'the board carries a held-positions map for the drawer');
+  const held = JSON.parse(m[1]);
+
+  // The bug this replaces: the list was the same for everybody and opened on
+  // whichever position sits first in the positions table, so every employee who
+  // was not that one thing got "They are not assigned to that position." on the
+  // first Save. A barista must be offered barista.
+  assert.deepStrictEqual(held[E.barista], ['barista'],
+    'a barista is offered barista, not the first row of the table');
+  assert.deepStrictEqual([...held[E.multi]].sort(), ['bartender', 'server'],
+    'somebody holding two jobs is offered both');
+
+  // Same source as the server's own qualification check, so the picker and the
+  // validator cannot drift apart and start disagreeing about the same person.
+  const domain = SCH.heldPositionsFor([E.barista, E.multi]);
+  assert.deepStrictEqual(held[E.barista], domain[E.barista]);
+  assert.deepStrictEqual([...held[E.multi]].sort(), [...domain[E.multi]].sort());
+});
+
+test('the refusal the picker prevents is still enforced on the server', async () => {
+  // The picker narrows what can be asked for; it is not what makes the rule
+  // true. A hand-rolled post still has to be refused.
+  const day = dates.addDays(week().start, 60);
+  const res = await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'server', date: day, start: '10:00', end: '14:00', break_minutes: '' });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, true, 'refused');
+  assert.match(f.msg, /not assigned to that position/i);
+});
+
+test('changing WHO re-asks what they can work, and never carries a stale position', async () => {
+  // Run the page's own picker, not a copy of it. The first version of this
+  // passed the previous selection through as the keep argument, which forces an
+  // option into the list — so switching from a barista to a cook offered, and
+  // selected, barista, and the server refused the save. A source-text assertion
+  // about the handler passed happily while that was true.
+  const html = await text('/schedule');
+  const from = html.indexOf('var held =');
+  const src = html.slice(from, html.indexOf("document.querySelector('.sb-grid')", from));
+  assert.ok(from > -1 && src.includes('function sbPositions'), 'found the picker in the page');
+
+  const el = (id) => ({
+    id, value: '', options: [], listeners: {},
+    set innerHTML(_) { this.options = []; },
+    appendChild(o) { this.options.push(o); this.firstChild = this.options[0]; },
+    addEventListener(k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); },
+    fire(k) { (this.listeners[k] || []).forEach((f) => f()); },
+  });
+  const nodes = { 'sb-pos': el('sb-pos'), 'sb-emp': el('sb-emp') };
+  const sandbox = {
+    document: { getElementById: (id) => nodes[id] || null },
+    Option: function Option(label, value) { return { label, value, disabled: false }; },
+  };
+  // The slice carries the drawer helper along with the picker; it only needs
+  // somewhere to hang itself, not a real window.
+  // eslint-disable-next-line no-new-func
+  new Function('document', 'Option', 'window', src)(sandbox.document, sandbox.Option, {});
+
+  const offered = () => nodes['sb-pos'].options.map((o) => o.value);
+  const switchTo = (id) => { nodes['sb-emp'].value = String(id); nodes['sb-emp'].fire('change'); };
+
+  nodes['sb-emp'].value = String(E.multi);          // server + bartender
+  switchTo(E.multi);
+  assert.deepStrictEqual(offered().sort(), ['bartender', 'server']);
+
+  nodes['sb-pos'].value = 'bartender';
+  switchTo(E.barista);                              // holds barista only
+  assert.deepStrictEqual(offered(), ['barista'], 'only what the cook can work');
+  assert.strictEqual(nodes['sb-pos'].value, 'barista',
+    'and bartender did not ride along — that is the refusal all over again');
+
+  nodes['sb-pos'].value = 'server';
+  switchTo(E.multi);
+  assert.strictEqual(nodes['sb-pos'].value, 'server', 'a shared position survives the switch');
+});
+
+test('creating offers Save Draft and Publish; editing offers one Save', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /name="publish" value="1"/, 'Publish posts a flag, not a second route');
+  assert.match(html, /id="sb-savepub"[^>]*hidden/, 'and is hidden until a create opens it');
+  assert.match(html, /id="sb-new"[^>]*hidden/, 'as is the draft explanation');
+  assert.match(html, /nobody\s+sees it until the week is published/,
+    'which says what saving actually does');
+
+  // The two branches of the drawer, each rebuilding the picker for its person.
+  const add = html.slice(html.indexOf("closest('.sb-add')"), html.indexOf("closest('.sbk')"));
+  assert.match(add, /sbPositions\(add\.dataset\.emp, null\)/, 'create asks for that employee');
+  assert.match(add, /'Save Draft'/, 'and leads with the draft');
+  const edit = html.slice(html.indexOf("closest('.sbk')"));
+  assert.match(edit, /sbPositions\(s\.e, s\.p\)/,
+    'edit keeps the position the shift already has, even if they no longer hold it');
+  assert.match(edit, /sb-savepub'\)\.hidden = true/, 'and drops the create-only pair');
+});
+
 test('an overlapping create SAVES, and says so as well as warning', async () => {
   const day = OV();
   const first = await post('/schedule/shift', { w: day, employee_id: String(E.server),
@@ -456,7 +557,10 @@ test('an overlapping create SAVES, and says so as well as warning', async () => 
     position: 'server', date: day, start: '17:00', end: '23:00', break_minutes: '' });
   const f = flashOf(second);
   assert.strictEqual(f.err, false, 'NOT an error — the shift was saved');
-  assert.match(f.msg, /^Shift added to the plan\./, 'it says the save happened first');
+  // Phase 3 follow-up: create says what it DID, which is save a draft. "Added
+  // to the plan" left a manager guessing whether the floor had been told.
+  assert.match(f.msg, /^Saved as a draft — employees cannot see it yet\./,
+    'it says the save happened, and that it reached nobody');
   // The exact sentence, not just the word: /overlap/i matched happily while it
   // read "has another shift that overlap this one".
   assert.match(f.msg, /Board Server has another shift that overlaps this one\./,
