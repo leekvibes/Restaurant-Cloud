@@ -1482,6 +1482,10 @@ body.bare {
   text-decoration: none; color: var(--pt-ink); font-size: 16px; border-radius: 10px; }
 .ps-arw:hover { background: var(--pt-line); }
 .ps-arw:focus-visible { outline: 2px solid var(--pt-blue); outline-offset: -2px; }
+/* The edge of the window the portal is allowed to show. Kept in place, not
+   removed, so the header does not jump a step sideways at either end. */
+.ps-arw.is-off { color: var(--pt-line); }
+.ps-arw.is-off:hover { background: none; }
 
 .ps-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 4px 0; }
 .ps-d { display: flex; flex-direction: column; align-items: center; gap: 2px;
@@ -1553,6 +1557,9 @@ body.bare {
 .ps-k--amber u, .ps-k--orange u { border-top-color: rgba(26,34,48,.22); }
 
 .ps-none { color: var(--pt-second); font-size: 13.5px; line-height: 1.5; margin: 28px 0; }
+.ps-next { display: inline-block; margin-top: 6px; color: var(--pt-blue);
+  font-weight: 600; text-decoration: none; }
+.ps-next:hover { text-decoration: underline; }
 .ps-fine { color: var(--pt-second); font-size: 12px; line-height: 1.5; margin-top: 18px; }
 
 /* --- My availability, deliberately not built yet -------------------------- */

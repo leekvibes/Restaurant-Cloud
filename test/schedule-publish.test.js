@@ -85,6 +85,22 @@ const today = () => TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
 let weekCursor = 0;
 const freshWeek = () => SCH.weekWindowFor(dates.addDays(today(), 14 + (weekCursor += 7)));
 
+/**
+ * The same idea, but inside the window the portal is allowed to render.
+ *
+ * freshWeek() walks a week further out on every call, and after twenty-odd
+ * groups it is past the ninety days the employee page shows — so a fixture
+ * placed there is invisible, and an assertion like "her shift is on the page"
+ * passes on some OTHER test's identical 4p–10p shift instead. Any test that
+ * renders /portal/schedule uses this one, and asks for its own week by date.
+ */
+let nearCursor = 0;
+const nearWeek = () => {
+  nearCursor += 1;
+  assert.ok(nearCursor <= 11, 'the portal window only holds so many fresh weeks');
+  return SCH.weekWindowFor(dates.addDays(today(), 7 * nearCursor));
+};
+
 const mk = (empId, day, start, end, extra = {}) => SCH.create({
   employeeId: empId, position: empId === E.kevin ? 'kitchen' : 'server',
   startsAt: `${day} ${start}`, endsAt: `${day} ${end}`, ...extra,
@@ -516,32 +532,60 @@ test('setActive is the only path that writes employees.active', () => {
 // ===========================================================================
 
 test('Only me shows published shifts and no draft', async () => {
-  const w = freshWeek();
+  const w = nearWeek();
   const shown = mk(E.esther, w.start, '16:00', '22:00');
   const hidden = mk(E.esther, dates.addDays(w.start, 1), '11:00', '15:00');
   await post(`/schedule/shift/${shown.id}/publish`, { w: w.start });
 
   const cookie = await signIn(PIN.esther);
-  const html = await text('/portal/schedule', { cookie });
+  // The page shows one week — the one the strip names — so ask for the week the
+  // fixture is in. Defaulting to today would prove nothing about either shift.
+  const html = await text(`/portal/schedule?d=${w.start}`, { cookie });
   assert.match(html, /4p – 10p/, 'the published shift is there');
   assert.doesNotMatch(html, /11a – 3p/, 'the unpublished one is not');
   assert.ok(hidden.id);
 });
 
+test('the week the header names is the week the page lists', async () => {
+  // The defect this locks: the header showed the picked week while the list
+  // below it ran ninety days out, so "Aug 1 – Aug 7" sat directly on top of a
+  // block headed "Aug 8 – Aug 14 · 4 shifts" and the arrows appeared dead.
+  const quiet = nearWeek();                 // consecutive by construction, and
+  const w = nearWeek();                     // nothing of hers is in the first
+  const shift = mk(E.esther, w.start, '16:00', '22:00');
+  await post(`/schedule/shift/${shift.id}/publish`, { w: w.start });
+
+  const cookie = await signIn(PIN.esther);
+  const empty = await text(`/portal/schedule?d=${quiet.start}`, { cookie });
+  assert.doesNotMatch(empty, /4p – 10p/, 'next week\'s shift is not listed under this week\'s header');
+  assert.match(empty, /Nothing scheduled for you this week/, 'the quiet week says so');
+  assert.match(empty, /Your next shift is/, 'and points at the one that exists');
+
+  // The offered jump lands on the week that actually holds it.
+  const href = /class="ps-next" href="([^"]+)"/.exec(empty);
+  assert.ok(href, 'the jump is a link');
+  const landed = await text(href[1].replace(/&amp;/g, '&'), { cookie });
+  assert.match(landed, /4p – 10p/, 'and there it is');
+  assert.match(landed, /Week summary/, 'with the summary for that week');
+});
+
 test('Only me never contains a coworker, anywhere in the page source', async () => {
-  const w = freshWeek();
+  const w = nearWeek();
   const mine = mk(E.esther, w.start, '16:00', '22:00');
   const theirs = mk(E.kevin, w.start, '09:00', '15:00');
   await post('/schedule/publish-week', { w: w.start });
 
   const cookie = await signIn(PIN.esther);
-  const html = await text('/portal/schedule?v=me', { cookie });
+  // Her week, not today's — on a week she is not working, "no Kevin" is true
+  // for the wrong reason and the test proves nothing.
+  const html = await text(`/portal/schedule?v=me&d=${w.start}`, { cookie });
+  assert.match(html, /4p – 10p/, 'her own shift is on the page, so the page is the right one');
   assert.doesNotMatch(html, /Kevin Pub/, 'not rendered, and not hiding in the markup either');
   assert.ok(mine.id && theirs.id);
 });
 
 test('Everyone shows published coworkers, and still no drafts or private fields', async () => {
-  const w = freshWeek();
+  const w = nearWeek();
   mk(E.esther, w.start, '16:00', '22:00', { note: 'SECRET note' });
   const draft = mk(E.kevin, dates.addDays(w.start, 1), '09:00', '15:00');
   await post(`/schedule/publish-week`, { w: w.start });
@@ -549,7 +593,7 @@ test('Everyone shows published coworkers, and still no drafts or private fields'
   const unpublished = mk(E.kevin, dates.addDays(w.start, 2), '06:00', '10:00');
 
   const cookie = await signIn(PIN.esther);
-  const html = await text('/portal/schedule?v=all', { cookie });
+  const html = await text(`/portal/schedule?v=all&d=${w.start}`, { cookie });
   assert.match(html, /Kevin Pub/, 'coworkers are visible on the floor schedule');
   assert.doesNotMatch(html, /6a – 10a/, 'but only what was published');
   assert.doesNotMatch(html, /SECRET/, 'no notes');
@@ -573,16 +617,23 @@ test('an employee cannot read another employee\'s shift detail', async () => {
 });
 
 test('a forged employee id in the querystring changes nothing', async () => {
-  const w = freshWeek();
+  const w = nearWeek();
   mk(E.kevin, w.start, '09:00', '15:00');
   await post('/schedule/publish-week', { w: w.start });
+
+  // On the week he IS published. Asking for a week nobody works hides him for
+  // the wrong reason, and the forgery would go untested.
+  const asKevin = await signIn(PIN.kevin);
+  assert.match(await text(`/portal/schedule?d=${w.start}`, { cookie: asKevin }), /9a – 3p/,
+    'his own shift is on his own page that week');
 
   const cookie = await signIn(PIN.esther);
   // Every shape somebody might try. The route reads the SESSION, never a param.
   for (const q of [`?employee=${E.kevin}`, `?emp=${E.kevin}`, `?employee_id=${E.kevin}`,
     `?v=me&employee=${E.kevin}`]) {
-    const html = await text(`/portal/schedule${q}`, { cookie });
+    const html = await text(`/portal/schedule${q}&d=${w.start}`, { cookie });
     assert.doesNotMatch(html, /Kevin Pub/, `${q} does not hand over somebody else's schedule`);
+    assert.doesNotMatch(html, /9a – 3p/, `${q} does not hand over his hours either`);
   }
 });
 

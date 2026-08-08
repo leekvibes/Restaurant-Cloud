@@ -6028,34 +6028,43 @@ app.get('/portal/schedule', (req, res) => {
     </a>`;
   };
 
-  // --- days, with a week separator ahead of each week -----------------------
+  // --- the days of the week the strip is naming -----------------------------
+  // The SAME seven days as the strip and the week nav above them. Listing the
+  // whole 97-day window under a week header made the arrows look broken: they
+  // moved the header and left the list where it was, so a week that read
+  // "Aug 1 – Aug 7" sat directly on top of "Aug 8 – Aug 14 · 4 shifts".
   const days = [];
-  for (let d = from; d <= to; d = addDays(d, 1)) days.push(d);
-  let lastWeek = null;
+  for (let d = stripWeek.start; d <= stripWeek.end; d = addDays(d, 1)) days.push(d);
+  const weekCount = days.reduce((a, d) => a + mine(d).length, 0);
+  // One separator, for a week that HAS something — an empty week says so in
+  // words instead, rather than with a "0 shifts" rule.
+  const sep = weekCount ? `<div class="ps-wk"><b>Week summary</b>
+      <i>${esc(TC.dayLabel(stripWeek.start).replace(/^\w+, /, ''))} &ndash; ${
+        esc(TC.dayLabel(stripWeek.end).replace(/^\w+, /, ''))} &middot; ${
+        weekCount} shift${weekCount === 1 ? '' : 's'}</i></div>` : '';
   const body = days.map((d) => {
     const list = mine(d);
-    const w = SCH.weekWindowFor(d);
-    let sep = '';
-    if (w.start !== lastWeek) {
-      lastWeek = w.start;
-      const n = days.filter((x) => x >= w.start && x <= w.end)
-        .reduce((a, x) => a + mine(x).length, 0);
-      // Only for a week that HAS something. The window runs ninety days out, so
-      // heading every empty week produced a dozen "0 shifts" rules between the
-      // real ones — a separator that outnumbers the content stops separating
-      // anything.
-      if (n) {
-        sep = `<div class="ps-wk"><b>Week summary</b>
-          <i>${esc(TC.dayLabel(w.start).replace(/^\w+, /, ''))} &ndash; ${
-            esc(TC.dayLabel(w.end).replace(/^\w+, /, ''))} &middot; ${n} shift${n === 1 ? '' : 's'}</i></div>`;
-      }
-    }
-    if (!list.length) return sep;                    // empty days stay clean
-    return `${sep}<div class="ps-row${d === today ? ' now' : ''}" id="d-${d}">
+    if (!list.length) return '';                     // empty days stay clean
+    return `<div class="ps-row${d === today ? ' now' : ''}" id="d-${d}">
       <div class="ps-dt"><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></div>
       <div class="ps-ks">${list.map(shiftCard).join('')}</div>
     </div>`;
   }).join('');
+
+  // An arrow that would land outside the locked window is clamped to its edge,
+  // so the last reachable week is still reachable; one that would not move at
+  // all is rendered dead rather than as a link that does nothing.
+  const stepTo = (delta) => {
+    const raw = addDays(stripWeek.start, delta);
+    const d = raw < from ? from : (raw > to ? to : raw);
+    return SCH.weekWindowFor(d).start === stripWeek.start ? null : d;
+  };
+  const arrow = (delta, label, glyph) => {
+    const d = stepTo(delta);
+    return d
+      ? `<a class="ps-arw" href="/portal/schedule?v=${view}&d=${d}" aria-label="${label}">${glyph}</a>`
+      : `<span class="ps-arw is-off" aria-hidden="true">${glyph}</span>`;
+  };
 
   const tab = (k, label, glyph) => `<a class="ps-t${view === k ? ' on' : ''}"
       href="/portal/schedule?v=${k}" aria-current="${view === k ? 'page' : 'false'}">
@@ -6064,6 +6073,16 @@ app.get('/portal/schedule', (req, res) => {
   const empty = `<p class="ps-none">Nothing on your schedule yet. When a manager
     publishes a week you will see it here.</p>`;
   const emptyAll = `<p class="ps-none">Nothing published for the floor yet.</p>`;
+  // An empty week is not an empty schedule. If something is published further
+  // out, say so and offer the jump — otherwise the first quiet week reads as
+  // "I have no shifts" and the arrows are the only way to find out otherwise.
+  const upcoming = [...byDay.keys()].filter((d) => d > stripWeek.end).sort()[0] || null;
+  const nextLink = upcoming ? ` <a class="ps-next" href="/portal/schedule?v=${view}&d=${upcoming}">${
+    view === 'all' ? 'Next published day' : 'Your next shift'} is ${
+    esc(TC.dayLabel(upcoming))} &rsaquo;</a>` : '';
+  const quiet = `<p class="ps-none">${view === 'all'
+    ? 'Nothing published for the floor this week.'
+    : 'Nothing scheduled for you this week.'}${nextLink}</p>`;
 
   res.send(portalPage('Schedule', `
     <div class="pt-body ps">
@@ -6073,12 +6092,10 @@ app.get('/portal/schedule', (req, res) => {
           : view === 'avail' ? 'When you can work' : 'Your published shifts'}</p>
         ${view === 'avail' ? '' : `
           <div class="ps-wknav">
-            <a class="ps-arw" href="/portal/schedule?v=${view}&d=${addDays(stripWeek.start, -7)}"
-               aria-label="Earlier week">&larr;</a>
+            ${arrow(-7, 'Earlier week', '&larr;')}
             <b>${esc(TC.dayLabel(stripWeek.start).replace(/^\w+, /, ''))} &ndash; ${
               esc(TC.dayLabel(stripWeek.end).replace(/^\w+, /, ''))}</b>
-            <a class="ps-arw" href="/portal/schedule?v=${view}&d=${addDays(stripWeek.start, 7)}"
-               aria-label="Later week">&rarr;</a>
+            ${arrow(7, 'Later week', '&rarr;')}
           </div>
           <nav class="ps-strip" aria-label="Days">${strip}</nav>`}
       </div>
@@ -6090,8 +6107,8 @@ app.get('/portal/schedule', (req, res) => {
             times you can work, and request time off, from here. It is not switched
             on yet — for now, talk to your manager.</p>
         </div>`
-        : (rows.length ? `<div class="ps-days">${body}</div>`
-          : (view === 'all' ? emptyAll : empty))}
+        : (weekCount ? `<div class="ps-days">${sep}${body}</div>`
+          : (rows.length ? quiet : (view === 'all' ? emptyAll : empty)))}
     </div>
 
     <nav class="ps-tabs" aria-label="Schedule sections">
