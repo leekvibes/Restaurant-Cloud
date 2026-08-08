@@ -375,8 +375,140 @@ test('a notification carries a week and a verb, and nothing private', async () =
     assert.doesNotMatch(all, /server|kitchen/i, 'no position');
     assert.doesNotMatch(all, /\d{1,2}(:\d{2})?\s*[ap]m?\b/i, 'no times');
     assert.strictEqual(ev.employee_id, E.esther, 'and it is addressed to one person');
-    assert.strictEqual(ev.href, '/portal/schedule', 'pointing at a page that exists');
+    assert.match(ev.href, /^\/portal\/schedule\?d=\d{4}-\d{2}-\d{2}$/,
+      'pointing at that week of a page that exists — a date, nothing else');
   }
+});
+
+test('A -> B -> A: restoring an earlier schedule still notifies', async () => {
+  // The trap in deduping on the resulting state alone. If the key is only the
+  // fingerprint, going back to a schedule the employee once had can never be
+  // announced: the key already exists from the first time, and they are left
+  // looking at a changed schedule nobody mentioned.
+  const w = freshWeek();
+  const s = mk(E.kevin, w.start, '09:00', '15:00');
+  const count = () => events(E.kevin).length;
+
+  const base = count();                               // Kevin has history from earlier tests
+  await post('/schedule/publish-week', { w: w.start });
+  const afterA = count();
+  assert.strictEqual(afterA, base + 1, 'A published — told once');
+
+  await post('/schedule/publish-week', { w: w.start });
+  assert.strictEqual(count(), afterA, 'exact retry of A — silent');
+
+  SCH.edit(s.id, { startsAt: `${w.start} 11:00`, endsAt: `${w.start} 17:00` });
+  await post('/schedule/publish-week', { w: w.start });
+  const afterB = count();
+  assert.strictEqual(afterB, afterA + 1, 'B published — told again');
+
+  await post('/schedule/publish-week', { w: w.start });
+  assert.strictEqual(count(), afterB, 'exact retry of B — silent');
+
+  SCH.edit(s.id, { startsAt: `${w.start} 09:00`, endsAt: `${w.start} 15:00` });  // back to A
+  await post('/schedule/publish-week', { w: w.start });
+  const afterA2 = count();
+  assert.strictEqual(afterA2, afterB + 1,
+    'back to A — a DIFFERENT publication event, so it is announced');
+
+  await post('/schedule/publish-week', { w: w.start });
+  assert.strictEqual(count(), afterA2, 'and its retry is silent too');
+
+  // And it keeps working around the cycle, which a transition-pair key would
+  // not: A->B repeats on the fourth publish.
+  SCH.edit(s.id, { startsAt: `${w.start} 11:00`, endsAt: `${w.start} 17:00` });
+  await post('/schedule/publish-week', { w: w.start });
+  assert.strictEqual(count(), afterA2 + 1, 'B again, second time around — still announced');
+});
+
+// ===========================================================================
+// Reactivation — the shifts that were still ahead of them
+// ===========================================================================
+
+const setActive = (id, on) => {
+  const { q } = require('../src/db');
+  q.setActive.run({ id, active: on ? 1 : 0 });
+};
+const visibleTo = (empId, w) => SCH.publishedFor(empId, { from: w.start, to: w.end });
+
+test('reactivation hides what already happened and keeps what is ahead', async () => {
+  // Relative to the CLOCK, not to a business date. "Later today" written as a
+  // fixed hour is already past when the suite runs at 00:35, and the boundary
+  // is an instant — so the fixture has to be one too. Queried over the whole
+  // default window rather than a week, because a 2:35am shift belongs to the
+  // PREVIOUS business date and would fall outside the week its calendar day
+  // sits in.
+  const at = (hoursFromNow) => TC.utcToLocalInput(
+    new Date(Date.parse(`${TC.nowUtc().replace(' ', 'T')}Z`) + hoursFromNow * 3600000)
+      .toISOString().slice(0, 19).replace('T', ' '));
+  const split = (s) => ({ day: s.slice(0, 10), time: s.slice(11, 16) });
+  const past = split(at(-2)); const pastEnd = split(at(-1));
+  const soon = split(at(2)); const soonEnd = split(at(3));
+
+  const gone = mk(E.eunji, past.day, past.time, pastEnd.time);
+  const ahead = mk(E.eunji, soon.day, soon.time, soonEnd.time);
+  for (const s of [gone, ahead]) {
+    await post(`/schedule/shift/${s.id}/publish`, { w: SCH.byId(s.id).business_date });
+  }
+  const seenNow = () => SCH.publishedFor(E.eunji).map((r) => r.scheduled_shift_id);
+  assert.ok(seenNow().includes(gone.id) && seenNow().includes(ahead.id),
+    'both visible while active');
+
+  setActive(E.eunji, 0);
+  setActive(E.eunji, 1);                              // reactivated NOW
+
+  const seen = seenNow();
+  assert.ok(!seen.includes(gone.id),
+    'a shift that had already started stays hidden — a business date could not express this');
+  assert.ok(seen.includes(ahead.id), 'one a couple of hours out comes back');
+});
+
+test('a future shift survives reactivation and is still there afterwards', async () => {
+  const w = SCH.weekWindowFor(dates.addDays(today(), 3));
+  const later = mk(E.kevin, dates.addDays(today(), 3), '09:00', '15:00');
+  await post('/schedule/publish-week', { w: w.start });
+  setActive(E.kevin, 0); setActive(E.kevin, 1);
+
+  assert.ok(visibleTo(E.kevin, w).some((r) => r.scheduled_shift_id === later.id),
+    'future at the moment of reactivation, so it returns');
+  // The threshold is an instant, not a rolling filter: once that shift happens
+  // it is simply recent history and keeps showing in the -7 tail.
+  const emp = db.prepare('SELECT schedule_visible_from_at v FROM employees WHERE id = ?').get(E.kevin);
+  assert.ok(emp.v && emp.v < SCH.byId(later.id).starts_at,
+    'the boundary sits before it and does not move');
+});
+
+test('a second deactivate/reactivate sets a NEW boundary', async () => {
+  const before = db.prepare('SELECT schedule_visible_from_at v FROM employees WHERE id = ?').get(E.kevin).v;
+  assert.ok(before, 'there is a boundary from the first cycle');
+  await new Promise((r) => setTimeout(r, 1100));      // the stamp has second resolution
+  setActive(E.kevin, 0); setActive(E.kevin, 1);
+  const after = db.prepare('SELECT schedule_visible_from_at v FROM employees WHERE id = ?').get(E.kevin).v;
+  assert.ok(after > before, 'the second return moves the line forward');
+});
+
+test('re-saving an already-active employee does NOT move the boundary', () => {
+  const was = db.prepare('SELECT schedule_visible_from_at v FROM employees WHERE id = ?').get(E.kevin).v;
+  setActive(E.kevin, 1);                              // already active
+  const now = db.prepare('SELECT schedule_visible_from_at v FROM employees WHERE id = ?').get(E.kevin).v;
+  assert.strictEqual(now, was,
+    'otherwise every save would quietly hide a little more of their history');
+});
+
+test('an employee who has never been deactivated is unaffected', () => {
+  const v = db.prepare('SELECT schedule_visible_from_at v FROM employees WHERE id = ?').get(E.esther).v;
+  assert.strictEqual(v, null, 'no threshold at all');
+});
+
+test('setActive is the only path that writes employees.active', () => {
+  // If a second route ever writes the column directly, the boundary can be
+  // bypassed and the rule quietly stops holding.
+  const dbSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'db.js'), 'utf8');
+  const srv = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const writes = (s) => (s.match(/UPDATE employees SET[^`']*\bactive\s*=/g) || []).length;
+  assert.strictEqual(writes(srv), 0, 'no route writes employees.active directly');
+  assert.strictEqual(writes(dbSrc), 2,
+    'exactly the two statements inside setActive — the waking one and the plain one');
 });
 
 // ===========================================================================

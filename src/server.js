@@ -5986,8 +5986,14 @@ app.get('/portal/schedule', (req, res) => {
   const brk = (r) => { try { return JSON.parse(r.breaks_json || '[]'); } catch { return []; } };
 
   // --- the seven-day strip -------------------------------------------------
-  const stripFrom = addDays(picked, -3);
-  const strip = Array.from({ length: 7 }, (_, i) => addDays(stripFrom, i)).map((d) => {
+  // The WEEK the picked day falls in, not a rolling window centred on it. The
+  // reference shows a fixed Mon–Sun row; ZWIN's week is the pay period's, so
+  // this is the same idea expressed in the week model the rest of the app
+  // already uses — and it means the strip and the week summary below it always
+  // describe the same seven days. A rolling ±3 window agreed with neither.
+  const stripWeek = SCH.weekWindowFor(picked);
+  const strip = Array.from({ length: 7 }, (_, i) => addDays(stripWeek.start, i))
+    .filter((d) => d <= stripWeek.end).map((d) => {
     const on = d === picked; const isToday = d === today;
     return `<a class="ps-d${on ? ' on' : ''}${isToday ? ' now' : ''}" href="/portal/schedule?v=${view}&d=${d}"
         aria-current="${on ? 'date' : 'false'}"
@@ -6002,15 +6008,22 @@ app.get('/portal/schedule', (req, res) => {
   // Position colour is the same mapping the manager board uses, so a job looks
   // the same everywhere. Position text is always present; colour is never the
   // only identifier. No note, no service, no coworker anything on Only me.
+  // Initials, for the floor view. Two letters from the name the app already
+  // holds — never an uploaded photo, never anything the employee did not give.
+  const initials = (name) => String(name || '?').trim().split(/\s+/)
+    .slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+
   const shiftCard = (r) => {
     const breaks = view === 'all' ? [] : brk(r);          // never coworker breaks
     const b = breaks[0];
+    const who = names.get(r.employee_id) || 'Someone';
+    const dur = hm(hrs(r));
     return `<a class="ps-k ps-k--${sbColor(r.position)}" href="/portal/schedule/shift/${r.scheduled_shift_id}"
-        aria-label="${esc(posName(r.position))} ${esc(sbTime(r.starts_at))} to ${esc(sbTime(r.ends_at))}${
-          view === 'all' ? `, ${esc(names.get(r.employee_id) || 'Someone')}` : ''}">
-      <b>${esc(sbTime(r.starts_at))} – ${esc(sbTime(r.ends_at))}</b>
-      <i>${esc(posName(r.position))}${view === 'all'
-        ? ` · ${esc(names.get(r.employee_id) || 'Someone')}` : ''}</i>
+        aria-label="${esc(posName(r.position))} ${esc(sbTime(r.starts_at))} to ${esc(sbTime(r.ends_at))}, ${esc(dur)}${
+          view === 'all' ? `, ${esc(who)}` : ''}">
+      <b>${esc(sbTime(r.starts_at))} – ${esc(sbTime(r.ends_at))} <span>(${esc(dur)})</span></b>
+      <i>${esc(posName(r.position))}</i>
+      ${view === 'all' ? `<em>${esc(who)}</em><span class="ps-av" aria-hidden="true">${esc(initials(who))}</span>` : ''}
       ${b && view !== 'all' ? `<u>Planned break ${b.minutes}m${b.paid ? ' · paid' : ''}</u>` : ''}
     </a>`;
   };
@@ -6032,8 +6045,9 @@ app.get('/portal/schedule', (req, res) => {
       // real ones — a separator that outnumbers the content stops separating
       // anything.
       if (n) {
-        sep = `<div class="ps-wk"><b>Week of ${esc(TC.dayLabel(w.start).replace(/^\w+, /, ''))}</b>
-          <i>${n} shift${n === 1 ? '' : 's'}</i></div>`;
+        sep = `<div class="ps-wk"><b>Week summary</b>
+          <i>${esc(TC.dayLabel(w.start).replace(/^\w+, /, ''))} &ndash; ${
+            esc(TC.dayLabel(w.end).replace(/^\w+, /, ''))} &middot; ${n} shift${n === 1 ? '' : 's'}</i></div>`;
       }
     }
     if (!list.length) return sep;                    // empty days stay clean
@@ -6057,7 +6071,16 @@ app.get('/portal/schedule', (req, res) => {
         <h1 class="pt-title">Schedule</h1>
         <p class="pt-sub">${view === 'all' ? 'Who is on the floor'
           : view === 'avail' ? 'When you can work' : 'Your published shifts'}</p>
-        ${view === 'avail' ? '' : `<nav class="ps-strip" aria-label="Days">${strip}</nav>`}
+        ${view === 'avail' ? '' : `
+          <div class="ps-wknav">
+            <a class="ps-arw" href="/portal/schedule?v=${view}&d=${addDays(stripWeek.start, -7)}"
+               aria-label="Earlier week">&larr;</a>
+            <b>${esc(TC.dayLabel(stripWeek.start).replace(/^\w+, /, ''))} &ndash; ${
+              esc(TC.dayLabel(stripWeek.end).replace(/^\w+, /, ''))}</b>
+            <a class="ps-arw" href="/portal/schedule?v=${view}&d=${addDays(stripWeek.start, 7)}"
+               aria-label="Later week">&rarr;</a>
+          </div>
+          <nav class="ps-strip" aria-label="Days">${strip}</nav>`}
       </div>
 
       ${view === 'avail' ? `
@@ -8567,6 +8590,17 @@ app.post('/employees/:id/roles/delete', (req, res) => {
 app.post('/employees/:id/deactivate', (req, res) => {
   q.setActive.run({ id: Number(req.params.id), active: 0 });
   res.redirect('/employees?msg=' + encodeURIComponent('Staff member deactivated.'));
+});
+
+// The other half of that. There was no way back in the app at all — `active`
+// only ever went to 0, so a reactivation meant editing the database by hand.
+// Bringing somebody back restores the shifts that were still AHEAD of them at
+// the moment they returned; what already happened while they were gone stays
+// gone, which is the rule the boundary column exists to keep.
+app.post('/employees/:id/reactivate', (req, res) => {
+  q.setActive.run({ id: Number(req.params.id), active: 1 });
+  res.redirect('/employees?msg=' + encodeURIComponent(
+    'Staff member reactivated. Their upcoming published shifts are back.'));
 });
 
 // ---------------------------------------------------------------------------
@@ -17685,18 +17719,41 @@ const sbEmpName = db.prepare('SELECT name FROM employees WHERE id = ?');
  * position, no times — nothing that could carry somebody else's information
  * into a push payload sitting on a lock screen.
  */
+const sbRevOf = db.prepare(`SELECT COUNT(*) n FROM portal_events
+  WHERE kind = 'schedule' AND employee_id = ? AND href = ?`);
+
 function sbNotifyPublished(before, week) {
   const label = `${TC.dayLabel(week.start).replace(/^\w+, /, '')} – ${TC.dayLabel(week.end).replace(/^\w+, /, '')}`;
+  const href = `/portal/schedule?d=${week.start}`;
   let told = 0;
   for (const [empId, was] of before) {
     const now = SCH.publishedFingerprint(empId, week.start, week.end);
-    if (now === was) continue;                       // nothing they can see moved
-    const first = !was;                              // they had nothing published for this week
+    // A retry is caught HERE, before any key is computed: publishing the same
+    // thing twice leaves the fingerprint identical, so there is nothing to say.
+    if (now === was) continue;
+    const first = !was;
+
+    // The dedupe key needs a REVISION, not just the resulting state. Keyed on
+    // the state alone, a schedule that went A → B → back to A could never
+    // announce the third publication: the key would already exist from the
+    // first, and the employee would be looking at a changed schedule nobody
+    // told them about. Repeated cycles (A→B→A→B) break a transition key the
+    // same way.
+    //
+    // The revision is how many schedule notifications this employee already
+    // has for this week — durable, monotonic, and derived from rows that are
+    // already written. Two concurrent requests making the SAME change read the
+    // same revision and the same state, so they collapse to one key; a
+    // genuinely later publication has a higher revision and always gets
+    // through. No timestamp anywhere, so a network retry cannot manufacture a
+    // second message.
+    const rev = sbRevOf.get(empId, href).n;
+    const state = crypto.createHash('sha1').update(now).digest('hex').slice(0, 12);
     PORTAL.notifyOnce(
-      `sched:${empId}:${week.start}:${crypto.createHash('sha1').update(now).digest('hex').slice(0, 16)}`,
+      `sched:${empId}:${week.start}:r${rev}:${state}`,
       'schedule',
       first ? `Your schedule for ${label} is ready.` : `Your schedule for ${label} was updated.`,
-      { employeeId: empId, href: '/portal/schedule' },
+      { employeeId: empId, href },
     );
     told += 1;
   }

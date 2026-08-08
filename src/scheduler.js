@@ -213,9 +213,16 @@ const q = {
       ends_at = excluded.ends_at, daypart = excluded.daypart, note = excluded.note,
       breaks_json = excluded.breaks_json, published_at = excluded.published_at`),
   pubDelete: db.prepare('DELETE FROM published_schedule WHERE scheduled_shift_id = ?'),
-  pubForEmployee: db.prepare(`SELECT * FROM published_schedule
-    WHERE employee_id = @emp AND business_date BETWEEN @from AND @to
-    ORDER BY starts_at`),
+  // The reactivation boundary lives in the WHERE clause, not in a filter the
+  // caller has to remember. Somebody brought back at 2pm gets tonight's shift
+  // and not this morning's — compared on starts_at, because a business date
+  // cannot express an instant. NULL threshold (everybody who has never been
+  // deactivated) passes everything, so this changes nothing for them.
+  pubForEmployee: db.prepare(`SELECT p.* FROM published_schedule p
+    JOIN employees e ON e.id = p.employee_id
+    WHERE p.employee_id = @emp AND p.business_date BETWEEN @from AND @to
+      AND (e.schedule_visible_from_at IS NULL OR p.starts_at >= e.schedule_visible_from_at)
+    ORDER BY p.starts_at`),
   pubById: db.prepare('SELECT * FROM published_schedule WHERE scheduled_shift_id = ?'),
   // Reconciliation reads BOTH sides of the week. inRange hides cancelled rows
   // because the board must not draw them; publishing has to see them, because a
@@ -227,9 +234,11 @@ const q = {
   // with nothing left in the draft week to notice it.
   pubInRange: db.prepare(`SELECT * FROM published_schedule
     WHERE business_date BETWEEN ? AND ? ORDER BY employee_id, starts_at`),
-  pubForWeek: db.prepare(`SELECT * FROM published_schedule
-    WHERE employee_id = @emp AND business_date BETWEEN @from AND @to
-    ORDER BY starts_at, scheduled_shift_id`),
+  pubForWeek: db.prepare(`SELECT p.* FROM published_schedule p
+    JOIN employees e ON e.id = p.employee_id
+    WHERE p.employee_id = @emp AND p.business_date BETWEEN @from AND @to
+      AND (e.schedule_visible_from_at IS NULL OR p.starts_at >= e.schedule_visible_from_at)
+    ORDER BY p.starts_at, p.scheduled_shift_id`),
 };
 
 const emp = {

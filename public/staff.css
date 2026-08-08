@@ -1474,7 +1474,16 @@ body.bare {
 .ps-head { padding: 0 0 6px; }
 
 /* --- the seven-day strip -------------------------------------------------- */
-.ps-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 12px 0 4px; }
+/* Week navigation above the strip, since the strip IS a week now. */
+.ps-wknav { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin: 14px 0 2px; }
+.ps-wknav b { font-size: 13px; color: var(--pt-ink); }
+.ps-arw { width: 44px; height: 44px; display: grid; place-items: center;
+  text-decoration: none; color: var(--pt-ink); font-size: 16px; border-radius: 10px; }
+.ps-arw:hover { background: var(--pt-line); }
+.ps-arw:focus-visible { outline: 2px solid var(--pt-blue); outline-offset: -2px; }
+
+.ps-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 4px 0; }
 .ps-d { display: flex; flex-direction: column; align-items: center; gap: 2px;
   padding: 8px 0 7px; min-height: 56px; border-radius: 10px;
   text-decoration: none; color: var(--pt-ink); position: relative; }
@@ -1497,27 +1506,42 @@ body.bare {
 .ps-wk { display: flex; align-items: baseline; justify-content: space-between;
   gap: 10px; margin: 22px 0 10px; padding-bottom: 6px;
   border-bottom: 1px solid var(--pt-line); }
-.ps-wk b { font-size: 12.5px; color: var(--pt-ink); }
-.ps-wk i { font-style: normal; font-size: 11.5px; color: var(--pt-second); }
+.ps-wk { background: var(--pt-line); border-bottom: 0; border-radius: 10px;
+  padding: 11px 13px; margin: 20px 0 12px; }
+.ps-wk b { font-size: 13px; color: var(--pt-ink); }
+.ps-wk i { font-style: normal; font-size: 12.5px; color: var(--pt-second); }
 
 /* --- a day, and its shifts ------------------------------------------------ */
-.ps-row { display: grid; grid-template-columns: 44px 1fr; gap: 12px;
-  padding: 8px 0; align-items: start; }
+.ps-row { display: grid; grid-template-columns: 46px 1fr; gap: 10px;
+  padding: 6px 0; align-items: start; }
 .ps-dt { text-align: center; padding-top: 4px; }
-.ps-dt b { display: block; font-size: 17px; font-weight: 650; color: var(--pt-ink); }
+.ps-dt b { display: block; font-size: 20px; font-weight: 400; color: var(--pt-second); line-height: 1.1; }
 .ps-dt i { font-style: normal; font-size: 10.5px; letter-spacing: .06em;
   text-transform: uppercase; color: var(--pt-second); }
-.ps-row.now .ps-dt b { color: var(--pt-blue); }
-.ps-ks { display: grid; gap: 6px; min-width: 0; }
+.ps-row.now .ps-dt b, .ps-row.now .ps-dt i { color: var(--pt-blue); }
+.ps-ks { display: grid; gap: 8px; min-width: 0; }
 
 /* Position colour, identical to the manager board — the same job reads the
    same on every surface. Position text is always present beside it. */
-.ps-k { display: block; padding: 11px 13px; border-radius: 10px;
+.ps-k { display: block; padding: 13px 14px; border-radius: 12px;
   text-decoration: none; color: #fff; background: #5a6675; min-width: 0; }
+.ps-k { position: relative; padding-right: 13px; }
 .ps-k b { display: block; font-family: var(--pt-mono, ui-monospace, monospace);
   font-size: 14px; font-weight: 650; }
-.ps-k i { display: block; font-style: normal; font-size: 12.5px; margin-top: 2px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The duration rides with the times, quieter — it answers "how long am I on"
+   without becoming a second headline. */
+.ps-k b span { font-weight: 400; opacity: .85; }
+.ps-k i { display: block; font-style: normal; font-size: 12.5px; margin-top: 3px;
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Everyone puts the person on their own line, with room kept for the avatar so
+   a long name wraps against it rather than under it. */
+.ps-k em { display: block; font-style: normal; font-size: 12.5px; margin-top: 1px;
+  padding-right: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-av { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px;
+  border-radius: 50%; display: grid; place-items: center;
+  font-size: 11.5px; font-weight: 700; letter-spacing: .02em;
+  background: rgba(255,255,255,.24); color: inherit; }
+.ps-k--amber .ps-av, .ps-k--orange .ps-av { background: rgba(26,34,48,.16); }
 .ps-k u { display: block; text-decoration: none; font-size: 11.5px; margin-top: 5px;
   padding-top: 5px; border-top: 1px solid rgba(255,255,255,.25); }
 .ps-k:focus-visible { outline: 2px solid var(--pt-ink); outline-offset: 2px; }

@@ -89,6 +89,17 @@ db.exec(`CREATE TABLE IF NOT EXISTS employee_roles (
 const empCols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
 if (!empCols.includes('pay_type')) db.exec("ALTER TABLE employees ADD COLUMN pay_type TEXT NOT NULL DEFAULT 'hourly'");
 if (!empCols.includes('salary_cents')) db.exec('ALTER TABLE employees ADD COLUMN salary_cents INTEGER NOT NULL DEFAULT 0');
+// Migration: the instant a deactivated employee was brought back.
+//
+// NULL for everybody who has never been through a reactivation, which is
+// everybody today — so this column changes nothing until somebody is actually
+// reactivated. It exists because "reactivation restores the shifts that were
+// still ahead of them AT THAT MOMENT" needs the moment recorded; a business
+// date cannot express it, since somebody reactivated at 2pm should get back
+// tonight's shift and not this morning's.
+if (!empCols.includes('schedule_visible_from_at')) {
+  db.exec('ALTER TABLE employees ADD COLUMN schedule_visible_from_at TEXT');
+}
 
 // Migration: add the tip-out policy stamp + shared-pool columns to shifts.
 const shiftCols = db.prepare('PRAGMA table_info(shifts)').all().map((c) => c.name);
@@ -294,7 +305,31 @@ const q = {
     `UPDATE employees SET name=@name, role=@role, email=@email, pin=@pin,
        hourly_rate_cents=@hourly_rate_cents, pos_id=@pos_id, pay_type=@pay_type, salary_cents=@salary_cents WHERE id=@id`
   ),
-  setActive: db.prepare('UPDATE employees SET active=@active WHERE id=@id'),
+  // The ONE place employees.active is written, and it stamps the reactivation
+  // instant itself rather than trusting a caller to remember. Audited: this is
+  // the only write path in the app — updateEmployee never touches `active`, and
+  // there is no other statement that does — so the threshold cannot be set by
+  // one route and bypassed by another.
+  //
+  // Stamped only on the inactive -> active edge. Re-saving an already-active
+  // employee must not move the boundary, or every save would quietly hide more
+  // of their history.
+  setActive: {
+    run(p) {
+      const on = Number(p.active) === 1;
+      const cur = db.prepare('SELECT active FROM employees WHERE id = ?').get(p.id);
+      const waking = on && cur && Number(cur.active) === 0;
+      return db.transaction(() => {
+        if (waking) {
+          db.prepare("UPDATE employees SET active = 1, schedule_visible_from_at = strftime('%Y-%m-%d %H:%M:%S','now') WHERE id = @id")
+            .run({ id: p.id });
+        } else {
+          db.prepare('UPDATE employees SET active = @active WHERE id = @id')
+            .run({ id: p.id, active: on ? 1 : 0 });
+        }
+      })();
+    },
+  },
 };
 
 // ---- Shifts -------------------------------------------------------------
