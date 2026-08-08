@@ -101,10 +101,14 @@ const nearWeek = () => {
   return SCH.weekWindowFor(dates.addDays(today(), 7 * nearCursor));
 };
 
-const mk = (empId, day, start, end, extra = {}) => SCH.create({
+/** Both ends given in full, so a shift may legitimately cross midnight. */
+const mkSpan = (empId, startsAt, endsAt, extra = {}) => SCH.create({
   employeeId: empId, position: empId === E.kevin ? 'kitchen' : 'server',
-  startsAt: `${day} ${start}`, endsAt: `${day} ${end}`, ...extra,
+  startsAt, endsAt, ...extra,
 });
+/** The common case: one day, two clock times. */
+const mk = (empId, day, start, end, extra = {}) => mkSpan(
+  empId, `${day} ${start}`, `${day} ${end}`, extra);
 const pubRows = (empId, w) => db.prepare(`SELECT * FROM published_schedule
   WHERE employee_id = ? AND business_date BETWEEN ? AND ? ORDER BY starts_at`).all(empId, w.start, w.end);
 const events = (empId) => db.prepare(
@@ -454,15 +458,21 @@ test('reactivation hides what already happened and keeps what is ahead', async (
   // default window rather than a week, because a 2:35am shift belongs to the
   // PREVIOUS business date and would fall outside the week its calendar day
   // sits in.
-  const at = (hoursFromNow) => TC.utcToLocalInput(
-    new Date(Date.parse(`${TC.nowUtc().replace(' ', 'T')}Z`) + hoursFromNow * 3600000)
-      .toISOString().slice(0, 19).replace('T', ' '));
-  const split = (s) => ({ day: s.slice(0, 10), time: s.slice(11, 16) });
-  const past = split(at(-2)); const pastEnd = split(at(-1));
-  const soon = split(at(2)); const soonEnd = split(at(3));
+  //
+  // Each end is a whole timestamp. Taking the DAY from one offset and the TIME
+  // from another put "23:18 – 00:18" onto a single day, which ends before it
+  // starts — so this test failed between midnight and 2am, and again in the two
+  // hours before midnight, and passed the rest of the day. An hour either side
+  // of midnight is an ordinary shift here; it must not be an ordinary bug.
+  const at = (hoursFromNow) => {
+    const s = TC.utcToLocalInput(
+      new Date(Date.parse(`${TC.nowUtc().replace(' ', 'T')}Z`) + hoursFromNow * 3600000)
+        .toISOString().slice(0, 19).replace('T', ' '));
+    return `${s.slice(0, 10)} ${s.slice(11, 16)}`;
+  };
 
-  const gone = mk(E.eunji, past.day, past.time, pastEnd.time);
-  const ahead = mk(E.eunji, soon.day, soon.time, soonEnd.time);
+  const gone = mkSpan(E.eunji, at(-2), at(-1));
+  const ahead = mkSpan(E.eunji, at(2), at(3));
   for (const s of [gone, ahead]) {
     await post(`/schedule/shift/${s.id}/publish`, { w: SCH.byId(s.id).business_date });
   }
