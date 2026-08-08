@@ -4408,6 +4408,17 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    An ACTION on the right has to look like one, or "Copy last week" reads as a
    label sitting next to the Draft chip. */
 .sb-tools .sb-btn { border-color:var(--rule); font-size:13px; }
+/* The only control on this page that changes what an employee sees. */
+.sb-tools .sb-go { border-color:var(--ink); font-weight:600; }
+.sb-chip--ok   { border-color:var(--positive); }
+.sb-chip--ok   .sb-dot { background:var(--positive); }
+.sb-chip--warn .sb-dot { background:var(--accent); }
+.sb-chip--idle { color:var(--muted); }
+.sb-chip--idle .sb-dot { background:var(--faint); }
+/* Publish / Unpublish live in the drawer, under a rule, because they are a
+   different verb from Save: one moves the draft, the other moves the floor. */
+.sb-pub { margin-top:14px; padding-top:14px; border-top:1px solid var(--rule); }
+.sb-pub-b { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
 .sb-chip { display:inline-flex; align-items:center; gap:7px; border:1px solid var(--rule);
   padding:7px 11px; font-size:12.5px; color:var(--headline); font-weight:600; background:var(--paper); }
 .sb-chip i { font-style:normal; font-weight:400; color:var(--muted); }
@@ -4480,6 +4491,17 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    spare, so hierarchy comes from size and weight instead. */
 .sbk i { display:block; font-style:normal; font-family:var(--mono); font-size:11px;
   font-weight:400; line-height:1.3; margin-top:3px; }
+/* Publication state, as a SHAPE in the corner rather than a second colour —
+   position colour stays the dominant encoding and nothing competes with it.
+   Published is the quiet default and carries no marker: a board that is fully
+   out should look calm, and a marker on every card would be noise. The state
+   is in each card's aria-label either way, so it is never shape-only. */
+.sbk > s { position:absolute; top:6px; right:6px; width:7px; height:7px;
+  border-radius:50% !important; text-decoration:none; }
+.sbk { position:relative; }
+.sbk--draft > s   { box-shadow: inset 0 0 0 1.5px currentColor; opacity:.75; }
+.sbk--changed > s { background:currentColor; }
+.sbk--published > s { display:none; }
 .sbk:hover { filter:brightness(1.06); }
 .sbk:focus-visible { outline:2px solid var(--headline); outline-offset:2px; }
 .sbk--green{background:var(--c-green);color:var(--t-green)}

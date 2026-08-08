@@ -217,6 +217,19 @@ const q = {
     WHERE employee_id = @emp AND business_date BETWEEN @from AND @to
     ORDER BY starts_at`),
   pubById: db.prepare('SELECT * FROM published_schedule WHERE scheduled_shift_id = ?'),
+  // Reconciliation reads BOTH sides of the week. inRange hides cancelled rows
+  // because the board must not draw them; publishing has to see them, because a
+  // cancellation is exactly the change that has to reach the floor.
+  inRangeAll: db.prepare(`SELECT * FROM scheduled_shifts
+    WHERE business_date BETWEEN ? AND ?`),
+  // And the published rows sitting in this week, so a shift dragged OUT of it
+  // is still reconciled — otherwise the old date would linger for the employee
+  // with nothing left in the draft week to notice it.
+  pubInRange: db.prepare(`SELECT * FROM published_schedule
+    WHERE business_date BETWEEN ? AND ? ORDER BY employee_id, starts_at`),
+  pubForWeek: db.prepare(`SELECT * FROM published_schedule
+    WHERE employee_id = @emp AND business_date BETWEEN @from AND @to
+    ORDER BY starts_at, scheduled_shift_id`),
 };
 
 const emp = {
@@ -450,12 +463,27 @@ function edit(id, patch) {
     normalizeBreaks(q.breaksFor.all(id), startsAt, endsAt, true);
   }
 
-  const material = employeeId !== row.employee_id
+  // Phase 3 — material means "what an employee can SEE has gone stale", and
+  // nothing else. The flag drives one thing: telling a manager the floor is
+  // looking at something older than the draft.
+  //
+  // Deliberately NOT material: the note (manager-private, never rendered to an
+  // employee), the daypart (internal service stamping — Time Clock semantics
+  // are untouched, employees are never shown Cafe/Dinner), a break's internal
+  // note, and a breaks patch that normalises to what was already there. Before
+  // this, ANY breaks patch counted, so re-saving a drawer without touching the
+  // break marked a published week stale and asked for a republish that would
+  // change nothing an employee sees.
+  const seenBreaks = (rows) => rows
+    .map((b) => `${b.minutes}|${b.planned_start_at || ''}|${b.paid ? 1 : 0}`).join(';');
+  const breaksChanged = breakRows !== null
+    && seenBreaks(breakRows) !== seenBreaks(q.breaksFor.all(id));
+
+  const material = employeeId !== row.employee_id     // includes assigned <-> open
     || position !== row.position
-    || startsAt !== row.starts_at
+    || startsAt !== row.starts_at                     // business date derives from this
     || endsAt !== row.ends_at
-    || daypart !== row.daypart
-    || patch.breaks !== undefined;
+    || breaksChanged;
 
   db.transaction(() => {
     q.update.run({
@@ -693,6 +721,80 @@ function overlapsFor(shift) {
 }
 
 /**
+ * Take a shift back off the employee's schedule, WITHOUT cancelling it.
+ *
+ * Three different things a manager might mean, kept apart on purpose:
+ *   edit      changes the draft; the floor still sees the last published truth
+ *   cancel    the shift is off — a plan that was called off, kept as a record
+ *   unpublish the shift is still planned, but nobody should be looking at it
+ *             yet. The draft stays exactly where it was on the board.
+ *
+ * Status returns to 'draft' because that is what it now is: something the
+ * manager holds and the floor cannot see. changed_after_publish clears with
+ * it — there is no published truth left for the draft to be stale against.
+ */
+function unpublish(id) {
+  const row = q.byId.get(id);
+  if (!row) throw new ScheduleError('That shift is no longer there.', 'missing');
+  db.transaction(() => {
+    q.pubDelete.run(id);
+    if (row.status === 'published') q.setStatus.run({ id, status: 'draft' });
+    q.clearChanged.run({ id });
+  })();
+  return byId(id);
+}
+
+/**
+ * Publish a whole week by RECONCILING it, not by trusting a flag.
+ *
+ * The union of two sets, because either alone is wrong:
+ *
+ *   drafts dated in the week   — including cancelled ones, which inRange hides
+ *                                from the board but which publishing must see,
+ *                                since a cancellation is the change that most
+ *                                needs to reach the floor
+ *   published rows dated in the week — so a shift DRAGGED OUT of this week is
+ *                                still reconciled. Without this the employee
+ *                                would keep the old date forever: nothing in
+ *                                the draft week would be left to notice it.
+ *
+ * publish() then does the right thing per id — upsert to its CURRENT date,
+ * delete on cancelled, skip open — so a cross-week move updates the one
+ * logical published shift rather than leaving two copies of it. One
+ * transaction: a half-published week is worse than an unpublished one.
+ */
+function publishWeek(anyDate) {
+  const w = weekWindowFor(anyDate);
+  const ids = new Set();
+  for (const r of q.inRangeAll.all(w.start, w.end)) ids.add(r.id);
+  for (const r of q.pubInRange.all(w.start, w.end)) ids.add(r.scheduled_shift_id);
+  return { week: w, results: publish([...ids]) };
+}
+
+/**
+ * What an employee can currently SEE for a week, as a comparable string.
+ *
+ * The identity a publish notification is deduped on. Deliberately derived from
+ * the RESULT rather than from the act: retrying the same publish produces the
+ * same fingerprint and therefore the same key, so the second attempt notifies
+ * nobody — while a genuinely different outcome produces a different key and
+ * does notify. A timestamp would change on every retry and defeat the point.
+ *
+ * Only employee-visible fields. The note is absent because employees never see
+ * it, and the daypart because they are never shown the service — so neither can
+ * manufacture a notification about something invisible.
+ */
+function publishedFingerprint(employeeId, from, to) {
+  return q.pubForWeek.all({ emp: employeeId, from, to })
+    .map((r) => {
+      const breaks = (r.breaks_json ? JSON.parse(r.breaks_json) : [])
+        .map((b) => `${b.minutes}/${b.plannedStartAt || ''}/${b.paid ? 1 : 0}`).join(',');
+      return `${r.scheduled_shift_id}:${r.business_date}:${r.starts_at}:${r.ends_at}:${r.position}:${breaks}`;
+    })
+    .join('|');
+}
+
+/**
  * Duplicate one shift into the same cell — same person, same day, same times.
  *
  * The common case is a split shift or a second person on the same station, and
@@ -861,7 +963,8 @@ function writeBreaks(shiftId, rows) {
 }
 
 module.exports = {
-  create, edit, cancel, publish, duplicate,
+  create, edit, cancel, publish, duplicate, unpublish, publishWeek,
+  publishedFingerprint,
   byId, inRange, weekFor, weekWindowFor, weekTotals,
   publishedFor, overlapsFor, copyWeek,
   spanMinutes, paidMinutes,

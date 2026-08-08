@@ -497,7 +497,14 @@ test('the admin portal survives an OPEN shift with people on it', async () => {
   // so all of them passed while the owner could not open the page.
   //
   // The condition, not the symptom, is what is pinned here.
-  const d = today();
+  // The CALENDAR date, because that is what the route asks shifts for:
+  //   server.js  const today = isoDate(startOfToday())
+  // The rest of the clock uses the BUSINESS date, and between midnight and the
+  // 4am cutoff those differ — which is a real defect on this page, reported
+  // separately. It is not what this test is about: this one exists to prove the
+  // takesTips crash cannot come back, so it uses the date the route itself
+  // uses and stays green at 00:14 as well as at noon.
+  const d = isoDate(startOfToday());
   const w = new Database(DB);
   const sid = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES (?, 'dinner', 'open', datetime('now'))")
     .run(d).lastInsertRowid;

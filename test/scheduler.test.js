@@ -474,16 +474,29 @@ test('D2: every day of a week resolves to the same window', () => {
 });
 
 test('D2: moving the pay-period anchor moves the board with it', () => {
-  const before = S.weekWindowFor(TODAY).start;
+  const before = S.weekWindowFor(TODAY);
   const original = P.anchor();
   try {
     P.setSetting('period_anchor', addDays(original, 1));
-    assert.strictEqual(S.weekWindowFor(TODAY).start, addDays(before, 1),
-      'the board follows the anchor rather than restating a weekday');
+    const after = S.weekWindowFor(TODAY);
+    assert.notStrictEqual(after.start, before.start, 'the window moved with the anchor');
+    // NOT "moved by one day". An earlier version asserted that, which is only
+    // true when TODAY sits in a period's FIRST week — shift the anchor when it
+    // sits in the second and the window jumps back six days into week one
+    // instead. That test passed on the day it was written and went red the next
+    // morning. The real property is the one that has to hold every day:
+    // whatever the anchor, the window still contains TODAY and is still a whole
+    // number of weeks from the period start.
+    assert.ok(after.start <= TODAY && TODAY <= after.end, 'and still contains today');
+    const p = P.periodFor(TODAY);
+    const off = Math.round(
+      (Date.parse(`${after.start}T00:00:00Z`) - Date.parse(`${p.start}T00:00:00Z`)) / 86400000,
+    );
+    assert.strictEqual(off % 7, 0, 'still aligned to the moved period');
   } finally {
     P.setSetting('period_anchor', original);
   }
-  assert.strictEqual(S.weekWindowFor(TODAY).start, before, 'and moves back');
+  assert.deepStrictEqual(S.weekWindowFor(TODAY), before, 'and comes back when the anchor does');
 });
 
 test('D3: weeks tile without gap or overlap across the DST change', () => {

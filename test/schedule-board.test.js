@@ -159,10 +159,13 @@ test('the permanent planning-only sentence is gone from the page head', async ()
 
 test('Q6: Draft is a compact chip, not a full-width banner', async () => {
   const html = await text('/schedule');
-  assert.match(html, /class="sb-chip"/);
-  assert.match(html, /Draft/);
-  assert.match(html, /not visible to employees/);
+  assert.match(html, /class="sb-chip sb-chip--/, 'the chip carries a derived tone');
   assert.doesNotMatch(html, /class="swb-draft"/, 'the old banner is gone');
+  // Phase 3: the chip is DERIVED. It used to say "Draft" unconditionally, even
+  // after a week had gone out — the one thing on the page a manager would most
+  // reasonably trust. The states it can now report are asserted below.
+  assert.match(html, /Nothing planned|unpublished change|Published/,
+    'and says one of the states it can actually be in');
 });
 
 test('Q1: the week shown is the pay period\'s workweek, not a calendar Monday', async () => {
@@ -212,7 +215,7 @@ test('a card leads with the POSITION and follows with the time', async () => {
   SCH.create({ employeeId: E.server, position: 'server',
     startsAt: `${wk.start} 16:00`, endsAt: `${wk.start} 22:00` });
   const html = await text('/schedule');
-  const card = (html.match(/<button class="sbk sbk--\w+"[\s\S]*?<\/button>/) || [])[0];
+  const card = (html.match(/<button class="sbk sbk--[\w-]+ sbk--\w+"[\s\S]*?<\/button>/) || [])[0];
   assert.ok(card, 'a card is on the board');
   assert.ok(card.indexOf('<b>') < card.indexOf('<i>'), 'position markup precedes time markup');
   assert.match(card, /<b>Server<\/b>/, 'the position is text, never colour alone');
@@ -222,7 +225,7 @@ test('a card leads with the POSITION and follows with the time', async () => {
 
 test('a card carries its position colour from the deterministic mapping', async () => {
   const html = await text('/schedule');
-  assert.match(html, /class="sbk sbk--green"/, 'server is green');
+  assert.match(html, /class="sbk sbk--green sbk--\w+"/, 'server is green, plus its publication state');
 });
 
 test('an overnight shift renders on the day it STARTED', async () => {
@@ -593,14 +596,12 @@ test('nothing on this page publishes, notifies, or reaches an employee', async (
   const html = await text('/schedule');
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM published_schedule').get().n, 0,
     'published_schedule is still empty after every write above');
-  assert.doesNotMatch(html, /\/schedule\/publish|name="publish"/, 'no publish control ships in this phase');
-  assert.strictEqual(await status('/schedule/publish'), 404, 'and no publish route exists');
+  // Phase 3 opens publishing deliberately. What must stay shut is the EMPLOYEE
+  // side reading drafts, which the tests below cover.
+  assert.match(html, /\/schedule\/publish-week/, 'the manager can publish');
 });
 
-test('the employee Schedule tab is still locked', async () => {
-  // Phase 3 opens this. Until then the portal must not grow a schedule surface.
-  assert.strictEqual(await status('/portal/schedule'), 404);
-});
+
 
 test('Schedule is its own access area — /shifts stays Services', () => {
   const { areaFor, AREAS } = require('../src/nav');
@@ -667,7 +668,10 @@ test('a write route refuses an account without the schedule area', async () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
   const region = src.slice(src.indexOf("app.post('/schedule/shift'"), src.indexOf("app.get('/timeclock'"));
   const guards = (region.match(/sbGuard\(req, res\)/g) || []).length;
-  assert.strictEqual(guards, 5, `all five write routes call the guard (found ${guards})`);
+  // Phase 3 added three: publish-week, publish, unpublish. Every route that can
+  // change a draft OR what an employee sees asks the same question the sidebar
+  // does, so a hidden link is also a closed door.
+  assert.strictEqual(guards, 8, `all eight write routes call the guard (found ${guards})`);
   assert.match(src.slice(src.indexOf('const sbGuard')), /navAllowed\('\/schedule'\)/,
     'and the guard asks the same question the sidebar does');
 });

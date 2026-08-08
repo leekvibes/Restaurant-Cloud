@@ -3504,13 +3504,15 @@ test('2D-1: the bottom bar is Home, Time clock, Schedule, Pay, More', async () =
   assert.deepStrictEqual(labels, ['Home', 'Time clock', 'Schedule', 'Pay', 'More'],
     'five tabs, in that order');
   assert.ok(!/Timesheet/.test(tabs), 'Timesheet gave up its tab');
-  assert.ok(!/href="\/portal\/schedule"/.test(html), 'and Schedule has no route to give');
+  // Phase 3 gave Schedule its route. It sat locked for two phases on purpose.
+  assert.match(tabs, /href="\/portal\/schedule"/, 'and Schedule now goes somewhere');
 });
 
-test('2D-1: Schedule is present, locked, and never the current tab', async () => {
+test('Phase 3: Schedule is a real tab, and lights when you are on it', async () => {
   const cookie = await signIn('3111');
+  // Every other tab still owns its own pages.
   for (const [path, expected] of [['/portal', 'Home'], ['/portal/clock', 'Time clock'],
-    ['/portal/earnings', 'Pay']]) {
+    ['/portal/earnings', 'Pay'], ['/portal/schedule', 'Schedule']]) {
     const html = await text(path, { cookie });
     const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
     assert.strictEqual((tabs.match(/aria-current="page"/g) || []).length, 1,
@@ -3518,40 +3520,23 @@ test('2D-1: Schedule is present, locked, and never the current tab', async () =>
     const cur = (tabs.match(/aria-current="page"[\s\S]*?<span>([^<]+)<\/span>\s*<\/a>/) || [])[1]
       || (tabs.match(/aria-current="page"[^>]*>[\s\S]*?<span>([^<]+)<\/span>/) || [])[1];
     assert.strictEqual(cur, expected, `${path} lights ${expected}`);
-    assert.ok(!/pt-tab-locked[^>]*aria-current/.test(tabs), 'Schedule is never current');
   }
   const html = await text('/portal', { cookie });
-  // Asserted as three independent facts rather than one attribute ORDER, so a
-  // new attribute on the element cannot fail a test about what the element IS.
-  const sched = (html.match(/<button[^>]*data-portal-locked="schedule"[^>]*>/) || [''])[0];
-  assert.ok(sched, 'it is a button, not a dead link');
-  assert.match(sched, /class="[^"]*pt-tab-locked/, 'carrying the locked treatment');
-  assert.ok(!/href=/.test(sched), 'and going nowhere on its own');
-  assert.match(html, /aria-label="Schedule, coming soon"/, 'with a spoken state');
-  assert.match(html, /aria-haspopup="dialog"/, 'that says it opens information');
-  assert.ok(!/pt-tab-locked[^>]*disabled/.test(html), 'and is not disabled — it has to be tappable');
-  assert.match(html, /class="pt-tab-lock"/, 'a lock indicator rides alongside the calendar icon');
+  // The lock is gone in every form it took: no button, no locked class, no sheet.
+  assert.ok(!/data-portal-locked="schedule"/.test(html), 'no locked button remains');
+  assert.ok(!/id="pt-locked-schedule"/.test(html), 'and no locked sheet');
+  assert.ok(!/Employee scheduling is coming soon/.test(html), 'nor the coming-soon copy');
 });
 
-test('2D-1: the locked Schedule sheet explains itself and invents nothing', async () => {
+test('Phase 3: only Schedule was unlocked — nothing else changed availability', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal', { cookie });
-  const i = html.indexOf('id="pt-locked-schedule"');
-  const sheet = i > -1 ? html.slice(i, html.indexOf('</div>', html.indexOf('Got it', i)) + 6) : '';
-  assert.ok(sheet, 'the sheet is on the page');
-  assert.match(sheet, /role="dialog" aria-modal="true"/, 'it is a dialog');
-  assert.match(sheet, /<h2 class="pt-nav-h" id="pt-locked-h-schedule">Schedule<\/h2>/, 'with a heading');
-  assert.match(sheet, /Employee scheduling is coming soon/, 'saying so plainly');
-  assert.match(sheet, /once scheduling is available/, 'and what it will do');
-  assert.match(sheet, />Got it</, 'with one way out');
-  assert.match(sheet, /data-portal-close/, 'plus the scrim and the close control');
-  // Nothing invented. ("upcoming shifts" is in the approved sentence — what
-  // must not be here is schedule DATA, or a promise about when.)
-  for (const fake of ['Monday', 'Tuesday', ':00', 'availability', 'time off', 'swap',
-    'next week', 'January', 'soon as', 'by the end of']) {
-    assert.ok(!new RegExp(fake, 'i').test(sheet), `no fabricated content: ${fake}`);
-  }
-  assert.ok(!/\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}/.test(sheet), 'and no dates at all');
+  const tabs = (html.match(/<nav class="pt-tabs"[\s\S]*?<\/nav>/) || [''])[0];
+  // Home, Time clock, Schedule and Pay are destinations; More opens a sheet.
+  assert.strictEqual((tabs.match(/<a class="pt-tab/g) || []).length, 4,
+    'four tabs are links');
+  assert.strictEqual((tabs.match(/pt-tab-locked/g) || []).length, 0,
+    'and nothing is locked any more');
 });
 
 test('2D-1: every known portal route maps to exactly one tab', async () => {

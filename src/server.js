@@ -3348,18 +3348,11 @@ const portalBackScript = () => `<script>
 const PORTAL_NAV = [
   { key: 'home', label: 'Home', icon: '⌂', href: '/portal', availability: 'available' },
   { key: 'clock', label: 'Time clock', icon: '◷', href: '/portal/clock', availability: 'available' },
-  // Deliberately present and deliberately not built. Staff ask where the
-  // schedule is; an empty slot answers that better than silence, and a fake
-  // calendar answers it worse than either.
-  { key: 'schedule',
-    label: 'Schedule',
-    icon: '▤',                       // the agenda grid Timesheet used to carry
-    href: null,
-    availability: 'locked',
-    accessibilityLabel: 'Schedule, coming soon',
-    lockedTitle: 'Schedule',
-    lockedMessage: 'Employee scheduling is coming soon. You will be able to view '
-      + 'upcoming shifts here once scheduling is available.' },
+  // Phase 3 made this real. It sat locked on purpose for two phases — staff ask
+  // where the schedule is, and an empty slot answered that better than silence
+  // while a fake calendar would have answered it worse than either.
+  { key: 'schedule', label: 'Schedule', icon: '▤',
+    href: '/portal/schedule', availability: 'available' },
   { key: 'pay', label: 'Pay', icon: '❖', href: '/portal/earnings', availability: 'available' },
   { key: 'more', label: 'More', icon: '⋯', href: null, availability: 'available' },
 ];
@@ -3379,6 +3372,10 @@ const PORTAL_AREA = [
   ['/portal/timesheet', 'clock'],
   ['/portal/requests', 'clock'],
   ['/portal/earnings', 'pay'],
+  // Every Schedule surface — Only me, Everyone, the locked availability tab and
+  // a shift's detail — lights the Schedule tab. One entry, as the comment above
+  // this table promised when Schedule was still locked.
+  ['/portal/schedule', 'schedule'],
 ];
 
 /** @returns {string} the key of the tab that should read as current. */
@@ -5932,6 +5929,193 @@ app.get('/portal/earnings/:id', (req, res) => {
 // ---------------------------------------------------------------------------
 // SPECIALS & 86 BOARD — read only
 // ---------------------------------------------------------------------------
+// ===========================================================================
+// EMPLOYEE SCHEDULE — published truth, and nothing else
+//
+// Every read here goes to published_schedule. Not "the query is careful" — the
+// drafts are not in the table, so there is no query that could reach one.
+//
+// Three sections, one route: Only me, Everyone, My availability. They share a
+// day/week structure and differ in scope, and the scope is decided on the
+// SERVER — Only me never puts a coworker in the page source at all.
+// ===========================================================================
+
+const SB_VIEWS = ['me', 'all', 'avail'];
+
+/** Published rows for one employee, or for the floor, over the locked window. */
+const sbPortalRows = (view, empId, from, to) => (view === 'all'
+  ? SCH.q.pubInRange.all(from, to)
+  : SCH.q.pubForWeek.all({ emp: empId, from, to }));
+
+app.get('/portal/schedule', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const view = SB_VIEWS.includes(req.query.v) ? req.query.v : 'me';
+
+  // The business date, and the same locked window Phase 1 set: a rolling tail
+  // back seven days so last night's shift is still there to check, and ninety
+  // forward. Never a calendar week — that erases Sunday every Monday morning.
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const from = addDays(today, -SCH.WINDOW_BACK);
+  const to = addDays(today, SCH.WINDOW_FORWARD);
+  // A day can be selected from the strip; it only moves the scroll anchor.
+  const picked = MX.isDate(req.query.d) && req.query.d >= from && req.query.d <= to
+    ? req.query.d : today;
+
+  const rows = view === 'avail' ? [] : sbPortalRows(view, emp.id, from, to);
+  const names = new Map(q.allEmployees.all().map((e) => [e.id, e.name]));
+
+  const byDay = new Map();
+  for (const r of rows) {
+    if (!byDay.has(r.business_date)) byDay.set(r.business_date, []);
+    byDay.get(r.business_date).push(r);
+  }
+  for (const list of byDay.values()) {
+    list.sort((a, b) => a.starts_at.localeCompare(b.starts_at)
+      || String(names.get(a.employee_id) || '').localeCompare(String(names.get(b.employee_id) || '')));
+  }
+
+  const mine = (d) => (byDay.get(d) || []);
+  const hrs = (r) => {
+    const span = Math.round((Date.parse(`${r.ends_at.replace(' ', 'T')}Z`)
+      - Date.parse(`${r.starts_at.replace(' ', 'T')}Z`)) / 60000);
+    return span;
+  };
+  const hm = (min) => (min % 60 ? `${Math.floor(min / 60)}h ${min % 60}m` : `${min / 60}h`);
+  const brk = (r) => { try { return JSON.parse(r.breaks_json || '[]'); } catch { return []; } };
+
+  // --- the seven-day strip -------------------------------------------------
+  const stripFrom = addDays(picked, -3);
+  const strip = Array.from({ length: 7 }, (_, i) => addDays(stripFrom, i)).map((d) => {
+    const on = d === picked; const isToday = d === today;
+    return `<a class="ps-d${on ? ' on' : ''}${isToday ? ' now' : ''}" href="/portal/schedule?v=${view}&d=${d}"
+        aria-current="${on ? 'date' : 'false'}"
+        aria-label="${esc(TC.dayLabel(d))}${isToday ? ', today' : ''}${mine(d).length
+          ? `, ${mine(d).length} shift${mine(d).length === 1 ? '' : 's'}` : ', nothing scheduled'}">
+      <i>${esc(TC.dayLabel(d).slice(0, 3))}</i><b>${Number(d.slice(8))}</b>
+      ${mine(d).length ? '<s aria-hidden="true"></s>' : ''}
+    </a>`;
+  }).join('');
+
+  // --- one published shift, as a card --------------------------------------
+  // Position colour is the same mapping the manager board uses, so a job looks
+  // the same everywhere. Position text is always present; colour is never the
+  // only identifier. No note, no service, no coworker anything on Only me.
+  const shiftCard = (r) => {
+    const breaks = view === 'all' ? [] : brk(r);          // never coworker breaks
+    const b = breaks[0];
+    return `<a class="ps-k ps-k--${sbColor(r.position)}" href="/portal/schedule/shift/${r.scheduled_shift_id}"
+        aria-label="${esc(posName(r.position))} ${esc(sbTime(r.starts_at))} to ${esc(sbTime(r.ends_at))}${
+          view === 'all' ? `, ${esc(names.get(r.employee_id) || 'Someone')}` : ''}">
+      <b>${esc(sbTime(r.starts_at))} – ${esc(sbTime(r.ends_at))}</b>
+      <i>${esc(posName(r.position))}${view === 'all'
+        ? ` · ${esc(names.get(r.employee_id) || 'Someone')}` : ''}</i>
+      ${b && view !== 'all' ? `<u>Planned break ${b.minutes}m${b.paid ? ' · paid' : ''}</u>` : ''}
+    </a>`;
+  };
+
+  // --- days, with a week separator ahead of each week -----------------------
+  const days = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) days.push(d);
+  let lastWeek = null;
+  const body = days.map((d) => {
+    const list = mine(d);
+    const w = SCH.weekWindowFor(d);
+    let sep = '';
+    if (w.start !== lastWeek) {
+      lastWeek = w.start;
+      const n = days.filter((x) => x >= w.start && x <= w.end)
+        .reduce((a, x) => a + mine(x).length, 0);
+      // Only for a week that HAS something. The window runs ninety days out, so
+      // heading every empty week produced a dozen "0 shifts" rules between the
+      // real ones — a separator that outnumbers the content stops separating
+      // anything.
+      if (n) {
+        sep = `<div class="ps-wk"><b>Week of ${esc(TC.dayLabel(w.start).replace(/^\w+, /, ''))}</b>
+          <i>${n} shift${n === 1 ? '' : 's'}</i></div>`;
+      }
+    }
+    if (!list.length) return sep;                    // empty days stay clean
+    return `${sep}<div class="ps-row${d === today ? ' now' : ''}" id="d-${d}">
+      <div class="ps-dt"><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></div>
+      <div class="ps-ks">${list.map(shiftCard).join('')}</div>
+    </div>`;
+  }).join('');
+
+  const tab = (k, label, glyph) => `<a class="ps-t${view === k ? ' on' : ''}"
+      href="/portal/schedule?v=${k}" aria-current="${view === k ? 'page' : 'false'}">
+    <span class="ps-t-i" aria-hidden="true">${glyph}</span><span>${label}</span></a>`;
+
+  const empty = `<p class="ps-none">Nothing on your schedule yet. When a manager
+    publishes a week you will see it here.</p>`;
+  const emptyAll = `<p class="ps-none">Nothing published for the floor yet.</p>`;
+
+  res.send(portalPage('Schedule', `
+    <div class="pt-body ps">
+      <div class="ps-head">
+        <h1 class="pt-title">Schedule</h1>
+        <p class="pt-sub">${view === 'all' ? 'Who is on the floor'
+          : view === 'avail' ? 'When you can work' : 'Your published shifts'}</p>
+        ${view === 'avail' ? '' : `<nav class="ps-strip" aria-label="Days">${strip}</nav>`}
+      </div>
+
+      ${view === 'avail' ? `
+        <div class="ps-soon">
+          <p class="ps-soon-t">My availability is coming later</p>
+          <p class="ps-soon-s">You will be able to tell your manager which days and
+            times you can work, and request time off, from here. It is not switched
+            on yet — for now, talk to your manager.</p>
+        </div>`
+        : (rows.length ? `<div class="ps-days">${body}</div>`
+          : (view === 'all' ? emptyAll : empty))}
+    </div>
+
+    <nav class="ps-tabs" aria-label="Schedule sections">
+      ${tab('me', 'Only me', '◑')}
+      ${tab('all', 'Everyone', '◎')}
+      ${tab('avail', 'My availability', '☱')}
+    </nav>`));
+});
+
+/** One published shift, for the employee it belongs to. */
+app.get('/portal/schedule/shift/:id', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const { emp } = who;
+  const row = SCH.q.pubById.get(Number(req.params.id));
+  // Their own published row, or nothing. Not a 403 that confirms it exists —
+  // an employee guessing ids learns the same thing either way.
+  if (!row || row.employee_id !== emp.id) {
+    return res.status(404).send(portalPage('Not found', `
+      <div class="pt-body ps"><p class="ps-none">That shift is not on your schedule.</p>
+      <p><a class="tc-more" href="/portal/schedule">Back to your schedule &rsaquo;</a></p></div>`));
+  }
+  let breaks = []; try { breaks = JSON.parse(row.breaks_json || '[]'); } catch { breaks = []; }
+  const span = Math.round((Date.parse(`${row.ends_at.replace(' ', 'T')}Z`)
+    - Date.parse(`${row.starts_at.replace(' ', 'T')}Z`)) / 60000);
+  const hm = (m) => (m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m / 60}h`);
+
+  res.send(portalPage('Your shift', `
+    ${portalTop({ href: '/portal/schedule', label: 'Schedule' }, 'Your shift')}
+    <div class="pt-body tc-body ps">
+      <p class="pt-date">${esc(TC.dayLabel(row.business_date).toUpperCase())}</p>
+      <h1 class="pt-title">${esc(sbTime(row.starts_at))} – ${esc(sbTime(row.ends_at))}</h1>
+      <p class="pt-sub">${esc(posName(row.position))}</p>
+      <div class="tc-rows">
+        <div class="tc-row"><span class="tc-row-l"><b>Scheduled</b><i>How long you are on</i></span>
+          <span class="tc-row-r"><b>${hm(span)}</b></span></div>
+        ${breaks.map((b) => `<div class="tc-row">
+          <span class="tc-row-l"><b>Planned break</b><i>${b.plannedStartAt
+            ? `Around ${esc(sbTime(b.plannedStartAt))}` : 'Time not set — service decides'}</i></span>
+          <span class="tc-row-r"><b>${b.minutes}m</b><i>${b.paid ? 'paid' : 'unpaid'}</i></span>
+        </div>`).join('')}
+      </div>
+      <p class="ps-fine">This is what your manager has published. Hours you are
+        actually paid for come from the time clock.</p>
+    </div>`));
+});
+
 app.get('/portal/specials', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -17480,6 +17664,58 @@ const sbHours = (min) => (min ? TC.toHours(min) : 0);
 const sbEmpName = db.prepare('SELECT name FROM employees WHERE id = ?');
 
 /**
+ * Tell the people whose published schedule actually moved, once each.
+ *
+ * Ten draft edits notify nobody, because nothing published changed. One publish
+ * notifies each affected employee once — not once per shift, so a manager who
+ * republishes five of Esther's shifts sends Esther one message.
+ *
+ * Affected is measured, not assumed: the employee's visible week is
+ * fingerprinted before and after, and only a difference counts. That covers the
+ * cases a "did we touch a row" test would miss — an employee who LOST every
+ * shift to a reassignment or a cancellation has an empty fingerprint now and
+ * gets told, and a republish that changed nothing they can see says nothing.
+ *
+ * The dedupe key is the RESULT, so a retry — double click, refresh, a timeout
+ * after the commit — recomputes the same fingerprint, hits the same key, and
+ * notifyOnce refuses it. A genuinely later change makes a different key and
+ * does notify. A timestamp identity would change on every retry and defeat it.
+ *
+ * Content is deliberately generic: a week and a verb. No coworker, no note, no
+ * position, no times — nothing that could carry somebody else's information
+ * into a push payload sitting on a lock screen.
+ */
+function sbNotifyPublished(before, week) {
+  const label = `${TC.dayLabel(week.start).replace(/^\w+, /, '')} – ${TC.dayLabel(week.end).replace(/^\w+, /, '')}`;
+  let told = 0;
+  for (const [empId, was] of before) {
+    const now = SCH.publishedFingerprint(empId, week.start, week.end);
+    if (now === was) continue;                       // nothing they can see moved
+    const first = !was;                              // they had nothing published for this week
+    PORTAL.notifyOnce(
+      `sched:${empId}:${week.start}:${crypto.createHash('sha1').update(now).digest('hex').slice(0, 16)}`,
+      'schedule',
+      first ? `Your schedule for ${label} is ready.` : `Your schedule for ${label} was updated.`,
+      { employeeId: empId, href: '/portal/schedule' },
+    );
+    told += 1;
+  }
+  return told;
+}
+
+/** Everyone who could be affected, fingerprinted BEFORE the write. */
+function sbFingerprintsBefore(week, extraIds = []) {
+  const ids = new Set(extraIds.filter((n) => n != null));
+  for (const r of SCH.q.inRangeAll.all(week.start, week.end)) {
+    if (r.employee_id != null) ids.add(r.employee_id);
+  }
+  for (const r of SCH.q.pubInRange.all(week.start, week.end)) ids.add(r.employee_id);
+  const map = new Map();
+  for (const id of ids) map.set(id, SCH.publishedFingerprint(id, week.start, week.end));
+  return map;
+}
+
+/**
  * The approved Phase 2 overlap warning (Q2): advisory, and AFTER the write.
  *
  * Create and edit only. Duplicate is excluded on purpose (see that route), and
@@ -17599,11 +17835,24 @@ app.get('/schedule', (req, res) => {
   const dow = (d) => TC.dayLabel(d).split(',')[0];
   const md = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8))}`;
 
-  // Position text is always present. Colour is never the only identifier.
-  const card = (s) => `<button class="sbk sbk--${sbColor(s.position)}" type="button"
-      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}">
+  // What the FLOOR can see of this shift, derived rather than stored:
+  //   published  the employee is looking at exactly this
+  //   changed    they are looking at an older version of it
+  //   draft      they cannot see it at all
+  // A never-published draft and a published-then-unpublished one are the same
+  // fact to an employee — nothing to see — so they read the same here.
+  const pubOf = (s) => (s.status === 'published'
+    ? (s.changed_after_publish ? 'changed' : 'published') : 'draft');
+  const STATE_WORD = { published: 'published', changed: 'changed since publishing', draft: 'not published' };
+
+  // Position text is always present. Colour is never the only identifier, and
+  // the publication marker is a shape rather than a second colour, so it never
+  // competes with the position for the eye.
+  const card = (s) => { const st = pubOf(s); return `<button class="sbk sbk--${sbColor(s.position)} sbk--${st}" type="button"
+      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}, ${STATE_WORD[st]}">
     <b>${esc(posName(s.position))}</b><i>${esc(sbTime(s.starts_at))}–${esc(sbTime(s.ends_at))}</i>
-  </button>`;
+    <s aria-hidden="true"></s>
+  </button>`; };
 
   const row = (e) => {
     const t = totals.byEmployee[String(e.id)] || { paidMinutes: 0, count: 0 };
@@ -17621,6 +17870,24 @@ app.get('/schedule', (req, res) => {
       }).join('')}
     </div>`;
   };
+
+  // The chip was hardcoded to "Draft" and said so even after a week had gone
+  // out — the one thing on the page a manager would most reasonably trust.
+  // Derived now, from what the floor can actually see.
+  const stateCounts = shifts.reduce((a, s) => {
+    a[pubOf(s)] = (a[pubOf(s)] || 0) + 1; return a;
+  }, {});
+  const pendingCancel = SCH.q.inRangeAll.all(week.start, week.end)
+    .filter((s) => s.status === 'cancelled' && SCH.q.pubById.get(s.id)).length;
+  const stale = (stateCounts.changed || 0) + (stateCounts.draft || 0) + pendingCancel;
+  const wk = !shifts.length && !pendingCancel
+    ? { tone: 'idle', label: 'Nothing planned', sub: '', title: 'This week is empty' }
+    : stale
+      ? { tone: 'warn', label: `${stale} unpublished change${stale === 1 ? '' : 's'}`,
+          sub: 'not on the employee schedule yet',
+          title: 'The floor is looking at something older than this' }
+      : { tone: 'ok', label: 'Published', sub: 'employees can see this week',
+          title: 'Employee schedules match this board' };
 
   const positionOptions = positions.all.all()
     .map((p) => `<option value="${esc(p.slug)}">${esc(p.name)}</option>`).join('');
@@ -17647,8 +17914,15 @@ app.get('/schedule', (req, res) => {
               <button class="sb-btn" type="submit"
                 title="Copy the previous week's plan into this one">Copy last week</button>
             </form>
-            <span class="sb-chip" title="Not visible to employees">
-              <span class="sb-dot" aria-hidden="true"></span>Draft<i> &middot; not visible to employees</i></span>
+            <form method="post" action="/schedule/publish-week" style="margin:0">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="w" value="${week.start}">
+              <button class="sb-btn sb-go" type="submit"
+                title="Send this week to the people on it">Publish week</button>
+            </form>
+            <span class="sb-chip sb-chip--${wk.tone}" title="${esc(wk.title)}">
+              <span class="sb-dot" aria-hidden="true"></span>${esc(wk.label)}${
+                wk.sub ? `<i> &middot; ${esc(wk.sub)}</i>` : ''}</span>
           </div>
         </div>
 
@@ -17719,6 +17993,13 @@ app.get('/schedule', (req, res) => {
             <button class="btn" type="submit" form="sb-del" id="sb-del-btn">Delete</button>
           </span>
         </div>
+        <div class="sb-pub" id="sb-pub" hidden>
+          <p class="sb-hint" id="sb-pub-say"></p>
+          <div class="sb-pub-b">
+            <button class="btn btn-primary" type="submit" form="sb-pub-f" id="sb-pub-btn">Publish shift</button>
+            <button class="btn" type="submit" form="sb-unpub-f" id="sb-unpub-btn" hidden>Unpublish shift</button>
+          </div>
+        </div>
       </form>
     </aside>
 
@@ -17731,7 +18012,7 @@ app.get('/schedule', (req, res) => {
         var shifts = ${JSON.stringify(shifts.map((s) => ({
           id: s.id, e: s.employee_id, p: s.position,
           si: TC.utcToLocalInput(s.starts_at), ei: TC.utcToLocalInput(s.ends_at),
-          dp: s.daypart, n: s.note || '',
+          dp: s.daypart, n: s.note || '', pub: pubOf(s),
           bm: (s.breaks[0] || {}).minutes || '', bp: (s.breaks[0] || {}).paid ? '1' : '0',
         })))};
         var byId = {};
@@ -17754,6 +18035,7 @@ app.get('/schedule', (req, res) => {
             form.action = '/schedule/shift';
             document.getElementById('sb-title').textContent = 'Add a shift';
             document.getElementById('sb-extra').hidden = true;
+            document.getElementById('sb-pub').hidden = true;
             setVal('sb-emp', add.dataset.emp); setVal('sb-date', add.dataset.d);
             setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
             setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
@@ -17777,6 +18059,29 @@ app.get('/schedule', (req, res) => {
           document.getElementById('sb-extra').hidden = false;
           document.getElementById('sb-dup').action = '/schedule/shift/' + s.id + '/duplicate';
           document.getElementById('sb-del').action = '/schedule/shift/' + s.id + '/delete';
+
+          // Three different verbs, kept apart so a manager is never guessing
+          // which one reaches the floor. Save moves the draft; Publish moves
+          // what employees see; Unpublish takes it off their schedule and
+          // leaves the draft alone.
+          document.getElementById('sb-pub').hidden = false;
+          document.getElementById('sb-pub-f').action = '/schedule/shift/' + s.id + '/publish';
+          document.getElementById('sb-unpub-f').action = '/schedule/shift/' + s.id + '/unpublish';
+          var pubBtn = document.getElementById('sb-pub-btn');
+          var unpubBtn = document.getElementById('sb-unpub-btn');
+          var say = document.getElementById('sb-pub-say');
+          if (s.pub === 'published') {
+            pubBtn.hidden = true; unpubBtn.hidden = false;
+            say.textContent = 'Employees can see this shift.';
+          } else if (s.pub === 'changed') {
+            pubBtn.hidden = false; unpubBtn.hidden = false;
+            pubBtn.textContent = 'Publish changes';
+            say.textContent = 'Employees are still seeing the version you published before.';
+          } else {
+            pubBtn.hidden = false; unpubBtn.hidden = true;
+            pubBtn.textContent = 'Publish shift';
+            say.textContent = 'No employee can see this shift yet.';
+          }
           sbDrawer(true);
         });
 
@@ -17789,6 +18094,10 @@ app.get('/schedule', (req, res) => {
         document.addEventListener('keydown', function (e) { if (e.key === 'Escape') sbDrawer(false); });
       }());
     </script>
+    <form method="post" id="sb-pub-f" style="display:none">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
+    <form method="post" id="sb-unpub-f" style="display:none">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
     <form method="post" id="sb-dup" style="display:none">
       <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
     <form method="post" id="sb-del" style="display:none">
@@ -17885,6 +18194,79 @@ app.post('/schedule/copy-week', (req, res) => {
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(res, to, e.message, true);
+  }
+});
+
+// --- publishing ------------------------------------------------------------
+// The only routes in the app that change what an employee can see. Everything
+// else on this page moves a draft the floor is not looking at.
+
+app.post('/schedule/publish-week', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = SCH.weekWindowFor(MX.isDate(req.body.w) ? req.body.w
+    : TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour));
+  try {
+    const before = sbFingerprintsBefore(w);
+    const { results } = SCH.publishWeek(w.start);
+    const told = sbNotifyPublished(before, w);
+    const open = results.filter((r) => r.action === 'skipped-open').length;
+    const live = results.filter((r) => r.action === 'published').length;
+    const gone = results.filter((r) => r.action === 'removed').length;
+    // Reports the OUTCOME, not the mechanism: how many people this reached.
+    // "Nothing changed" is a real and useful answer — a manager who publishes
+    // twice should be told the second one was a no-op rather than left to
+    // wonder whether it worked.
+    const msg = told
+      ? `Week published — ${told} ${told === 1 ? 'person was' : 'people were'} told.`
+        + (open ? ` ${open} open shift${open === 1 ? '' : 's'} skipped.` : '')
+      : `Week published. Nothing changed for anybody${live || gone ? '' : ' — nothing to publish'}.`;
+    sbBack(res, w.start, msg);
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w.start, e.message, true);
+  }
+});
+
+app.post('/schedule/shift/:id/publish', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const wk = sbWeekOf(req);
+  const w = SCH.weekWindowFor(wk);
+  try {
+    const row = SCH.byId(Number(req.params.id));
+    if (!row) throw new SCH.ScheduleError('That shift is no longer there.', 'missing');
+    const before = sbFingerprintsBefore(w, [row.employee_id]);
+    const [result] = SCH.publish(Number(req.params.id));
+    if (result && result.action === 'skipped-open') {
+      return sbBack(res, w.start, 'An open shift has nobody to publish it to yet.', true);
+    }
+    const told = sbNotifyPublished(before, w);
+    sbBack(res, w.start, told ? 'Published — the employee has been told.'
+      : 'Published. Nothing they can see changed.');
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w.start, e.message, true);
+  }
+});
+
+app.post('/schedule/shift/:id/unpublish', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const wk = sbWeekOf(req);
+  const w = SCH.weekWindowFor(wk);
+  try {
+    const row = SCH.byId(Number(req.params.id));
+    if (!row) throw new SCH.ScheduleError('That shift is no longer there.', 'missing');
+    const before = sbFingerprintsBefore(w, [row.employee_id]);
+    // Not a cancel and not a delete: the plan stays on the board, the floor
+    // stops seeing it. Losing a shift is a schedule change like any other, so
+    // the person it disappeared from is told.
+    SCH.unpublish(Number(req.params.id));
+    const told = sbNotifyPublished(before, w);
+    sbBack(res, w.start, told
+      ? 'Taken off the employee schedule. The shift is still here as a draft.'
+      : 'Taken off the employee schedule.');
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w.start, e.message, true);
   }
 });
 
