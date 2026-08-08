@@ -4330,66 +4330,205 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 @media (max-width: 760px) { .tsg-emp b { font-size: 12px; } }
 .tsg-pop a { display: inline-block; margin-top: 6px; color: var(--accent); font-size: 11.5px; }
 
-/* --- .swb- : the schedule week board -------------------------------------
-   Composes .egrid- for the frame. What differs from Timesheets is the CELL:
-   this one holds shift CARDS, any number of them, so a row's height is set by
-   its busiest day rather than by one line of text. That is why nothing here
-   sets a fixed row height — a manager who cannot see the second shift in a
-   cell will schedule over it. */
-.swb-draft {
-  margin: 0 0 14px; padding: 8px 12px;
-  border: 1px solid var(--rule); border-left: 3px solid var(--secondary);
-  background: var(--panel); color: var(--ink); font-size: 12.5px;
+/* --- .sb- : the Schedule week board ---------------------------------------
+   A planning surface, not a report. Position colour is the DATA here: a
+   manager scans a column to see two kitchen and one server without reading a
+   word, which a tinted or edge-only card cannot deliver.
+
+   Composes .egrid-scroll for the contained scroll box (the piece whose failure
+   mode — the PAGE scrolling sideways instead of the board — is the one that
+   matters), and owns everything else, because its cells hold stacked cards
+   rather than one number. */
+
+/* The ten curated position colours. A closed set, deliberately: colour belongs
+   to the POSITION so a job reads the same on every future scheduling surface,
+   and a freeform picker would guarantee it does not. Until the Positions form
+   grows a Color field, sbColor() in server.js maps slugs to these by hand with
+   a stable hash fallback for anything new.
+
+   Amber and orange carry INK, not white. They cannot hold white text at this
+   lightness, and darkening them until they could is exactly the heaviness the
+   softened palette exists to avoid. Every pair measured at AA; the weakest of
+   the ten is teal at 4.69, which is why no card text uses opacity — there is
+   no contrast to spare. */
+.sb {
+  --c-green:#2b7a4e;  --t-green:#fff;      --c-plum:#7a55a3;   --t-plum:#fff;
+  --c-amber:#e2ad51;  --t-amber:#1a2230;   --c-brick:#a94e45;  --t-brick:#fff;
+  --c-blue:#37699f;   --t-blue:#fff;       --c-teal:#27807f;   --t-teal:#fff;
+  --c-indigo:#5560ad; --t-indigo:#fff;     --c-rose:#b45272;   --t-rose:#fff;
+  --c-orange:#e59457; --t-orange:#1a2230;  --c-slate:#5a6675;  --t-slate:#fff;
 }
-.swb-draft b { color: var(--headline); }
-
-.swb-bar { flex-wrap: wrap; margin: 0 0 12px; }
-.swb-sum { margin-left: auto; font-size: 12px; color: var(--muted); }
-
-.swb-scroll { padding-bottom: 4px; }
-.swb-head, .swb-row { display: contents; }
-.swb-dh b { display: block; font-family: var(--mono); font-size: 12px; color: var(--ink); font-weight: 600; }
-.swb-dh i { display: block; font-style: normal; font-size: 9.5px; letter-spacing: .05em;
-  text-transform: uppercase; color: var(--muted); }
-/* Today is marked on the board, not just in the range label. A week view with
-   no anchor makes a manager count columns to find Thursday.
-
-   No box-shadow: .bs sets `box-shadow: none !important` on every descendant
-   (line 194), so an inset rule here is dead CSS that measures as none. And not
-   --secondary, which is a MUTED grey (#4d5866) — using it made today render
-   fainter than every other day, the exact opposite of a marker. The colour is
-   --accent and the proof is a measurement, not a reading. */
-.swb-dh.swb-today { border-bottom-color: var(--accent); background: var(--paper); }
-.swb-dh.swb-today b, .swb-dh.swb-today i { color: var(--accent); }
-
-.swb-emp { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.swb-emp b { display: block; font-size: 13px; color: var(--ink); }
-.swb-emp i { display: block; font-style: normal; font-size: 10.5px; color: var(--muted); }
-.swb-tot { text-align: right; }
-.swb-tot b { font-family: var(--mono); font-size: 13px; color: var(--ink); }
-.swb-tot i { display: block; font-style: normal; font-size: 10px; color: var(--muted); }
-
-.swb-c { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
-.swb-c.swb-none::after { content: '·'; color: var(--faint); text-align: center; }
-
-/* A card, not a chip: two lines, because the time alone does not say what
-   somebody is doing and the position alone does not say when. */
-.swb-card {
-  display: block; padding: 4px 6px;
-  border: 1px solid var(--rule); border-left: 2px solid var(--accent);
-  background: var(--paper); text-align: left;
+[data-theme="night"] .sb {
+  --c-green:#2f8455; --c-plum:#8360ad; --c-amber:#e2ad51; --c-brick:#b2564c;
+  --c-blue:#3f74ac;  --c-teal:#2c8b8a; --c-indigo:#5f6ab7; --c-rose:#bc5b7b;
+  --c-orange:#e59457; --c-slate:#63707f;
 }
-.swb-card b { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--ink); font-weight: 600; }
-.swb-card i { display: block; font-style: normal; font-size: 10.5px; color: var(--muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.swb-foot { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; padding: 0 2px; }
-.swb-foot a { color: var(--accent); }
+.sb { --sb-lead:190px; --sb-col:minmax(132px,1fr); --sb-row:68px;
+      --sb-r:6px; --sb-kr:5px; width:100%; min-width:0;
+      /* A structured grid, not a cage: the vertical is the system's own rule,
+         the horizontal a shade darker so the eye tracks ONE employee across
+         seven days more readily than it drifts down a column. */
+      --sb-vline:var(--rule);
+      --sb-hline:color-mix(in srgb, var(--rule) 76%, var(--secondary) 24%); }
 
-@media (max-width: 760px) {
-  .swb-sum { margin-left: 0; width: 100%; }
-  .swb-card b { font-size: 11px; }
-  .swb-card i { font-size: 10px; }
+/* The board is a workspace, edge to edge. .bs-shell is a flex row and .bs-main
+   is `flex: 0 1 auto`, so main sizes to its CONTENT and stops short of the
+   viewport however much max-width is removed — flex:1 1 auto is the real fix.
+   Scoped with :has() so it reaches ONLY a page that actually renders a board;
+   applying it to .bs-main globally would widen every other page in the app. */
+.bs-main:has(.sb) { flex:1 1 auto; max-width:none; min-width:0;
+  padding-left:22px; padding-right:22px; }
+.bs-page:has(.sb) { max-width:none; min-width:0; width:100%; }
+
+/* A narrowly scoped exception to the shell's square-everything rule (line 194
+   sets border-radius:0 !important on every .bs descendant). Scoped to .sb; no
+   other Zwin surface is affected. */
+.sb .sb-frame, .sb .sb-chip, .sb .sb-btn { border-radius:var(--sb-r) !important; }
+.sb .sbk, .sb .sb-add { border-radius:var(--sb-kr) !important; }
+
+/* --- toolbar + board + summary, one framed object ------------------------- */
+.sb-frame { border:1px solid var(--rule); background:var(--panel); overflow:hidden; }
+.sb-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:10px 12px; border-bottom:1px solid var(--rule); background:var(--panel); }
+/* Wraps rather than clips: the frame hides overflow to keep its corners, which
+   once cut "This week" in half at 390 — present and unreachable. */
+.sb-nav { display:flex; align-items:center; gap:2px; flex-wrap:wrap; }
+.sb-btn { min-width:44px; height:44px; display:inline-flex; align-items:center;
+  justify-content:center; border:1px solid transparent; background:none;
+  color:var(--ink); font:inherit; font-size:15px; text-decoration:none;
+  cursor:pointer; padding:0 12px; }
+.sb-btn:hover { background:var(--paper); border-color:var(--rule); }
+.sb-btn:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.sb-btn.is-on { border-color:var(--ink); font-size:13px; }
+.sb-range { font-family:var(--mono); font-size:14px; font-weight:600;
+  color:var(--headline); padding:0 8px; white-space:nowrap; }
+.sb-tools { margin-left:auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+/* The week arrows sit inside a nav and read as navigation without a border.
+   An ACTION on the right has to look like one, or "Copy last week" reads as a
+   label sitting next to the Draft chip. */
+.sb-tools .sb-btn { border-color:var(--rule); font-size:13px; }
+.sb-chip { display:inline-flex; align-items:center; gap:7px; border:1px solid var(--rule);
+  padding:7px 11px; font-size:12.5px; color:var(--headline); font-weight:600; background:var(--paper); }
+.sb-chip i { font-style:normal; font-weight:400; color:var(--muted); }
+.sb-dot { width:7px; height:7px; border-radius:50% !important; background:var(--secondary); flex:none; }
+
+/* --- the grid ------------------------------------------------------------- */
+.sb-grid { display:grid;
+  grid-template-columns: var(--sb-lead) repeat(var(--sb-cols), var(--sb-col));
+  width:100%; min-width:0; }
+.sb-head, .sb-row { display:contents; }
+
+/* People is the strongest metric — it answers "is Saturday short?". Shifts and
+   hours are the detail underneath. */
+.sb-dh { position:sticky; top:0; z-index:2; background:var(--panel);
+  padding:9px 12px 10px; border-bottom:1px solid var(--rule);
+  border-left:1px solid var(--sb-vline); }
+.sb-dh em { display:block; font-style:normal; font-size:12px; font-weight:600;
+  color:var(--headline); white-space:nowrap; }
+.sb-dh b { display:block; font-size:13px; font-weight:650; color:var(--ink); margin-top:5px; }
+.sb-dh i { display:block; font-style:normal; font-family:var(--mono); font-size:10.5px;
+  color:var(--muted); margin-top:2px; letter-spacing:-.02em; white-space:nowrap; min-height:1.35em; }
+
+.sb-emp { position:sticky; left:0; z-index:3; background:var(--panel);
+  padding:11px 12px; border-right:1px solid var(--rule);
+  border-bottom:1px solid var(--sb-hline);
+  display:flex; flex-direction:column; justify-content:center; }
+.sb-corner { z-index:4; border-bottom:1px solid var(--rule);
+  font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); }
+/* The week total sits under the NAME. Never the person's "primary" position —
+   somebody who works two jobs in a week is mislabelled by one of them, and it
+   repeats what every card in the row already says. */
+.sb-emp b { font-size:14.5px; font-weight:650; color:var(--headline);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; letter-spacing:-.005em; }
+.sb-emp i { font-style:normal; font-family:var(--mono); font-size:11px;
+  color:var(--muted); margin-top:3px; }
+.sb-emp.is-off i { font-family:inherit; font-style:italic; }
+
+.sb-cell { min-height:var(--sb-row); padding:6px; display:flex; flex-direction:column;
+  justify-content:flex-start; gap:5px;
+  border-bottom:1px solid var(--sb-hline);
+  border-left:1px solid var(--sb-vline); }
+/* The sticky name column already draws a right edge. Without this the first
+   day column draws its own left edge against it and that one seam is 2px while
+   every other divider is 1px. */
+.sb-emp + .sb-cell, .sb-corner + .sb-dh { border-left:0; }
+.sb-row:last-child .sb-cell, .sb-row:last-child .sb-emp { border-bottom:0; }
+.sb-row:hover .sb-cell, .sb-row:hover .sb-emp { background:var(--row-hover); }
+
+/* Today: header accent plus a wash barely there, so it never competes with the
+   position colours. Labelled as well as coloured — never colour alone. */
+.sb-dh.is-today { border-bottom:2px solid var(--accent);
+  background:color-mix(in srgb, var(--accent) 5%, var(--panel)); }
+.sb-dh.is-today em { color:var(--accent); }
+.sb-cell.is-today { background:color-mix(in srgb, var(--accent) 2%, transparent); }
+.sb-today { display:inline-block; font-family:var(--mono); font-size:8.5px; font-weight:700;
+  letter-spacing:.1em; color:#fff; background:var(--accent); padding:1px 5px;
+  border-radius:2px !important; vertical-align:1.5px; margin-left:5px; }
+
+/* --- the shift card ------------------------------------------------------- */
+/* Natural height, top-aligned — NOT stretched to fill the row. Stretching made
+   a six-hour shift render tall in a row that happened to hold a double
+   elsewhere in the week and short in one that did not: height would look like
+   duration while encoding nothing. Same shift, same size, always. */
+.sbk { display:block; width:100%; flex:0 0 auto; min-height:0; text-align:left;
+  border:0; padding:9px 11px; cursor:pointer; font:inherit;
+  background:var(--c-slate); color:var(--t-slate); }
+.sbk b { display:block; font-size:12.5px; font-weight:650; line-height:1.2;
+  letter-spacing:-.005em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* No opacity on the time line: the weakest of the ten fills has no contrast to
+   spare, so hierarchy comes from size and weight instead. */
+.sbk i { display:block; font-style:normal; font-family:var(--mono); font-size:11px;
+  font-weight:400; line-height:1.3; margin-top:3px; }
+.sbk:hover { filter:brightness(1.06); }
+.sbk:focus-visible { outline:2px solid var(--headline); outline-offset:2px; }
+.sbk--green{background:var(--c-green);color:var(--t-green)}
+.sbk--plum{background:var(--c-plum);color:var(--t-plum)}
+.sbk--amber{background:var(--c-amber);color:var(--t-amber)}
+.sbk--brick{background:var(--c-brick);color:var(--t-brick)}
+.sbk--blue{background:var(--c-blue);color:var(--t-blue)}
+.sbk--teal{background:var(--c-teal);color:var(--t-teal)}
+.sbk--indigo{background:var(--c-indigo);color:var(--t-indigo)}
+.sbk--rose{background:var(--c-rose);color:var(--t-rose)}
+.sbk--orange{background:var(--c-orange);color:var(--t-orange)}
+.sbk--slate{background:var(--c-slate);color:var(--t-slate)}
+
+/* An empty cell is EMPTY. The whole cell is the create target; the affordance
+   answers hover AND keyboard focus, so it is never hover-only. */
+.sb-add { flex:1; width:100%; border:1px dashed transparent; background:none;
+  cursor:pointer; font:inherit; font-size:11.5px; color:transparent; min-height:44px; }
+.sb-cell:hover .sb-add { border-color:var(--rule); color:var(--muted); }
+.sb-add:focus-visible { border-color:var(--accent); color:var(--accent); outline:none; }
+
+/* --- weekly summary, inside the same frame -------------------------------- */
+.sb-sum { display:flex; align-items:center; gap:28px; flex-wrap:wrap;
+  padding:12px 16px; border-top:1px solid var(--rule); background:var(--paper); }
+.sb-sum-c { display:flex; align-items:baseline; gap:7px; }
+.sb-sum-c span { font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); }
+.sb-sum-c b { font-family:var(--mono); font-size:19px; color:var(--headline); line-height:1; }
+.sb-empty { padding:44px 20px; text-align:center; color:var(--muted); font-size:13px; }
+
+/* --- drawer extras -------------------------------------------------------- */
+.sb-f2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.sb-hint { margin:0; font-size:11.5px; color:var(--muted); line-height:1.45; }
+.sb-danger { margin-left:auto; }
+
+/* --- responsive ----------------------------------------------------------- */
+/* A 1280 desktop leaves about 1020 for the board after the sidebar and gutter.
+   Trimmed so all seven days are visible there too — a week view that scrolls
+   on a full-size screen reads as broken rather than as an affordance. */
+@media (max-width:1300px) { .sb { --sb-lead:160px; --sb-col:minmax(120px,1fr); } }
+@media (max-width:900px) {
+  .sb { --sb-lead:154px; --sb-col:minmax(128px,1fr); --sb-row:64px; }
+  .bs-main:has(.sb) { padding-left:14px; padding-right:14px; }
+}
+@media (max-width:560px) {
+  .sb { --sb-lead:120px; --sb-col:minmax(120px,1fr); }
+  .sb-emp { padding:9px; } .sb-emp b { font-size:13px; }
+  .sb-tools { margin-left:0; }
+  .sb-sum { gap:18px; padding:11px 13px; }
+  .sb-sum-c b { font-size:17px; }
+  .sb-f2 { grid-template-columns:1fr; }
 }
 
 /* --- who is on right now --------------------------------------------------

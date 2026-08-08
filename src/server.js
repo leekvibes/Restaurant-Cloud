@@ -17450,38 +17450,99 @@ function tcCanEdit(req, res, entry) {
 // SCHEDULE — the manager's week board
 //
 // A PLAN, and only a plan. Nothing on this page writes a punch, an hour, a
-// service or a payroll row; the domain module is the one that guarantees it,
-// and the tests hold it there. What an employee sees comes from
-// published_schedule, which no route here touches yet.
+// service or a payroll row; src/scheduler.js is the module that guarantees it
+// and test/scheduler.test.js holds it there. What an employee sees comes from
+// published_schedule, which no route here touches — there is no publish
+// control in this phase.
 // ===========================================================================
+
+// The ten curated position colours. Colour belongs to the POSITION, not to the
+// Scheduler, so the same job will read the same on every scheduling surface
+// once the Positions form grows a Color field. Until then this is the approved
+// deterministic mapping: known slugs by hand, anything new by a stable hash so
+// a position added tomorrow still gets one colour and keeps it.
+const SB_PALETTE = ['green', 'plum', 'amber', 'brick', 'blue', 'teal', 'indigo', 'rose', 'orange', 'slate'];
+const SB_POS_COLOR = {
+  server: 'green', kitchen: 'plum', barista: 'amber',
+  busser: 'brick', bartender: 'blue', training: 'slate',
+};
+const sbColor = (slug) => SB_POS_COLOR[slug]
+  || SB_PALETTE[[...String(slug || '')].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % SB_PALETTE.length];
+
+/** "9:00 AM" is a punch record; "9a" is a schedule. Seven of the long form push
+ *  the grid past the window and a WEEK view shows five days of the week. */
+const sbTime = (utc) => TC.clockFace(utc)
+  .replace(/:00(?=\s*[AaPp][Mm]\b)/, '')
+  .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
+
+const sbHours = (min) => (min ? TC.toHours(min) : 0);
+
+/** Which week the board is on, guarding the querystring. */
+function sbWeek(req) {
+  const cfg = TC.settings();
+  // The business date, never the calendar one: at 1am on a Saturday the week
+  // that matters is still Friday's.
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const asked = MX.isDate(req.query.w) ? req.query.w : today;
+  // A typo must not send the board a decade away and make the page look broken.
+  const far = Math.abs(Math.round(
+    (Date.parse(`${asked}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000,
+  ));
+  return { today, week: SCH.weekWindowFor(far > 730 ? today : asked) };
+}
+
+const sbBack = (res, weekStart, msg, err) =>
+  res.redirect(`/schedule?w=${weekStart}${msg ? `&msg=${encodeURIComponent(msg)}` : ''}${err ? '&err=1' : ''}`);
+
+/**
+ * Read the drawer's fields into what the domain wants.
+ *
+ * The form asks for a date and two clock times, because that is how a manager
+ * thinks about a shift. An end at or before the start means the shift runs past
+ * midnight, so it lands on the next day — which is also how the clock reads a
+ * bartender who finishes at 2am.
+ */
+function sbForm(body) {
+  const date = MX.isDate(body.date) ? body.date : null;
+  if (!date) throw new SCH.ScheduleError('Choose a date.', 'time');
+  const t = (v) => (/^\d{2}:\d{2}$/.test(String(v || '')) ? String(v) : null);
+  const start = t(body.start); const end = t(body.end);
+  if (!start || !end) throw new SCH.ScheduleError('Enter a start and an end time.', 'time');
+  const endDate = end > start ? date : addDays(date, 1);
+
+  const breaks = [];
+  const mins = Number(body.break_minutes);
+  if (body.break_minutes !== '' && body.break_minutes != null && Number.isFinite(mins) && mins !== 0) {
+    breaks.push({ minutes: mins, paid: body.break_paid === '1' });
+  }
+  return {
+    employeeId: body.employee_id,
+    position: String(body.position || '').trim(),
+    startsAt: `${date} ${start}`,
+    endsAt: `${endDate} ${end}`,
+    // 'auto' lets the service window decide; anything else is a manager override
+    // and is stamped as given.
+    daypart: SCH.DAYPARTS.includes(body.daypart) ? body.daypart : undefined,
+    breaks,
+    note: String(body.note || '').trim() || null,
+  };
+}
 
 app.get('/schedule', (req, res) => {
   if (!navAllowed('/schedule')) {
     return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   }
-  const cfg = TC.settings();
-  // The business date, never the calendar one. At 1am on a Saturday the week
-  // that matters is still Friday's.
-  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
-
-  // A typo in the querystring must not send the board a decade away and make
-  // the page look broken. Anything unparseable falls back to this week.
-  const asked = MX.isDate(req.query.w) ? req.query.w : today;
-  const far = Math.abs(Math.round(
-    (Date.parse(`${asked}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000,
-  ));
-  const week = SCH.weekWindowFor(far > 730 ? today : asked);
+  const { today, week } = sbWeek(req);
   const thisWeek = SCH.weekWindowFor(today);
-
   const days = [];
   for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
 
   const shifts = SCH.inRange(week.start, week.end);
   const totals = SCH.weekTotals(shifts);
 
-  // Everybody active, plus anybody who has a shift this week even if they have
-  // since been deactivated — the same rule the Timesheets grid uses, because a
-  // row that vanishes is a plan nobody can find to cancel.
+  // Everybody active, plus anybody holding a shift this week even if they have
+  // since been deactivated — a row that vanishes is a plan nobody can find to
+  // cancel. Scheduled first, unscheduled after, so placing a shift stays fast.
   const active = q.allEmployees.all();
   const byId = new Map(active.map((e) => [e.id, e]));
   for (const s of shifts) {
@@ -17489,93 +17550,305 @@ app.get('/schedule', (req, res) => {
       byId.set(s.employee_id, { id: s.employee_id, name: s.employee_name, role: s.position, active: 0 });
     }
   }
-  const staff = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const count = (id) => ((totals.byEmployee[String(id)] || {}).count || 0);
+  const staff = [...byId.values()]
+    .sort((a, b) => (count(b.id) ? 1 : 0) - (count(a.id) ? 1 : 0) || a.name.localeCompare(b.name));
 
   const cells = new Map();
   for (const s of shifts) {
-    const k = `${s.employee_id == null ? 'open' : s.employee_id}|${s.business_date}`;
+    const k = `${s.employee_id}|${s.business_date}`;
     if (!cells.has(k)) cells.set(k, []);
     cells.get(k).push(s);
   }
   for (const list of cells.values()) list.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
 
-  // "9:00 AM" is right for a punch record and wrong for a week board: seven of
-  // those side by side push the grid past the window, so a manager looking at a
-  // WEEK can only see five days of it. Compacted to "9a" / "3:30p", which is
-  // what a paper schedule says. Derived from the same formatter, so a 24-hour
-  // locale (no meridiem to strip) passes through untouched.
-  const hhmm = (utc) => TC.clockFace(utc)
-    .replace(/:00(?=\s*[AaPp][Mm]\b)/, '')
-    .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
-  const hrs = (min) => (min ? TC.toHours(min) : 0);
+  const dayStat = (d) => {
+    const t = totals.byDate[d] || { paidMinutes: 0, count: 0 };
+    const people = new Set(shifts.filter((s) => s.business_date === d).map((s) => s.employee_id)).size;
+    return { h: sbHours(t.paidMinutes), n: t.count, p: people };
+  };
+  const dow = (d) => TC.dayLabel(d).split(',')[0];
+  const md = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8))}`;
 
-  const card = (s) => `<span class="swb-card" data-id="${s.id}">
-    <b>${esc(hhmm(s.starts_at))}–${esc(hhmm(s.ends_at))}</b>
-    <i>${esc(posName(s.position))}</i>
-  </span>`;
+  // Position text is always present. Colour is never the only identifier.
+  const card = (s) => `<button class="sbk sbk--${sbColor(s.position)}" type="button"
+      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}">
+    <b>${esc(posName(s.position))}</b><i>${esc(sbTime(s.starts_at))}–${esc(sbTime(s.ends_at))}</i>
+  </button>`;
 
   const row = (e) => {
-    const wk = totals.byEmployee[String(e.id)];
-    return `<div class="swb-row egrid-row">
-      <span class="swb-emp egrid-lead">
-        <b>${esc(e.name)}</b><i>${esc(posName(e.role))}${e.active ? '' : ' · left'}</i>
-      </span>
+    const t = totals.byEmployee[String(e.id)] || { paidMinutes: 0, count: 0 };
+    return `<div class="sb-row">
+      <div class="sb-emp${t.count ? '' : ' is-off'}"><b>${esc(e.name)}</b><i>${t.count
+        ? `${sbHours(t.paidMinutes)}h · ${t.count} shift${t.count === 1 ? '' : 's'}`
+        : 'Not scheduled'}</i></div>
       ${days.map((d) => {
         const list = cells.get(`${e.id}|${d}`) || [];
-        return `<span class="swb-c egrid-c${list.length ? '' : ' swb-none'}" data-emp="${e.id}" data-d="${d}"
-          >${list.map(card).join('')}</span>`;
+        return `<div class="sb-cell${d === today ? ' is-today' : ''}">${
+          list.length ? list.map(card).join('')
+            : `<button class="sb-add" type="button" data-new="1" data-emp="${e.id}" data-d="${d}"
+                 aria-label="Add a shift for ${esc(e.name)} on ${esc(TC.dayLabel(d))}"><span>+ Add shift</span></button>`
+        }</div>`;
       }).join('')}
-      <span class="swb-tot egrid-tail"><b>${hrs(wk && wk.paidMinutes)}</b><i>hours</i></span>
     </div>`;
   };
 
-  // The same period nav the Timesheets page uses, class for class. A manager
-  // moves between these two screens constantly; a second pagination pattern
-  // would be a thing to learn twice for no gain.
-  const arrow = (start, glyph, label) =>
-    `<a class="tsx-arrow" href="/schedule?w=${start}" aria-label="${label}">${glyph}</a>`;
+  const positionOptions = positions.all.all()
+    .map((p) => `<option value="${esc(p.slug)}">${esc(p.name)}</option>`).join('');
+  const employeeOptions = active
+    .map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join('');
 
   const body = `<div class="bs-page">
-    <div class="bs-head">
-      <h1>Schedule</h1>
-      <p class="bs-sub">Who is planned to work, week by week. Planning only — this
-        writes no hours and changes no pay.</p>
-    </div>
+    ${flash(req)}
+    <div class="bs-head"><h1>Schedule</h1></div>
 
-    <!-- Q6: persistent, not a toast. A manager must be able to tell at a glance
-         whether the floor has seen any of this, and a message that fades cannot
-         answer that question a minute later. -->
-    <p class="swb-draft" role="status"><b>Draft schedule</b> · Not visible to employees</p>
-
-    <nav class="tsm-per swb-bar" aria-label="Week">
-      ${arrow(addDays(week.start, -7), '←', 'Earlier week')}
-      <span class="tsm-range">${esc(TC.dayLabel(week.start))} – ${esc(TC.dayLabel(week.end))}</span>
-      ${arrow(addDays(week.start, 7), '→', 'Later week')}
-      <a class="tsx-today${week.start === thisWeek.start ? ' on' : ''}" href="/schedule">This week</a>
-      <span class="swb-sum">${hrs(totals.total.paidMinutes)} planned hours · ${totals.total.count} shift${totals.total.count === 1 ? '' : 's'}</span>
-    </nav>
-
-    <section class="bs-panel">
-      <div class="swb-scroll egrid-scroll">
-        <div class="swb egrid" style="--egrid-cols:${days.length};--egrid-lead-w:150px">
-          <div class="swb-head egrid-head">
-            <span class="swb-emp egrid-lead egrid-corner">Who</span>
-            ${days.map((d) => `<span class="swb-dh egrid-dh${d === today ? ' swb-today' : ''}"
-              ><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></span>`).join('')}
-            <span class="swb-tot egrid-tail egrid-corner">Week</span>
+    <div class="sb">
+      <div class="sb-frame">
+        <div class="sb-bar">
+          <nav class="sb-nav" aria-label="Week">
+            <a class="sb-btn" href="/schedule?w=${addDays(week.start, -7)}" aria-label="Earlier week">&larr;</a>
+            <span class="sb-range">${esc(TC.dayLabel(week.start))} &ndash; ${esc(TC.dayLabel(week.end))}</span>
+            <a class="sb-btn" href="/schedule?w=${addDays(week.start, 7)}" aria-label="Later week">&rarr;</a>
+            <a class="sb-btn${week.start === thisWeek.start ? ' is-on' : ''}" href="/schedule">This week</a>
+          </nav>
+          <div class="sb-tools">
+            <form method="post" action="/schedule/copy-week" style="margin:0">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="to" value="${week.start}">
+              <button class="sb-btn" type="submit"
+                title="Copy the previous week's plan into this one">Copy last week</button>
+            </form>
+            <span class="sb-chip" title="Not visible to employees">
+              <span class="sb-dot" aria-hidden="true"></span>Draft<i> &middot; not visible to employees</i></span>
           </div>
-          ${staff.length ? staff.map(row).join('')
-            : '<div class="swb-row egrid-row"><span class="swb-emp egrid-lead">Nobody on staff yet</span></div>'}
+        </div>
+
+        <div class="sb-scroll egrid-scroll">
+          <div class="sb-grid" style="--sb-cols:${days.length}">
+            <div class="sb-head">
+              <div class="sb-emp sb-corner">Who</div>
+              ${days.map((d) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}">
+                <em>${esc(dow(d))} ${md(d)}${d === today ? ' <span class="sb-today">TODAY</span>' : ''}</em>
+                <b>${s.p} ${s.p === 1 ? 'person' : 'people'}</b>
+                <i>${s.n} shift${s.n === 1 ? '' : 's'} &middot; ${s.h}h</i>
+              </div>`; }).join('')}
+            </div>
+            ${staff.length ? staff.map(row).join('')
+              : '<div class="sb-empty">Nobody on staff yet. Add people under Staff, then plan their week here.</div>'}
+          </div>
+        </div>
+
+        <div class="sb-sum">
+          <div class="sb-sum-c"><span>Hours</span><b>${sbHours(totals.total.paidMinutes)}</b></div>
+          <div class="sb-sum-c"><span>Shifts</span><b>${totals.total.count}</b></div>
+          <div class="sb-sum-c"><span>People</span><b>${new Set(shifts.map((s) => s.employee_id)).size}</b></div>
         </div>
       </div>
-    </section>
+    </div>
 
-    <p class="swb-foot">Hours shown are PLANNED and paid — the shift less any unpaid
-      break. What people are actually paid comes from the clock, on
-      <a href="/payroll/timesheets">Timesheets</a>.</p>
+    <div class="drawer-scrim" onclick="sbDrawer(false)"></div>
+    <aside class="drawer" id="sb-drawer" aria-label="Shift">
+      <div class="drawer-h">
+        <div><div class="drawer-t" id="sb-title">Add a shift</div>
+          <div class="drawer-s">Planning only &mdash; this writes no hours and changes no pay.</div></div>
+        <button class="drawer-x" type="button" onclick="sbDrawer(false)" aria-label="Close">&#10005;</button>
+      </div>
+      <form class="drawer-b" method="post" id="sb-form" action="/schedule/shift">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="w" value="${week.start}">
+        <label class="fld wide">Who
+          <select name="employee_id" id="sb-emp" required>${employeeOptions}</select></label>
+        <label class="fld wide">Position
+          <select name="position" id="sb-pos" required>${positionOptions}</select></label>
+        <label class="fld wide">Date
+          <input type="date" name="date" id="sb-date" required></label>
+        <div class="sb-f2">
+          <label class="fld">Starts<input type="time" name="start" id="sb-start" required></label>
+          <label class="fld">Ends<input type="time" name="end" id="sb-end" required></label>
+        </div>
+        <p class="sb-hint">An end at or before the start runs past midnight and lands on the next day.</p>
+        <label class="fld wide">Service
+          <select name="daypart" id="sb-daypart">
+            <option value="">Decide from the start time</option>
+            ${SCH.DAYPARTS.map((d) => `<option value="${d}">${esc(dp(d))}</option>`).join('')}
+          </select></label>
+        <div class="sb-f2">
+          <label class="fld">Planned break (minutes)
+            <input type="number" name="break_minutes" id="sb-brk" min="0" step="5" placeholder="none"></label>
+          <label class="fld">Break is paid
+            <select name="break_paid" id="sb-brkpaid">
+              <option value="0">No &mdash; comes off the hours</option>
+              <option value="1">Yes &mdash; stays in the hours</option>
+            </select></label>
+        </div>
+        <label class="fld wide">Note<input name="note" id="sb-note" maxlength="200"></label>
+        <div class="drawer-f">
+          <button class="btn btn-primary" type="submit">Save</button>
+          <button class="btn" type="button" onclick="sbDrawer(false)">Cancel</button>
+          <span class="sb-danger" id="sb-extra" hidden>
+            <button class="btn" type="submit" form="sb-dup">Duplicate</button>
+            <button class="btn" type="submit" form="sb-del" id="sb-del-btn">Delete</button>
+          </span>
+        </div>
+      </form>
+    </aside>
+
+    <script>
+      (function () {
+        var form = document.getElementById('sb-form');
+        // Prefilled from the LOCAL rendering of each stored UTC stamp, through
+        // the same converter the clock uses, so a 4pm shift shows 16:00 in the
+        // form whatever the server's zone and whichever side of DST it is on.
+        var shifts = ${JSON.stringify(shifts.map((s) => ({
+          id: s.id, e: s.employee_id, p: s.position,
+          si: TC.utcToLocalInput(s.starts_at), ei: TC.utcToLocalInput(s.ends_at),
+          dp: s.daypart, n: s.note || '',
+          bm: (s.breaks[0] || {}).minutes || '', bp: (s.breaks[0] || {}).paid ? '1' : '0',
+        })))};
+        var byId = {};
+        shifts.forEach(function (s) { byId[s.id] = s; });
+
+        function sbDrawer(open) {
+          document.body.classList.toggle('drawer-open', !!open);
+          if (open) setTimeout(function () {
+            var f = document.querySelector('#sb-drawer select[name=employee_id]');
+            if (f) f.focus();
+          }, 180);
+        }
+        window.sbDrawer = sbDrawer;
+
+        function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v == null ? '' : v; }
+
+        document.querySelector('.sb-grid').addEventListener('click', function (ev) {
+          var add = ev.target.closest && ev.target.closest('.sb-add');
+          if (add) {
+            form.action = '/schedule/shift';
+            document.getElementById('sb-title').textContent = 'Add a shift';
+            document.getElementById('sb-extra').hidden = true;
+            setVal('sb-emp', add.dataset.emp); setVal('sb-date', add.dataset.d);
+            setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
+            setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
+            sbDrawer(true);
+            return;
+          }
+          var edit = ev.target.closest && ev.target.closest('.sbk');
+          if (!edit) return;
+          var s = byId[edit.dataset.edit];
+          if (!s) return;
+          form.action = '/schedule/shift/' + s.id;
+          document.getElementById('sb-title').textContent = 'Edit shift';
+          setVal('sb-emp', s.e); setVal('sb-pos', s.p); setVal('sb-date', s.si.slice(0, 10));
+          setVal('sb-start', s.si.slice(11, 16)); setVal('sb-end', s.ei.slice(11, 16));
+          setVal('sb-daypart', s.dp); setVal('sb-brk', s.bm); setVal('sb-brkpaid', s.bp); setVal('sb-note', s.n);
+          // Duplicate and Delete are edit-only, and each posts its own form so
+          // neither can be triggered by the drawer's Enter key. Rendered in the
+          // markup and merely revealed here — building them as a string put an
+          // escaped quote inside a template literal inside an attribute, which
+          // closed the string early and took the whole script down with it.
+          document.getElementById('sb-extra').hidden = false;
+          document.getElementById('sb-dup').action = '/schedule/shift/' + s.id + '/duplicate';
+          document.getElementById('sb-del').action = '/schedule/shift/' + s.id + '/delete';
+          sbDrawer(true);
+        });
+
+        document.getElementById('sb-del-btn').addEventListener('click', function (ev) {
+          if (!confirm('Delete this planned shift? It removes the plan, not any hours worked.')) {
+            ev.preventDefault();
+          }
+        });
+
+        document.addEventListener('keydown', function (e) { if (e.key === 'Escape') sbDrawer(false); });
+      }());
+    </script>
+    <form method="post" id="sb-dup" style="display:none">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
+    <form method="post" id="sb-del" style="display:none">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
   </div>`;
 
   res.send(layout('Schedule', body));
+});
+
+// --- writes ----------------------------------------------------------------
+// Every one of these re-resolves the employee and the position through the
+// domain's validate(). The browser's posted values are an untrusted request,
+// never an authorization: a forged position the person does not hold is refused
+// server-side whatever the form offered.
+
+const sbGuard = (req, res) => {
+  if (navAllowed('/schedule')) return true;
+  res.status(403).send('Not available on your account.');
+  return false;
+};
+const sbWeekOf = (req) => (MX.isDate(req.body.w) ? req.body.w : SCH.weekWindowFor(
+  TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour)).start);
+
+app.post('/schedule/shift', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
+    sbBack(res, w, 'Shift added to the plan.');
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/shift/:id', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    SCH.edit(Number(req.params.id), sbForm(req.body));
+    sbBack(res, w, 'Shift updated.');
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/shift/:id/delete', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    // cancel(), not a row delete: a cancelled plan is still a record of what
+    // was planned, and it touches no punch.
+    SCH.cancel(Number(req.params.id));
+    sbBack(res, w, 'Shift removed from the plan.');
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/shift/:id/duplicate', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    SCH.duplicate(Number(req.params.id), { createdBy: 'owner' });
+    sbBack(res, w, 'Duplicated into the same day.');
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/copy-week', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const to = MX.isDate(req.body.to) ? req.body.to : sbWeekOf(req);
+  try {
+    const { made, skipped } = SCH.copyWeek(addDays(to, -7), to, { createdBy: 'owner' });
+    // Every skip says WHY, in the words validate() used, so a manager can act
+    // on it rather than wonder what happened to somebody.
+    const why = [...new Set(skipped.map((s) => s.why))].slice(0, 2).join(' ');
+    const msg = made.length
+      ? `Copied ${made.length} shift${made.length === 1 ? '' : 's'}.${skipped.length ? ` ${skipped.length} skipped — ${why}` : ''}`
+      : (skipped.length ? `Nothing copied. ${skipped.length} skipped — ${why}` : 'Last week has nothing to copy.');
+    sbBack(res, to, msg, !made.length);
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    sbBack(res, to, e.message, true);
+  }
 });
 
 app.get('/timeclock', (req, res) => {

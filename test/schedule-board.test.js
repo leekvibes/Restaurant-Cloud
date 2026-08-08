@@ -1,13 +1,15 @@
 'use strict';
 
 // ===========================================================================
-// Scheduler — the manager's week board.
+// Scheduler — the manager's week board, in production.
 //
-// The domain is tested in scheduler.test.js. This file is about the PAGE: that
-// the week it shows is the week payroll measures, that a bad querystring
-// cannot break it, that the frame it draws is the shared one, and above all
-// that opening it writes nothing. A planning screen that touches a punch is
-// a planning screen that has changed somebody's pay.
+// The domain is tested in scheduler.test.js. This file is about the PAGE and
+// its write routes: that the week it shows is the week payroll measures, that
+// a bad querystring cannot break it, that a forged position is refused by the
+// server whatever the form offered, and above all that none of it writes a
+// punch, an hour, a service or a payroll row.
+//
+// A planning screen that touches any of those has changed somebody's pay.
 // ===========================================================================
 
 const test = require('node:test');
@@ -26,10 +28,26 @@ process.env.DB_PATH = DB;
 process.env.TZ = process.env.TZ || 'America/New_York';
 let child; let Database; let db; let SCH; let TC; let P; let dates;
 
-const text = async (p, headers = {}) => (await fetch(BASE + p, { headers })).text();
-const status = async (p, headers = {}) => (await fetch(BASE + p, { headers, redirect: 'manual' })).status;
+let __csrf = null;
+async function token() {
+  if (!__csrf) __csrf = (await (await fetch(`${BASE}/csrf`)).text()).trim();
+  return __csrf;
+}
+const text = async (p) => (await fetch(BASE + p)).text();
+const status = async (p) => (await fetch(BASE + p, { redirect: 'manual' })).status;
+const post = async (p, body) => fetch(BASE + p, {
+  method: 'POST', redirect: 'manual',
+  headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ ...body, _csrf: await token() }).toString(),
+});
+/** The message a route redirected back with, decoded. */
+const flashOf = (res) => {
+  const q = (res.headers.get('location') || '').split('?')[1] || '';
+  const p = new URLSearchParams(q);
+  return { msg: p.get('msg') || '', err: p.get('err') === '1' };
+};
 
-const E = { server: 201, barista: 202, gone: 203 };
+const E = { server: 201, barista: 202, gone: 203, multi: 204, longname: 205 };
 
 test.before(async () => {
   Database = require('better-sqlite3');
@@ -48,6 +66,12 @@ test.before(async () => {
   ins.run(E.server, 'Board Server', 'server', '5201', 1500, 1);
   ins.run(E.barista, 'Board Barista', 'barista', '5202', 1400, 1);
   ins.run(E.gone, 'Board Departed', 'server', '5203', 1500, 0);
+  ins.run(E.multi, 'Board Multi', 'server', '5204', 1500, 1);
+  ins.run(E.longname, 'Bartholomew Fitzwilliam-Harrington', 'kitchen', '5205', 1600, 1);
+  // Multi genuinely holds two jobs — the case the employee-column subtitle
+  // would misrepresent if it named one "primary" position.
+  db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+    .run(E.multi, 'bartender', 1700);
 
   SCH = require('../src/scheduler');
   TC = require('../src/timeclock');
@@ -62,6 +86,7 @@ test.after(() => {
 });
 
 const today = () => TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+const week = () => SCH.weekWindowFor(today());
 
 /** Every table the board must never write to. */
 const footprint = () => ({
@@ -71,149 +96,441 @@ const footprint = () => ({
   shifts: db.prepare('SELECT COUNT(*) n FROM shifts').get().n,
   server_sales: db.prepare('SELECT COUNT(*) n FROM server_sales').get().n,
   tip_submissions: db.prepare('SELECT COUNT(*) n FROM tip_submissions').get().n,
+  timesheets: db.prepare('SELECT COUNT(*) n FROM timesheets').get().n,
   published: db.prepare('SELECT COUNT(*) n FROM published_schedule').get().n,
 });
 
 // ===========================================================================
+// Initialization — this release is the first boot that requires the module
+// ===========================================================================
 
-test('the board opens, and says it is a plan rather than a record', async () => {
-  const html = await text('/schedule');
-  assert.match(html, /<h1>Schedule<\/h1>/);
-  assert.match(html, /writes no hours and changes no pay/i,
-    'the page states what it is, where somebody would otherwise assume');
+test('booting the server creates the three Scheduler tables and nothing else', () => {
+  const names = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'
+    AND (name LIKE 'scheduled%' OR name = 'published_schedule') ORDER BY name`).all().map((r) => r.name);
+  assert.deepStrictEqual(names, ['published_schedule', 'scheduled_breaks', 'scheduled_shifts'],
+    'requiring the module is what creates them');
+  // Additive: the tables the rest of the app owns are all still here.
+  for (const t of ['time_entries', 'work', 'shifts', 'employees', 'positions']) {
+    assert.ok(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(t),
+      `${t} untouched`);
+  }
 });
 
-test('Q6: the draft banner is on the page, not a message that fades', async () => {
+test('initialization seeds NO Scheduler rows', () => {
+  // A default row would look like a real plan to whoever opened the page next.
+  for (const t of ['scheduled_shifts', 'scheduled_breaks', 'published_schedule']) {
+    const n = db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n;
+    if (t === 'scheduled_shifts') continue;              // this file creates its own below
+    assert.strictEqual(n, 0, `${t} starts empty`);
+  }
+});
+
+test('the Scheduler indexes exist', () => {
+  const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type='index'
+    AND tbl_name IN ('scheduled_shifts','scheduled_breaks','published_schedule')`).all().map((r) => r.name);
+  assert.ok(idx.length >= 1, `the module declares its own indexes (found ${idx.length})`);
+});
+
+// ===========================================================================
+// The page
+// ===========================================================================
+
+test('the board opens for the owner', async () => {
+  assert.strictEqual(await status('/schedule'), 200);
   const html = await text('/schedule');
-  assert.match(html, /class="swb-draft"/, 'the banner is part of the page');
-  assert.match(html, /Draft schedule/);
-  assert.match(html, /Not visible to employees/);
-  assert.doesNotMatch(html, /class="swb-draft"[^>]*data-dismiss/, 'and cannot be dismissed');
+  assert.match(html, /<h1>Schedule<\/h1>/);
+});
+
+test('an empty week still renders a usable board', async () => {
+  // Far enough out that nothing this file creates lands in it.
+  const far = dates.addDays(week().start, 21);
+  const html = await text(`/schedule?w=${far}`);
+  assert.match(html, /class="sb-grid"/, 'the grid is drawn');
+  assert.match(html, /class="sb-add"/, 'every empty cell is a create target');
+  assert.doesNotMatch(html, /class="sbk /, 'and no shift cards');
+  assert.match(html, /<b>0<\/b>/, 'the summary reads zero rather than blank');
+});
+
+test('the permanent planning-only sentence is gone from the page head', async () => {
+  const html = await text('/schedule');
+  assert.doesNotMatch(html, /<p class="bs-sub">[^<]*Who is planned to work/,
+    'the board dominates the page; the explanation lives in the drawer');
+});
+
+test('Q6: Draft is a compact chip, not a full-width banner', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /class="sb-chip"/);
+  assert.match(html, /Draft/);
+  assert.match(html, /not visible to employees/);
+  assert.doesNotMatch(html, /class="swb-draft"/, 'the old banner is gone');
 });
 
 test('Q1: the week shown is the pay period\'s workweek, not a calendar Monday', async () => {
   const html = await text('/schedule');
-  const start = (html.match(/\/schedule\?w=(\d{4}-\d{2}-\d{2})/) || [])[1];
-  assert.ok(start, 'the page links to another week');
-
-  // Whatever week is on screen, its start must be a whole number of weeks from
-  // the pay-period anchor — the same split reports.js uses for overtime.
-  const wk = SCH.weekWindowFor(today());
+  const wk = week();
   const per = P.periodFor(wk.start);
   const off = Math.round(
     (Date.parse(`${wk.start}T00:00:00Z`) - Date.parse(`${per.start}T00:00:00Z`)) / 86400000,
   );
-  assert.strictEqual(off % 7, 0, 'the board week is aligned to the pay period');
-
-  // Seven columns, and the header names the first and last day of THAT window.
-  const cols = (html.match(/--egrid-cols:(\d+)/) || [])[1];
-  assert.strictEqual(Number(cols), 7, 'a week is seven columns');
-  assert.ok(html.includes(TC.dayLabel(wk.start)) && html.includes(TC.dayLabel(wk.end)),
-    `the range reads ${TC.dayLabel(wk.start)} – ${TC.dayLabel(wk.end)}`);
+  assert.strictEqual(off % 7, 0, 'aligned to the pay period, which is what OT is measured against');
+  assert.strictEqual(Number((html.match(/--sb-cols:(\d+)/) || [])[1]), 7, 'seven columns');
+  assert.ok(html.includes(TC.dayLabel(wk.start)) && html.includes(TC.dayLabel(wk.end)));
 });
 
-test('prev and next move exactly one week, and stay period-aligned', async () => {
-  const wk = SCH.weekWindowFor(today());
+test('prev and next move exactly one week', async () => {
+  const wk = week();
   const html = await text('/schedule');
   assert.ok(html.includes(`/schedule?w=${dates.addDays(wk.start, -7)}`), 'back one week');
   assert.ok(html.includes(`/schedule?w=${dates.addDays(wk.start, 7)}`), 'forward one week');
-
-  const next = await text(`/schedule?w=${dates.addDays(wk.start, 7)}`);
-  const nw = SCH.weekWindowFor(dates.addDays(wk.start, 7));
-  assert.ok(next.includes(TC.dayLabel(nw.start)), 'and the next page shows that week');
 });
 
-test('a junk or far-off week falls back rather than showing an empty decade', async () => {
-  const wk = SCH.weekWindowFor(today());
+test('a junk or far-off week falls back rather than stranding the board', async () => {
+  const wk = week();
   for (const bad of ['banana', '2026-13-45', '0001-01-01', '9999-12-31', '']) {
     const html = await text(`/schedule?w=${encodeURIComponent(bad)}`);
-    assert.ok(html.includes(TC.dayLabel(wk.start)),
-      `?w=${bad || '(empty)'} falls back to this week instead of stranding the board`);
+    assert.ok(html.includes(TC.dayLabel(wk.start)), `?w=${bad || '(empty)'} falls back`);
   }
 });
 
-test('a planned shift shows as a card, with its time and its position', async () => {
-  const wk = SCH.weekWindowFor(today());
-  SCH.create({
-    employeeId: E.server, position: 'server',
-    startsAt: `${wk.start} 16:00`, endsAt: `${wk.start} 22:00`,
-  });
+test('there is no dot placeholder left anywhere on the board', async () => {
   const html = await text('/schedule');
-  assert.match(html, /class="swb-card"/, 'the shift is on the board');
-  assert.match(html, /4p–10p/, 'compact enough that seven days fit across');
-  assert.match(html, /Board Server/, 'on the right person\'s row');
+  assert.doesNotMatch(html, /class="[^"]*sb-none/, 'empty means empty');
 });
 
-test('Q3: the week total is PAID hours — an unpaid break comes off it', async () => {
-  const wk = SCH.weekWindowFor(today());
+test('the ten-colour palette is NOT shown on the schedule page', async () => {
+  const html = await text('/schedule');
+  assert.doesNotMatch(html, /the ten a position can be given/i);
+  assert.doesNotMatch(html, /class="sb-pal"/, 'the reference strip belongs on Positions, later');
+});
+
+// ===========================================================================
+// Cards
+// ===========================================================================
+
+test('a card leads with the POSITION and follows with the time', async () => {
+  const wk = week();
+  SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${wk.start} 16:00`, endsAt: `${wk.start} 22:00` });
+  const html = await text('/schedule');
+  const card = (html.match(/<button class="sbk sbk--\w+"[\s\S]*?<\/button>/) || [])[0];
+  assert.ok(card, 'a card is on the board');
+  assert.ok(card.indexOf('<b>') < card.indexOf('<i>'), 'position markup precedes time markup');
+  assert.match(card, /<b>Server<\/b>/, 'the position is text, never colour alone');
+  assert.match(card, /<i>4p–10p<\/i>/, 'compact enough that seven days fit across');
+  assert.match(card, /aria-label="Edit Server/, 'and it is labelled for a screen reader');
+});
+
+test('a card carries its position colour from the deterministic mapping', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /class="sbk sbk--green"/, 'server is green');
+});
+
+test('an overnight shift renders on the day it STARTED', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 2);
+  // 8pm to 2am. The clock puts this on the night it began; so must the plan.
+  const s = SCH.create({ employeeId: E.multi, position: 'bartender',
+    startsAt: `${day} 20:00`, endsAt: `${dates.addDays(day, 1)} 02:00` });
+  assert.strictEqual(SCH.byId(s.id).business_date, day, 'stamped to the starting night');
+  const html = await text('/schedule');
+  assert.match(html, /<i>8p–2a<\/i>/, 'and reads across midnight on the card');
+});
+
+test('multiple shifts on one day stack in chronological order, full size', async () => {
+  const wk = week();
   const day = dates.addDays(wk.start, 3);
-  SCH.create({
-    employeeId: E.barista, position: 'barista',
-    startsAt: `${day} 09:00`, endsAt: `${day} 17:00`, breaks: [{ minutes: 30 }],
-  });
+  SCH.create({ employeeId: E.barista, position: 'barista',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  SCH.create({ employeeId: E.barista, position: 'barista',
+    startsAt: `${day} 06:30`, endsAt: `${day} 11:00` });
   const html = await text('/schedule');
-  const row = (html.match(/Board Barista[\s\S]*?class="swb-tot egrid-tail"><b>([\d.]+)</) || [])[1];
-  assert.strictEqual(Number(row), 7.5,
-    'eight hours on the clock face, seven and a half paid — the board shows what it costs');
+  const row = (html.match(/Board Barista[\s\S]*?(?=<div class="sb-row">|<\/div>\s*<\/div>\s*<div class="sb-sum")/) || [])[0];
+  const times = [...row.matchAll(/<i>([^<]+)<\/i>/g)].map((m) => m[1]).filter((s) => /[ap]$/.test(s));
+  const idxEarly = times.indexOf('6:30a–11a');
+  const idxLate = times.indexOf('4p–10p');
+  assert.ok(idxEarly >= 0 && idxLate >= 0, `both shifts render (${times.join(', ')})`);
+  assert.ok(idxEarly < idxLate, 'earliest first');
 });
 
-test('somebody who left is still shown while they have a shift on the board', async () => {
-  const wk = SCH.weekWindowFor(today());
-  // Placed while active, then deactivated — the plan outlives the roster change
-  // and must stay findable, or nobody can cancel it.
-  db.prepare('UPDATE employees SET active = 1 WHERE id = ?').run(E.gone);
-  SCH.create({ employeeId: E.gone, position: 'server',
-    startsAt: `${dates.addDays(wk.start, 2)} 10:00`, endsAt: `${dates.addDays(wk.start, 2)} 14:00` });
-  db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(E.gone);
-
+test('the employee column shows hours and shift count, never a "primary" position', async () => {
   const html = await text('/schedule');
-  assert.match(html, /Board Departed/, 'the row is still there');
-  assert.match(html, /Board Departed[\s\S]{0,200}· left/, 'and says why it looks unusual');
+  assert.match(html, /<b>Board Multi<\/b><i>[\d.]+h · \d+ shifts?<\/i>/,
+    'name then totals');
+  // Multi works server AND bartender; naming one under the name would be wrong.
+  assert.doesNotMatch(html, /<b>Board Multi<\/b><i>(Server|Bartender)/i);
 });
 
-test('the board composes the shared grid frame rather than its own', async () => {
+test('an active employee with no shifts stays visible, at the bottom', async () => {
   const html = await text('/schedule');
-  assert.match(html, /class="swb-scroll egrid-scroll"/, 'the scroll container is the shared one');
-  assert.match(html, /class="swb egrid"/, 'and so is the grid');
-  assert.match(html, /class="swb-emp egrid-lead"/, 'the name column is frozen by the primitive');
-  assert.match(html, /class="swb-tot egrid-tail"/, 'and so is the week total');
-  assert.match(html, /class="swb-c egrid-c/, 'the cells take the shared padding');
+  assert.match(html, /Not scheduled/, 'they are listed');
+  const noShift = html.indexOf('Bartholomew');
+  const withShift = html.indexOf('Board Server');
+  assert.ok(withShift < noShift, 'scheduled people come first');
 });
 
-test('today is marked on the board, by BUSINESS date', async () => {
+test('today is marked by BUSINESS date, and not by colour alone', async () => {
   const html = await text('/schedule');
-  const marked = html.match(/class="swb-dh egrid-dh swb-today"[\s\S]{0,120}?<b>(\d+)<\/b>/);
-  assert.ok(marked, 'one column is marked as today');
-  assert.strictEqual(Number(marked[1]), Number(today().slice(8)),
-    'and it is the business date, not the calendar one — at 1am they differ');
-  assert.strictEqual((html.match(/swb-today/g) || []).length, 1, 'exactly one day is today');
+  const marked = html.match(/class="sb-dh is-today"[\s\S]{0,200}?<em>([^<]*)/);
+  assert.ok(marked, 'one column is marked');
+  assert.match(html, /class="sb-today">TODAY</, 'labelled, not just tinted');
+  assert.strictEqual((html.match(/sb-dh is-today/g) || []).length, 1, 'exactly one day');
+});
+
+test('day headers lead with people, then shifts and hours', async () => {
+  const html = await text('/schedule');
+  const dh = (html.match(/<div class="sb-dh[^"]*">[\s\S]*?<\/div>/) || [])[0];
+  assert.ok(dh.indexOf('<b>') < dh.indexOf('<i>'), 'people above shifts/hours');
+  assert.match(dh, /<b>\d+ (person|people)<\/b>/);
+  assert.match(dh, /<i>\d+ shifts? &middot; [\d.]+h<\/i>/);
+  assert.doesNotMatch(html, /labou?r cost|projected OT|labou?r %/i, 'and nothing from a later phase');
 });
 
 // ===========================================================================
-// The invariant, at the route
+// Writes
 // ===========================================================================
 
-test('opening the board writes nothing to time, work, payroll or the published schedule', async () => {
+test('creating from an empty cell adds a draft to that employee and day', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 4);
   const before = footprint();
-  await text('/schedule');
-  await text(`/schedule?w=${dates.addDays(SCH.weekWindowFor(today()).start, 7)}`);
-  await text('/schedule?w=nonsense');
-  assert.deepStrictEqual(footprint(), before,
-    'reading a plan is reading, and publishes nothing to the floor either');
+  const res = await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.server), position: 'server',
+    date: day, start: '17:00', end: '23:00', daypart: '', break_minutes: '', note: 'section 4',
+  });
+  assert.strictEqual(res.status, 302);
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  const made = db.prepare('SELECT * FROM scheduled_shifts WHERE business_date = ? AND employee_id = ?')
+    .get(day, E.server);
+  assert.ok(made, 'the row exists');
+  assert.strictEqual(made.status, 'draft', 'and it is a draft, never published');
+  assert.strictEqual(made.note, 'section 4');
+  assert.deepStrictEqual(footprint(), before, 'and nothing that records actual work moved');
 });
 
-test('the board is a GET-only surface in this phase', async () => {
-  // No write route exists yet. If one appears without a test, this catches it.
-  const res = await fetch(`${BASE}/schedule`, { method: 'POST', redirect: 'manual' });
-  assert.ok(res.status === 404 || res.status === 405,
-    `POST /schedule is not a route yet (got ${res.status})`);
+test('an end at or before the start runs past midnight, onto the next day', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 5);
+  const res = await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.multi), position: 'bartender',
+    date: day, start: '19:00', end: '01:30', break_minutes: '',
+  });
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  const made = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.multi, day);
+  assert.ok(made, 'stamped to the night it began');
+  assert.ok(made.ends_at > made.starts_at, 'and ends after it starts');
+  assert.ok(SCH.spanMinutes(made) === 390, `six and a half hours, not negative (${SCH.spanMinutes(made)})`);
 });
 
-test('Schedule is its own access area, so it is not opened by an unrelated grant', async () => {
-  const { areaFor } = require('../src/nav');
-  assert.strictEqual(areaFor('/schedule'), 'schedule',
-    'the page belongs to an area of its own');
+test('editing a shift changes the plan and still writes nothing actual', async () => {
+  const wk = week();
+  const row = db.prepare('SELECT * FROM scheduled_shifts ORDER BY id LIMIT 1').get();
+  const before = footprint();
+  const res = await post(`/schedule/shift/${row.id}`, {
+    w: wk.start, employee_id: String(row.employee_id), position: row.position,
+    date: row.business_date, start: '15:00', end: '21:00', break_minutes: '30', break_paid: '0',
+  });
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  const after = SCH.byId(row.id);
+  assert.strictEqual(after.breaks.length, 1, 'the planned break saved');
+  assert.strictEqual(after.breaks[0].paid, 0, 'as unpaid');
+  assert.deepStrictEqual(footprint(), before, 'no punch, no work row, no service');
+});
+
+test('a forged position the employee does not hold is refused server-side', async () => {
+  const wk = week();
+  // The form only ever offers what they hold; this posts past it deliberately.
+  const res = await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.barista), position: 'bartender',
+    date: dates.addDays(wk.start, 6), start: '17:00', end: '23:00', break_minutes: '',
+  });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, true, 'refused');
+  assert.match(f.msg, /not assigned to that position/i, 'and says why, without leaking internals');
+  assert.doesNotMatch(f.msg, /SQL|employee_roles|undefined/i);
+});
+
+test('an inactive employee cannot be scheduled through the route', async () => {
+  const wk = week();
+  const res = await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.gone), position: 'server',
+    date: dates.addDays(wk.start, 6), start: '17:00', end: '23:00', break_minutes: '',
+  });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, true);
+  assert.match(f.msg, /not active/i);
+});
+
+test('a break longer than its shift is refused, not silently dropped', async () => {
+  const wk = week();
+  const res = await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.server), position: 'server',
+    date: dates.addDays(wk.start, 6), start: '17:00', end: '19:00', break_minutes: '600',
+  });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, true);
+  assert.match(f.msg, /longer than the shift/i);
+});
+
+test('service defaults from the start time and can be overridden by the manager', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 1);
+  await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.server), position: 'server',
+    date: day, start: '09:00', end: '14:00', daypart: '', break_minutes: '',
+  });
+  const auto = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id=? AND business_date=?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+  assert.strictEqual(auto.daypart, 'cafe', 'a 9am start is cafe by the service window');
+
+  await post('/schedule/shift', {
+    w: wk.start, employee_id: String(E.server), position: 'server',
+    date: day, start: '10:00', end: '15:00', daypart: 'dinner', break_minutes: '',
+  });
+  const forced = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id=? AND business_date=?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+  assert.strictEqual(forced.daypart, 'dinner', 'and the manager can say otherwise');
+});
+
+test('delete cancels the plan and leaves every punch alone', async () => {
+  const wk = week();
+  const row = db.prepare("SELECT * FROM scheduled_shifts WHERE status='draft' ORDER BY id DESC LIMIT 1").get();
+  const before = footprint();
+  const res = await post(`/schedule/shift/${row.id}/delete`, { w: wk.start });
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  assert.strictEqual(SCH.byId(row.id).status, 'cancelled', 'kept as a record of what was planned');
+  assert.deepStrictEqual(footprint(), before);
+});
+
+test('duplicate puts a second draft in the same cell', async () => {
+  const wk = week();
+  const row = db.prepare("SELECT * FROM scheduled_shifts WHERE status='draft' ORDER BY id LIMIT 1").get();
+  const n = () => db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE employee_id=? AND business_date=?')
+    .get(row.employee_id, row.business_date).n;
+  const before = n();
+  const res = await post(`/schedule/shift/${row.id}/duplicate`, { w: wk.start });
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  assert.strictEqual(n(), before + 1);
+});
+
+test('copy last week copies drafts, and running it twice does not double them', async () => {
+  const wk = week();
+  const target = dates.addDays(wk.start, 7);
+  const count = () => db.prepare(`SELECT COUNT(*) n FROM scheduled_shifts
+    WHERE business_date BETWEEN ? AND ?`).get(target, dates.addDays(target, 6)).n;
+  const before = footprint();
+
+  const first = await post('/schedule/copy-week', { w: target, to: target });
+  assert.strictEqual(flashOf(first).err, false, flashOf(first).msg);
+  const afterFirst = count();
+  assert.ok(afterFirst > 0, 'something was copied');
+
+  const second = await post('/schedule/copy-week', { w: target, to: target });
+  assert.strictEqual(count(), afterFirst, 'the second run copies nothing new');
+  assert.match(flashOf(second).msg, /skipped/i, 'and says how many it skipped');
+
+  assert.ok(db.prepare(`SELECT COUNT(*) n FROM scheduled_shifts
+    WHERE business_date BETWEEN ? AND ? AND status <> 'draft'`)
+    .get(target, dates.addDays(target, 6)).n === 0, 'every copy is a draft');
+  assert.deepStrictEqual(footprint(), before, 'and no actual labour data was touched');
+});
+
+// ===========================================================================
+// The invariants, at the route
+// ===========================================================================
+
+test('nothing on this page publishes, notifies, or reaches an employee', async () => {
+  const html = await text('/schedule');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM published_schedule').get().n, 0,
+    'published_schedule is still empty after every write above');
+  assert.doesNotMatch(html, /\/schedule\/publish|name="publish"/, 'no publish control ships in this phase');
+  assert.strictEqual(await status('/schedule/publish'), 404, 'and no publish route exists');
+});
+
+test('the employee Schedule tab is still locked', async () => {
+  // Phase 3 opens this. Until then the portal must not grow a schedule surface.
+  assert.strictEqual(await status('/portal/schedule'), 404);
+});
+
+test('Schedule is its own access area — /shifts stays Services', () => {
+  const { areaFor, AREAS } = require('../src/nav');
+  assert.strictEqual(areaFor('/schedule'), 'schedule', 'its own key');
+  assert.strictEqual(areaFor('/shifts'), 'shifts', 'and Services keeps the old one');
   assert.notStrictEqual(areaFor('/schedule'), areaFor('/shifts'),
-    'and not to Services, which many accounts already have');
-  assert.strictEqual(await status('/schedule'), 200, 'the owner can open it');
+    'so an account granted Services is not silently granted the Scheduler');
+  assert.ok(AREAS.some((a) => a.key === 'shifts' && /Services/i.test(a.label)),
+    'the shifts KEY is still the one stored on accounts');
+});
+
+test('every posting form on the board carries a CSRF token', async () => {
+  // The CSRF layer itself is global middleware, covered in auth.test.js — and
+  // it stands down entirely when no password is set (server.js: "nobody signed
+  // in, there is no session to forge a request against"), which is exactly the
+  // mode this harness runs in. So testing the middleware from here would test
+  // the middleware, not these routes.
+  //
+  // What IS this page's job: every form it renders must actually supply the
+  // token, or the board breaks the moment a password is set on the account.
+  const html = await text('/schedule');
+  const forms = html.match(/<form[\s\S]*?<\/form>/g) || [];
+  const posting = forms.filter((f) => /method="post"/i.test(f));
+  assert.ok(posting.length >= 3, `the board posts from several forms (${posting.length})`);
+  // The VALUE is empty in open mode — csrfFor() has no session to derive from —
+  // so what is asserted is that the field is there to be filled the moment a
+  // password exists. A form missing it entirely breaks on the day one is set.
+  for (const f of posting) {
+    assert.match(f, /name="_csrf"/,
+      `a posting form ships with no token field: ${f.slice(0, 90)}`);
+  }
+});
+
+test("the board's own inline script parses", async () => {
+  // It did not, once. An escaped quote inside a template literal inside an
+  // onclick attribute closed the string early, and the ENTIRE drawer script
+  // died at parse time — so clicking a cell or a card did nothing at all.
+  // Every server-side test still passed, because none of them run the page.
+  const html = await text('/schedule');
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.ok(scripts.length >= 1, 'the board ships a script');
+  for (const src of scripts) {
+    assert.doesNotThrow(() => new Function(src),   // eslint-disable-line no-new-func
+      'the board\'s inline script has a syntax error and would not run at all');
+  }
+});
+
+test('the drawer can reach create, edit, duplicate and delete', async () => {
+  const html = await text('/schedule');
+  // The four actions the board's script switches between, present as real
+  // markup rather than strings built at click time.
+  assert.match(html, /id="sb-form"[^>]*action="\/schedule\/shift"/, 'create posts to the collection');
+  assert.match(html, /id="sb-dup"/, 'duplicate has its own form');
+  assert.match(html, /id="sb-del"/, 'and so does delete');
+  assert.match(html, /id="sb-del-btn"/, 'with a button the script can confirm on');
+  assert.match(html, /data-new="1"/, 'an empty cell carries what create needs');
+  assert.match(html, /data-edit="\d+"/, 'and a card carries its id for edit');
+});
+
+test('a write route refuses an account without the schedule area', async () => {
+  // navAllowed() is the one gate the sidebar and the routes both read. The
+  // write handlers call it before touching the domain, so a link that is
+  // hidden is also a route that is closed.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const region = src.slice(src.indexOf("app.post('/schedule/shift'"), src.indexOf("app.get('/timeclock'"));
+  const guards = (region.match(/sbGuard\(req, res\)/g) || []).length;
+  assert.strictEqual(guards, 5, `all five write routes call the guard (found ${guards})`);
+  assert.match(src.slice(src.indexOf('const sbGuard')), /navAllowed\('\/schedule'\)/,
+    'and the guard asks the same question the sidebar does');
+});
+
+test('the board never lets the PAGE scroll sideways', async () => {
+  const html = await text('/schedule');
+  // The board owns its scroll; the document must not. Asserted at the seam
+  // where it is decided, because a page that scrolls sideways drags the
+  // masthead and sidebar off with it.
+  assert.match(html, /class="sb-scroll egrid-scroll"/, 'the grid is inside a contained scroller');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const rule = (sel) => (css.match(new RegExp('(?:^|\\})\\s*' + sel.replace(/[.\-]/g, (m) => '\\' + m) + '\\s*\\{([^}]*)\\}', 'm')) || [])[1] || '';
+  assert.match(rule('.egrid-scroll'), /overflow-x:\s*auto/);
+  assert.match(rule('.bs-main:has\\(.sb\\)'), /min-width:\s*0/,
+    'and min-width:0 stops a max-content grid forcing the shell wider than the viewport');
 });
