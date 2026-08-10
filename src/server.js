@@ -1425,6 +1425,27 @@ const shiftRollup = db.prepare(`SELECT sh.*, ${SHIFT_ROLLUP_COLS}
 const shiftSales = (x) =>
   (x.total_food_cents + x.total_coffee_cents + x.total_alcohol_cents + x.total_other_cents) || x.server_sales;
 
+/**
+ * Today, as the restaurant means it — the service, not the calendar.
+ *
+ * A page picks between two different questions, and the wrong one is invisible
+ * for twenty hours a day:
+ *
+ *   isoDate(startOfToday())  the CALENDAR date. Right for paperwork — an
+ *                            invoice, an expense, a recurring task, a month to
+ *                            group rows under.
+ *   serviceToday()           the BUSINESS date, with the 4am cutoff. Right for
+ *                            anything about a service: which shift is running,
+ *                            who still owes a floor report, whether the pay
+ *                            period has finished.
+ *
+ * Between midnight and the cutoff the two disagree, and every page that asked
+ * the calendar was quietly looking at tomorrow — exactly when a manager is
+ * closing out. Named rather than inlined so the next page has an obvious right
+ * answer to reach for.
+ */
+const serviceToday = () => TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+
 function shiftState(x, today) {
   if (x.status === 'emailed') return { key: 'sent', label: 'Sent', cls: 's-done' };
   if (x.date === today) return { key: 'open', label: 'Open', cls: 's-sched' };
@@ -1434,7 +1455,11 @@ function shiftState(x, today) {
 }
 
 app.get('/shifts', (req, res) => {
-  const today = isoDate(startOfToday());
+  // shiftState calls a service "Open" when its date is today, and shift rows
+  // carry the BUSINESS date. On the calendar date, a service still on the floor
+  // at 1am stopped being Open and fell through to "Ready to send" — the page
+  // telling a manager the night was finished while people were still working it.
+  const today = serviceToday();
   const thisMonth = today.slice(0, 7);
   const all = shiftRollup.all();
   const st = all.map((x) => ({ x, s: shiftState(x, today) }));
@@ -6159,7 +6184,9 @@ app.get('/portal/schedule/shift/:id', (req, res) => {
 app.get('/portal/specials', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
-  const today = isoDate(startOfToday());
+  // Only the date printed at the top, but a server reading the board at 1am
+  // should see tonight's date on it, not tomorrow's.
+  const today = serviceToday();
   const board = PORTAL.q.specialsAll.all();
   const running = board.filter((b) => !b.eighty_sixed_at);
   const off = board.filter((b) => b.eighty_sixed_at);
@@ -9086,7 +9113,11 @@ app.get('/payroll', (req, res) => {
   // is what took the table from nine columns to six and let it survive a
   // phone without a horizontal scrollbar.
   // =========================================================================
-  const today = isoDate(startOfToday());
+  // Pay-period boundaries are business dates — weekWindowFor draws them and
+  // aggregatePayroll splits overtime on them. On the calendar date, at 1am on a
+  // period's last night, `to > today` went false and the page announced "this
+  // period is finished" while that night was still being worked.
+  const today = serviceToday();
   const period = isPeriod(from, to);
   const sent = period ? sendRecord(from) : null;
   const issues = period ? periodIssues(from, to, rows) : [];
@@ -10292,7 +10323,10 @@ function cashScript() {
 app.get('/cash/new', (req, res) => {
   if (!canWrite()) return res.redirect('/cash');
   const drawer = CASH.q.drawers.all()[0];
-  const today = isoDate(startOfToday());
+  // Both uses are about a service: which daypart actually ran, and the date
+  // stamped on the cash count itself. Counting the drawer at 1am filed it under
+  // tomorrow and found no shift to read the daypart from.
+  const today = serviceToday();
   // Whatever service actually ran today, rather than a guess. A café that
   // never serves dinner should not have to correct the field every night.
   const ran = db.prepare('SELECT daypart FROM shifts WHERE date = ? ORDER BY id DESC LIMIT 1').get(today);
@@ -13345,7 +13379,12 @@ app.get('/staff-portal', (req, res) => {
   if (!navAllowed('/staff-portal')) return res.status(403).send(layout('Not allowed',
     '<div class="bs-blank"><b>Not your area</b><span>Ask the owner to turn on Team for your account.</span></div>'));
 
-  const today = isoDate(startOfToday());
+  // The defect this whole sweep started from. Both the open-shift lookup below
+  // and the live-notes filter are about tonight's service, and shift rows carry
+  // the business date — so after midnight this asked for a shift dated tomorrow,
+  // found none, and rendered "who still owes a floor report" as nobody. Which is
+  // precisely the hour a manager is closing out and needs it.
+  const today = serviceToday();
   const day = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.d || '')) ? req.query.d : today;
 
   const openStock = PORTAL.q.stockOpen.all();
