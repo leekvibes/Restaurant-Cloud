@@ -53,12 +53,22 @@ const html = async (p) => {
 // day and red at night, which is worse than either.
 const iso = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
-// Anchored at midday UTC on today's New York date, then stepped whole days.
-// Noon sits far from both boundaries, so this never slips across a day — or a
-// DST change — the way subtracting hours from "now" can. Correct however the
-// suite is invoked, not just when TZ happens to be set.
+// Anchored at midday UTC on the BUSINESS date, then stepped whole days.
+//
+// The business date, not the calendar one, because /shifts asks the same
+// question: shiftState calls a service "Open" when its date is today, and today
+// there means the service. Anchored on the calendar this fixture was correct
+// for twenty hours a day — and between midnight and the 4am cutoff back(1) WAS
+// tonight, so the shift meant to read "Nobody on it" read "Open" instead and
+// the label vanished from the page. Found at 1am, which is the only time it
+// could be.
+//
+// Noon sits far from both boundaries, so stepping never slips across a day or a
+// DST change the way subtracting hours from "now" can.
 const back = (n) => {
-  const d = new Date(`${iso(new Date())}T12:00:00Z`);
+  const TC = require('../src/timeclock');
+  const biz = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const d = new Date(`${biz}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() - n);
   return d.toISOString().slice(0, 10);
 };
@@ -105,7 +115,7 @@ test.before(async () => {
 
   shift(back(1), 'cafe', 'open');                    // nobody on it
 
-  const open = shift(iso(new Date()), 'cafe', 'open');   // today
+  const open = shift(back(0), 'cafe', 'open');   // tonight's service
   work(open, people.kevin, 'kitchen', 4);
 
   Object.assign(module.exports, { people, sent, ready, review, open });

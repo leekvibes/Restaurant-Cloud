@@ -994,9 +994,133 @@ function writeBreaks(shiftId, rows) {
   for (const r of rows) q.addBreak.run({ scheduled_shift_id: shiftId, ...r });
 }
 
+// ===========================================================================
+// ISSUES — what is wrong with this week, derived on read
+// ===========================================================================
+//
+// Phase 4. Four conditions, computed from the week's current state every time
+// somebody asks. No table, no cache, no dismissal.
+//
+// DERIVED, NOT STORED, and that is the design rather than a shortcut. A week of
+// 50 shifts derives in a quarter of a millisecond; a stored copy would need
+// invalidating from ten different mutation points and would be wrong the first
+// time one was missed. It also settles something Phase 2 left open: duplicate
+// and copy-week deliberately do NOT warn about the overlaps they create,
+// because warning mid-bulk-action is noise. Derived issues catch those on the
+// next render with no route-specific code at all.
+//
+// TWO SEVERITIES, no more:
+//
+//   review   worth a look. Overlap — a real plan a manager may have meant
+//   action   the schedule is wrong under today's rules, or the floor is
+//            looking at something the manager is not
+//
+// Nothing here blocks a save or a publish. Phase 4 makes problems visible; it
+// does not change who is allowed to do what.
+//
+// Returns DATA, not sentences. The route owns the wording, because it has the
+// employee names and the position names already loaded for the board.
+
+/** review = worth a look. action = wrong under today's rules. */
+const ISSUE_SEVERITY = { overlap: 'review', qualification: 'action', 'position-retired': 'action', 'cancelled-live': 'action' };
+
+/**
+ * Every issue in one week.
+ *
+ * @param {string} anyDate  any day in the week to examine
+ * @returns {{week: object, issues: Array}} issues sorted by day, then severity
+ */
+function issuesFor(anyDate) {
+  const week = weekWindowFor(anyDate);
+  const rows = q.inRangeAll.all(week.start, week.end);   // cancelled included
+  const issues = [];
+  const seen = new Set();
+  const add = (i) => { if (!seen.has(i.key)) { seen.add(i.key); issues.push(i); } };
+
+  const live = rows.filter((r) => r.status !== 'cancelled');
+  const held = heldPositionsFor(live.map((r) => r.employee_id));
+  const active = new Set(positions.active.all().map((p) => p.slug));
+
+  for (const s of live) {
+    // --- overlap -----------------------------------------------------------
+    // One clash is ONE issue. overlapsFor asks from a single side, so a pair
+    // reports itself twice — once from A, once from B. Sorting the two ids into
+    // the key collapses them, which is what makes the count mean "how many
+    // clashes" rather than "how many cards are involved in one".
+    for (const other of overlapsFor(s)) {
+      const [a, b] = [s.id, other.id].sort((x, y) => x - y);
+      add({
+        key: `overlap:${a}:${b}`,
+        kind: 'overlap',
+        severity: ISSUE_SEVERITY.overlap,
+        employeeId: s.employee_id,
+        businessDate: s.business_date < other.business_date ? s.business_date : other.business_date,
+        shiftIds: [a, b],
+        // Both sides, so the route can say which two shifts without re-querying.
+        pair: [s.id === a ? s : other, s.id === a ? other : s],
+      });
+    }
+
+    // --- the position is no longer theirs ----------------------------------
+    // Valid when it was made. A role was removed, or the employee's primary
+    // role was rewritten, and neither route looks at the schedule.
+    if (s.employee_id != null && !(held[s.employee_id] || []).includes(s.position)) {
+      add({
+        key: `qualification:${s.id}`,
+        kind: 'qualification',
+        severity: ISSUE_SEVERITY.qualification,
+        employeeId: s.employee_id,
+        businessDate: s.business_date,
+        shiftIds: [s.id],
+        position: s.position,
+      });
+    }
+
+    // --- the position itself was retired -----------------------------------
+    // Only reachable for shifts that already existed when it was deactivated;
+    // new ones are refused at the write. That is what keeps this list finite.
+    if (!active.has(s.position)) {
+      add({
+        key: `position-retired:${s.id}`,
+        kind: 'position-retired',
+        severity: ISSUE_SEVERITY['position-retired'],
+        employeeId: s.employee_id,
+        businessDate: s.business_date,
+        shiftIds: [s.id],
+        position: s.position,
+      });
+    }
+  }
+
+  // --- cancelled, but the floor still sees it -------------------------------
+  // The manager called the shift off and has not published the cancellation, so
+  // two people are reading two different plans. Publishing resolves it — no
+  // separate action needed, which is why there is no resolve workflow.
+  for (const s of rows) {
+    if (s.status !== 'cancelled') continue;
+    if (!q.pubById.get(s.id)) continue;
+    add({
+      key: `cancelled-live:${s.id}`,
+      kind: 'cancelled-live',
+      severity: ISSUE_SEVERITY['cancelled-live'],
+      employeeId: s.employee_id,
+      businessDate: s.business_date,
+      shiftIds: [s.id],
+      position: s.position,
+    });
+  }
+
+  // Action before review, then by day, so the list opens on what matters.
+  const rank = { action: 0, review: 1 };
+  issues.sort((x, y) => rank[x.severity] - rank[y.severity]
+    || String(x.businessDate).localeCompare(String(y.businessDate))
+    || x.key.localeCompare(y.key));
+  return { week, issues };
+}
+
 module.exports = {
   create, edit, cancel, publish, duplicate, unpublish, publishWeek,
-  publishedFingerprint,
+  publishedFingerprint, issuesFor, ISSUE_SEVERITY,
   byId, inRange, weekFor, weekWindowFor, weekTotals,
   publishedFor, overlapsFor, copyWeek,
   spanMinutes, paidMinutes,

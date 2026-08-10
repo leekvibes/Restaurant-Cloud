@@ -4508,9 +4508,81 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .sbk > s { position:absolute; top:6px; right:6px; width:7px; height:7px;
   border-radius:50% !important; text-decoration:none; }
 .sbk { position:relative; }
-.sbk--draft > s   { box-shadow: inset 0 0 0 1.5px currentColor; opacity:.75; }
+/* outline, not box-shadow. `.bs *` sets `box-shadow: none !important` for the
+   whole shell, so the hollow draft ring shipped in Phase 3 and has never once
+   been drawn — the marker rendered as nothing at all rather than as a ring.
+   Found by measuring: a screenshot of a missing 8px ring looks like a design
+   choice. outline is not on that global's list, and a negative offset draws it
+   inside the dot exactly where the inset shadow was meant to. */
+.sbk--draft > s   { outline:1.5px solid currentColor; outline-offset:-1.5px; opacity:.75; }
 .sbk--changed > s { background:currentColor; }
 .sbk--published > s { display:none; }
+
+/* ---- Phase 4: the issue marker ------------------------------------------
+   A THIRD channel, and it had to be. Fill is the position and stays dominant;
+   the <s> dot is publication state. An outline is the only thing left that
+   competes with neither — and because `.bs *` forbids radius inside the shell
+   it stays a crisp rectangle rather than a soft glow.
+
+   Restrained on purpose: a ring, not a wash. The card still reads as its
+   position colour first. Amber for both severities — review and action differ
+   in the panel's words, not by escalating to red, because nothing here is
+   invalid data and `--danger` is reserved for blocking. Action is a heavier
+   line, not a different hue.
+
+   outline rather than box-shadow, for the same reason as the marker above:
+   `.bs *` kills box-shadow inside the shell. A negative offset puts the ring
+   inside the card's own edge so it never changes the grid's metrics. */
+.sbk--iss-review { outline:2px solid var(--warning); outline-offset:-2px; }
+.sbk--iss-action { outline:3px solid var(--warning); outline-offset:-3px; }
+
+.sb-chip--iss {
+  cursor: pointer; font: inherit;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--rule));
+  background: color-mix(in srgb, var(--warning) 9%, var(--paper));
+  color: var(--headline);
+}
+.sb-chip--iss .sb-dot { background: var(--warning); }
+.sb-chip--iss b { font-weight: 700; }
+.sb-chip--iss:hover { background: color-mix(in srgb, var(--warning) 16%, var(--paper)); }
+
+/* The panel. Same mechanics as .drawer, its own open class, because clicking
+   an issue must close this and open the shift drawer — one element cannot be
+   both at once. */
+.sb-iss-scrim {
+  position: fixed; inset: 0; z-index: 60; background: rgba(20, 18, 14, .34);
+  opacity: 0; visibility: hidden; transition: opacity .22s ease-out, visibility .22s;
+}
+body.sb-iss-open .sb-iss-scrim { opacity: 1; visibility: visible; }
+.sb-iss {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 430px; max-width: 92vw; z-index: 61;
+  background: var(--paper); border-left: 1px solid var(--rule);
+  box-shadow: -14px 0 44px rgba(20, 18, 14, .16);
+  display: flex; flex-direction: column;
+  transform: translateX(102%); visibility: hidden;
+  transition: transform .26s cubic-bezier(.32,.72,0,1), visibility .26s;
+}
+body.sb-iss-open .sb-iss { transform: translateX(0); visibility: visible; }
+.sb-iss-b { flex: 1; overflow-y: auto; padding: 6px 0; }
+.sb-iss-r {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; border-bottom: 1px solid var(--rule);
+  padding: 14px 22px; font: inherit;
+}
+.sb-iss-r:hover { background: color-mix(in srgb, var(--warning) 7%, var(--paper)); }
+.sb-iss-k {
+  display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 5px;
+}
+.sb-iss-r--action .sb-iss-k { color: var(--warning); }
+.sb-iss-r b  { display: block; font-size: 14.5px; font-weight: 650; color: var(--headline); }
+.sb-iss-r i  { display: block; font-style: normal; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.sb-iss-r em { display: block; font-style: normal; font-size: 13px; color: var(--body); margin-top: 6px; }
+.sb-iss-f {
+  margin: 0; padding: 14px 22px; border-top: 1px solid var(--rule);
+  font-size: 12.5px; color: var(--muted);
+}
+@media (max-width: 720px) { .sb-iss { width: 100%; max-width: 100%; } }
 .sbk:hover { filter:brightness(1.06); }
 .sbk:focus-visible { outline:2px solid var(--headline); outline-offset:2px; }
 .sbk--green{background:var(--c-green);color:var(--t-green)}

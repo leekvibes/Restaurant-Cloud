@@ -502,7 +502,10 @@ test('changing WHO re-asks what they can work, and never carries a stale positio
   });
   const nodes = { 'sb-pos': el('sb-pos'), 'sb-emp': el('sb-emp') };
   const sandbox = {
-    document: { getElementById: (id) => nodes[id] || null },
+    // querySelector answers null: the slice also carries the Issues panel
+    // wiring, which is absent from this fake page and must simply not throw.
+    document: { getElementById: (id) => nodes[id] || null, querySelector: () => null,
+      body: { classList: { toggle() {} } } },
     Option: function Option(label, value) { return { label, value, disabled: false }; },
   };
   // The slice carries the drawer helper along with the picker; it only needs
@@ -791,4 +794,107 @@ test('the board never lets the PAGE scroll sideways', async () => {
   assert.match(rule('.egrid-scroll'), /overflow-x:\s*auto/);
   assert.match(rule('.bs-main:has\\(.sb\\)'), /min-width:\s*0/,
     'and min-width:0 stops a max-content grid forcing the shell wider than the viewport');
+});
+
+// ===========================================================================
+// PHASE 4 — the Issues surface on the board
+// ===========================================================================
+
+const ISS = () => dates.addDays(week().start, 0);
+
+test('no issues means no Issues chip at all', async () => {
+  const html = await text('/schedule');
+  // Zero does not deserve permanent furniture in the toolbar.
+  if (!/sb-chip--iss/.test(html)) {
+    assert.doesNotMatch(html, /id="sb-iss"/, 'and no panel either');
+    return;
+  }
+  // The board is shared with earlier tests; if something in this week is
+  // genuinely wrong the chip is correct to be there.
+  assert.match(html, /Issues <b>\d+<\/b>/, 'and when it is there it carries a count');
+});
+
+test('an overlap puts a count in the toolbar and one row in the panel', async () => {
+  const day = dates.addDays(week().start, 3);
+  const a = await post('/schedule/shift', { w: day, employee_id: String(E.multi),
+    position: 'server', date: day, start: '16:00', end: '22:00', break_minutes: '' });
+  const b = await post('/schedule/shift', { w: day, employee_id: String(E.multi),
+    position: 'bartender', date: day, start: '17:00', end: '23:00', break_minutes: '' });
+  assert.strictEqual(flashOf(a).err, false);
+  assert.strictEqual(flashOf(b).err, false);
+
+  const html = await text('/schedule');
+  assert.match(html, /sb-chip--iss/, 'the chip appears');
+  const panel = html.slice(html.indexOf('id="sb-iss"'), html.indexOf('class="drawer-scrim"'));
+  assert.match(panel, /Overlap/, 'the panel names the kind');
+  assert.match(panel, /Board Multi/, 'and who it is about');
+  assert.match(panel, /overlaps/, 'and says what clashes with what');
+  assert.match(panel, /REVIEW|Review/, 'overlap is Review, not Action needed');
+
+  // ONE row for THIS clash, not one per card. Asserted on the pair's own key
+  // rather than the panel's total, because this board is shared with every
+  // other test in the file and may legitimately hold other issues.
+  const mine = db.prepare(`SELECT id FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date = ? AND status <> 'cancelled' ORDER BY id`).all(E.multi, day);
+  assert.strictEqual(mine.length, 2, 'both shifts saved');
+  const [lo, hi] = mine.map((r) => r.id);
+  const keyed = (panel.match(new RegExp(`data-key="overlap:${lo}:${hi}"`, 'g')) || []).length;
+  assert.strictEqual(keyed, 1, 'a single clash is a single row, keyed on the sorted pair');
+  assert.ok(!panel.includes(`data-key="overlap:${hi}:${lo}"`),
+    'and never the same pair the other way round');
+
+  // Both cards carry the outline even though the issue is one.
+  for (const id of [lo, hi]) {
+    const card = (html.match(new RegExp(`<button class="sbk[^"]*"[^>]*data-edit="${id}"`)) || [])[0];
+    assert.ok(card && /sbk--iss-review/.test(card), `shift ${id} is outlined`);
+  }
+});
+
+test('the panel lets a manager reach the shift, and says there is nothing to tick off', async () => {
+  const html = await text('/schedule');
+  const panel = html.slice(html.indexOf('id="sb-iss"'), html.indexOf('class="drawer-scrim"'));
+  assert.match(panel, /data-goto="\d+"/, 'each row points at a shift');
+  assert.match(panel, /nothing here to tick off/i, 'and there is no resolve workflow');
+  // The click handler finds the card by the attribute the board already uses.
+  assert.match(html, /\.sbk\[data-edit="' \+ row\.dataset\.goto \+ '"\]/,
+    'click-through reuses data-edit rather than new state');
+});
+
+test('none of it blocks publishing', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /sb-chip--iss/, 'issues are present');
+  assert.match(html, /\/schedule\/publish-week/, 'and Publish week is still there');
+  const day = dates.addDays(week().start, 3);
+  const res = await post('/schedule/publish-week', { w: day });
+  assert.strictEqual(flashOf(res).err, false, 'publishing a week with issues is allowed');
+});
+
+test('the issue outline never replaces the position colour or the publish marker', async () => {
+  const html = await text('/schedule');
+  const card = (html.match(/<button class="sbk sbk--\w+ sbk--[\w-]+ sbk--iss-\w+"[\s\S]*?<\/button>/) || [])[0];
+  assert.ok(card, 'a card carries all three');
+  assert.match(card, /sbk--(green|plum|amber|brick|blue|teal|indigo|rose|orange|slate)/,
+    'position colour survives');
+  assert.match(card, /sbk--(draft|changed|published)/, 'publication state survives');
+  assert.match(card, /<s aria-hidden="true">/, 'and the publication dot is still drawn');
+});
+
+test('no Issues data reaches the employee portal', async () => {
+  // Issues name coworkers and their hours. The portal must never carry any of
+  // it, in rendered text or in page source.
+  const cookie = await (async () => {
+    const r = await fetch(`${BASE}/tips/start`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ pin: '5204' }),
+    });
+    return (r.headers.get('set-cookie') || '').split(';')[0];
+  })();
+  for (const p of ['/portal/schedule', '/portal/schedule?v=all', '/portal']) {
+    const html = await (await fetch(BASE + p, { headers: { cookie } })).text();
+    for (const leak of ['sb-iss', 'Action needed', 'overlaps', 'no longer one of',
+      'issuesFor', 'sbk--iss']) {
+      assert.ok(!html.includes(leak), `${p} does not leak "${leak}"`);
+    }
+  }
 });

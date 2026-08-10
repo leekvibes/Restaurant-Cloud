@@ -497,14 +497,15 @@ test('the admin portal survives an OPEN shift with people on it', async () => {
   // so all of them passed while the owner could not open the page.
   //
   // The condition, not the symptom, is what is pinned here.
-  // The CALENDAR date, because that is what the route asks shifts for:
-  //   server.js  const today = isoDate(startOfToday())
-  // The rest of the clock uses the BUSINESS date, and between midnight and the
-  // 4am cutoff those differ — which is a real defect on this page, reported
-  // separately. It is not what this test is about: this one exists to prove the
-  // takesTips crash cannot come back, so it uses the date the route itself
-  // uses and stays green at 00:14 as well as at noon.
-  const d = isoDate(startOfToday());
+  // The BUSINESS date, because that is what the route asks shifts for.
+  //
+  // This line used to be the calendar date, matching a defect on that page: it
+  // looked up tonight's shift by the calendar day, so between midnight and the
+  // 4am cutoff it asked for tomorrow, found nothing, and rendered "who still
+  // owes a floor report" as nobody. That is fixed, and this fixture follows the
+  // route rather than the wall clock — otherwise it goes red every night
+  // between midnight and four, which is exactly when it did.
+  const d = today();
   const w = new Database(DB);
   const sid = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES (?, 'dinner', 'open', datetime('now'))")
     .run(d).lastInsertRowid;

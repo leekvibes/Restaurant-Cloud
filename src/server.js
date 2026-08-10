@@ -17961,11 +17961,19 @@ app.get('/schedule', (req, res) => {
   // Position text is always present. Colour is never the only identifier, and
   // the publication marker is a shape rather than a second colour, so it never
   // competes with the position for the eye.
-  const card = (s) => { const st = pubOf(s); return `<button class="sbk sbk--${sbColor(s.position)} sbk--${st}" type="button"
-      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}, ${STATE_WORD[st]}">
+  // The issue outline is a THIRD channel, deliberately. Fill is the position and
+  // stays dominant; the <s> marker is publication state; an outline is the only
+  // thing left that does not compete with either.
+  const card = (s) => {
+    const st = pubOf(s);
+    const iss = issueOn.get(s.id);
+    return `<button class="sbk sbk--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}" type="button"
+      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}, ${STATE_WORD[st]}${
+      iss ? `, needs review` : ''}">
     <b>${esc(posName(s.position))}</b><i>${esc(sbTime(s.starts_at))}–${esc(sbTime(s.ends_at))}</i>
     <s aria-hidden="true"></s>
-  </button>`; };
+  </button>`;
+  };
 
   const row = (e) => {
     const t = totals.byEmployee[String(e.id)] || { paidMinutes: 0, count: 0 };
@@ -18027,6 +18035,47 @@ app.get('/schedule', (req, res) => {
     .map(([id, slugs]) => [id, slugs.filter((s) => live.has(s))]));
   const posNames = Object.fromEntries(positions.all.all().map((p) => [p.slug, p.name]));
 
+  // ---- Phase 4: what is wrong with this week -------------------------------
+  // Derived on every render, so a conflict introduced by duplicate, copy-week
+  // or an edit made elsewhere is caught without any route knowing the engine
+  // exists. The domain returns data; the wording lives here, where the employee
+  // and position names are already loaded for the board.
+  const { issues } = SCH.issuesFor(week.start);
+  const whoName = (id) => (byId.get(id) || {}).name || 'Someone';
+  const dayShort = (d) => {
+    const label = TC.dayLabel(d);                      // 'Tuesday, Aug 11'
+    return `${label.slice(0, 3)} ${label.replace(/^\w+,\s*/, '')}`;
+  };
+  const shiftPhrase = (s) => `${posName(s.position)} ${sbTime(s.starts_at)}–${sbTime(s.ends_at)}`;
+  const ISSUE_TITLE = {
+    overlap: 'Overlap',
+    qualification: 'Position no longer assigned',
+    'position-retired': 'Position retired',
+    'cancelled-live': 'Cancellation not published',
+  };
+  const issueLine = (i) => {
+    const who = whoName(i.employeeId);
+    if (i.kind === 'overlap') {
+      const [a, b] = i.pair;
+      return `${esc(shiftPhrase(a))} overlaps ${esc(shiftPhrase(b))}`;
+    }
+    if (i.kind === 'qualification') {
+      return `${esc(posName(i.position))} is no longer one of ${esc(who)}&rsquo;s assigned positions`;
+    }
+    if (i.kind === 'position-retired') {
+      return `${esc(posName(i.position))} is no longer an active position`;
+    }
+    return `This cancelled shift is still visible to ${esc(who)}`;
+  };
+  // Worst severity per card, for the outline. A shift in two issues outlines
+  // once, at the higher of the two.
+  const issueOn = new Map();
+  for (const i of issues) {
+    for (const id of i.shiftIds) {
+      if (i.severity === 'action' || !issueOn.has(id)) issueOn.set(id, i.severity);
+    }
+  }
+
   const body = `<div class="bs-page">
     ${flash(req)}
     <div class="bs-head"><h1>Schedule</h1></div>
@@ -18056,6 +18105,9 @@ app.get('/schedule', (req, res) => {
             <span class="sb-chip sb-chip--${wk.tone}" title="${esc(wk.title)}">
               <span class="sb-dot" aria-hidden="true"></span>${esc(wk.label)}${
                 wk.sub ? `<i> &middot; ${esc(wk.sub)}</i>` : ''}</span>
+            ${issues.length ? `<button class="sb-chip sb-chip--iss" type="button" id="sb-iss-open"
+              title="What needs looking at in this week">
+              <span class="sb-dot" aria-hidden="true"></span>Issues <b>${issues.length}</b></button>` : ''}
           </div>
         </div>
 
@@ -18081,6 +18133,27 @@ app.get('/schedule', (req, res) => {
         </div>
       </div>
     </div>
+
+    ${issues.length ? `
+    <div class="sb-iss-scrim" onclick="sbIssues(false)"></div>
+    <aside class="sb-iss" id="sb-iss" aria-label="Issues in this week" aria-hidden="true">
+      <div class="drawer-h">
+        <div><div class="drawer-t">Issues</div>
+          <div class="drawer-s">${issues.length} to look at this week. None of them stop you publishing.</div></div>
+        <button class="drawer-x" type="button" onclick="sbIssues(false)" aria-label="Close">&#10005;</button>
+      </div>
+      <div class="sb-iss-b">
+        ${issues.map((i) => `<button class="sb-iss-r sb-iss-r--${i.severity}" type="button"
+            data-goto="${i.shiftIds[0]}" data-key="${esc(i.key)}">
+          <span class="sb-iss-k">${i.severity === 'action' ? 'Action needed' : 'Review'}</span>
+          <b>${esc(ISSUE_TITLE[i.kind])}</b>
+          <i>${esc(whoName(i.employeeId))} &middot; ${esc(dayShort(i.businessDate))}</i>
+          <em>${issueLine(i)}</em>
+        </button>`).join('')}
+      </div>
+      <p class="sb-iss-f">Fix the schedule and an issue goes away on its own &mdash;
+        there is nothing here to tick off.</p>
+    </aside>` : ''}
 
     <div class="drawer-scrim" onclick="sbDrawer(false)"></div>
     <aside class="drawer" id="sb-drawer" aria-label="Shift">
@@ -18195,6 +18268,32 @@ app.get('/schedule', (req, res) => {
           sbPositions(empSel.value, list.indexOf(want) > -1 ? want : null);
         });
 
+        // The Issues panel is its own overlay rather than a second state of the
+        // shift drawer, because clicking an issue has to CLOSE it and open the
+        // drawer on the offending shift — one element cannot be both.
+        function sbIssues(open) {
+          var p = document.getElementById('sb-iss');
+          if (!p) return;
+          document.body.classList.toggle('sb-iss-open', !!open);
+          p.setAttribute('aria-hidden', open ? 'false' : 'true');
+        }
+        window.sbIssues = sbIssues;
+        var issOpen = document.getElementById('sb-iss-open');
+        if (issOpen) issOpen.addEventListener('click', function () { sbIssues(true); });
+
+        // Click an issue, land on the shift. No resolve workflow — editing or
+        // publishing the schedule is what makes an issue go away.
+        var issBody = document.querySelector('.sb-iss-b');
+        if (issBody) issBody.addEventListener('click', function (ev) {
+          var row = ev.target.closest && ev.target.closest('[data-goto]');
+          if (!row) return;
+          var card = document.querySelector('.sbk[data-edit="' + row.dataset.goto + '"]');
+          sbIssues(false);
+          if (!card) return;
+          card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          card.click();
+        });
+
         function sbDrawer(open) {
           document.body.classList.toggle('drawer-open', !!open);
           if (open) setTimeout(function () {
@@ -18282,7 +18381,10 @@ app.get('/schedule', (req, res) => {
           }
         });
 
-        document.addEventListener('keydown', function (e) { if (e.key === 'Escape') sbDrawer(false); });
+        document.addEventListener('keydown', function (e) {
+          if (e.key !== 'Escape') return;
+          sbDrawer(false); sbIssues(false);
+        });
       }());
     </script>
     <form method="post" id="sb-pub-f" style="display:none">
