@@ -727,3 +727,75 @@ test('INV1: duplicate and copyWeek write nothing to time, work or payroll', () =
   assert.deepStrictEqual(footprint(), before,
     'planning at any scale is still only a plan');
 });
+
+// ===========================================================================
+// RETIRED POSITIONS — prevent what is new, preserve what exists
+// ===========================================================================
+//
+// heldPositions answers only "does this person do that job" and deliberately
+// never joins positions, so before this a deactivated position was still fully
+// schedulable: the qualification rule passed and nothing else looked. New work
+// could be planned into a job the restaurant had retired.
+
+const RETIRED = 'sched-retired';
+
+test('a retired position cannot be scheduled, but a shift that has one survives', () => {
+  const { positions } = require('../src/db');
+  db.prepare("INSERT OR IGNORE INTO positions (slug, name, kind, sort, active) VALUES (?, 'Sched Retired', 'support', 900, 1)")
+    .run(RETIRED);
+  const pos = positions.bySlug.get(RETIRED);
+  db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)')
+    .run(SERVER, RETIRED, 1200);
+  const day = addDays(TODAY, 40);
+
+  // While it is still a live position, this is an ordinary shift.
+  const made = S.create({
+    employeeId: SERVER, position: RETIRED,
+    startsAt: at(day, '10:00'), endsAt: at(day, '14:00'),
+  });
+  assert.strictEqual(made.position, RETIRED);
+
+  positions.setActive.run(0, pos.id);
+  try {
+    // NEW work into the retired job is refused.
+    assert.throws(() => S.create({
+      employeeId: SERVER, position: RETIRED,
+      startsAt: at(day, '15:00'), endsAt: at(day, '18:00'),
+    }), (e) => e.code === 'position-inactive', 'creating into a retired position is refused');
+
+    // Duplicating is a new assignment too, so it is refused for the same reason.
+    assert.throws(() => S.duplicate(made.id),
+      (e) => e.code === 'position-inactive', 'and duplicating one is also new work');
+
+    // But the shift that already carries it stays editable. A manager must be
+    // able to move its times without being forced to re-assign the job in the
+    // same motion — otherwise deactivating a position strands every shift on it.
+    const moved = S.edit(made.id, { startsAt: at(day, '11:00'), endsAt: at(day, '15:00') });
+    assert.strictEqual(moved.position, RETIRED, 'the retired position is preserved');
+    // Stamps are UTC, so compare against the row rather than the local input.
+    assert.notStrictEqual(moved.starts_at, made.starts_at, 'and the edit went through');
+
+    // Choosing a DIFFERENT retired position is still a new assignment.
+    const other = S.create({
+      employeeId: SERVER, position: 'server',
+      startsAt: at(day, '19:00'), endsAt: at(day, '22:00'),
+    });
+    assert.throws(() => S.edit(other.id, { position: RETIRED }),
+      (e) => e.code === 'position-inactive',
+      'moving a shift ONTO a retired position is refused');
+
+    S.cancel(other.id);
+  } finally {
+    positions.setActive.run(1, pos.id);
+    S.cancel(made.id);
+  }
+});
+
+test('a position that does not exist at all is refused', () => {
+  const day = addDays(TODAY, 41);
+  assert.throws(() => S.create({
+    employeeId: SERVER, position: 'no-such-position',
+    startsAt: at(day, '10:00'), endsAt: at(day, '14:00'),
+  }), (e) => e.code === 'position' || e.code === 'qualification',
+  'an unknown slug never reaches the database');
+});

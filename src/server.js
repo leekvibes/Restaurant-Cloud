@@ -18015,7 +18015,16 @@ app.get('/schedule', (req, res) => {
   // refused is a worse rule than no rule; the picker offers what will be
   // accepted instead. Same source as the server's own check, so the two can
   // never disagree.
-  const held = SCH.heldPositionsFor([...byId.keys()]);
+  // Held AND still run by the restaurant. heldPositions answers only "does this
+  // person do that job" — it never joins positions — so without this filter the
+  // picker offered retired positions and the server accepted them. A shift that
+  // already carries a retired position keeps it: sbPositions' keep argument
+  // puts it back when that shift is opened, which is the same carve-out
+  // validate() makes.
+  const live = new Set(positions.active.all().map((p) => p.slug));
+  const heldAll = SCH.heldPositionsFor([...byId.keys()]);
+  const held = Object.fromEntries(Object.entries(heldAll)
+    .map(([id, slugs]) => [id, slugs.filter((s) => live.has(s))]));
   const posNames = Object.fromEntries(positions.all.all().map((p) => [p.slug, p.name]));
 
   const body = `<div class="bs-page">

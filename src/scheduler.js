@@ -27,7 +27,7 @@
 // server — and they must not share a word in conversation either, which is why
 // the owner-facing page for the first is called Services.
 
-const { db } = require('./db');
+const { db, positions } = require('./db');
 const { isoDate, addDays } = require('./dates');
 const TC = require('./timeclock');
 // Read only, and only periodFor(). The pay period owns the definition of a
@@ -299,8 +299,28 @@ function toUtc(local) {
   return utc;
 }
 
-function validate({ employeeId, position, startsAt, endsAt }) {
+function validate({ employeeId, position, startsAt, endsAt, keepPosition }) {
   if (!position) throw new ScheduleError('Choose the position for this shift.', 'position');
+
+  // The position has to be one the restaurant still runs.
+  //
+  // heldPositions answers "does this person do that job" and deliberately never
+  // joins positions, so before this check a deactivated position was still
+  // schedulable — the qualification rule passed and nothing else looked. New
+  // work could be planned into a job that had been retired.
+  //
+  // keepPosition is the position a shift ALREADY carries. An existing shift
+  // whose position was retired underneath it stays editable: a manager must be
+  // able to move its times, or fix the person, without being forced to
+  // re-assign the job in the same motion. Choosing a different inactive
+  // position is still refused, because that is a new assignment. Deactivation
+  // preserves what exists and prevents what is new — the same rule the
+  // scheduler already applies to inactive employees.
+  const known = positions.bySlug.get(position);
+  if (!known) throw new ScheduleError('That position no longer exists.', 'position');
+  if (!known.active && position !== keepPosition) {
+    throw new ScheduleError(`${known.name} is not an active position any more.`, 'position-inactive');
+  }
 
   // An open shift has no employee yet, and that is legal — it is how a shift
   // waits to be claimed. What is not legal is naming somebody who cannot work.
@@ -451,7 +471,10 @@ function edit(id, patch) {
     ? (patch.employeeId === '' || patch.employeeId == null ? null : Number(patch.employeeId))
     : row.employee_id;
   const position = patch.position !== undefined ? String(patch.position).trim() : row.position;
-  validate({ employeeId, position, startsAt, endsAt });
+  // keepPosition: this shift's existing job stays legal on edit even if it has
+  // since been retired, so a stale shift can still be fixed. duplicate() and
+  // copyWeek() pass nothing, because both write NEW assignments.
+  validate({ employeeId, position, startsAt, endsAt, keepPosition: row.position });
 
   // Re-stamped only when the START actually moves. An edit to the note or the
   // end time leaves the service alone, and a service-window change elsewhere
