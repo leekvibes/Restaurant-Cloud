@@ -515,10 +515,15 @@ async function sendTest(employeeId) {
  * throws: a notification failing must not fail the action that raised it.
  */
 function adminNotify(kind, title, { body = null, href = null } = {}) {
+  // Best effort, still — a floor report must not fail because the bell did.
+  // But SILENTLY best effort is how "I get no notifications" becomes
+  // unanswerable: every failure was swallowed whole, so there was nothing to
+  // find afterwards. The event is the record; if it cannot be written, say so
+  // where somebody reading the logs will see it.
   try { q.adminAdd.run({ kind, title, body, href }); }
-  catch { /* best effort — the action that raised it still stands */ }
+  catch (e) { console.error('[notify] could not record', kind, '-', e && e.message); }
   try { sendAdminPush({ title, body: body || '', url: href || '/notifications' }); }
-  catch { /* push is best effort; the event is already recorded */ }
+  catch (e) { console.error('[notify] push failed for', kind, '-', e && e.message); }
 }
 
 /**
