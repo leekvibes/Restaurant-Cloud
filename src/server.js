@@ -5475,8 +5475,24 @@ app.get('/notifications', (req, res) => {
     <script>
     (function(){
       var box=document.getElementById('anpush'); if(!box) return;
-      if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
       var btn=document.getElementById('anpush-b'), t=document.getElementById('anpush-t'), s=document.getElementById('anpush-s'), test=document.getElementById('anpush-test');
+      // iPhone gives web push ONLY to an app added to the Home Screen. In an
+      // ordinary Safari tab PushManager simply is not there — and this used to
+      // return here, so the whole panel stayed hidden: no button, no sentence,
+      // nothing. The owner got alerts on a laptop, nothing on a phone, and the
+      // page offered no reason. Say the one thing that fixes it.
+      var apis = ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window);
+      if(!apis){
+        var ios = /iPad|iPhone|iPod/.test(navigator.userAgent)
+          || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+        var standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
+        box.hidden=false; btn.hidden=true; if(test) test.hidden=true;
+        t.textContent='Notifications on this phone';
+        s.textContent = (ios && !standalone)
+          ? 'Add ZWIN to your Home Screen first — tap Share, then "Add to Home Screen", open it from there and come back to this page. iPhone only sends notifications to an installed app.'
+          : 'This browser cannot receive notifications. Try Chrome or Safari, or add ZWIN to your Home Screen.';
+        return;
+      }
       var vapid=box.getAttribute('data-vapid'); box.hidden=false;
       // No key on the server means subscribe() cannot succeed — it throws on a
       // zero-length applicationServerKey. Offering the button anyway spends the

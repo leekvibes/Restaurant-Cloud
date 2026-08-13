@@ -1938,3 +1938,26 @@ test('signing back in mid-shift returns to the clock, not the home', async () =>
     'and told plainly that they have not finished');
   w.close();
 });
+
+test('the notifications panel explains itself on a phone that cannot subscribe', async () => {
+  // iPhone gives web push ONLY to a Home Screen app. In an ordinary Safari tab
+  // PushManager is absent, and the panel used to return on that check — so the
+  // owner saw no button and no reason, just nothing, and concluded
+  // notifications were broken. The page must say the one thing that fixes it.
+  const html = await (await fetch(BASE + '/notifications')).text();
+  const i = html.indexOf("getElementById('anpush')");
+  assert.ok(i > -1, 'the panel is on the page');
+  const script = html.slice(i, html.indexOf('</script>', i));
+
+  assert.match(script, /Add ZWIN to your Home Screen first/,
+    'it names the actual fix rather than failing silently');
+  assert.match(script, /iPad\|iPhone\|iPod/, 'and works out that it is on an iPhone');
+  assert.match(script, /display-mode: standalone/,
+    'only saying it when NOT already installed, or it would nag the app it is running in');
+  assert.match(script, /box\.hidden=false/,
+    'the panel is revealed to carry the message — the old code left it hidden');
+
+  // The two states that already worked must not have regressed.
+  assert.match(script, /not set up on the server yet/, 'no keys on the server still says so');
+  assert.match(script, /Blocked in your settings/, 'a denied permission still says so');
+});
