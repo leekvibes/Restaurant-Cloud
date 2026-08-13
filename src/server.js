@@ -3013,13 +3013,41 @@ function tipsToken(empId) {
   return `${empId}.${exp}.${sign(`tips:${empId}:${exp}`)}`;
 }
 
+/**
+ * How long past expiry a session is still honoured FOR SOMEBODY ON THE CLOCK.
+ *
+ * The session is 45 minutes, which is right for the tips form on a shared
+ * phone. It is wrong for a shift. Somebody clocks in at 4pm, puts the phone in
+ * an apron for seven hours, wakes it on the clock screen at 11pm and taps
+ * Confirm — and the punch was posting against a session that died at 4:45.
+ *
+ * The window is one long shift, so a token that has been dead since yesterday
+ * is still refused. It applies ONLY while that employee has an open punch: the
+ * moment they are off the clock the ordinary 45 minutes is all there is.
+ */
+const CLOCK_GRACE = 16 * 60 * 60 * 1000;
+
+/**
+ * The employee this token names, or null.
+ *
+ * A validly signed but expired token is accepted for one purpose only: the
+ * person it names is still on the clock. Being on the clock is evidence they
+ * are at work, and stranding somebody mid-shift is worse than the risk this
+ * trades against — a punch that never closes reaches neither the shift, nor the
+ * tip pool, nor payroll, and somebody has to unpick it by hand afterwards.
+ * The signature is still required, so this is the same person's own session,
+ * only older than 45 minutes.
+ */
 function readTipsToken(raw) {
   const [id, exp, sig] = String(raw || '').split('.');
   if (!id || !exp || !sig) return null;
   if (sig !== sign(`tips:${id}:${exp}`)) return null;
-  if (Number(exp) < Date.now()) return null;
   const emp = q.employee.get(Number(id));
-  return emp && emp.active ? emp : null;
+  if (!emp || !emp.active) return null;
+  if (Number(exp) >= Date.now()) return emp;
+  const late = Date.now() - Number(exp);
+  if (late > CLOCK_GRACE) return null;
+  return TC.q.active.get(emp.id) ? emp : null;
 }
 
 /** The jobs this person can report, from what you've assigned them in Staff. */
@@ -3270,10 +3298,24 @@ let portalShape = null;
 
 function requirePortal(req, res) {
   const emp = portalUser(req);
-  if (emp) { const who = portalWho(emp); portalShape = who.shape; return who; }
+  if (emp) {
+    const who = portalWho(emp);
+    portalShape = who.shape;
+    // Anybody on the clock keeps their session, on ANY portal request rather
+    // than the three routes that used to do it. A shift is not 45 minutes long.
+    if (TC.q.active.get(emp.id)) setPortalCookie(req, res, emp.id);
+    return who;
+  }
   portalShape = null;
-  res.redirect('/tips?err=1&msg=' + encodeURIComponent(
-    'That timed out — enter your PIN again. Nothing you sent was lost.'));
+  // "Nothing you sent was lost" was true for a GET and a lie for a POST. The
+  // POST body is gone the moment this redirect goes out, so a clock-out tapped
+  // against a dead session vanished — and the sentence told the person it had
+  // not. They entered their PIN, landed on the portal, and walked out still on
+  // the clock believing they had finished. That is the complaint this fixes.
+  const lost = req.method !== 'GET';
+  res.redirect('/tips?err=1&msg=' + encodeURIComponent(lost
+    ? 'You were signed out, so that did NOT go through. Enter your PIN and try it again.'
+    : 'That timed out — enter your PIN again.'));
   return null;
 }
 
@@ -8373,6 +8415,14 @@ app.post('/tips/start', (req, res) => {
   // a cook it holds no form at all. The submission flow behind it is
   // untouched: it still takes the same signed token from the same field.
   setPortalCookie(req, res, matches[0].id);
+  // Straight back to the clock if that is where they were sent away from, and
+  // still on the clock now. Landing on the portal home after being bounced out
+  // of a clock-out is what let somebody think the job was done — the home says
+  // nothing about whether they are still working.
+  if (TC.q.active.get(matches[0].id)) {
+    return res.redirect('/portal/clock?err=' + encodeURIComponent(
+      'You are still on the clock. Tap Clock out to finish.'));
+  }
   res.redirect('/portal');
 });
 

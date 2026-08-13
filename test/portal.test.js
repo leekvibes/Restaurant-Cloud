@@ -1841,3 +1841,100 @@ test('an employee stock report never reaches the Home board', async () => {
   assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM portal_specials WHERE name='Qz Private shortage'").get().n,
     0, 'and it created no official 86');
 });
+
+// ===========================================================================
+// A SHIFT IS NOT 45 MINUTES LONG
+// ===========================================================================
+//
+// The reported bug, and it produced the worst possible symptom: staff insisting
+// they had clocked out, and the record showing them still on.
+//
+// Somebody clocks in at 4pm. The portal session is 45 minutes — right for the
+// tips form on a shared phone, wrong for a shift. The phone goes in an apron.
+// At 11pm they wake it on the still-rendered clock screen and tap Confirm. The
+// POST arrives with a dead cookie, requirePortal bounces it to the PIN screen,
+// and the body is gone — no punch, no error they would recognise as failure.
+// The message even said "Nothing you sent was lost", which is true of a GET and
+// a lie about a POST. They entered their PIN, landed on the portal home, and
+// walked out still on the clock believing they had finished.
+
+const crypto = require('node:crypto');
+
+/** A validly signed portal cookie with an expiry in the past. */
+const agedCookie = (empId, ageMs) => {
+  const exp = Date.now() - ageMs;
+  const sig = crypto.createHmac('sha256', process.env.SESSION_SECRET || 'insecure-dev-secret')
+    .update(`tips:${empId}:${exp}`).digest('hex').slice(0, 32);
+  return `zwin_portal=${empId}.${exp}.${sig}`;
+};
+
+test('a clock-out still lands when the session died mid-shift', async () => {
+  const w = new Database(DB);
+  const id = w.prepare(`INSERT INTO employees (name, role, pin, hourly_rate_cents, active)
+    VALUES ('Long Shift', 'server', '7401', 1500, 1)`).run().lastInsertRowid;
+  const cookie = await signIn('7401');
+  await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+  const entry = () => w.prepare('SELECT status, clock_out_at FROM time_entries WHERE employee_id = ?').get(id);
+  assert.strictEqual(entry().status, 'active', 'on the clock');
+
+  // Seven hours later, on a session that expired six hours ago.
+  const res = await form('/portal/clock/out', {}, { cookie: agedCookie(id, 7 * 3600e3) });
+  assert.strictEqual(res.status, 302);
+  assert.ok(!/\/tips/.test(res.headers.get('location') || ''),
+    'not bounced to the PIN screen');
+  assert.strictEqual(entry().status, 'complete', 'the punch closed');
+  assert.ok(entry().clock_out_at, 'and it has a clock-out time');
+  w.close();
+});
+
+test('the grace is only for somebody on the clock, and only for one shift', async () => {
+  const w = new Database(DB);
+  const on = w.prepare(`INSERT INTO employees (name, role, pin, hourly_rate_cents, active)
+    VALUES ('Still On', 'server', '7402', 1500, 1)`).run().lastInsertRowid;
+  const off = w.prepare(`INSERT INTO employees (name, role, pin, hourly_rate_cents, active)
+    VALUES ('Gone Home', 'server', '7403', 1500, 1)`).run().lastInsertRowid;
+  const cookie = await signIn('7402');
+  await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+
+  const reaches = async (c) => (await fetch(BASE + '/portal/clock',
+    { redirect: 'manual', headers: { cookie: c } })).status === 200;
+
+  assert.ok(await reaches(agedCookie(on, 7 * 3600e3)),
+    'on the clock, hours past expiry — let through, or the shift cannot be ended');
+  assert.ok(!(await reaches(agedCookie(on, 20 * 3600e3))),
+    'but not a day later: the window is one long shift, not a permanent session');
+  assert.ok(!(await reaches(agedCookie(off, 2 * 3600e3))),
+    'and never for somebody who is not on the clock — the 45 minutes still stands');
+
+  // The signature is still the whole basis of the thing.
+  const forged = agedCookie(on, 7 * 3600e3).replace(/.$/, (c) => (c === '0' ? '1' : '0'));
+  assert.ok(!(await reaches(forged)), 'a tampered token is refused however recent');
+  w.close();
+});
+
+test('an expired POST is never described as saved', async () => {
+  const w = new Database(DB);
+  const id = w.prepare(`INSERT INTO employees (name, role, pin, hourly_rate_cents, active)
+    VALUES ('Bounced', 'server', '7404', 1500, 1)`).run().lastInsertRowid;
+  // Not on the clock, so no grace: this POST genuinely is discarded.
+  const res = await form('/portal/clock/out', {}, { cookie: agedCookie(id, 2 * 3600e3) });
+  const msg = decodeURIComponent((res.headers.get('location') || '').split('msg=')[1] || '');
+  assert.match(msg, /did NOT go through/,
+    'a dropped POST says so — "nothing was lost" was the sentence that made staff think it worked');
+  assert.doesNotMatch(msg, /Nothing you sent was lost/);
+  w.close();
+});
+
+test('signing back in mid-shift returns to the clock, not the home', async () => {
+  const w = new Database(DB);
+  w.prepare(`INSERT INTO employees (name, role, pin, hourly_rate_cents, active)
+    VALUES ('Back Again', 'server', '7405', 1500, 1)`).run();
+  const cookie = await signIn('7405');
+  await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+  const res = await form('/tips/start', { pin: '7405' });
+  const loc = res.headers.get('location') || '';
+  assert.match(loc, /^\/portal\/clock/, 'straight back to the clock');
+  assert.match(decodeURIComponent(loc), /still on the clock/i,
+    'and told plainly that they have not finished');
+  w.close();
+});
