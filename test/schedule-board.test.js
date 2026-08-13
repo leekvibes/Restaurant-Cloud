@@ -492,7 +492,9 @@ test('changing WHO re-asks what they can work, and never carries a stale positio
   // From `var shifts` — the context line reads that array, so a slice that
   // starts below it runs against a name that does not exist yet.
   const from = html.indexOf('var shifts =');
-  const src = html.slice(from, html.indexOf("document.querySelector('.sb-grid')", from));
+  // Ends at the shared click handler — a stable marker that does not move when
+  // the grid selector is used elsewhere.
+  const src = html.slice(from, html.indexOf('var sbTargets', from));
   assert.ok(from > -1 && src.includes('function sbPositions'), 'found the picker in the page');
 
   const el = (id) => ({

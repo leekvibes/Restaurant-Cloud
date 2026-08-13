@@ -18142,9 +18142,109 @@ app.get('/schedule', (req, res) => {
     }
   }
 
+  // ---- Phase 5: the manager's phone -----------------------------------------
+  //
+  // A purpose-built operational list, not the seven-column grid squeezed down.
+  // Both views render; CSS decides which one a viewport gets, and ?v= overrides
+  // in either direction. No user-agent sniffing, one URL, and a linkable,
+  // back-button-correct, testable choice.
+  //
+  // Today is ALWAYS the current business date, independent of whichever week the
+  // board is parked on — "today" that moves when you page the board would be a
+  // different word.
+  const sbView = ['today', 'week'].includes(req.query.v) ? req.query.v : 'auto';
+  const mToday = serviceToday();
+  const mEnd = addDays(mToday, 7);
+  const mRows = SCH.inRange(mToday, mEnd);
+
+  // Issues for every week the range touches — the engine is week-scoped and
+  // eight days can straddle two. Merged by key, which is why the keys are
+  // deterministic.
+  const mIssue = new Map();
+  for (const anchor of [...new Set([mToday, mEnd].map((d) => SCH.weekWindowFor(d).start))]) {
+    for (const i of SCH.issuesFor(anchor).issues) {
+      for (const id of i.shiftIds) {
+        if (i.severity === 'action' || !mIssue.has(id)) mIssue.set(id, i.severity);
+      }
+    }
+  }
+
+  const mByDay = new Map();
+  for (const s of mRows) {
+    if (!mByDay.has(s.business_date)) mByDay.set(s.business_date, []);
+    mByDay.get(s.business_date).push(s);
+  }
+  for (const list of mByDay.values()) list.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+
+  const mTot = SCH.weekTotals(mByDay.get(mToday) || []);
+  const mIssuesToday = (mByDay.get(mToday) || []).filter((s) => mIssue.has(s.id)).length;
+
+  // One card. Time first, then who, then the position — the order a manager
+  // reads. Position colour stays the fill; publication is the same <s> marker;
+  // an issue is the same amber outline. No fourth encoding invented here.
+  const mCard = (s) => {
+    const st = pubOf(s);
+    const iss = mIssue.get(s.id);
+    const who = s.employee_id == null ? 'Open shift' : (byId.get(s.employee_id) || {}).name || 'Someone';
+    return `<button class="sbm-k sbm-k--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}"
+        type="button" data-edit="${s.id}"
+        aria-label="${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}, ${esc(who)}, ${esc(posName(s.position))}, ${STATE_WORD[st]}${iss ? ', needs review' : ''}">
+      <b>${esc(sbTime(s.starts_at))} – ${esc(sbTime(s.ends_at))}</b>
+      <em>${esc(who)}</em>
+      <i>${esc(posName(s.position))}</i>
+      <s aria-hidden="true"></s>
+    </button>`;
+  };
+
+  const mDayLabel = (d) => {
+    const l = TC.dayLabel(d);
+    return `${l.slice(0, 3)} ${l.replace(/^\w+,\s*/, '')}`;
+  };
+  // Upcoming: the next seven business dates, and only the ones with something on
+  // them. Empty days padded out to fill seven slots is scrolling for nothing.
+  const mUpcoming = [];
+  for (let i = 1; i <= 7; i++) {
+    const d = addDays(mToday, i);
+    const list = mByDay.get(d) || [];
+    if (list.length) mUpcoming.push(`<div class="sbm-day"><h3>${esc(mDayLabel(d))}</h3>
+      ${list.map(mCard).join('')}</div>`);
+  }
+
+  const mTodayList = mByDay.get(mToday) || [];
+  const sbMobile = `
+    <section class="sbm" aria-label="Today and upcoming">
+      <div class="sbm-head">
+        <p class="sbm-date">${esc(TC.dayLabel(mToday).toUpperCase())}</p>
+        <div class="sbm-sum">
+          <span><b>${new Set(mTodayList.map((s) => s.employee_id)).size}</b> people</span>
+          <span><b>${mTodayList.length}</b> shift${mTodayList.length === 1 ? '' : 's'}</span>
+          <span><b>${sbHours(mTot.total.paidMinutes)}h</b> planned</span>
+          ${mIssuesToday ? `<span class="sbm-iss"><b>${mIssuesToday}</b> to review</span>` : ''}
+        </div>
+        <button class="sb-btn sb-go sbm-add" type="button" id="sbm-add"
+          data-d="${mToday}">Add shift</button>
+      </div>
+      ${mTodayList.length
+    ? `<div class="sbm-day">${mTodayList.map(mCard).join('')}</div>`
+    : '<p class="sbm-none">No shifts scheduled today.</p>'}
+      <h2 class="sbm-h">Upcoming</h2>
+      ${mUpcoming.length ? mUpcoming.join('')
+    : '<p class="sbm-none">Nothing scheduled in the next 7 days.</p>'}
+    </section>`;
+
   const body = `<div class="bs-page">
     ${flash(req)}
     <div class="bs-head"><h1>Schedule</h1></div>
+    <div class="sb-view sb-view--${sbView}">
+
+    <nav class="sb-seg" aria-label="Schedule view">
+      <a class="sb-seg-b${sbView === 'today' ? ' on' : ''}" href="/schedule?v=today"
+        aria-current="${sbView === 'today' ? 'page' : 'false'}">Today</a>
+      <a class="sb-seg-b${sbView === 'week' ? ' on' : ''}" href="/schedule?v=week&amp;w=${week.start}"
+        aria-current="${sbView === 'week' ? 'page' : 'false'}">Week</a>
+    </nav>
+
+    ${sbMobile}
 
     <div class="sb">
       <div class="sb-frame">
@@ -18178,7 +18278,7 @@ app.get('/schedule', (req, res) => {
         </div>
 
         <div class="sb-scroll egrid-scroll">
-          <div class="sb-grid" style="--sb-cols:${days.length}">
+          <div class="sb-scroll"><div class="sb-grid" style="--sb-cols:${days.length}">
             <div class="sb-head">
               <div class="sb-emp sb-corner">Who</div>
               ${days.map((d) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}">
@@ -18189,7 +18289,7 @@ app.get('/schedule', (req, res) => {
             </div>
             ${staff.length ? staff.map(row).join('')
               : '<div class="sb-empty">Nobody on staff yet. Add people under Staff, then plan their week here.</div>'}
-          </div>
+          </div></div>
         </div>
 
         <div class="sb-sum">
@@ -18220,6 +18320,8 @@ app.get('/schedule', (req, res) => {
       <p class="sb-iss-f">Fix the schedule and an issue goes away on its own &mdash;
         there is nothing here to tick off.</p>
     </aside>` : ''}
+
+    </div><!-- /.sb-view -->
 
     <div class="drawer-scrim" onclick="sbDrawer(false)"></div>
     <aside class="drawer" id="sb-drawer" aria-label="Shift">
@@ -18434,7 +18536,10 @@ app.get('/schedule', (req, res) => {
 
         function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v == null ? '' : v; }
 
-        document.querySelector('.sb-grid').addEventListener('click', function (ev) {
+        // The mobile list and the grid open the SAME drawer through the same
+        // handler — one code path, so the two views cannot drift apart.
+        var sbTargets = [document.querySelector('.sb-grid'), document.querySelector('.sbm')];
+        sbTargets.filter(Boolean).forEach(function (root) { root.addEventListener('click', function (ev) {
           var add = ev.target.closest && ev.target.closest('.sb-add');
           if (add) {
             form.action = '/schedule/shift';
@@ -18503,13 +18608,38 @@ app.get('/schedule', (req, res) => {
             pubBtn.textContent = 'Publish shift';
             say.textContent = 'No employee can see this shift yet.';
           }
+          sbDelWhat = (empSel && empSel.options[empSel.selectedIndex]
+            ? empSel.options[empSel.selectedIndex].text : 'this shift')
+            + ' on ' + s.si.slice(0, 10) + ', ' + s.si.slice(11, 16) + '–' + s.ei.slice(11, 16);
           sbDrawer(true);
+        }); });
+
+        // Names WHO and WHEN. A confirmation that could be about any shift is
+        // one people learn to tap through, and on a phone Cancel sits an inch
+        // from Publish. It removes the plan, never any hours worked.
+        var sbDelWhat = '';
+        document.getElementById('sb-del-btn').addEventListener('click', function (ev) {
+          var q = sbDelWhat ? 'Cancel ' + sbDelWhat + '?' : 'Cancel this planned shift?';
+          if (!confirm(q + ' It removes the plan, not any hours worked.')) ev.preventDefault();
         });
 
-        document.getElementById('sb-del-btn').addEventListener('click', function (ev) {
-          if (!confirm('Delete this planned shift? It removes the plan, not any hours worked.')) {
-            ev.preventDefault();
-          }
+        // Add from the Today header. No empty cell to tap in a list, so the
+        // entry point is explicit — and it opens the SAME create drawer.
+        var mAdd = document.getElementById('sbm-add');
+        if (mAdd) mAdd.addEventListener('click', function () {
+          form.action = '/schedule/shift';
+          document.getElementById('sb-title').textContent = 'Add a shift';
+          document.getElementById('sb-extra').hidden = true;
+          document.getElementById('sb-pub').hidden = true;
+          setVal('sb-date', mAdd.dataset.d);
+          setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
+          setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
+          sbPositions(document.getElementById('sb-emp').value, null);
+          sbContext(document.getElementById('sb-emp').value, mAdd.dataset.d, null);
+          document.getElementById('sb-save').textContent = 'Save Draft';
+          document.getElementById('sb-savepub').hidden = false;
+          document.getElementById('sb-new').hidden = false;
+          sbDrawer(true);
         });
 
         document.addEventListener('keydown', function (e) {

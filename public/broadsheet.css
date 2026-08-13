@@ -4360,7 +4360,7 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    softened palette exists to avoid. Every pair measured at AA; the weakest of
    the ten is teal at 4.69, which is why no card text uses opacity — there is
    no contrast to spare. */
-.sb {
+.sb, .sbm {
   --c-green:#2b7a4e;  --t-green:#fff;      --c-plum:#7a55a3;   --t-plum:#fff;
   --c-amber:#e2ad51;  --t-amber:#1a2230;   --c-brick:#a94e45;  --t-brick:#fff;
   --c-blue:#37699f;   --t-blue:#fff;       --c-teal:#27807f;   --t-teal:#fff;
@@ -4398,6 +4398,14 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 
 /* --- toolbar + board + summary, one framed object ------------------------- */
 .sb-frame { border:1px solid var(--rule); background:var(--panel); overflow:hidden; }
+/* The board is 960px wide and a phone is 360. `overflow:hidden` contained it —
+   the page never scrolled sideways — but nothing panned either, so five of
+   seven days and every shift on them were simply unreachable. Measured: 0 of 4
+   cards on screen, no scrollable ancestor. Contained AND pannable: the frame
+   still clips at the page edge, and the grid scrolls inside its own box. */
+.sb-scroll { overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch;
+  overscroll-behavior-x:contain; }
+
 .sb-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
   padding:10px 12px; border-bottom:1px solid var(--rule); background:var(--panel); }
 /* Wraps rather than clips: the frame hides overflow to keep its corners, which
@@ -5246,3 +5254,84 @@ input[type="date"], input[type="time"], input[type="search"], select {
 /* The requests pill: give it room and the pill radius. */
 .bs-req-pill { padding: 7px 14px; line-height: 1.2; }
 .bs-req-pill.on b { min-width: 18px; height: 18px; }
+
+/* ===========================================================================
+   PHASE 5 — the manager's phone
+   ===========================================================================
+   An operational list, not the week grid squeezed down. Both views ship in the
+   page and CSS picks one; ?v= overrides in either direction. No user-agent
+   sniffing and one URL, so the choice is linkable and testable. */
+.sb-seg { display:none; gap:0; margin:0 0 14px; border:1px solid var(--rule); width:max-content; }
+.sb-seg-b { padding:9px 20px; font-size:13.5px; font-weight:600; color:var(--muted);
+  text-decoration:none; min-height:44px; display:flex; align-items:center; }
+.sb-seg-b + .sb-seg-b { border-left:1px solid var(--rule); }
+.sb-seg-b.on { background:var(--ink); color:var(--paper); }
+
+.sbm { display:none; }
+/* auto: the viewport decides. Explicit ?v= beats it in both directions, so a
+   desktop manager can open Today and a phone can still reach the Week board. */
+@media (max-width:760px){
+  .sb-view--auto .sbm { display:block; }
+  .sb-view--auto .sb  { display:none; }
+  .sb-seg { display:flex; }
+}
+.sb-view--today .sbm { display:block; }
+.sb-view--today .sb  { display:none; }
+.sb-view--week  .sbm { display:none; }
+.sb-view--week  .sb  { display:block; }
+.sb-view--today .sb-seg, .sb-view--week .sb-seg { display:flex; }
+/* Auto resolves per viewport, so the control has to agree with what is on
+   screen rather than leaving both segments looking unselected. */
+@media (max-width:760px){ .sb-view--auto .sb-seg-b[href*="v=today"] { background:var(--ink); color:var(--paper); } }
+@media (min-width:761px){ .sb-view--auto .sb-seg-b[href*="v=week"]  { background:var(--ink); color:var(--paper); } }
+
+.sbm-head { border:1px solid var(--rule); border-bottom:0; background:var(--panel); padding:14px 16px; }
+.sbm-date { margin:0 0 8px; font-family:var(--mono); font-size:11px; letter-spacing:.12em;
+  color:var(--muted); }
+.sbm-sum { display:flex; flex-wrap:wrap; gap:14px; font-size:13px; color:var(--muted); }
+.sbm-sum b { color:var(--headline); font-weight:650; }
+.sbm-iss b { color:var(--warning); }
+.sbm-add { margin-top:12px; width:100%; min-height:46px; }
+.sbm-h { margin:22px 0 8px; font-size:12px; font-family:var(--mono); letter-spacing:.12em;
+  text-transform:uppercase; color:var(--muted); }
+.sbm-day { border:1px solid var(--rule); border-top:0; }
+.sbm-day h3 { margin:0; padding:9px 16px; font-size:12px; font-family:var(--mono);
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+  background:var(--panel); border-bottom:1px solid var(--rule); }
+.sbm-h + .sbm-day { border-top:1px solid var(--rule); }
+
+/* The card. Position colour is still the fill and still dominant; the <s>
+   publication dot and the amber issue outline are the same two encodings the
+   board uses, so nothing new has to be learned to read this screen. */
+.sbm-k { position:relative; display:block; width:100%; text-align:left; border:0;
+  border-bottom:1px solid var(--rule); padding:12px 16px; min-height:64px;
+  font:inherit; cursor:pointer; background:var(--paper); }
+.sbm-k:last-child { border-bottom:0; }
+.sbm-k b  { display:block; font-size:15px; font-weight:650; color:var(--headline); }
+.sbm-k em { display:block; font-style:normal; font-size:14px; margin-top:2px; }
+.sbm-k i  { display:inline-block; font-style:normal; font-size:11.5px; margin-top:6px;
+  padding:2px 8px; font-family:var(--mono); letter-spacing:.04em; }
+.sbm-k > s { position:absolute; top:14px; right:14px; width:8px; height:8px;
+  border-radius:50% !important; }
+.sbm-k--green i{background:var(--c-green);color:var(--t-green)}
+.sbm-k--plum i{background:var(--c-plum);color:var(--t-plum)}
+.sbm-k--amber i{background:var(--c-amber);color:var(--t-amber)}
+.sbm-k--brick i{background:var(--c-brick);color:var(--t-brick)}
+.sbm-k--blue i{background:var(--c-blue);color:var(--t-blue)}
+.sbm-k--teal i{background:var(--c-teal);color:var(--t-teal)}
+.sbm-k--indigo i{background:var(--c-indigo);color:var(--t-indigo)}
+.sbm-k--rose i{background:var(--c-rose);color:var(--t-rose)}
+.sbm-k--orange i{background:var(--c-orange);color:var(--t-orange)}
+.sbm-k--slate i{background:var(--c-slate);color:var(--t-slate)}
+.sbm-none { margin:0; border:1px solid var(--rule); border-top:0; padding:22px 16px;
+  color:var(--muted); font-size:13.5px; }
+
+/* The Week board on a narrow screen — and this must come AFTER the responsive
+   --sb-col rules above, which reset the column to minmax(...,1fr) and would
+   otherwise win on order and shrink the grid back to the viewport.
+   Fixed columns instead of fractional ones, and the grid keeps its natural
+   width: `width:100%; min-width:0` is exactly what collapsed it before. */
+@media (max-width:900px){
+  .sb { --sb-lead:112px; --sb-col:132px; }
+  .sb-scroll .sb-grid { width:max-content; min-width:100%; }
+}
