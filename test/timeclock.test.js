@@ -3743,3 +3743,66 @@ test('2D-1: different records are never folded together', async () => {
   assert.match(home, /Timesheet A/, 'the first survives');
   assert.match(home, /Timesheet B/, 'and so does the second');
 });
+
+// ===========================================================================
+// THE SERVICE MUST FOLLOW THE CLOCK
+// ===========================================================================
+//
+// Payroll reads work.hours. The clock is the truth. If a manager approves a
+// correction and the service keeps the old figure, somebody is paid for hours
+// they did not work — quietly, and only visible when the two are compared by
+// hand. This pins the propagation rather than trusting that the call is there.
+
+test('approving a shorter punch moves the service hours with it', () => {
+  const TC = require('../src/timeclock');
+  const db = require('../src/db').db;
+  const emp = db.prepare(`INSERT INTO employees (name, role, pin, hourly_rate_cents, active)
+    VALUES ('Sync Follow', 'server', '9401', 1500, 1)`).run().lastInsertRowid;
+  const sh = db.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES ('2026-07-02', 'dinner', 'open', datetime('now'))`).run().lastInsertRowid;
+  const e = db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, raw_minutes, payable_minutes, source, created_by)
+    VALUES (?, ?, '2026-07-02', 'dinner', 'server', '2026-07-02 20:00:00',
+            '2026-07-03 02:00:00', 'complete', 360, 360, 'portal', 'test')`).run(emp, sh).lastInsertRowid;
+
+  const hours = () => {
+    const r = db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(sh, emp);
+    return r ? Number(r.hours) : null;
+  };
+
+  TC.syncShiftHours(sh, emp, 'test', { role: 'server' });
+  assert.strictEqual(hours(), 6, 'a six-hour punch writes six hours to the service');
+
+  // What an approved correction does: move the punch, then sync.
+  db.prepare(`UPDATE time_entries SET clock_out_at = '2026-07-03 00:00:00',
+    raw_minutes = 240, payable_minutes = 240 WHERE id = ?`).run(e);
+  TC.syncShiftHours(sh, emp, 'test', { role: 'server' });
+  assert.strictEqual(hours(), 4, 'shortening the punch shortens the service — payroll cannot drift');
+
+  // And the other direction, because a correction can lengthen a shift too.
+  db.prepare(`UPDATE time_entries SET clock_out_at = '2026-07-03 04:00:00',
+    raw_minutes = 480, payable_minutes = 480 WHERE id = ?`).run(e);
+  TC.syncShiftHours(sh, emp, 'test', { role: 'server' });
+  assert.strictEqual(hours(), 8, 'and lengthening it lengthens the service');
+
+  db.prepare('DELETE FROM work WHERE shift_id = ?').run(sh);
+  db.prepare('DELETE FROM time_entries WHERE id = ?').run(e);
+  db.prepare('DELETE FROM shifts WHERE id = ?').run(sh);
+  db.prepare('DELETE FROM employees WHERE id = ?').run(emp);
+});
+
+test('every route that decides a correction also syncs the service', () => {
+  // A source check, because the failure is silent: approve a correction, the
+  // punch moves, and if the sync call is missing the service quietly keeps the
+  // old hours. Reading the region is how a future edit that drops the call gets
+  // caught, since no assertion over a single approval would notice.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const i = src.indexOf('function decideCorrection');
+  assert.ok(i > -1, 'found the decision path');
+  const region = src.slice(i, i + 6000);
+  assert.match(region, /TC\.syncShiftHours\(/,
+    'approving a correction writes the new hours to the service');
+});
