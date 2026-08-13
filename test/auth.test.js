@@ -947,3 +947,50 @@ test('the guard is a guard now, not a comment', async () => {
   assert.ok(!/Post it|86 an item/.test(await them.text()),
     'not even the read view of the board manager');
 });
+
+// ===========================================================================
+// ONE TOKEN PER FORM
+// ===========================================================================
+//
+// This file is the only one that runs with APP_PASSWORD set, which is why the
+// defect below lived here and nowhere else: with no password csrfFor() returns
+// '' and the entire CSRF layer stands down, so a thousand green tests on a
+// developer machine said nothing about it.
+//
+// A response-level stamper adds a hidden _csrf to every post form. Forms that
+// already wrote their own therefore carried TWO — and express parses a repeated
+// field as an ARRAY, so the check compared ['tok','tok'] against 'tok', which is
+// never equal. Every one of those forms answered "that form came from somewhere
+// else" on submit, in production only. The schedule drawer was one of them: you
+// could not create a shift at all.
+
+test('no post form is ever stamped with two CSRF tokens', async () => {
+  for (const path of ['/login', '/tips']) {
+    const html = await (await fetch(BASE + path)).text();
+    const forms = [...html.matchAll(/<form\b[^>]*method\s*=\s*["']?post[^>]*>[\s\S]*?<\/form>/gi)];
+    for (const [f] of forms) {
+      const n = (f.match(/name="_csrf"/g) || []).length;
+      assert.ok(n <= 1, `a form on ${path} carries ${n} tokens — express reads that as an array`);
+    }
+  }
+});
+
+test('a repeated token is read as one, not compared as an array', async () => {
+  // Belt and braces on top of the stamper fix: if a duplicate ever returns, it
+  // must not silently refuse every submit again.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /function csrfGiven\(req\)/, 'one place reads the submitted token');
+  assert.match(src, /Array\.isArray\(raw\) \? String\(raw\[0\] \|\| ''\) : String\(raw\)/,
+    'and it takes the first value rather than comparing an array to a string');
+  // Both gates use it — the ordinary path and the upload path.
+  assert.strictEqual((src.match(/csrfGiven\(req\)/g) || []).length, 3,
+    'the definition plus both call sites');
+});
+
+test('the stamper leaves a form that already has a token alone', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const i = src.indexOf('const hidden = `<input type="hidden" name="${CSRF_FIELD}"');
+  const region = src.slice(i, i + 900);
+  assert.match(region, /inner\.indexOf\(`name="\$\{CSRF_FIELD\}"`\) !== -1\) return m/,
+    'a form carrying its own token is returned untouched');
+});

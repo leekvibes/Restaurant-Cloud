@@ -183,7 +183,7 @@ app.use((req, res, next) => {
   // Nobody signed in: there is no session to forge a request against, and the
   // route's own guard will refuse them anyway.
   if (!expected) return next();
-  const given = (req.body && req.body[CSRF_FIELD]) || req.get('x-csrf-token') || '';
+  const given = csrfGiven(req);
 
   // An upload's fields are not here yet.
   //
@@ -240,6 +240,21 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * The token this request actually presented.
+ *
+ * A repeated field arrives from express as an ARRAY, and comparing an array to
+ * the expected string is never equal — which turned a duplicated hidden input
+ * into "that form came from somewhere else" on every submit. The duplicate is
+ * fixed at the source, in the stamper; taking the first value here means a
+ * future one cannot resurrect the same silent failure. Every copy is the same
+ * session's token, so the first is as good as any.
+ */
+function csrfGiven(req) {
+  const raw = (req.body && req.body[CSRF_FIELD]) || req.get('x-csrf-token') || '';
+  return Array.isArray(raw) ? String(raw[0] || '') : String(raw);
+}
+
 /** The site a browser says this request came from, or '' if it did not say. */
 function whereFrom(req) {
   const site = (u) => { try { return new URL(u).host; } catch { return ''; } };
@@ -267,7 +282,7 @@ function csrfBody(req, res, next) {
   if (!req.__csrfDeferred) return next();
   const expected = csrfFor(req);
   if (!expected) return next();
-  const given = (req.body && req.body[CSRF_FIELD]) || req.get('x-csrf-token') || '';
+  const given = csrfGiven(req);
   if (given && given !== expected) {
     return res.status(403).send('That form expired or came from somewhere else. Go back, reload the page, and try again.');
   }
@@ -384,8 +399,20 @@ app.use((req, res, next) => {
     }
     if (typeof body === 'string' && body.indexOf('<form') !== -1) {
       const hidden = `<input type="hidden" name="${CSRF_FIELD}" value="${token}">`;
-      body = body.replace(/<form\b([^>]*)>/gi, (m, attrs) =>
-        (/method\s*=\s*["']?post/i.test(attrs) ? m + hidden : m));
+      // Only forms that do NOT already carry one.
+      //
+      // Stamping unconditionally gave every hand-written form TWO _csrf inputs,
+      // and express parses a repeated field as an ARRAY — so the check compared
+      // ['tok','tok'] against 'tok', which is never equal, and refused the post
+      // with "came from somewhere else". Every such form was dead in
+      // production and fine in development, because with no APP_PASSWORD the
+      // token is empty and this whole layer stands down. That is why a full
+      // green suite said nothing about it.
+      body = body.replace(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi, (m, attrs, inner) => {
+        if (!/method\s*=\s*["']?post/i.test(attrs)) return m;
+        if (inner.indexOf(`name="${CSRF_FIELD}"`) !== -1) return m;
+        return `<form${attrs}>${hidden}${inner}</form>`;
+      });
     }
     return send(body);
   };
