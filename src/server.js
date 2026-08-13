@@ -18278,7 +18278,7 @@ app.get('/schedule', (req, res) => {
         </div>
 
         <div class="sb-scroll egrid-scroll">
-          <div class="sb-scroll"><div class="sb-grid" style="--sb-cols:${days.length}">
+          <div class="sb-grid" style="--sb-cols:${days.length}">
             <div class="sb-head">
               <div class="sb-emp sb-corner">Who</div>
               ${days.map((d) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}">
@@ -18289,7 +18289,7 @@ app.get('/schedule', (req, res) => {
             </div>
             ${staff.length ? staff.map(row).join('')
               : '<div class="sb-empty">Nobody on staff yet. Add people under Staff, then plan their week here.</div>'}
-          </div></div>
+          </div>
         </div>
 
         <div class="sb-sum">

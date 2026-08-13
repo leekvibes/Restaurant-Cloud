@@ -930,3 +930,121 @@ test('the drawer says what that person already has — hours, and that same day'
   assert.match(src, /exceptId && String\(s\.id\) === String\(exceptId\)/,
     'and never reports the shift being edited as clashing with itself');
 });
+
+// ===========================================================================
+// PHASE 5 — the manager's phone
+// ===========================================================================
+
+test('P5: both views ship in the page, and ?v= picks one', async () => {
+  const auto = await text('/schedule');
+  assert.match(auto, /class="sb-view sb-view--auto"/, 'no ?v= leaves the viewport to decide');
+  assert.match(auto, /class="sbm"/, 'the Today list is present');
+  assert.match(auto, /class="sb-grid"/, 'and so is the Week grid');
+
+  const t = await text('/schedule?v=today');
+  assert.match(t, /class="sb-view sb-view--today"/);
+  assert.match(t, /aria-current="page"[^>]*>Today|Today<\/a>/, 'Today reads as current');
+  const w = await text('/schedule?v=week');
+  assert.match(w, /class="sb-view sb-view--week"/);
+  assert.match(w, /href="\/schedule\?v=week[^"]*"\s+aria-current="page"/,
+    'Week exposes the accessible selected state');
+});
+
+test('P5: Today is the business date, not the calendar date', async () => {
+  const html = await text('/schedule?v=today');
+  const biz = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  assert.match(html, new RegExp(TC.dayLabel(biz).toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    'the header names the business date');
+  // Between midnight and the cutoff that is YESTERDAY's calendar date, which is
+  // the whole reason this is not `new Date()`.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const i = src.indexOf('const mToday = serviceToday()');
+  assert.ok(i > -1, 'Today comes from serviceToday(), the one business-date authority');
+});
+
+test('P5: Today is chronological and Upcoming groups by date', async () => {
+  const biz = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const later = dates.addDays(biz, 2);
+  await post('/schedule/shift', { w: biz, employee_id: String(E.server),
+    position: 'server', date: biz, start: '18:00', end: '23:00', break_minutes: '' });
+  await post('/schedule/shift', { w: biz, employee_id: String(E.barista),
+    position: 'barista', date: biz, start: '08:00', end: '12:00', break_minutes: '' });
+  await post('/schedule/shift', { w: later, employee_id: String(E.multi),
+    position: 'server', date: later, start: '16:00', end: '22:00', break_minutes: '' });
+
+  const html = await text('/schedule?v=today');
+  const sbm = html.slice(html.indexOf('class="sbm"'), html.indexOf('class="sb "') > -1
+    ? html.indexOf('class="sb "') : html.indexOf('<div class="sb">'));
+  const today = sbm.slice(0, sbm.indexOf('Upcoming'));
+  assert.ok(today.indexOf('8a') < today.indexOf('6p'),
+    'the earlier shift is listed first — chronological, not by employee');
+  assert.match(sbm, /class="sbm-h">Upcoming/, 'Upcoming exists');
+  assert.match(sbm.slice(sbm.indexOf('Upcoming')), /class="sbm-day"><h3>/,
+    'and is grouped under a date heading');
+});
+
+test('P5: no attendance language anywhere in the mobile surface', async () => {
+  // Schedule is the plan. Only the Time Clock knows who actually turned up, and
+  // a manager reading "Now" on a plan will hear attendance.
+  const html = await text('/schedule?v=today');
+  const sbm = html.slice(html.indexOf('class="sbm"'), html.indexOf('<div class="sb">'));
+  for (const claim of ['In progress', 'Clocked in', 'No-show', 'Late', 'On break', '>Now<']) {
+    assert.ok(!sbm.includes(claim), `the plan never claims "${claim}"`);
+  }
+});
+
+test('P5: Add shift prefills the current business date', async () => {
+  const html = await text('/schedule?v=today');
+  const biz = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  assert.match(html, new RegExp(`id="sbm-add"[^>]*data-d="${biz}"`),
+    'the Add button carries today, so the drawer opens on the right day');
+});
+
+test('P5: the mobile list opens the same drawer through the same handler', async () => {
+  const html = await text('/schedule?v=today');
+  assert.match(html, /var sbTargets = \[document\.querySelector\('\.sb-grid'\), document\.querySelector\('\.sbm'\)\]/,
+    'one handler for both views — they cannot drift apart');
+  assert.match(html, /class="sbm-k[^"]*"[\s\S]{0,200}?data-edit="\d+"/,
+    'and a mobile card carries the same data-edit the grid uses');
+});
+
+test('P5: cancelling names the shift', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /var q = sbDelWhat \? 'Cancel ' \+ sbDelWhat/,
+    'the confirmation identifies who and when, not just "this shift"');
+  assert.match(html, /removes the plan, not any hours worked/,
+    'and still says what cancelling does not touch');
+});
+
+test('P5: position colours come from the one palette, not a second one', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css, /\.sb, \.sbm \{\s*\n?\s*--c-green:/,
+    'the mobile list shares the board declaration — it rendered unpainted as a sibling');
+  const pal = ['green', 'plum', 'amber', 'brick', 'blue', 'teal', 'indigo', 'rose', 'orange', 'slate'];
+  for (const c of pal) {
+    assert.match(css, new RegExp(`\\.sbm-k--${c} i\\{background:var\\(--c-${c}\\)`),
+      `${c} uses the approved variable rather than a new value`);
+  }
+});
+
+test('P5: the Week grid can actually overflow its scroller on a narrow screen', async () => {
+  // The Phase 5 blocker. The board already had .sb-scroll.egrid-scroll with
+  // overflow-x:auto; it never scrolled because .sb-grid is width:100%,
+  // min-width:0 and so shrank to the wrapper instead of overflowing it.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css, /\.sb-scroll \.sb-grid \{ width:max-content; min-width:100%; \}/,
+    'the grid keeps its natural width inside the scroller');
+  assert.match(css, /@media \(max-width:900px\)\{\s*\n?\s*\.sb \{ --sb-lead:112px; --sb-col:132px; \}/,
+    'and the columns stop being fractional, so they cannot shrink to fit');
+  const html = await text('/schedule?v=week');
+  assert.strictEqual((html.match(/class="sb-scroll/g) || []).length, 1,
+    'exactly ONE scroller — a nested second one is what made every measurement read the wrong box');
+});
+
+test('P5: desktop Week is unchanged', async () => {
+  const html = await text('/schedule?v=week');
+  assert.match(html, /class="sb-grid" style="--sb-cols:7"/, 'seven day columns');
+  assert.match(html, /\/schedule\/publish-week/, 'Publish week still lives in Week mode');
+  const sbm = html.slice(html.indexOf('class="sbm"'), html.indexOf('<div class="sb">'));
+  assert.ok(!sbm.includes('publish-week'), 'and never appears in the Today surface');
+});

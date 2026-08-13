@@ -5326,11 +5326,14 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sbm-none { margin:0; border:1px solid var(--rule); border-top:0; padding:22px 16px;
   color:var(--muted); font-size:13.5px; }
 
-/* The Week board on a narrow screen — and this must come AFTER the responsive
-   --sb-col rules above, which reset the column to minmax(...,1fr) and would
-   otherwise win on order and shrink the grid back to the viewport.
-   Fixed columns instead of fractional ones, and the grid keeps its natural
-   width: `width:100%; min-width:0` is exactly what collapsed it before. */
+/* The Week board on a narrow screen.
+   The board ALREADY had a scroll wrapper — `.sb-scroll.egrid-scroll`, with
+   overflow-x:auto on it since Phase 2. It never scrolled because .sb-grid is
+   `width:100%; min-width:0`, so the grid shrank to the wrapper instead of
+   overflowing it and there was nothing to scroll. Fixed columns below 900px and
+   a natural grid width are the whole fix.
+   This block must come AFTER the responsive --sb-col rules above, which reset
+   the column to minmax(...,1fr) and would otherwise win on source order. */
 @media (max-width:900px){
   .sb { --sb-lead:112px; --sb-col:132px; }
   .sb-scroll .sb-grid { width:max-content; min-width:100%; }
