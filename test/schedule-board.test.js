@@ -489,7 +489,9 @@ test('changing WHO re-asks what they can work, and never carries a stale positio
   // selected, barista, and the server refused the save. A source-text assertion
   // about the handler passed happily while that was true.
   const html = await text('/schedule');
-  const from = html.indexOf('var held =');
+  // From `var shifts` — the context line reads that array, so a slice that
+  // starts below it runs against a name that does not exist yet.
+  const from = html.indexOf('var shifts =');
   const src = html.slice(from, html.indexOf("document.querySelector('.sb-grid')", from));
   assert.ok(from > -1 && src.includes('function sbPositions'), 'found the picker in the page');
 
@@ -500,7 +502,9 @@ test('changing WHO re-asks what they can work, and never carries a stale positio
     addEventListener(k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); },
     fire(k) { (this.listeners[k] || []).forEach((f) => f()); },
   });
-  const nodes = { 'sb-pos': el('sb-pos'), 'sb-emp': el('sb-emp') };
+  const nodes = { 'sb-pos': el('sb-pos'), 'sb-emp': el('sb-emp'),
+    'sb-ctx': el('sb-ctx'), 'sb-date': el('sb-date'),
+    'sb-form': Object.assign(el('sb-form'), { getAttribute: () => '/schedule/shift' }) };
   const sandbox = {
     // querySelector answers null: the slice also carries the Issues panel
     // wiring, which is absent from this fake page and must simply not throw.
@@ -897,4 +901,30 @@ test('no Issues data reaches the employee portal', async () => {
       assert.ok(!html.includes(leak), `${p} does not leak "${leak}"`);
     }
   }
+});
+
+test('the drawer says what that person already has — hours, and that same day', async () => {
+  // Phase 2 specified three things beside the picker: held positions, current
+  // scheduled hours, same-day assignments. Only the first was built, so the
+  // drawer asked you to place a shift while hiding the two facts that decide
+  // whether you should.
+  const day = dates.addDays(week().start, 5);
+  const a = await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '09:00', end: '15:00', break_minutes: '' });
+  assert.strictEqual(flashOf(a).err, false);
+
+  const html = await text('/schedule');
+  assert.match(html, /var wkMins = \{/, 'the week minutes reach the page');
+  assert.match(html, /id="sb-ctx"/, 'and there is somewhere to say it');
+
+  // Same source as the row, so the drawer and the grid cannot disagree.
+  const mins = JSON.parse(/var wkMins = (\{.*?\});/.exec(html)[1]);
+  const t = SCH.weekTotals(SCH.inRange(week().start, week().end));
+  assert.strictEqual(mins[E.barista], t.byEmployee[String(E.barista)].paidMinutes,
+    'the figure is weekTotals, not a second count');
+
+  const src = html.slice(html.indexOf('function sbContext'));
+  assert.match(src, /already on that day/, 'it names the other shifts on that date');
+  assert.match(src, /exceptId && String\(s\.id\) === String\(exceptId\)/,
+    'and never reports the shift being edited as clashing with itself');
 });

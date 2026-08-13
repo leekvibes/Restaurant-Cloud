@@ -18233,6 +18233,7 @@ app.get('/schedule', (req, res) => {
         <input type="hidden" name="w" value="${week.start}">
         <label class="fld wide">Who
           <select name="employee_id" id="sb-emp" required>${employeeOptions}</select></label>
+        <p class="sb-hint sb-ctx" id="sb-ctx" hidden></p>
         <label class="fld wide">Position
           <select name="position" id="sb-pos" required>${positionOptions}</select></label>
         <label class="fld wide">Date
@@ -18294,6 +18295,11 @@ app.get('/schedule', (req, res) => {
         shifts.forEach(function (s) { byId[s.id] = s; });
         var held = ${JSON.stringify(held)};
         var posNames = ${JSON.stringify(posNames)};
+        // Paid minutes already on the board this week, per person — the server's
+        // own weekTotals, not a second count that could disagree with the row.
+        var wkMins = ${JSON.stringify(Object.fromEntries(
+    Object.entries(totals.byEmployee).map(([id, t]) => [id, t.paidMinutes]),
+  ))};
 
         // The position list belongs to the PERSON, not to the table. Rebuilt
         // whenever the employee changes, so the only positions on offer are the
@@ -18319,6 +18325,62 @@ app.get('/schedule', (req, res) => {
           sel.value = keep && list.indexOf(keep) > -1 ? keep : list[0];
         }
 
+        // ---- who you are about to schedule, and what they already have ------
+        //
+        // Phase 2 specified three things beside the picker: held positions,
+        // current scheduled hours, and same-day assignments. Only the first was
+        // ever built. Without the other two the drawer asks you to place a
+        // shift while hiding the two facts that decide whether you should — that
+        // this person is already at 38 hours, or already on at four o'clock that
+        // same afternoon. Both are on the page already; neither was shown.
+        //
+        // Read from the SAME data the board drew itself from, so the drawer and
+        // the grid can never disagree. Advisory only: it reports, it never
+        // refuses. Overlap is caught properly by the Issues engine.
+        function sbFace(iso) {                     // '2026-08-11T16:30' -> '4:30p'
+          var hh = Number(iso.slice(11, 13)), mm = iso.slice(14, 16);
+          var ap = hh >= 12 ? 'p' : 'a', h12 = hh % 12 || 12;
+          return h12 + (mm === '00' ? '' : ':' + mm) + ap;
+        }
+        function sbHM(min) {
+          var h = Math.floor(min / 60), m = min % 60;
+          return h ? (h + 'h' + (m ? ' ' + m + 'm' : '')) : m + 'm';
+        }
+        function sbContext(empId, dateStr, exceptId) {
+          var box = document.getElementById('sb-ctx');
+          if (!box) return;
+          var bits = [];
+          var mins = wkMins[empId] || 0;
+          if (mins) bits.push(sbHM(mins) + ' scheduled this week');
+
+          // Everything else they are already on that day. The shift being
+          // edited is left out — telling somebody their own shift clashes with
+          // itself is noise, and it is the commonest reason to open this drawer.
+          var same = [];
+          shifts.forEach(function (s) {
+            if (String(s.e) !== String(empId)) return;
+            if (exceptId && String(s.id) === String(exceptId)) return;
+            if (s.si.slice(0, 10) !== dateStr) return;
+            same.push((posNames[s.p] || s.p) + ' ' + sbFace(s.si) + '–' + sbFace(s.ei));
+          });
+          if (same.length) bits.push('already on that day: ' + same.join(', '));
+
+          box.textContent = bits.join(' · ');
+          box.hidden = !bits.length;
+        }
+        // Both fields move it, because either can change the answer.
+        var dateEl = document.getElementById('sb-date');
+        function sbCtxRefresh() {
+          // Guarded: one missing element must not throw out of a click handler
+          // and take every other control in this drawer down with it.
+          var f = document.getElementById('sb-form');
+          var e = document.getElementById('sb-emp');
+          if (!f || !e) return;
+          var editing = (f.getAttribute('action') || '').match(/\\/schedule\\/shift\\/(\\d+)$/);
+          sbContext(e.value, dateEl ? dateEl.value : '', editing ? editing[1] : null);
+        }
+        if (dateEl) dateEl.addEventListener('change', sbCtxRefresh);
+
         // Changing who it is re-asks what they can work, keeping the current
         // choice ONLY when the new person also holds it.
         //
@@ -18332,6 +18394,7 @@ app.get('/schedule', (req, res) => {
           var want = sel ? sel.value : null;
           var list = held[empSel.value] || [];
           sbPositions(empSel.value, list.indexOf(want) > -1 ? want : null);
+          sbCtxRefresh();
         });
 
         // The Issues panel is its own overlay rather than a second state of the
@@ -18382,6 +18445,7 @@ app.get('/schedule', (req, res) => {
             setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
             setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
             sbPositions(add.dataset.emp, null);
+            sbContext(add.dataset.emp, add.dataset.d, null);
             // Two ways out of a new shift, and the drawer says which is which.
             // Save Draft leads: the model is build the week, then send it, and
             // a misclick on Publish reaches real people.
@@ -18402,6 +18466,7 @@ app.get('/schedule', (req, res) => {
           setVal('sb-daypart', s.dp); setVal('sb-brk', s.bm); setVal('sb-brkpaid', s.bp); setVal('sb-note', s.n);
           // Rebuilt for this person, keeping the position the shift already has.
           sbPositions(s.e, s.p);
+          sbContext(s.e, s.si.slice(0, 10), s.id);
           // An existing shift is saved, then published separately below — the
           // create-only pair goes away so there is one Save and one meaning.
           document.getElementById('sb-save').textContent = 'Save';
