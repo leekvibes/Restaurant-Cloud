@@ -15295,15 +15295,22 @@ app.post('/c/invoices', invoiceUpload.array('file', 12), csrfBody, (req, res) =>
     ai_lines: lineJson,
   });
   const saved = db.prepare('SELECT id FROM m_invoices ORDER BY id DESC LIMIT 1').get();
-  // Filed over a duplicate warning — a manager pressed "Save it anyway". That's
-  // the classic path to paying a vendor twice, so the office hears about the
-  // override (the reason it was flagged is already shown on that screen).
-  if (req.body.dup_ok === '1' && saved) {
-    const vn = vendorId ? (invQ.vendors.all().find((v) => Number(v.id) === Number(vendorId)) || {}).name : null;
-    PORTAL.adminNotify('invoice_dup', 'Duplicate invoice saved anyway',
-      { body: `${vn ? vn + ' · ' : ''}${req.body.invoice_number ? '#' + String(req.body.invoice_number).trim() + ' · ' : ''}${money(total)} — a duplicate warning was overridden`,
-        href: `/c/invoices#inv-${saved.id}` });
-  }
+  // NO NOTIFICATION ON SAVE, DELIBERATELY.
+  //
+  // Filing over a duplicate warning used to raise "Duplicate invoice saved
+  // anyway", on the reasoning that overriding the warning is the classic path
+  // to paying a vendor twice. The owner turned it off, and the reason matters:
+  // the reader currently misreads the invoice number on Sysco invoices, so
+  // genuine invoices flag as duplicates, the warning gets overridden every
+  // time, and the notification fired on essentially every upload. An alert
+  // that fires every time is not an alert.
+  //
+  // The on-screen duplicate warning itself is untouched — the drawer still
+  // says what it matched and why before anything is saved. Only the bell went.
+  //
+  // Worth restoring once the invoice-number read is fixed, at which point an
+  // override becomes rare and therefore worth hearing about. See
+  // docs/ZWIN-READER-DOCUMENT-AI-AUDIT.md.
   if (!lineCount || !saved) return res.redirect('/c/invoices?msg=' + encodeURIComponent('Invoice saved.'));
 
   // Anything the matcher is sure of goes straight in. Hundreds of historical
@@ -22450,19 +22457,23 @@ function runAdminSweep() {
     }
   } catch (e) { console.error('[sweep] payroll', e && e.message); }
 
-  // #15 — an open invoice due today or past due.
-  try {
-    for (const inv of dashQ.openInvoices.all()) {
-      const st = invStatus(inv);
-      const overdue = st.key === 'overdue';
-      if (!overdue && st.label !== 'Due today') continue;
-      const vn = inv.vendor_id ? (invQ.vendors.all().find((v) => Number(v.id) === Number(inv.vendor_id)) || {}).name : null;
-      PORTAL.adminNotifyOnce(`inv:${inv.id}:${overdue ? 'overdue' : 'due'}`, 'invoice',
-        overdue ? `Invoice overdue — ${vn || 'a vendor'}` : `Invoice due today — ${vn || 'a vendor'}`,
-        { body: `${inv.invoice_number ? '#' + inv.invoice_number + ' · ' : ''}${money(inv.amount_cents || 0)} · ${st.label}`,
-          href: `/c/invoices#inv-${inv.id}` });
-    }
-  } catch (e) { console.error('[sweep] invoices', e && e.message); }
+  // #15 — REMOVED. Invoices due today or past due used to raise one alert each.
+  //
+  // adminNotifyOnce meant a given invoice was announced once and never
+  // re-nagged, which is the right shape for a single event and the wrong shape
+  // for a backlog: a restaurant carrying a dozen open invoices got a dozen
+  // alerts the first time the sweep saw them, all on the same morning. The
+  // owner turned it off.
+  //
+  // Money owed is not lost with it. Invoices due and overdue still surface on
+  // the dashboard's "Needs attention" panel and on /c/invoices itself, both of
+  // which show the current state rather than announcing it once and going
+  // quiet — for a bill that stays due until it is paid, a standing list beats
+  // a one-time notification anyway.
+  //
+  // The other three sweep alerts (payroll unsent, stale floor reports,
+  // document deadlines) are untouched: each announces a genuine change of
+  // state rather than restating a backlog.
 
   // #25 — a floor / out-of-stock report left open more than a day.
   try {

@@ -689,12 +689,20 @@ test('an upload saves, with the token its form was drawn with', async () => {
   assert.match(res.headers.get('location') || '', /Saved/, 'and says so');
 });
 
-test('and the save is what raises the notification the office was missing', async () => {
+test('and the row is really on the page — a 302 saying "Saved" is not proof', async () => {
+  // This used to assert the "Rosa is owed $18.40" notification, which was the
+  // observable proving the write actually landed. That notification was
+  // deliberately removed (it fired on nearly every expense), so the proof moves
+  // to the record itself.
+  //
+  // The regression it guards is unchanged and worth keeping: while uploads were
+  // being refused by the duplicate-CSRF-token bug, the POST still redirected
+  // with "Saved" and nothing was written. A status code and a flash message say
+  // the same thing whether or not a row exists — only the row settles it.
   const owner = await login({ password: 'test-manager-password' });
-  const html = await (await as(owner, '/notifications')).text();
-  assert.match(html, /Rosa is owed \$18\.40/,
-    'somebody paid out of their own pocket and the back office is told — this is the line that vanished '
-    + 'while uploads were being refused, because the notification is raised by the save that never happened');
+  const html = await (await as(owner, '/c/expenses')).text();
+  assert.match(html, /Coffee filters/, 'the expense that was uploaded is listed');
+  assert.match(html, /18\.40/, 'with the amount it was filed for');
 });
 
 test('an upload from another site is still refused', async () => {

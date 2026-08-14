@@ -881,21 +881,27 @@ test('admin push is its own list — turning it on never touches staff push', as
 
 // --- more admin notifications: events + the daily sweep --------------------
 
-test('an expense someone fronted themselves notifies the office (a card buy does not)', async () => {
+test('filing an expense notifies nobody — however it was paid for', async () => {
+  // This used to raise "Rosa is owed $18.40" whenever somebody fronted the
+  // money themselves. In practice almost every expense is fronted by a person,
+  // so it fired on nearly every save and the owner turned it off. What is owed
+  // still leads the Expenses page, which is where somebody settling up looks.
   const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n;
   await form('/c/expenses', { spent_on: today(), name: 'ice bags', amount_cents: '18.00',
     paid_by: 'Rosa', paid_with: 'Their own money' });
-  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n;
-  assert.strictEqual(after, before + 1, 'their-own-money raises one event');
-  const ev = db.prepare("SELECT * FROM admin_events WHERE kind='expense' ORDER BY id DESC LIMIT 1").get();
-  assert.match(ev.title, /Rosa is owed/, 'it names who is owed');
-  assert.match(ev.href, /^\/c\/expenses\/\d+$/, 'and links to the expense');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n, before,
+    'their-own-money raises nothing');
 
-  // A company-card buy is already paid — no one is owed, so nothing fires.
+  // The expense itself still lands, and still records that a person is owed —
+  // only the announcement went.
+  const row = db.prepare('SELECT * FROM m_expenses ORDER BY id DESC LIMIT 1').get();
+  assert.strictEqual(row.name, 'ice bags', 'the expense is filed');
+  assert.strictEqual(row.paid_with, 'Their own money', 'and who fronted it is still recorded');
+
   await form('/c/expenses', { spent_on: today(), name: 'napkins', amount_cents: '12.00',
     paid_by: 'Rosa', paid_with: 'Company card' });
-  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n, after,
-    'a company-card expense raises nothing');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='expense'").get().n, before,
+    'and a company-card expense raises nothing either');
 });
 
 test('creating a back-office user notifies the office', async () => {
@@ -908,8 +914,11 @@ test('creating a back-office user notifies the office', async () => {
   assert.match(ev.title, /New user: Sam Manager/, 'it names the account');
 });
 
-test('the daily sweep raises overdue invoices, stale floor reports and document deadlines — once', async () => {
-  // Seed the three conditions the sweep looks for.
+test('the daily sweep raises stale floor reports and document deadlines — once, and never invoices', async () => {
+  // Seed three conditions. Only two of them are still swept: invoices were
+  // dropped because a backlog of open bills produced one alert each on the
+  // same morning. The overdue invoice below is seeded precisely to prove it
+  // stays quiet.
   db.prepare(`INSERT INTO m_invoices (invoice_date, due_date, invoice_number, amount_cents, status, category)
     VALUES (date('now','-10 days'), date('now','-3 days'), 'SW-OVERDUE-1', 42000, 'Unpaid', 'Other')`).run();
   db.prepare(`INSERT INTO portal_stock (item, status, reported_by, reported_at)
@@ -931,14 +940,15 @@ test('the daily sweep raises overdue invoices, stale floor reports and document 
   };
 
   await sweepOnce(PORT + 61);
-  assert.ok(db.prepare("SELECT 1 FROM admin_events WHERE kind='invoice' AND title LIKE '%overdue%'").get(), 'overdue invoice raised');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='invoice'").get().n, 0,
+    'the overdue invoice is NOT announced — due and overdue live on the dashboard, not in the bell');
   assert.ok(db.prepare("SELECT 1 FROM admin_events WHERE kind='floor' AND title LIKE '%sweep test milk%'").get(), 'stale floor report raised');
   assert.ok(db.prepare("SELECT 1 FROM admin_events WHERE kind='document' AND title LIKE '%Sweep Test Permit%'").get(), 'document deadline raised');
 
   // Run it again: the same situations must not be announced twice.
-  const invBefore = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='invoice'").get().n;
+  const docBefore = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='document'").get().n;
   await sweepOnce(PORT + 62);
-  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='invoice'").get().n, invBefore,
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind='document'").get().n, docBefore,
     'a second sweep re-announces nothing');
 });
 
@@ -960,14 +970,19 @@ test('when the last person submits, the office hears the shift is ready to close
     'a resubmission does not re-announce it');
 });
 
-test('overriding a duplicate-invoice warning notifies the office', async () => {
+test('overriding a duplicate-invoice warning files it and notifies nobody', async () => {
+  // The override used to be announced, on the reasoning that it is the classic
+  // path to paying a vendor twice. It fired on essentially every upload —
+  // because the reader misreads the invoice number on real invoices, genuine
+  // deliveries flag as duplicates and the warning is overridden every time.
+  // The on-screen warning is untouched; only the notification went.
   const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'invoice_dup'").get().n;
   await form('/c/invoices', { dup_ok: '1', amount: '99.00', invoice_number: 'DUP-TEST-1',
     invoice_date: today(), status: 'Unpaid', category: 'Other' });
-  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'invoice_dup'").get().n;
-  assert.strictEqual(after, before + 1, 'saving over the warning raises one event');
-  const ev = db.prepare("SELECT * FROM admin_events WHERE kind = 'invoice_dup' ORDER BY id DESC LIMIT 1").get();
-  assert.match(ev.href, /^\/c\/invoices#inv-\d+$/, 'and links to the invoice that was filed');
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'invoice_dup'").get().n, before,
+    'the override raises nothing');
+  const inv = db.prepare('SELECT * FROM m_invoices ORDER BY id DESC LIMIT 1').get();
+  assert.strictEqual(inv.invoice_number, 'DUP-TEST-1', 'but the invoice is filed');
 });
 
 test('a brand-new user starts clean — no backlog, only what arrives after them', async () => {

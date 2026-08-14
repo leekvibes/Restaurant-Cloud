@@ -83,18 +83,18 @@ const MODULES = [
       { name: 'pages', label: 'Pages', type: 'pages', pagesOf: 'file' },
       { name: 'notes', label: 'Notes', type: 'textarea' },
     ],
-    // If someone paid out of their own pocket and hasn't been paid back, tell the
-    // back office so they get reimbursed instead of having to chase it. Only that
-    // case — a company-card buy needs no follow-up. Lazily required, like the
-    // incident hook, so the registry never has to know the notification module.
-    onCreate(row) {
-      if (row.paid_with !== 'Their own money' || row.reimbursed_on) return;
-      const amt = '$' + ((Number(row.amount_cents) || 0) / 100).toFixed(2);
-      const who = row.paid_by || 'Someone';
-      require('./portal').adminNotify('expense', `${who} is owed ${amt}`,
-        { body: `Paid their own money for ${row.name || 'an expense'}${row.where_bought ? ' at ' + row.where_bought : ''}`,
-          href: `/c/expenses/${row.id}` });
-    },
+    // NO onCreate HOOK, DELIBERATELY.
+    //
+    // Filing an expense used to raise an admin notification whenever somebody
+    // had paid with their own money and had not been paid back — "Rosa is owed
+    // $18.40". The owner turned it off: in practice almost every expense is
+    // fronted by a person, so the notification fired on nearly every save and
+    // became noise rather than a prompt.
+    //
+    // Nothing about the money was lost with it. The Expenses page still leads
+    // with what is owed and to whom, which is the surface somebody actually
+    // looks at when they are settling up — a notification was a second, worse
+    // copy of a number that was already on the page.
   },
   {
     slug: 'invoices', table: 'm_invoices', title: 'Invoices', icon: '🧾',
