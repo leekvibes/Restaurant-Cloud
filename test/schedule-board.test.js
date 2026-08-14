@@ -219,7 +219,7 @@ test('a card leads with the POSITION and follows with the time', async () => {
   assert.ok(card, 'a card is on the board');
   assert.ok(card.indexOf('<b>') < card.indexOf('<i>'), 'position markup precedes time markup');
   assert.match(card, /<b>Server<\/b>/, 'the position is text, never colour alone');
-  assert.match(card, /<i>4p–10p<\/i>/, 'compact enough that seven days fit across');
+  assert.match(card, /<i>4:00p–10:00p<\/i>/, 'minutes always, so a column of times scans');
   assert.match(card, /aria-label="Edit Server/, 'and it is labelled for a screen reader');
 });
 
@@ -236,7 +236,7 @@ test('an overnight shift renders on the day it STARTED', async () => {
     startsAt: `${day} 20:00`, endsAt: `${dates.addDays(day, 1)} 02:00` });
   assert.strictEqual(SCH.byId(s.id).business_date, day, 'stamped to the starting night');
   const html = await text('/schedule');
-  assert.match(html, /<i>8p–2a<\/i>/, 'and reads across midnight on the card');
+  assert.match(html, /<i>8:00p–2:00a<\/i>/, 'and reads across midnight on the card');
 });
 
 test('multiple shifts on one day stack in chronological order, full size', async () => {
@@ -249,8 +249,8 @@ test('multiple shifts on one day stack in chronological order, full size', async
   const html = await text('/schedule');
   const row = (html.match(/Board Barista[\s\S]*?(?=<div class="sb-row">|<\/div>\s*<\/div>\s*<div class="sb-sum")/) || [])[0];
   const times = [...row.matchAll(/<i>([^<]+)<\/i>/g)].map((m) => m[1]).filter((s) => /[ap]$/.test(s));
-  const idxEarly = times.indexOf('6:30a–11a');
-  const idxLate = times.indexOf('4p–10p');
+  const idxEarly = times.indexOf('6:30a–11:00a');
+  const idxLate = times.indexOf('4:00p–10:00p');
   assert.ok(idxEarly >= 0 && idxLate >= 0, `both shifts render (${times.join(', ')})`);
   assert.ok(idxEarly < idxLate, 'earliest first');
 });
@@ -976,7 +976,7 @@ test('P5: Today is chronological and Upcoming groups by date', async () => {
   const sbm = html.slice(html.indexOf('class="sbm"'), html.indexOf('class="sb "') > -1
     ? html.indexOf('class="sb "') : html.indexOf('<div class="sb">'));
   const today = sbm.slice(0, sbm.indexOf('Upcoming'));
-  assert.ok(today.indexOf('8a') < today.indexOf('6p'),
+  assert.ok(today.indexOf('8:00a') < today.indexOf('6:00p'),
     'the earlier shift is listed first — chronological, not by employee');
   assert.match(sbm, /class="sbm-h">Upcoming/, 'Upcoming exists');
   assert.match(sbm.slice(sbm.indexOf('Upcoming')), /class="sbm-day"><h3>/,
@@ -1027,8 +1027,9 @@ test('P5: position colours come from the one palette, not a second one', async (
     'the mobile list shares the board declaration — it rendered unpainted as a sibling');
   const pal = ['green', 'plum', 'amber', 'brick', 'blue', 'teal', 'indigo', 'rose', 'orange', 'slate'];
   for (const c of pal) {
-    assert.match(css, new RegExp(`\\.sbm-k--${c} i\\{background:var\\(--c-${c}\\)`),
-      `${c} uses the approved variable rather than a new value`);
+    // One declaration now serves both the fill and the outline, and both views.
+    assert.match(css, new RegExp(`\\.sbk--${c},\\.sbm-k--${c}\\{--pc:var\\(--c-${c}\\)`),
+      `${c} declares the approved variable rather than a new value`);
   }
 });
 
@@ -1052,4 +1053,84 @@ test('P5: desktop Week is unchanged', async () => {
   assert.match(html, /\/schedule\/publish-week/, 'Publish week still lives in Week mode');
   const sbm = html.slice(html.indexOf('class="sbm"'), html.indexOf('<div class="sb">'));
   assert.ok(!sbm.includes('publish-week'), 'and never appears in the Today surface');
+});
+
+// ===========================================================================
+// PUBLICATION STATE READS OFF THE CARD
+// ===========================================================================
+//
+// Published and draft were both solid position-colour cards with an 8px dot
+// between them, so a manager scanning the week could not tell what employees
+// were actually looking at. Fill now carries it: solid = the floor sees this,
+// outlined = it does not. The hue never changes — position stays dominant and
+// the same ten colours do both jobs.
+
+test('published is solid, draft is outlined, and the hue is the same', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+
+  // One declaration sets the hue for BOTH states — that is what makes a
+  // published and an unpublished Server unmistakably the same job.
+  assert.match(css, /\.sbk--green,\.sbm-k--green\{--pc:var\(--c-green\);--pt:var\(--t-green\)\}/,
+    'the colour class declares a variable rather than painting a background');
+  assert.match(css, /\.sbk, \.sbm-k \{ border:3px solid var\(--pc\); background:var\(--pc\); color:var\(--pt\); \}/,
+    'the default is solid — published needs no extra rule');
+  assert.match(css, /\.sbk--draft, \.sbk--changed,[\s\S]{0,120}\{\s*\n?\s*background:var\(--paper\)/,
+    'draft and changed drop the fill and keep the 3px coloured border');
+
+  // No second palette anywhere.
+  for (const c of ['green', 'plum', 'amber', 'brick', 'blue', 'teal', 'indigo', 'rose', 'orange', 'slate']) {
+    assert.ok(!new RegExp(`--c-${c}-draft|--c-${c}-pub`).test(css), `no separate draft hue for ${c}`);
+  }
+});
+
+test('the three publication states are each distinguishable', async () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  // published: solid, no dot. draft: outlined + hollow ring.
+  // changed: outlined + FILLED dot, so "published then edited" never reads as
+  // "never sent" — they share the outline but not the marker.
+  assert.match(css, /\.sbk--published > s, \.sbm-k\.sbk--published > s \{ display:none; \}/);
+  assert.match(css, /\.sbk--draft > s[^{]*\{ outline:1\.5px solid var\(--pc\)/);
+  assert.match(css, /\.sbk--changed > s[^{]*\{ background:var\(--pc\); outline:0; \}/);
+});
+
+test('publication state is spoken, not only coloured', async () => {
+  const html = await text('/schedule?v=week');
+  // Fill vs outline cannot be the only signal.
+  // The words the renderer can produce, whatever this week happens to hold.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /STATE_WORD = \{ published: 'published', changed: 'changed since publishing', draft: 'not published' \}/,
+    'each publication state has a word, not only a fill');
+  const card = (html.match(/<button class="sbk[^"]*"[^>]*aria-label="[^"]*"/) || [])[0] || '';
+  assert.match(card, /aria-label="Edit [^"]+ to [^"]+, (published|not published|changed since publishing)/,
+    'every card names its state in words');
+});
+
+test('Week and Today map publication state the same way', async () => {
+  const html = await text('/schedule');
+  // Both surfaces use the SAME sbk--<state> class, so one cannot drift solid
+  // while the other is outlined for the same shift.
+  assert.match(html, /class="sbm-k sbm-k--\w+ sbk--(published|draft|changed)/,
+    'the mobile card carries the board\'s own state class');
+});
+
+test('card times always carry minutes', async () => {
+  const biz = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const day = dates.addDays(week().start, 6);
+  await post('/schedule/shift', { w: day, employee_id: String(E.longname),
+    position: 'kitchen', date: day, start: '07:00', end: '22:00', break_minutes: '' });
+  await post('/schedule/shift', { w: day, employee_id: String(E.barista),
+    position: 'barista', date: day, start: '16:00', end: '22:30', break_minutes: '' });
+  const html = await text('/schedule?v=week');
+
+  assert.match(html, /7:00a<\/i>|7:00a/, 'a whole hour still prints :00');
+  assert.match(html, /10:30p/, 'and a half hour is unchanged');
+  // The old formatter stripped :00, so a board mixed "7a" with "10:30p" and the
+  // eye had to work out they were the same kind of value.
+  assert.ok(!/>\s*7a\s*[–-]/.test(html), 'never the bare hour form');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /const sbTimeFull = /,
+    'manager cards have their own formatter');
+  assert.match(src, /const sbTime = \(utc\) => TC\.clockFace\(utc\)\s*\n\s*\.replace\(\/:00/,
+    'and sbTime is UNCHANGED — the employee portal shares it and was out of scope');
+  assert.ok(biz);
 });

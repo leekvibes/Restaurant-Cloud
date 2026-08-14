@@ -17838,8 +17838,32 @@ const sbColor = (slug) => SB_POS_COLOR[slug]
 
 /** "9:00 AM" is a punch record; "9a" is a schedule. Seven of the long form push
  *  the grid past the window and a WEEK view shows five days of the week. */
+/**
+ * A shift time on a manager card: 7:00a, 4:30p.
+ *
+ * Minutes ALWAYS, including :00. They used to be stripped on the hour, so a
+ * board read "7a – 10p" next to "4p – 10:30p" and the eye had to work out that
+ * the first pair were whole hours rather than a different kind of value. A
+ * column of times only scans if every one of them has the same shape.
+ */
 const sbTime = (utc) => TC.clockFace(utc)
   .replace(/:00(?=\s*[AaPp][Mm]\b)/, '')
+  .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
+
+/**
+ * The same clock face, with minutes ALWAYS — for manager cards only.
+ *
+ * The board used to strip :00, so a week read "7a – 10p" beside
+ * "4p – 10:30p" and the eye had to work out that the first pair were whole
+ * hours rather than a different kind of value. A column of times only scans if
+ * every one has the same shape.
+ *
+ * Deliberately NOT sbTime itself: the employee portal shares that helper, its
+ * cards are a different surface with its own density, and this change was
+ * scoped to the manager's Scheduler. Changing one formatter would have quietly
+ * restyled every shift an employee sees.
+ */
+const sbTimeFull = (utc) => TC.clockFace(utc)
   .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
 
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
@@ -18061,9 +18085,9 @@ app.get('/schedule', (req, res) => {
     const st = pubOf(s);
     const iss = issueOn.get(s.id);
     return `<button class="sbk sbk--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}" type="button"
-      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}, ${STATE_WORD[st]}${
+      data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))} to ${esc(sbTimeFull(s.ends_at))}, ${STATE_WORD[st]}${
       iss ? `, needs review` : ''}">
-    <b>${esc(posName(s.position))}</b><i>${esc(sbTime(s.starts_at))}–${esc(sbTime(s.ends_at))}</i>
+    <b>${esc(posName(s.position))}</b><i>${esc(sbTimeFull(s.starts_at))}–${esc(sbTimeFull(s.ends_at))}</i>
     <s aria-hidden="true"></s>
   </button>`;
   };
@@ -18215,8 +18239,8 @@ app.get('/schedule', (req, res) => {
     const who = s.employee_id == null ? 'Open shift' : (byId.get(s.employee_id) || {}).name || 'Someone';
     return `<button class="sbm-k sbm-k--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}"
         type="button" data-edit="${s.id}"
-        aria-label="${esc(sbTime(s.starts_at))} to ${esc(sbTime(s.ends_at))}, ${esc(who)}, ${esc(posName(s.position))}, ${STATE_WORD[st]}${iss ? ', needs review' : ''}">
-      <b>${esc(sbTime(s.starts_at))} – ${esc(sbTime(s.ends_at))}</b>
+        aria-label="${esc(sbTimeFull(s.starts_at))} to ${esc(sbTimeFull(s.ends_at))}, ${esc(who)}, ${esc(posName(s.position))}, ${STATE_WORD[st]}${iss ? ', needs review' : ''}">
+      <b>${esc(sbTimeFull(s.starts_at))} – ${esc(sbTimeFull(s.ends_at))}</b>
       <em>${esc(who)}</em>
       <i>${esc(posName(s.position))}</i>
       <s aria-hidden="true"></s>

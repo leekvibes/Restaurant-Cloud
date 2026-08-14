@@ -4593,16 +4593,16 @@ body.sb-iss-open .sb-iss { transform: translateX(0); visibility: visible; }
 @media (max-width: 720px) { .sb-iss { width: 100%; max-width: 100%; } }
 .sbk:hover { filter:brightness(1.06); }
 .sbk:focus-visible { outline:2px solid var(--headline); outline-offset:2px; }
-.sbk--green{background:var(--c-green);color:var(--t-green)}
-.sbk--plum{background:var(--c-plum);color:var(--t-plum)}
-.sbk--amber{background:var(--c-amber);color:var(--t-amber)}
-.sbk--brick{background:var(--c-brick);color:var(--t-brick)}
-.sbk--blue{background:var(--c-blue);color:var(--t-blue)}
-.sbk--teal{background:var(--c-teal);color:var(--t-teal)}
-.sbk--indigo{background:var(--c-indigo);color:var(--t-indigo)}
-.sbk--rose{background:var(--c-rose);color:var(--t-rose)}
-.sbk--orange{background:var(--c-orange);color:var(--t-orange)}
-.sbk--slate{background:var(--c-slate);color:var(--t-slate)}
+.sbk--green,.sbm-k--green{--pc:var(--c-green);--pt:var(--t-green)}
+.sbk--plum,.sbm-k--plum{--pc:var(--c-plum);--pt:var(--t-plum)}
+.sbk--amber,.sbm-k--amber{--pc:var(--c-amber);--pt:var(--t-amber)}
+.sbk--brick,.sbm-k--brick{--pc:var(--c-brick);--pt:var(--t-brick)}
+.sbk--blue,.sbm-k--blue{--pc:var(--c-blue);--pt:var(--t-blue)}
+.sbk--teal,.sbm-k--teal{--pc:var(--c-teal);--pt:var(--t-teal)}
+.sbk--indigo,.sbm-k--indigo{--pc:var(--c-indigo);--pt:var(--t-indigo)}
+.sbk--rose,.sbm-k--rose{--pc:var(--c-rose);--pt:var(--t-rose)}
+.sbk--orange,.sbm-k--orange{--pc:var(--c-orange);--pt:var(--t-orange)}
+.sbk--slate,.sbm-k--slate{--pc:var(--c-slate);--pt:var(--t-slate)}
 
 /* An empty cell is EMPTY. The whole cell is the create target; the affordance
    answers hover AND keyboard focus, so it is never hover-only. */
@@ -5313,16 +5313,6 @@ input[type="date"], input[type="time"], input[type="search"], select {
   padding:2px 8px; font-family:var(--mono); letter-spacing:.04em; }
 .sbm-k > s { position:absolute; top:14px; right:14px; width:8px; height:8px;
   border-radius:50% !important; }
-.sbm-k--green i{background:var(--c-green);color:var(--t-green)}
-.sbm-k--plum i{background:var(--c-plum);color:var(--t-plum)}
-.sbm-k--amber i{background:var(--c-amber);color:var(--t-amber)}
-.sbm-k--brick i{background:var(--c-brick);color:var(--t-brick)}
-.sbm-k--blue i{background:var(--c-blue);color:var(--t-blue)}
-.sbm-k--teal i{background:var(--c-teal);color:var(--t-teal)}
-.sbm-k--indigo i{background:var(--c-indigo);color:var(--t-indigo)}
-.sbm-k--rose i{background:var(--c-rose);color:var(--t-rose)}
-.sbm-k--orange i{background:var(--c-orange);color:var(--t-orange)}
-.sbm-k--slate i{background:var(--c-slate);color:var(--t-slate)}
 .sbm-none { margin:0; border:1px solid var(--rule); border-top:0; padding:22px 16px;
   color:var(--muted); font-size:13.5px; }
 
@@ -5338,3 +5328,46 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .sb { --sb-lead:112px; --sb-col:132px; }
   .sb-scroll .sb-grid { width:max-content; min-width:100%; }
 }
+
+
+/* ===========================================================================
+   PUBLICATION STATE — solid means the floor can see it
+   ===========================================================================
+   Published and draft used to be the same solid card with an 8px dot between
+   them, so a manager scanning the week could not tell what employees were
+   actually looking at without inspecting each one. Now the fill carries it:
+
+     solid position colour   published — employees see exactly this
+     white, colour outline   draft — nobody can see it yet
+
+   The hue never changes. Position stays the dominant encoding and the same ten
+   colours do both jobs, which is why they became variables above rather than
+   two palettes.
+
+   Border, not outline, for the publication ring: the Phase 4 issue marker
+   already owns `outline`, and the two states are independent — a draft can also
+   have an issue, and both have to be legible at once. */
+.sbk, .sbm-k { border:3px solid var(--pc); background:var(--pc); color:var(--pt); }
+
+.sbk--draft, .sbk--changed,
+.sbm-k.sbk--draft, .sbm-k.sbk--changed {
+  background:var(--paper); color:var(--headline);
+}
+/* The position name keeps the hue on an outlined card, so the colour is never
+   carried by the border alone. */
+.sbk--draft > b, .sbk--changed > b { color:var(--pc); }
+
+/* Mobile: the chip is the colour on a draft card and steps back on a solid one,
+   so the two never fight for the same job. */
+.sbm-k i { background:var(--pc); color:var(--pt); }
+.sbm-k.sbk--published i { background:transparent; color:inherit; padding-left:0;
+  text-decoration:underline; text-underline-offset:3px; }
+.sbm-k.sbk--published em, .sbm-k.sbk--published b { color:var(--pt); }
+.sbm-k.sbk--draft, .sbm-k.sbk--changed { background:var(--paper); }
+
+/* Published needs no marker — the fill IS the signal. The dot stays for the
+   two states that are NOT plainly visible, and `changed` keeps its filled dot
+   so a published-then-edited draft is distinguishable from one never sent. */
+.sbk--published > s, .sbm-k.sbk--published > s { display:none; }
+.sbk--draft > s, .sbm-k.sbk--draft > s   { outline:1.5px solid var(--pc); outline-offset:-1.5px; background:transparent; }
+.sbk--changed > s, .sbm-k.sbk--changed > s { background:var(--pc); outline:0; }
