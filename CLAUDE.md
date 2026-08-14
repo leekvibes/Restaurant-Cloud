@@ -25,24 +25,56 @@ production. `DB_PATH` overrides it.
 
 ---
 
-## The shape of it
+## What ZWIN actually is
+
+Eleven areas. The scheduler is one of them, and it is the newest — do not let
+the volume of scheduler docs suggest it is the centre of the app. The nightly
+close and payroll are older, more used, and closer to money.
+
+| Area | Route | What it does |
+|---|---|---|
+| Dashboard | `/` | What needs attention today |
+| **Services & tip-outs** | `/shifts` | The nightly close. A *service* (café/dinner), who worked it, their sales, and the tip-out split. **The oldest and most money-critical flow** |
+| Schedule | `/schedule` | Planned shifts, publishing, Issues. Phases 0–5 shipped |
+| Sales | `/sales` | Daily sales, POS webhook from Benugin |
+| Performance | `/costs` | Cost ratios over a range |
+| Cash | `/cash` | Drawer counts, denominations, reconciliation |
+| **Payroll** | `/payroll` | Period roll-up, overtime, take-home, emailed summaries |
+| Trackers & logs | `/c/*` | Invoices · expenses · vendors · products + par · expirations · equipment · documents · contacts · recurring tasks · incidents · notes |
+| Menu costing | `/menu` | Recipe cost from product prices. Beta |
+| Staff | `/employees` `/timeclock` `/staff-portal` `/positions` `/policy` | People, punches, the portal's admin side, tip-out policy versions |
+| Settings & users | `/settings` `/users` `/email` | Config, accounts, mail |
+
+**The staff portal** (`/portal/*`, sign-in at `/tips`) is a separate product on
+the same server: employees clock in/out, submit sales and tips, read the
+specials and 86 board, report low stock, see their pay and their schedule.
+Mobile-first, PIN sign-in, its own stylesheet.
+
+## Files
 
 | File | What it owns |
 |---|---|
-| `src/server.js` | Every route and every page. ~34k lines. Pages are template literals |
+| `src/server.js` | Every route and page. ~34k lines. Pages are template literals |
 | `src/db.js` | Schema, migrations, prepared statements. One SQLite connection |
 | `src/timeclock.js` | Punches, breaks, business dates. **The clock's truth** |
-| `src/scheduler.js` | Planned shifts, publishing, the Issues engine. **Plans only** |
+| `src/scheduler.js` | Planned shifts, publishing, Issues. **Plans only** |
 | `src/portal.js` | Staff portal data + notifications (in-app and web push) |
 | `src/reports.js` | Payroll aggregation, overtime |
+| `src/engine.js` `src/policy.js` | **Tip-out calculation and its versioned policy** |
+| `src/modules.js` | The `/c/*` trackers — declarative registry, one shape per module |
+| `src/menu.js` `src/products.js` | Menu costing, products, par levels |
+| `src/cash.js` | Drawer counts |
+| `src/reader.js` | AI extraction from invoice and receipt photos |
+| `src/dupes.js` | Duplicate detection for expenses and documents |
+| `src/metrics.js` `src/charts.js` | Ranges, comparisons, chart data |
+| `src/nav.js` `src/views.js` | Nav model, layout shell, permission gate |
+| `src/guard.js` | Rate limiting, sign-in attempts |
 | `public/broadsheet.css` | Owner UI |
 | `public/staff.css` | Employee portal |
 
-Docs live in `docs/`. Start with `ZWIN-SCHEDULER-ROADMAP.md` for the scheduler,
-and the phase audits for anything scheduler-adjacent. `ZWIN-DESIGN-SYSTEM.md`
-and `ZWIN-UI-MAP.md` cover the look and the page inventory.
-
----
+Docs are in `docs/`. They skew heavily to the scheduler because that is what was
+built most recently — `TIME-CLOCK-PLAN.md` and `SPEC-dashboard-and-shifts.md`
+cover older ground, and for everything else the code comments are the record.
 
 ## Invariants — breaking these corrupts real money or real trust
 
@@ -66,6 +98,19 @@ to break and somebody gets paid wrong.
 
 **Money is integer cents. Clock time is integer minutes.** `work.hours` is
 decimal hours — the one exception, and it is the payroll boundary.
+
+**A tip-out is calculated against a POLICY VERSION, not today's settings.**
+`shifts.policy_id` pins the version a service was closed under. Changing the
+tip-out rules must never retroactively restate what somebody was already paid.
+Same discipline as `scheduled_shifts.daypart` being stamped once.
+
+**An invoice is matched by its number, never by its file.** Two photographs of
+the same invoice are different bytes; the same PDF re-saved is different bytes
+again. `duplicateInvoice()` warns and allows — a vendor really can bill the same
+amount twice on one day, so a hard block would leave the second unfileable.
+
+**Overtime is weekly and comes from worked time.** `aggregatePayroll` splits it
+on the pay-period workweek. Never project OT from a schedule.
 
 ---
 
