@@ -18332,7 +18332,7 @@ app.get('/schedule', (req, res) => {
           <div class="sb-grid" style="--sb-cols:${days.length}">
             <div class="sb-head">
               <div class="sb-emp sb-corner">Who</div>
-              ${days.map((d) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}">
+              ${days.map((d) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}${s.p ? '' : ' sb-dh--none'}">
                 <em>${esc(dow(d))} ${md(d)}${d === today ? ' <span class="sb-today">TODAY</span>' : ''}</em>
                 <b>${s.p} ${s.p === 1 ? 'person' : 'people'}</b>
                 <i>${s.n} shift${s.n === 1 ? '' : 's'} &middot; ${s.h}h</i>

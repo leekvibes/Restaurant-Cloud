@@ -273,7 +273,7 @@ test('an active employee with no shifts stays visible, at the bottom', async () 
 
 test('today is marked by BUSINESS date, and not by colour alone', async () => {
   const html = await text('/schedule');
-  const marked = html.match(/class="sb-dh is-today"[\s\S]{0,200}?<em>([^<]*)/);
+  const marked = html.match(/class="sb-dh is-today[^"]*"[\s\S]{0,200}?<em>([^<]*)/);
   assert.ok(marked, 'one column is marked');
   assert.match(html, /class="sb-today">TODAY</, 'labelled, not just tinted');
   assert.strictEqual((html.match(/sb-dh is-today/g) || []).length, 1, 'exactly one day');
@@ -1133,4 +1133,31 @@ test('card times always carry minutes', async () => {
   assert.match(src, /const sbTime = \(utc\) => TC\.clockFace\(utc\)\s*\n\s*\.replace\(\/:00/,
     'and sbTime is UNCHANGED — the employee portal shares it and was out of scope');
   assert.ok(biz);
+});
+
+test('the day header reads DATE, then people, then shifts', async () => {
+  // The hierarchy was inverted: the date was 12px and the people count 13px, so
+  // the eye landed on "0 people" before it found which day that was, and a week
+  // of quiet days read louder than the week itself.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const size = (sel) => {
+    const i = css.indexOf(sel + ' {');
+    const m = /font-size:([\d.]+)px/.exec(css.slice(i, css.indexOf('}', i)));
+    return m ? Number(m[1]) : null;
+  };
+  const date = size('.sb-dh em'), people = size('.sb-dh b'), metrics = size('.sb-dh i');
+  assert.ok(date > people, `the date (${date}px) leads the people count (${people}px)`);
+  assert.ok(people > metrics, `and people (${people}px) leads shifts/hours (${metrics}px)`);
+  assert.ok(date >= 17 && date <= 19, `date is ${date}px, in the agreed range`);
+
+  // A day with nobody on it must not shout just because the number is bold.
+  assert.match(css, /\.sb-dh--none b \{ font-weight:500; color:var\(--muted\); \}/,
+    'an empty day steps back rather than reading as an alert');
+  // Asserted on the template, not on the board's incidental state: by the time
+  // this runs the shared week may have somebody on every day, and then there is
+  // no empty column to find.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /\$\{s\.p \? '' : ' sb-dh--none'\}/,
+    'the class is emitted exactly when the people count is zero');
+  assert.match(css, /font-variant-numeric:tabular-nums/, 'metrics line up column to column');
 });
