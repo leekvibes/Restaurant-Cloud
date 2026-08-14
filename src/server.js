@@ -18587,7 +18587,10 @@ app.get('/schedule', (req, res) => {
             sbDrawer(true);
             return;
           }
-          var edit = ev.target.closest && ev.target.closest('.sbk');
+          // Both card shapes: .sbk on the week grid, .sbm-k in the Today list.
+          // Binding the handler to both roots was not enough — it still only
+          // matched the grid's class, so a tap in Today did nothing at all.
+          var edit = ev.target.closest && ev.target.closest('.sbk, .sbm-k');
           if (!edit) return;
           var s = byId[edit.dataset.edit];
           if (!s) return;

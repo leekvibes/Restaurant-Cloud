@@ -546,10 +546,10 @@ test('creating offers Save Draft and Publish; editing offers one Save', async ()
     'which says what saving actually does');
 
   // The two branches of the drawer, each rebuilding the picker for its person.
-  const add = html.slice(html.indexOf("closest('.sb-add')"), html.indexOf("closest('.sbk')"));
+  const add = html.slice(html.indexOf("closest('.sb-add')"), html.indexOf("closest('.sbk, .sbm-k')"));
   assert.match(add, /sbPositions\(add\.dataset\.emp, null\)/, 'create asks for that employee');
   assert.match(add, /'Save Draft'/, 'and leads with the draft');
-  const edit = html.slice(html.indexOf("closest('.sbk')"));
+  const edit = html.slice(html.indexOf("closest('.sbk, .sbm-k')"));
   assert.match(edit, /sbPositions\(s\.e, s\.p\)/,
     'edit keeps the position the shift already has, even if they no longer hold it');
   assert.match(edit, /sb-savepub'\)\.hidden = true/, 'and drops the create-only pair');
@@ -1004,6 +1004,11 @@ test('P5: the mobile list opens the same drawer through the same handler', async
   const html = await text('/schedule?v=today');
   assert.match(html, /var sbTargets = \[document\.querySelector\('\.sb-grid'\), document\.querySelector\('\.sbm'\)\]/,
     'one handler for both views — they cannot drift apart');
+  // And it must MATCH both card shapes. Binding to both roots was not enough:
+  // the selector still said .sbk only, so a tap in Today did nothing at all,
+  // and this test passed anyway because it only checked the binding existed.
+  assert.match(html, /closest\('\.sbk, \.sbm-k'\)/,
+    'the grid card AND the mobile card both open the drawer');
   assert.match(html, /class="sbm-k[^"]*"[\s\S]{0,200}?data-edit="\d+"/,
     'and a mobile card carries the same data-edit the grid uses');
 });
