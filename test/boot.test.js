@@ -102,16 +102,33 @@ test('the app boots against a database from before Products existed', async () =
 test('every test file that spawns a server claims its own port', () => {
   const dir = require('node:path').join(__dirname);
   const seen = new Map();
+  // EVERY port a file binds, not only its top-level `const PORT`.
+  //
+  // The old rule matched `^const PORT = n;` and nothing else, so a second
+  // server spawned inside a test body was invisible to it. portal.test.js did
+  // exactly that on 3995 — schedule-board.test.js's port — and the two raced
+  // for the socket on every parallel run. Whichever lost sent its requests to
+  // the other app, and one assertion failed with nothing wrong in the code it
+  // was testing. That is the failure this guard exists to prevent, and it
+  // walked straight past it.
   for (const f of require('node:fs').readdirSync(dir).filter((x) => x.endsWith('.test.js'))) {
     const src = require('node:fs').readFileSync(require('node:path').join(dir, f), 'utf8');
-    const m = src.match(/^const PORT = (\d+);/m);
-    if (!m) continue;
-    const port = Number(m[1]);
-    assert.ok(!seen.has(port), `${f} and ${seen.get(port)} both bind ${port}`);
-    seen.set(port, f);
+    const ports = new Set();
+    for (const m of src.matchAll(/^const PORT = (\d+);/gm)) ports.add(Number(m[1]));
+    // A port declared anywhere else in the file — inside a test, in a spawn env.
+    for (const m of src.matchAll(/\bconst port = (\d{4});/g)) ports.add(Number(m[1]));
+    for (const m of src.matchAll(/PORT: String\((\d{4})\)/g)) ports.add(Number(m[1]));
+    if (!ports.size) continue;
+    for (const port of ports) {
+      assert.ok(!seen.has(port) || seen.get(port) === f,
+        `${f} and ${seen.get(port)} both bind ${port}`);
+      seen.set(port, f);
+    }
     // dashboard.test.js starts a second server on PORT + 1.
-    assert.ok(!seen.has(port + 1) || seen.get(port + 1) === f,
-      `${f} may also use ${port + 1}, which ${seen.get(port + 1)} claims`);
+    for (const port of ports) {
+      assert.ok(!seen.has(port + 1) || seen.get(port + 1) === f,
+        `${f} may also use ${port + 1}, which ${seen.get(port + 1)} claims`);
+    }
   }
   assert.ok(seen.size >= 4, `found ${seen.size} spawning files, expected several`);
 });

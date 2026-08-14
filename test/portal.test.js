@@ -404,7 +404,15 @@ test('history starts where the manager says it starts', async () => {
   // A literal, not PORT + 7 — that arithmetic landed on 4000, which is the
   // app's own default port, so this test failed for anybody who happened to
   // have the dev server running. It read as a flake for weeks.
-  const port = 3995;
+  // 4002, and unique across the whole suite — boot.test.js now proves that.
+  //
+  // This was 3995, which is schedule-board.test.js's own port. Run alone the
+  // test passed; run in the parallel suite the two servers raced for the
+  // socket, this fetch reached whichever won, and when that was the board's
+  // server — which has no PORTAL_HISTORY_FROM — the floor was never applied and
+  // June appeared. The comment below already records this test being moved off
+  // one collision; it landed on another.
+  const port = 4002;
   const child2 = require('node:child_process').spawn(
     process.execPath, [path.join(__dirname, '..', 'src', 'server.js')],
     { env: { ...process.env, DB_PATH: DB, TZ: 'America/New_York', APP_PASSWORD: '',
