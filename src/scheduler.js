@@ -118,6 +118,110 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sbreak_shift ON scheduled_breaks (scheduled_shift_id);
 `);
 
+// ---------------------------------------------------------------------------
+// Phase 6 — availability and time off.
+//
+// TWO TABLES, DELIBERATELY, and the reason is lifecycle rather than storage:
+// availability is STATED by an employee and takes effect on save; time off is
+// REQUESTED and a manager decides it. Merging them because both end in "cannot
+// work" would put an approval workflow on a preference.
+//
+// THE INVARIANT THAT MATTERS MOST: no rows means AVAILABLE. Every employee has
+// zero rows the moment these tables ship, and any other reading would mark the
+// whole roster unavailable on deploy and light the board with issues for a
+// schedule that was correct yesterday. This is also why "available" is never
+// stored — a stored "available all day Monday" makes the default ambiguous the
+// first time somebody deletes it. Asserted in test/schedule-availability.test.js.
+// ---------------------------------------------------------------------------
+db.exec(`
+  CREATE TABLE IF NOT EXISTS availability_rules (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id    INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    -- NOT a bare 'unavailable' column. Three things in this codebase already
+    -- answer to that word and none of them is this one: PORTAL_NAV.availability
+    -- is a nav tab state, "Earnings unavailable" is a pay state, and
+    -- kind:'unavailable' in the pay feed means a shift the tip engine could not
+    -- cost. The column name carries the domain so a grep lands in the right one.
+    avail_kind     TEXT NOT NULL,          -- 'unavailable' | 'prefer'
+    -- ONE TABLE SERVES BOTH SHAPES: weekday set = recurring, on_date set =
+    -- one-off. Exactly one, enforced below. Precedence then falls out of
+    -- specificity rather than needing a rules engine.
+    weekday        INTEGER,                -- 0=Sunday..6, NULL for a one-off
+    on_date        TEXT,                   -- 'YYYY-MM-DD', NULL for a recurring rule
+    all_day        INTEGER NOT NULL DEFAULT 0,
+    -- Local wall clock, minutes from midnight. NOT UTC: "I can't work Tuesday
+    -- evenings" is a statement about the clock on the wall, and storing it as an
+    -- instant would make it drift an hour twice a year.
+    start_min      INTEGER,
+    -- END_MIN <= START_MIN MEANS IT ENDS THE NEXT DAY. Friday 22:00-02:00 is one
+    -- rule, not two, and it belongs to the weekday its START falls on. This is
+    -- the same discipline scheduled_shifts already uses ("ends_at ... may be on
+    -- the next calendar day"), and it is why every comparison resolves to
+    -- instants before overlapping rather than comparing day labels.
+    end_min        INTEGER,
+    -- Both nullable = indefinite in that direction. Both INCLUSIVE.
+    -- Without these, somebody changing their regular Tuesday retroactively
+    -- rewrites whether last month's schedule was ever valid. Editing a rule
+    -- closes the old row with effective_until and inserts a new one; it never
+    -- updates in place. Same reason policy_versions supersedes instead of
+    -- editing, and the same reason a deactivated employee gets effective_until
+    -- set rather than their rules deleted.
+    effective_from  TEXT,
+    effective_until TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (avail_kind IN ('unavailable', 'prefer')),
+    -- Exactly one of weekday / on_date. A row with both is a rule nobody can
+    -- reason about, and a row with neither applies to nothing.
+    CHECK ((weekday IS NULL) <> (on_date IS NULL)),
+    CHECK (weekday IS NULL OR (weekday BETWEEN 0 AND 6)),
+    -- A timed rule must actually carry its times. An all-day rule need not.
+    CHECK (all_day = 1 OR (start_min IS NOT NULL AND end_min IS NOT NULL)),
+    CHECK (start_min IS NULL OR (start_min BETWEEN 0 AND 1439)),
+    CHECK (end_min   IS NULL OR (end_min   BETWEEN 0 AND 1440))
+  );
+  CREATE INDEX IF NOT EXISTS idx_avail_emp_wd   ON availability_rules (employee_id, weekday);
+  CREATE INDEX IF NOT EXISTS idx_avail_emp_date ON availability_rules (employee_id, on_date);
+
+  -- Modelled on time_corrections, which is the strongest request-lifecycle
+  -- precedent in the codebase: actor and timestamp on BOTH sides, the manager's
+  -- note kept separate from the employee's reason, and a decision guarded
+  -- against being made twice.
+  --
+  -- What is deliberately NOT copied is 'applied_at'. For a time correction,
+  -- "applied" means a punch was rewritten, so the decision and its effect are
+  -- two writes. For time off, APPROVAL IS THE EFFECT — the issues engine reads
+  -- the status directly and there is no second write to record.
+  CREATE TABLE IF NOT EXISTS time_off_requests (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id    INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    -- UTC instants, like scheduled_shifts. A multi-day absence is ONE row, not
+    -- one per day: daily rows would make approving and withdrawing a loop, and
+    -- a partial day is the same row with a narrower window.
+    starts_at      TEXT NOT NULL,
+    ends_at        TEXT NOT NULL,
+    -- A display and comparison convenience, not a different entity. A full day
+    -- is a range too.
+    all_day        INTEGER NOT NULL DEFAULT 0,
+    reason         TEXT,                   -- optional, the employee's own words
+    status         TEXT NOT NULL DEFAULT 'pending',
+    requested_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_by     TEXT,
+    decided_at     TEXT,
+    decision_note  TEXT,                   -- the manager's, and the employee sees it
+    CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn')),
+    CHECK (ends_at > starts_at)
+  );
+  CREATE INDEX IF NOT EXISTS idx_timeoff_emp    ON time_off_requests (employee_id, starts_at);
+  CREATE INDEX IF NOT EXISTS idx_timeoff_status ON time_off_requests (status);
+  -- Idempotency at the schema, not at a disabled button. A double-tapped submit
+  -- or a retried POST lands the identical row twice otherwise, and the office
+  -- gets two notifications for one absence. Scoped to pending so that a request
+  -- rejected once can legitimately be asked for again.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_timeoff_no_dupe
+    ON time_off_requests (employee_id, starts_at, ends_at)
+    WHERE status = 'pending';
+`);
+
 const STATUSES = ['draft', 'published', 'cancelled'];
 
 /** Refusals a caller is meant to show, distinct from a genuine crash. */
@@ -1125,6 +1229,269 @@ module.exports = {
   publishedFor, overlapsFor, copyWeek,
   spanMinutes, paidMinutes,
   serviceFor, businessDateFor, heldPositions, heldPositionsFor,
+  availabilityFor, availabilityForMany, availabilityEnabled, ruleWindowOn,
+  availabilityContext, resolveAvailability,
   q, DAYPARTS, STATUSES, ScheduleError,
   WINDOW_BACK, WINDOW_FORWARD,
 };
+
+// ===========================================================================
+// Phase 6 — resolving availability.
+// ===========================================================================
+//
+// ONE ANSWER, ONE DEFINITION. The Issues engine, the create/edit warning, the
+// drawer's context line and (later) Day View all ask this and nothing else. The
+// mistake to avoid is the one sbOverlapNote made by living in a route: two
+// copies of a rule drift, and duplicate/copy-week silently stopped warning.
+//
+// IT RETURNS FACTS, NOT A BOOLEAN. Phase 8's claim/replacement eligibility is
+// specified to consume availability and approved time off through a shared
+// evaluator rather than re-deriving them. A boolean would force exactly that
+// re-derivation: 'preferred' is not a weaker 'available' when you are ranking
+// volunteers, and a pending request is a different verdict from an approved one.
+//
+// QUALIFICATION IS NOT IN HERE. heldPositions() answers "does this person do
+// that job" and stays separate, so there is deliberately no `position` argument
+// below — availability is employee-wide, and a position parameter would be the
+// seam through which qualification leaked into availability storage. Phase 8
+// composes the two; it does not merge them.
+//
+// IT IS SPLIT INTO A LOAD AND A RESOLVE, AND THAT SPLIT WAS MEASURED RATHER
+// THAN GUESSED. The Phase 6 audit predicted this would "stay comfortably
+// synchronous with no caching", reasoning from Phase 4 deriving a real week of
+// issues in 0.25 ms. The first version here queried inside every call, which is
+// the shape the audit imagined, and a 50-shift week cost 28.6 ms — about 114x
+// the entire budget it was being added to, because the Issues engine asks once
+// per shift. Loading the week once and resolving in memory is what makes the
+// original prediction true. Keep new callers on a context if they ask more than
+// once.
+
+// Local wall clock <-> UTC, memoised.
+//
+// MEASURED: TC.localInputToUtc costs ~104us per call and utcToLocalInput ~50us,
+// because each one goes through Intl timezone machinery. The resolver asks for
+// the same handful of local instants over and over — a week has a few hundred
+// distinct (date, time) pairs and a roster asks about each of them repeatedly —
+// so the conversions, not the queries, were the whole cost of deriving a week.
+//
+// Safe to cache for the life of the process: the mapping from a local wall
+// clock string to an instant is fixed by the zone's rules, which do not change
+// while the server is running. Bounded so a long-lived process cannot grow it
+// without limit; clearing is free because every entry is recomputable.
+// THE ZONE IS PART OF THE KEY, and that is not paranoia. timeclock.js reads the
+// zone as `const TZ = () => process.env.TZ || 'America/New_York'` — a FUNCTION,
+// evaluated per call, not a constant captured at load. So '2026-08-21 22:00' does
+// not name one instant; it names one instant PER ZONE, and a cache keyed on the
+// string alone would hand back a New York answer to a London question. Nothing in
+// production changes TZ today, but the whole point of a cache key is that it does
+// not depend on that staying true.
+//
+// DST needs nothing extra, because the key carries the full local date AND time.
+// '2026-11-01 01:30' is one key with one answer; the probe loop inside
+// localInputToUtc resolves the ambiguous hour the same way every time, so the
+// cache can only ever repeat a decision it did not make.
+const tzKey = () => process.env.TZ || 'America/New_York';
+const TZ_MEMO = new Map();
+function localToUtc(local) {
+  const key = `${tzKey()}|${local}`;
+  let v = TZ_MEMO.get(key);
+  if (v === undefined) {
+    v = TC.localInputToUtc(local);
+    if (TZ_MEMO.size > 8192) TZ_MEMO.clear();
+    TZ_MEMO.set(key, v);
+  }
+  return v;
+}
+const UTC_MEMO = new Map();
+function utcToLocal(utc) {
+  const key = `${tzKey()}|${utc}`;
+  let v = UTC_MEMO.get(key);
+  if (v === undefined) {
+    v = TC.utcToLocalInput(utc);
+    if (UTC_MEMO.size > 8192) UTC_MEMO.clear();
+    UTC_MEMO.set(key, v);
+  }
+  return v;
+}
+
+/** Minutes-from-midnight as local 'HH:MM'. */
+const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+/**
+ * One occurrence of a rule, anchored on a local date, as a UTC window.
+ *
+ * END BEFORE OR EQUAL TO START MEANS IT ENDS THE NEXT DAY. Friday 22:00-02:00 is
+ * one rule, and it belongs to the weekday its START falls on. The employee never
+ * learns this; they enter a day, a start and an end, and the UI says "ends 2:00am
+ * the next day" when the end is the earlier number.
+ *
+ * Everything comes back as an instant because that is the only thing safe to
+ * compare. A shift at 1am Saturday and a rule anchored on Friday disagree about
+ * every label available — calendar date, business date, weekday — and agree
+ * about the only thing that matters, which is when they actually are.
+ */
+function ruleWindowOn(rule, localDate) {
+  if (rule.all_day) {
+    return { start: localToUtc(`${localDate} 00:00`),
+      end: localToUtc(`${addDays(localDate, 1)} 00:00`) };
+  }
+  const endsNextDay = rule.end_min <= rule.start_min || rule.end_min >= 1440;
+  const endDate = endsNextDay ? addDays(localDate, 1) : localDate;
+  return { start: localToUtc(`${localDate} ${hhmm(rule.start_min)}`),
+    end: localToUtc(`${endDate} ${hhmm(rule.end_min % 1440)}`) };
+}
+
+/** The local calendar date an instant falls on. */
+const localDateOf = (utc) => String(utcToLocal(utc)).slice(0, 10);
+
+/**
+ * Is the availability feature switched on?
+ *
+ * ABSENT MEANS ON. getSetting returns the fallback for a missing row, so the
+ * test is negative — an installation that has never touched the setting gets the
+ * feature, because zero rules already behaves exactly like the feature being off
+ * and shipping it dark would be the dead toggle the roadmap forbids.
+ *
+ * It governs AVAILABILITY RULES ONLY. Time off is unconditional: requests can
+ * still be made and decided, and an approved absence still conflicts with a
+ * shift, because that is a commitment a manager personally made.
+ */
+function availabilityEnabled() {
+  return P.getSetting('sch_availability', '1') !== '0';
+}
+
+/** Strict overlap, identical to the shift-overlap test this module already uses. */
+const overlaps = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && aEnd > bStart;
+
+const BLANK = () => ({ state: 'available', rule: null, timeOff: null, reasons: [] });
+
+/**
+ * Load everything needed to answer for these people across this span, once.
+ *
+ * Two queries total, however many times you then resolve against it. Callers
+ * that ask about a whole week of shifts should build one of these and reuse it;
+ * see the measurement note above for what happens when they do not.
+ */
+function availabilityContext(employeeIds, fromUtc, toUtc) {
+  const ids = [...new Set((employeeIds || []).map(Number).filter(Boolean))];
+  const ctx = { ids, enabled: availabilityEnabled(), rules: new Map(), requests: new Map() };
+  if (!ids.length) return ctx;
+  const holes = ids.map(() => '?').join(',');
+
+  // Approved first so the resolver can stop at the first hit it finds.
+  for (const r of db.prepare(
+    `SELECT id, employee_id, starts_at, ends_at, all_day, status
+       FROM time_off_requests
+      WHERE employee_id IN (${holes})
+        AND status IN ('approved', 'pending')
+        AND starts_at < ? AND ends_at > ?
+      ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END, id`).all(...ids, String(toUtc), String(fromUtc))) {
+    if (!ctx.requests.has(r.employee_id)) ctx.requests.set(r.employee_id, []);
+    ctx.requests.get(r.employee_id).push(r);
+  }
+
+  if (ctx.enabled) {
+    for (const r of db.prepare(
+      `SELECT id, employee_id, avail_kind, weekday, on_date, all_day,
+              start_min, end_min, effective_from, effective_until
+         FROM availability_rules
+        WHERE employee_id IN (${holes})`).all(...ids)) {
+      if (!ctx.rules.has(r.employee_id)) ctx.rules.set(r.employee_id, []);
+      ctx.rules.get(r.employee_id).push(r);
+    }
+  }
+  return ctx;
+}
+
+/**
+ * Resolve one employee over one window against a loaded context. Pure — it
+ * touches no database, which is the whole point of the split.
+ *
+ * PRECEDENCE, deterministic and in this order, because a rules engine for four
+ * cases would be four times the code and one more thing to be wrong:
+ *
+ *   1. approved time off   — beats everything, and forces state 'unavailable'
+ *   2. a one-off rule      — beats a recurring rule on the same day
+ *   3. a recurring rule    — the weekly pattern
+ *   4. nothing stated      — available
+ *
+ * Within a tier, 'unavailable' beats 'prefer'. A PENDING request never changes
+ * state: it is reported so the drawer can show context, but an employee must not
+ * be able to put a warning on the manager's board simply by asking.
+ */
+function resolveAvailability(ctx, employeeId, startsAt, endsAt) {
+  const id = Number(employeeId);
+  const rec = BLANK();
+  const qs = String(startsAt);
+  const qe = String(endsAt);
+
+  for (const r of ctx.requests.get(id) || []) {
+    if (!overlaps(r.starts_at, r.ends_at, qs, qe)) continue;
+    rec.timeOff = { id: r.id, status: r.status, allDay: !!r.all_day,
+      startsAt: r.starts_at, endsAt: r.ends_at };
+    if (r.status === 'approved') {
+      rec.state = 'unavailable';
+      rec.reasons.push(`timeoff:${r.id}`);
+      return rec;                     // nothing outranks an approved absence
+    }
+    break;                            // a pending one is context; keep looking at rules
+  }
+
+  const rules = ctx.rules.get(id);
+  if (!rules || !rules.length) return rec;
+
+  // A rule anchored on the previous local day can still reach into this window
+  // (that is the whole point of the overnight case), so widen by a day at each
+  // end and let the instant comparison decide.
+  const firstDate = addDays(localDateOf(qs), -1);
+  const lastDate = localDateOf(qe);
+
+  for (const rule of rules) {
+    for (let date = firstDate; date <= lastDate; date = addDays(date, 1)) {
+      if (rule.on_date) { if (rule.on_date !== date) continue; }
+      else if (new Date(`${date}T00:00:00Z`).getUTCDay() !== rule.weekday) continue;
+
+      // Effective dates are INCLUSIVE and tested against the day the occurrence
+      // STARTS. A rule effective through Friday keeps its whole Friday
+      // occurrence, tail past midnight included — truncating it at midnight
+      // would silently shorten the last one somebody ever stated.
+      if (rule.effective_from && date < rule.effective_from) continue;
+      if (rule.effective_until && date > rule.effective_until) continue;
+
+      if (!overlaps(...Object.values(ruleWindowOn(rule, date)), qs, qe)) continue;
+
+      const specific = !!rule.on_date;
+      const hard = rule.avail_kind === 'unavailable';
+      const held = rec.rule;
+      const wins = !held
+        || (specific && !held.oneOff)
+        || (specific === held.oneOff && hard && rec.state !== 'unavailable');
+      if (!wins) continue;
+
+      rec.rule = { id: rule.id, kind: rule.avail_kind, oneOff: specific,
+        weekday: rule.weekday, onDate: rule.on_date, allDay: !!rule.all_day,
+        startMin: rule.start_min, endMin: rule.end_min };
+      rec.state = hard ? 'unavailable' : 'preferred';
+    }
+  }
+  if (rec.rule) rec.reasons.push(`${rec.state === 'preferred' ? 'prefer' : 'unavailable'}:${rec.rule.id}`);
+  return rec;
+}
+
+/**
+ * Convenience for a caller that asks once — the drawer's context line, a single
+ * create/edit check. Builds a context and throws it away, which is exactly the
+ * wrong thing to do in a loop.
+ */
+function availabilityFor(employeeId, startsAt, endsAt) {
+  const ctx = availabilityContext([employeeId], startsAt, endsAt);
+  return resolveAvailability(ctx, employeeId, startsAt, endsAt);
+}
+
+/** The same question for a roster over one window. Returns Map(id -> facts). */
+function availabilityForMany(employeeIds, startsAt, endsAt) {
+  const ctx = availabilityContext(employeeIds, startsAt, endsAt);
+  const out = new Map();
+  for (const id of ctx.ids) out.set(id, resolveAvailability(ctx, id, startsAt, endsAt));
+  return out;
+}

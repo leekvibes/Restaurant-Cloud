@@ -1164,3 +1164,827 @@ Three, and I would not call any of them blockers:
    before any UI is built on top of it.
 
 Everything else in the 34 has a recommendation with evidence behind it.
+
+---
+
+# PART TWO — AUDIT COMPLETION
+
+Added 2026-08-14, at `f8ccea4`. Completes the two things the gap check found
+missing: one table carrying all 34 product decisions, and the four audit areas
+that were never written. Still audit only — no production code, no test changes,
+no schema.
+
+Research for this part was **measured**: the settings pattern, the portal's
+accessibility primitives, the cross-midnight precedent and the qualification
+seam were all read from source. Where a recommendation rests on judgement rather
+than code, it says so.
+
+---
+
+## B1. The 34 decisions — the approval sheet
+
+Read this table top to bottom. Every row has an answer. **Status** says how much
+of a choice it really is:
+
+- **LOCKED** — the roadmap, a prior phase, or migration safety already decided
+  it. Changing it means changing something upstream.
+- **REC** — a recommendation with clear evidence. Approve or overrule.
+- **OPEN** — genuinely ambiguous. Your call, and the recommendation is weaker.
+
+| # | Decision | Recommendation | Status |
+|---|---|---|---|
+| 1 | Default when an employee has no rules | **Available** | LOCKED |
+| 2 | Do availability changes need manager approval? | **No** — only time off does | LOCKED |
+| 3 | Is prefer-to-work all-day, timed, or both? | **Both** — same columns as any rule | REC |
+| 4 | Do recurring rules need effective dates? | **Yes** — `effective_from` / `effective_until`, both nullable | REC |
+| 5 | How are one-off exceptions modelled? | **Same table.** `weekday` set = recurring, `on_date` set = one-off | REC |
+| 6 | Time-off statuses | **pending · approved · rejected · withdrawn.** No `applied` | REC |
+| 7 | Partial-day time off | **Yes** — same row, `all_day` is a flag | REC |
+| 8 | Multi-day requests | **One request**, not one row per day | REC |
+| 9 | Can an employee edit a pending request? | **No** — withdraw and resubmit | REC |
+| 10 | Can an employee withdraw an *approved* request? | **No** — ask the manager | REC |
+| 11 | Is a reason required? | **Optional** | REC |
+| 12 | Can managers add private review notes? | **A note, but NOT private** — the employee sees it | OPEN |
+| 13 | Does pending time off affect the Scheduler? | **Drawer context only** — not an Issue, not in the count | OPEN |
+| 14 | Shift during stated unavailable | **Warn, allow.** Severity `review` | LOCKED |
+| 15 | Shift during approved time off | **Warn, allow.** Severity `action` | LOCKED |
+| 16 | Do Issues persist after a manager overrides? | **Yes** — no dismissal | LOCKED |
+| 17 | Immediate warning on create/edit? | **Yes**, through the same helper the Issues engine uses | REC |
+| 18 | Integrate with the Phase 4 Issues drawer? | **Yes** — two new kinds, nothing structural | LOCKED |
+| 19 | Notify managers when availability changes? | **No** — weekly per-employee edits would be noise | REC |
+| 20 | Notify managers on a time-off request? | **Yes** — on submit and withdraw | REC |
+| 21 | Notify the employee on approve/reject? | **Yes** — `reqTell` already does exactly this | REC |
+| 22 | Where do managers review requests? | **The existing Time Clock requests queue** | REC |
+| 23 | Where do managers see availability while scheduling? | **The create/edit drawer's employee context line** | REC |
+| 24 | Does the UI show "Available — all day" by default? | **Yes, as display only** — never stored | REC |
+| 25 | Ship prefer-to-work at all? | **Yes, with no issue and no warning** | OPEN |
+| 26 | Recurrence model | **weekday 0–6 + start/end minutes.** No RRULE, no generated instances | REC |
+| 27 | Overnight availability ranges | **One rule.** `end_min <= start_min` means it ends next day | REC |
+| 28 | Availability changed after shifts exist | **Nothing mutates.** The Issue re-derives | LOCKED |
+| 29 | Time off approved after shifts exist | **Same** — nothing mutates | LOCKED |
+| 30 | Does any of this block Publish? | **No** | LOCKED |
+| 31 | Which permission governs manager approval? | **The existing `schedule` area** | REC |
+| 32 | What history stays visible? | Rejected/withdrawn stay in the employee's own history; invisible to schedule checks | REC |
+| 33 | Employee-wide or per-position availability? | **Employee-wide** | REC |
+| 34 | Adopt the reference interaction model? | **Structure yes; calendar grid and "set available" control no** | REC |
+| **S1** | **The roadmap's "enable employee availability" setting** | **Ship it, default ON, governing availability only** | **OPEN** |
+
+**S1 is numbered separately** so the brief's 34 keep their numbers. It is a
+roadmap requirement (§III) that the first audit missed entirely.
+
+### Impact matrix
+
+`S` schema · `E` employee UI · `M` manager UI · `I` Issues engine ·
+`N` notifications · `8` Phase 8 compatibility.
+
+| # | S | E | M | I | N | 8 | # | S | E | M | I | N | 8 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | – | ✓ | ✓ | ✓ | – | **✓** | 18 | – | – | ✓ | ✓ | – | ✓ |
+| 2 | – | ✓ | – | – | – | – | 19 | – | – | – | – | ✓ | – |
+| 3 | ✓ | ✓ | ✓ | – | – | ✓ | 20 | – | – | ✓ | ✓ | – |
+| 4 | ✓ | ✓ | – | ✓ | – | ✓ | 21 | – | ✓ | – | – | ✓ | – |
+| 5 | ✓ | ✓ | ✓ | ✓ | – | ✓ | 22 | – | – | ✓ | – | ✓ | – |
+| 6 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 23 | – | – | ✓ | – | – | – |
+| 7 | ✓ | ✓ | ✓ | ✓ | – | ✓ | 24 | – | ✓ | – | – | – | – |
+| 8 | ✓ | ✓ | ✓ | ✓ | – | ✓ | 25 | ✓ | ✓ | ✓ | – | – | ✓ |
+| 9 | – | ✓ | – | – | – | – | 26 | ✓ | ✓ | – | ✓ | – | ✓ |
+| 10 | – | ✓ | ✓ | – | ✓ | – | 27 | ✓ | ✓ | – | ✓ | – | **✓** |
+| 11 | ✓ | ✓ | ✓ | – | – | – | 28 | – | – | ✓ | ✓ | – | – |
+| 12 | ✓ | ✓ | ✓ | – | ✓ | – | 29 | – | – | ✓ | ✓ | – | – |
+| 13 | – | – | ✓ | **✓** | – | ✓ | 30 | – | – | ✓ | – | – | – |
+| 14 | – | – | ✓ | ✓ | – | ✓ | 31 | – | – | ✓ | – | – | ✓ |
+| 15 | – | – | ✓ | ✓ | – | ✓ | 32 | – | ✓ | ✓ | – | – | – |
+| 16 | – | – | ✓ | ✓ | – | – | 33 | ✓ | ✓ | ✓ | ✓ | – | **✓** |
+| 17 | – | – | ✓ | ✓ | – | ✓ | 34 | – | ✓ | – | – | – | – |
+| | | | | | | | **S1** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+### Evidence and consequence, per decision
+
+**1 — Default available.** *Evidence:* all 84 current employees have zero rows,
+because the table does not exist. *Consequence:* any other reading marks the
+whole roster unavailable on deploy and lights the board with Issues for a
+schedule that was correct yesterday. *Impact:* none — it is the absence of a
+rule, which is why "available" is never stored (§6). This is the highest-risk
+decision in the phase and the only one where being wrong is immediately visible
+to everybody.
+
+**2 — No approval for availability.** *Evidence:* the roadmap says a manager
+*"may override with a warning"*, which an approval step contradicts. *Consequence:*
+availability takes effect on save; time off remains the reviewed path.
+
+**3 — Prefer-to-work both.** *Evidence:* `all_day` + `start_min` + `end_min`
+already serve unavailable; a preference needs no different shape. *Consequence:*
+one row type covers all three kinds.
+
+**4 — Effective dates.** *Evidence:* without them, an employee changing their
+regular Tuesday retroactively rewrites whether last month's schedule was ever
+valid. *Consequence:* history stops moving. *Impact:* two nullable columns and a
+date predicate in the resolver. See §B14 for the inclusivity edges.
+
+**5 — One-off in the same table.** *Consequence:* precedence falls out of
+specificity rather than needing a rules engine (§21). *Impact:* one table, one
+query, a `CHECK` that exactly one of `weekday`/`on_date` is set.
+
+**6 — Four statuses.** *Evidence:* `time_corrections` carries `applied_at`
+because a decision and its effect are separate writes there; for time off,
+approval *is* the effect. *Consequence:* the Issues engine reads status directly.
+
+**7, 8 — Partial and multi-day.** *Evidence:* a full day is a range too; a
+multi-day absence is one conversation. *Consequence:* one row, `all_day` a
+display convenience. Daily rows would make withdraw and approve loop.
+
+**9, 10 — Edit and withdrawal.** *Evidence:* the correction precedent has no
+employee edit — a pending request can only be decided. *Consequence:* pending is
+withdraw-and-resubmit; approved cannot be pulled unilaterally because a manager
+has already scheduled around it.
+
+**11 — Reason optional.** *Consequence:* a required reason invites either
+fiction or oversharing, and §36 already keeps free text off the board.
+
+**12 — Manager note, not private. OPEN.** *Evidence:* `time_corrections` has
+`decision_note` separate from the employee's `reason`, and `reqTell` already
+carries an outcome to the employee. *Consequence:* a decline with no stated
+reason is the version people escalate about. *Why OPEN:* a note the employee
+cannot see is a different feature with a different risk — it would be the first
+place in ZWIN storing manager-only text about a named person, on an unencrypted
+database. Recommend visible; if you want private notes, that needs its own
+decision about who else can read them.
+
+**13 — Pending is context, not an Issue. OPEN.** See §B12.
+
+**14, 15 — Warn, never block.** *Evidence:* Phase 2 overlap, Phase 4
+qualification and Phase 5 all warn. *Consequence:* the manager keeps final
+responsibility, which the roadmap assigns to them explicitly.
+
+**16 — Issues persist.** *Evidence:* Phase 4 established issues as derived with
+no dismissal. *Consequence:* an override flag would be dismissal by another
+name. Fix the schedule or the request, and the issue goes.
+
+**17 — One helper, two callers.** *Evidence:* `sbOverlapNote` lived in the route
+and so duplicate/copy-week never warned until Phase 4 derived it centrally.
+*Consequence:* the create/edit warning and the Issues engine cannot disagree.
+
+**18 — Two new kinds.** `issuesFor()` already returns
+`{key, kind, severity, employeeId, businessDate, shiftIds}` and
+`ISSUE_SEVERITY` is a plain map at `scheduler.js:1025`. *Impact:* two entries in
+that map, two blocks in the loop. Nothing structural.
+
+**19, 20, 21 — Notification direction.** *Evidence:* `PORTAL.adminNotify`,
+`PORTAL.notify`, `reqTell` and `notifyOnce` all exist. *Consequence:* the office
+hears about requests, not about somebody editing their Tuesday. **Note the fresh
+precedent:** three notifications were removed on 2026-08-14 for firing on nearly
+every save. A notification per availability edit would have been the fourth.
+
+**22 — The existing queue.** *Evidence:* `/timeclock/requests/all` and
+`pendingCorrections` already exist with a review UI. *Consequence:* no new HR
+area, and one place a manager looks for "things waiting on me".
+
+**23 — The drawer.** *Evidence:* the employee context line added in `e951f3f`
+already says what that person has that day. *Consequence:* availability appears
+where the decision is made.
+
+**24 — Displayed, never stored.** *Evidence:* §22. *Consequence:* the line is
+rendered from the absence of rules; deleting the last rule returns to it
+automatically.
+
+**25 — Prefer-to-work, silent. OPEN.** *Evidence:* the roadmap said *"preferred
+working times if they earn their keep"* and never resolved the conditional.
+*Recommendation:* ship it with no issue and no warning — it earns its keep by
+being visible while scheduling, not by firing. *Why OPEN:* the honest
+alternative is to cut it from Phase 6 entirely and see whether anyone asks.
+
+**26 — Weekday plus minutes.** *Evidence considered:* RRULE strings and
+generated instances were the alternatives the brief asked about. RRULE brings a
+parser and a dependency for recurrence nobody has asked for beyond weekly;
+generated instances mean writing rows into the future and deciding how far,
+then rewriting them when a rule changes. *Consequence:* a weekday integer and
+two minute integers answer every case in the brief's §7 examples, and the
+resolver stays a date predicate.
+
+**27 — One overnight rule.** See §B5.
+
+**28, 29 — Nothing auto-edits.** *Evidence:* `issuesFor` re-derives on every
+render, so this is already supported. *Consequence:* the manager resolves; the
+schedule is never silently rewritten.
+
+**30 — Publish never blocks.** *Evidence:* Publish calls no validation at all
+today. *Consequence:* adding a block here would be the first, contradicting
+Phases 2, 4 and 5.
+
+**31 — The `schedule` area.** *Evidence:* `nav.js` `AREAS` — `schedule` is a new
+key and new keys are closed by default, so a restricted account does not get
+approval powers by accident. *Consequence:* no second permission system.
+
+**32 — History stays.** *Consequence:* a rejected request is the record that the
+conversation happened. Deleting it makes "you never asked" unanswerable.
+
+**33 — Employee-wide.** *Evidence:* a time range already expresses the real
+constraint — *"I can't do dinner"* **is** *"unavailable after 4pm"*.
+*Consequence:* avoids multiplying rows and precedence by position. **Phase 8
+note:** eligibility still checks position, because qualification is a separate
+evaluator (§B7) — employee-wide availability does not weaken it.
+
+**34 — Structure yes, chrome no.** *Evidence:* `.ps-strip`, `.ps-row`,
+`.ps-wknav` and the `.pes` sheet already exist and are already tested.
+*Consequence:* no new overlay pattern. Simplify away the calendar grid and any
+explicit "set available" control, which has no semantic effect once absence
+means available.
+
+**S1 — The setting.** See §B2 and §B3.
+
+---
+
+## B2. The Phase 6 enable setting — *storage measured, behaviour recommended*
+
+The roadmap (§III) says Phase 6 introduces **"enable employee availability"**.
+The first audit never mentioned it.
+
+### The existing pattern
+
+| Question | Answer, read from source |
+|---|---|
+| Storage | `settings` — `key TEXT PRIMARY KEY, value TEXT`. Nothing else |
+| Generic read | `getSetting(key, fallback)`, `src/periods.js:51` |
+| Feature-flag precedent | **`ot_enabled`** — `src/overtime.js:52`, `read('ot_enabled','0') === '1'` |
+| How domains read it | Through their **own** rule function (`OT.rule()`), not `getSetting` scattered everywhere |
+| How it is written | A domain saver that clamps (`OT.saveRule()`, `overtime.js:59`) |
+| Where it is toggled | **`POST /payroll/overtime`** (`server.js:8969`) — on the Payroll page |
+
+**The insertion point is not `/settings`.** `/settings` is a card index —
+`nav.js` `SETTINGS_GROUPS` lists Tip-out policy, Positions, Staff, Users, Email,
+Cash tips page, each linking to a dedicated page. Overtime, the closest
+analogue, is toggled **on the page it governs**. So:
+
+> **Recommendation: the toggle lives on `/schedule`**, in the same place
+> scheduling settings would go, not on `/settings`. Follow `OT.rule()` — a
+> `SCH.availabilityRule()` reader owned by `scheduler.js`, so no route reads the
+> raw key.
+
+### The precedent that matters most
+
+`ot_enabled` is **stamped onto the record** — it is a column on the timesheet
+approval and transfer tables (`timeclock.js:293`, `:314`), so a past approval
+remembers the rule it was computed under. Same discipline as `shifts.policy_id`
+and `scheduled_shifts.daypart`.
+
+**Availability does not need this**, and the difference is worth stating: OT
+stamps because the setting changes a **number somebody was paid**. Availability
+changes only what warnings a manager sees, and Issues are derived fresh on every
+render with no stored result. Nothing to stamp.
+
+### Recommended behaviour
+
+| Question | Recommendation |
+|---|---|
+| Default for existing restaurants | **ON** |
+| Default in a fresh install | **ON** |
+| What governs it | **Availability only** — see §B3 |
+| `My availability` when disabled | **Stays fully reachable** — the tab also owns Time Off, which the setting does not govern. Availability *controls* are hidden/disabled; the section does not lock. See §B18 |
+| Existing data when disabled | **Preserved untouched.** Disabling is not deleting |
+| Availability-derived Issues when disabled | **Suppressed.** `availabilityFor()` returns `available` for everyone, so the two new issue kinds never fire |
+| Time off when disabled | **Still fully available** — see §B3 |
+| Permissions | Unchanged. The toggle sits under the `schedule` area like the surface it governs |
+| Migration | One key, absent by default, read as ON. **No migration writes a row** |
+
+**Why default ON, against the `ot_enabled` precedent of defaulting off:** overtime
+off is a *legal and financial* default where guessing wrong costs money.
+Availability off is a *feature-visibility* default where guessing wrong costs
+nothing — zero rules means available, so an enabled feature with no data behaves
+exactly like a disabled one. The roadmap's own rule is **"no dead toggles"**, and
+shipping a feature switched off is the deadest toggle there is.
+
+**The read must be `!== '0'`, not `=== '1'`.** An absent key must mean ON, and
+`getSetting` returns the fallback for a missing row — so the fallback is `'1'`
+and the test is negative. Getting this backwards ships Phase 6 invisible.
+
+---
+
+## B3. What the setting governs — availability only
+
+The brief asks explicitly whether "enable employee availability" covers
+**A. availability only** or **B. availability + time off**.
+
+> **Recommendation: A — availability only.**
+
+**Rationale.**
+
+1. **They have different owners.** Availability is stated by the employee and
+   takes effect immediately (decision 2). Time off is *requested* and a manager
+   decides. Switching off a request workflow does not mean the same thing as
+   switching off a preference someone recorded.
+2. **The roadmap already separates them.** §I.7 and the Phase 6 section treat
+   availability as a constraint and time off as *"a real request/approval
+   workflow"*, and §III's wording names only availability.
+3. **Turning off time off has a victim.** An employee with an approved absence
+   for next Friday, whose request surface vanishes, has no way to tell anyone.
+   Availability going quiet has no equivalent — nothing was promised.
+4. **Approved time off is a commitment already made.** Suppressing the Issue for
+   it would let a manager schedule over an absence they personally approved, with
+   no warning. That is worse than the noise the toggle exists to prevent.
+
+**If you later want time off switchable too, that is a second key** — not a
+widened meaning of this one. A setting whose scope grows is how "disabled" stops
+being predictable.
+
+---
+
+## B4. Accessibility and mobile — *primitives measured*
+
+The brief's nineteen items, against what the Staff Portal already ships. **The
+finding is that almost nothing needs building.**
+
+| Requirement | Status | Evidence |
+|---|---|---|
+| 44px+ touch targets | **Already exceeded** | `staff.css:120` `min-height: 48px`; `:513` 48px; `:527` 46px |
+| Safe-area handling | **Already everywhere** | `env(safe-area-inset-top)` and `-bottom` at `staff.css:56, 61, 114, 128, 159, 205, 299, 318, 323, 327, 530` |
+| Bottom-nav clearance | **Solved** | `.pt-tabs` and footers already pad by `env(safe-area-inset-bottom)` |
+| Focus trap in sheets | **Already built** | `server.js:3566–3629` — focus moves in, Tab cycles first↔last, Escape closes, focus **returns to the opener** |
+| Screen-reader dialog semantics | **Already built** | `role="dialog" aria-modal="true"` + `aria-labelledby` (`server.js:3541`) |
+| Sheet layering | **Tokenised** | `--pt-z-sheet: 90` (`staff.css:282`), `.pes` at `:633` |
+| Week/date strip | **Built and tested** | `.ps-strip`, a 7-column grid (`staff.css:1490`) |
+| Day rows at narrow widths | **Handled** | `.ps-row` 46px → 38px under the breakpoint (`:1519`, `:1587`) |
+| Date inputs | **Use native** | the portal already ships `type="date"` |
+| Numeric entry | **Use native** | `inputmode` used throughout the tips flow |
+
+### What Phase 6 genuinely adds, and the rules for it
+
+**Time entry — use `<input type="time">`.** Native, keyboard-accessible, and
+screen-reader labelled for free; on iOS and Android it raises the platform time
+wheel. **Do not build a custom time picker.** The portal has never built one and
+the one control class it does hand-roll (the PIN keypad, `server.js:3185`) is
+explicitly `aria-label`ed per key, which shows the cost.
+
+**Date ranges — two `<input type="date">`, not a range widget.** A time-off
+request is a start and an end. Two native inputs are two accessible controls; a
+custom range calendar is a grid nobody can drive with a keyboard without real
+work. §24 already recommends simplifying the calendar grid away.
+
+**Weekday selection — checkboxes in a `<fieldset>` with a `<legend>`.** Seven
+toggles that look like chips are still checkboxes underneath. A `<legend>` gives
+the group a name, which a bare row of buttons never has.
+
+**All-day vs timed — a real control, not a disclosure.** Recommend a checkbox
+that toggles `disabled` on the two time inputs, with `aria-describedby` naming
+what changed. A range that silently ignores its own values is the accessibility
+failure people actually hit.
+
+**Status not by colour alone.** Pending, approved and rejected each need a word
+or a glyph beside the colour. The owner shell already sets this precedent — the
+invoice AI badge is *"Check"* / *"AI read"* as text, not a coloured dot.
+
+**Error and decision announcement.** Both belong in a container with
+`role="status"` (polite). A decision arriving as a silently repainted chip is
+invisible to a screen reader, and this phase's whole point is telling somebody
+the answer.
+
+**Long reason text.** A free-text reason has no length ceiling in the schema
+proposed at §6. Recommend a `maxlength` on the input and clamped display in the
+review queue — and per §36, none of it on the Week Board.
+
+**200% zoom / large text.** `.ps-row`'s fixed 46px date gutter is the one at
+risk: at large text the day number can outgrow it. Recommend `min-width` with
+content-based growth rather than a fixed track.
+
+**Mobile keyboard overlap.** The `.pes` sheet is bottom-anchored
+(`align-items: flex-end`), which is exactly where a raised keyboard lands.
+Existing sheets are short enough not to hit it; a time-off form with dates,
+times and a reason is taller. Recommend the panel scroll internally with the
+submit button reachable — **and verify it in the browser**, because per CLAUDE.md
+a green suite has never once caught a layout failure of this kind.
+
+**No custom controls are required for Phase 6.** Every input is a native
+element and every container already exists.
+
+---
+
+## B5. Overnight recurring availability — *the precedent is already in the schema*
+
+> *Friday unavailable 10:00pm – 2:00am.*
+
+### The alternatives, and why one wins
+
+| Model | Verdict |
+|---|---|
+| **One rule, `end_min <= start_min` means it ends next day** | **Recommended** |
+| Split into Friday 22:00–24:00 + Saturday 00:00–02:00 | Rejected — two rows for one statement; editing or deleting must find both; `effective_until` on "Friday" now half-applies to a Saturday row |
+| Two linked rows with a parent id | Rejected — all the cost above plus a relationship to maintain |
+| Store as absolute minutes past week-start | Rejected — cannot express "every Friday" independent of a date |
+
+**The codebase already voted.** `scheduled_shifts.ends_at` carries the comment
+*"UTC; may be on the next calendar day"* (`scheduler.js:51`), and the overlap
+test is `starts_at < @ends_at AND ends_at > @starts_at` (`scheduler.js:189`) —
+**instants, not day labels.** A shift crossing midnight is already normal here.
+Availability should be modelled the same way and compared the same way.
+
+The employee enters one rule: a day, a start, an end. **They never learn that
+`end_min <= start_min` means anything** — the UI says *"ends 2:00am the next
+day"* when the end is earlier than the start, and that is the whole disclosure.
+
+### Locked behaviour
+
+Rule: **every Friday, unavailable 22:00 → 02:00**, resolving to a Friday-anchored
+UTC window `[Fri 22:00, Sat 02:00)`.
+
+| Case | Result | Why |
+|---|---|---|
+| Shift **Friday 23:00 – 01:00** | **Conflict** | Fully inside the window |
+| Shift **Saturday 01:00 – 03:00** | **Conflict** | Overlaps 01:00–02:00. Note its business date is *Friday* and its calendar date is *Saturday* — neither label decides it, the instants do |
+| Shift **Saturday 02:00 – 05:00** | **No conflict** | Touching, not overlapping. `ends_at > starts_at` is strict, matching `scheduler.js:189` exactly |
+| Shift **Saturday 22:00 – 02:00** | **No conflict** | A *Saturday* rule would be needed. The rule is anchored to the day it starts |
+| `effective_until` = that same Friday | **Conflict still applies through 02:00 Saturday** | The occurrence is tested by its **start** day. A rule effective through Friday gets its whole Friday occurrence, tail included. Truncating at midnight would silently shorten the last one |
+
+**Anchor rule, stated once:** a recurring rule belongs to the weekday its
+**start** falls on, and its window may run past midnight into the next day. One
+sentence, and every case above follows from it.
+
+**One-off exceptions inherit it unchanged** — an `on_date` rule of 22:00–02:00
+is a window starting on that date and ending the next.
+
+---
+
+## B6 / B7. The Phase 8 seam — resolver and evaluator, kept apart
+
+The roadmap says Phase 8's claims and replacements evaluate *employee active ·
+holds the required position · no overlapping assignment · availability · approved
+time off*, through one evaluator, and **"Do not duplicate this logic."**
+
+### The architecture already separates qualification — *measured*
+
+`scheduler.js:262` `heldPositions(employeeId)` and `:275` `heldPositionsFor(ids)`
+answer position qualification and nothing else. The comment above them
+(`:307–309`) is explicit that this is deliberate:
+
+> *heldPositions answers "does this person do that job" and deliberately never
+> [claims] schedulable — the qualification rule passed and nothing else looked.*
+
+**So the codebase has already made the call the brief asks about.** Phase 6 must
+not undo it by building a resolver that swallows qualification.
+
+> **Recommendation: compose, do not merge.**
+>
+> - `SCH.availabilityFor(employeeId, startsAt, endsAt)` → **availability facts only**
+> - `SCH.heldPositions(employeeId)` → **qualification, unchanged, already exists**
+> - `employees.active` + `schedule_visible_from_at` → **lifecycle, already exists**
+> - *(Phase 8)* `SCH.eligibilityFor(...)` → **composes all three.** Built in Phase 8, not now
+
+### The contract Phase 6 must ship
+
+Structured facts, never a boolean — a boolean is what forces Phase 8 to re-derive:
+
+```
+availabilityFor(employeeId, startsAt, endsAt) -> {
+  state:    'available' | 'unavailable' | 'preferred',
+  rule:     null | { id, kind, weekday, onDate, allDay, startMin, endMin },
+  timeOff:  null | { id, status: 'approved' | 'pending', allDay, startsAt, endsAt },
+  reasons:  [ 'unavailable:<ruleId>', 'timeoff:<requestId>', ... ]
+}
+```
+
+**Why each field earns its place:**
+
+- **`state` is three-valued, not two.** `preferred` is not a weaker `available` —
+  Phase 8 will want to rank volunteers, and a boolean throws that away.
+- **`timeOff` carries `status`.** Phase 6 treats pending as context and approved
+  as a conflict (decision 13/15). Phase 8 will likely *refuse* a claim during
+  approved time off while merely warning on pending — different verdicts from the
+  same fact, which only works if the status survives.
+- **`rule` and `timeOff` return the record, not a flag.** The drawer needs to say
+  *which* rule, the Issues engine needs the id for its deterministic key
+  (`unavailable:<shiftId>:<ruleId>`), and Phase 8 needs to explain a refusal.
+- **`reasons` is a flat list.** More than one thing can be true at once. A single
+  reason field would force a priority order into the resolver, where precedence
+  (§21) belongs to `state` alone.
+
+**Batch shape too.** `heldPositionsFor(ids)` exists because per-employee calls
+across a roster were the wrong shape; `issuesFor` uses it at `scheduler.js:1041`.
+Ship **`availabilityForMany(ids, startsAt, endsAt)`** in Phase 6 for the same
+reason — Phase 8 scores a whole roster against one open shift, and that is
+exactly the query that would otherwise become N round-trips.
+
+**What must not happen:** `availabilityFor` must not take a `position` argument.
+Availability is employee-wide (decision 33), and a position parameter would be
+the seam where qualification leaks into availability storage.
+
+---
+
+## B8. Naming collisions, and conventions to adopt
+
+Three existing uses of availability-sounding words mean something else:
+
+| Identifier | Where | Actually means |
+|---|---|---|
+| `PORTAL_NAV.availability` | `server.js:3437` | Whether a nav tab is usable |
+| `"Earnings unavailable"` | `server.js:5807`, `:6012` | A pay figure could not be computed |
+| **`kind: 'unavailable'`** | `server.js:3747` | **A shift the tip engine could not cost** |
+
+The third is the dangerous one: it is a `kind:` on a pushed object in a derived
+list, which is precisely the shape of a scheduler issue, and it belongs to
+**money**.
+
+**Do not rename any of them.** They are correct in their own domains and
+`PORTAL_NAV.availability` in particular is read by tests. Phase 6 avoids the
+collision instead:
+
+| Thing | Convention | Example |
+|---|---|---|
+| Availability rule kind | Never bare `unavailable` | `avail_kind: 'unavailable' \| 'prefer'` on the row; the column name carries the domain |
+| Issue kind | Prefix with the domain, as Phase 4 already does | `timeoff` and `unavailable` are **scoped by `ISSUE_SEVERITY` membership** — keep the key format `unavailable:<shiftId>:<ruleId>` so a grep for the bare word lands on the key, not a pay state |
+| Resolver result | Name the field, not the value | `state: 'unavailable'` inside an object named for availability — never a loose `unavailable: true` |
+| Tables | Fully qualified | `availability_rules`, `time_off_requests` |
+
+**The rule in one line:** a bare `unavailable` identifier is already taken;
+Phase 6 identifiers say what they are unavailable *for*.
+
+---
+
+## B9. Intentional test migrations
+
+### `test/schedule-publish.test.js:682` — "My availability is present and honestly empty"
+
+```js
+for (const fake of ['Save', 'Request time off', 'Prefer', 'Unavailable', 'Repeat']) {
+  assert.ok(!new RegExp(`>${fake}`, 'i').test(html), `no ${fake} control`);
+}
+```
+
+**Why it exists:** Phase 3 shipped the tab locked, and the guard stops anyone
+adding a control that *looks* live while doing nothing. It is the same discipline
+as the `PORTAL_NAV` locked-tab assertions the roadmap called out at Phase 3 —
+*"a planned change with known test updates, not a surprise failure."*
+
+**Why it must change:** those five strings are the exact controls Phase 6 ships.
+The test fails the moment the feature works.
+
+**Do not delete it.** Its purpose — *the tab never lies about what it can do* —
+still applies, inverted. Replacements:
+
+1. **Active only when intended.** With the setting ON the controls render; with
+   it OFF the `.ps-soon` panel renders and **none of the five strings appear**.
+   That is the original assertion, preserved, now conditional (§B2).
+2. **Owned by the authenticated employee.** Rules and requests rendered are only
+   the signed-in employee's — asserted by signing in as two employees and
+   checking neither sees the other's.
+3. **No coworker access.** A forged rule id or request id in a URL returns 404,
+   following the `/portal/schedule/shift/:id` precedent (`row.employee_id !== emp.id` → 404).
+4. **No leak into Only me / Everyone.** Extend the **existing Phase 3 privacy
+   test** (§35) rather than writing a new one — it already asserts over page
+   source, which is the right altitude.
+5. **The locked-order nav test at `:690` stays untouched.** `['Only me',
+   'Everyone', 'My availability']` is still the order, and Phase 6 must not
+   reorder it.
+
+---
+
+## B10. Likely files — corrected
+
+| File | Change | New? |
+|---|---|---|
+| `src/db.js` | Two tables, four indexes, FKs | |
+| `src/scheduler.js` | `availabilityFor`, `availabilityForMany`, `availabilityRule()`, two `ISSUE_SEVERITY` entries, two blocks in `issuesFor` | |
+| `src/server.js` | Portal availability view, request routes, manager queue rows, drawer context, the setting's toggle route | |
+| `src/portal.js` | Notification helpers for submit / withdraw / decide | |
+| `public/staff.css` | `.ps-av*` | |
+| `public/broadsheet.css` | Manager review + drawer context | |
+| `test/schedule-availability.test.js` | Resolver + precedence + overnight | **new** |
+| `test/schedule-timeoff.test.js` | Lifecycle, concurrent review, idempotency | **new** |
+| `test/schedule-issues.test.js` | The two new kinds | |
+| `test/schedule-publish.test.js` | **The locked-tab migration (§B9)** | |
+| `test/portal.test.js` | Portal surfaces, ownership, notifications | |
+| `test/settings.test.js` *(or wherever `ot_enabled` is covered)* | The setting's default-ON behaviour | verify location first |
+| `docs/ZWIN-SCHEDULER-ROADMAP.md` | Record the §29 corrections | |
+| `CLAUDE.md` | Phase 6 shipped; the naming conventions of §B8 | |
+
+**Settings files:** there is **no dedicated settings module**. `settings` is a
+bare key/value table read through `getSetting` (`periods.js:51`) and written by
+domain savers. So the setting's code lives in **`src/scheduler.js`** (the reader)
+and **`src/server.js`** (the toggle route) — not in a settings file, because
+there is not one.
+
+---
+
+## B11. The default-availability invariant — non-negotiable
+
+**No availability rows = available. Nothing else.**
+
+Consequences, each of which must hold and be tested:
+
+1. **Existing employees are unchanged after migration.** All 84 keep working
+   exactly as they do now.
+2. **Issue count is zero immediately after migration.** Not "low" — zero.
+3. **No seed rows, ever.** Not in `seed.js`, not in a migration, not "available
+   all day" defaults written per employee.
+4. **Deleting the last rule returns to available**, with no extra write.
+5. **"Available — all day" may be displayed without being stored** (decision 24).
+   The line is rendered from absence.
+6. **Disabling the feature must not reinterpret zero rows.** Off and empty behave
+   identically — which is exactly why the toggle can safely default ON (§B2).
+
+**This is asserted by a test, not assumed** (§43). The test boots a database with
+the new tables and zero rows and asserts `issuesFor()` returns exactly what it
+returned before Phase 6.
+
+---
+
+## B12. Pending time off — context, not an Issue
+
+**Recommendation unchanged.** Nothing found in Part Two weakens it.
+
+**Why:**
+
+- An employee must not be able to put a warning on the manager's board
+  unilaterally, simply by asking.
+- The manager still needs to see it — scheduling straight over an unanswered
+  request is how somebody ends up looking like they ignored it.
+- **Approval is the moment it becomes a fact.** Before that it is a question.
+
+**Where pending context appears:**
+
+| Surface | Shows pending? |
+|---|---|
+| The requests queue | **Yes** — this is where it is answered |
+| Create/edit drawer, for that employee and date | **Yes** — plain context line, no severity styling |
+| Employee's own My availability | **Yes** — their own request, with status |
+| Week Board issue count | **No** |
+| Issues drawer | **No** |
+| Publish | **No** |
+
+**No contribution to the board's issue count**, which is the whole distinction.
+
+---
+
+## B13. The setting × pending-request interaction
+
+Because the setting governs **availability only** (§B3), the answers are clean:
+
+| When availability is disabled | Behaviour |
+|---|---|
+| Existing pending time-off requests | **Untouched.** Still pending, still in the queue |
+| Manager requests queue | **Unchanged.** Time off still listed and decidable |
+| Approved time off | **Still in force** |
+| Approved-time-off Issues | **Still raised.** A manager must not schedule over an absence they approved |
+| Employee submitting new time off | **Still allowed** |
+| Availability rules | Preserved, but **not evaluated** — the resolver returns `available` |
+| Unavailable / prefer Issues | **Suppressed** |
+
+**Had the setting governed both (option B), every row above would need an answer
+about orphaned commitments** — which is the strongest practical argument for
+option A.
+
+---
+
+## B14. Effective-date edges
+
+| Question | Recommendation |
+|---|---|
+| `effective_from` | **Inclusive.** The rule applies on that date |
+| `effective_until` | **Inclusive.** The rule applies on that date |
+| Both NULL | Indefinite in that direction |
+| An overnight rule whose tail crosses past `effective_until` | **The tail applies** — the occurrence is tested by its start day (§B5) |
+| A one-off `on_date` outside the recurrence's effective range | **Applies.** A one-off is not governed by a recurring rule's dates — it is its own row |
+| Editing a rule | **Never retroactive.** Close the old row with `effective_until` and insert a new one, rather than updating in place |
+
+That last one is the load-bearing rule. Updating a rule in place rewrites whether
+last month's schedule was ever valid. **Same discipline as `policy_versions` and
+`shifts.policy_id`** — the codebase already treats "edit" as "supersede" where
+history depends on it.
+
+**Inactive employees** (§37) fold in here: deactivation sets `effective_until`
+rather than deleting, so reactivation does not resurrect stale availability from
+before somebody left.
+
+---
+
+## B15. Edits after scheduling — confirmed locked
+
+**Availability changed after a shift exists:**
+
+- Does **not** mutate the shift
+- Does **not** cancel it
+- Does **not** unpublish it
+- **Does** re-derive the Issue — automatic, because `issuesFor` re-derives on
+  every render
+- The manager resolves manually
+
+**Approved time off after a shift exists:** identical, at severity `action`
+rather than `review`.
+
+**No automatic scheduling action anywhere in Phase 6.** This needs no new
+architecture — it is what the engine already does.
+
+---
+
+## B16. What changed from the first audit, and why
+
+| Item | First audit | Now |
+|---|---|---|
+| "Nothing exists" | Asserted from a **schema** query over 6 terms | **Measured** — repo-wide over 14. Conclusion holds; **three** naming collisions found, not one (§A1) |
+| The enable setting | Absent | §B2 — storage measured, behaviour recommended, and §B18 locks it |
+| Accessibility | One passing phrase | §B4 — nineteen items against measured primitives. **Finding: no custom control is needed** |
+| Overnight rules | Unaddressed | §B5 — one rule, `end_min <= start_min` means next day, with five locked cases |
+| Phase 8 seam | Unmentioned | §B6/B7 — structured facts, batch variant, and qualification kept **out** of availability |
+| Decisions | 10 tabulated, 24 in prose | §B1 — all 34 in one table, plus S1 |
+| `test/schedule-publish.test.js` | Not in the file list | §B9 — a documented migration with five replacement assertions |
+| Performance | "I did not measure this" | Still unmeasured. **Now scheduled** — §26 step 2, before any UI |
+
+**One recommendation reversed.** §B2 originally said the `My availability` tab
+should render the locked `.ps-soon` panel when the setting is off. That
+contradicted §B3's own conclusion that the setting governs availability only: the
+tab also owns Time Off, so locking it would have hidden a surface the setting has
+no authority over. Corrected in §B2 and locked in §B18.
+
+---
+
+## B17. Genuinely unresolved after Part Two
+
+Three, and they are small:
+
+1. **Decision 12 — is the manager's decision note visible to the employee?**
+   Recommended visible. A hidden note would be the first manager-only text about
+   a named person in an unencrypted database, which deserves its own decision.
+2. **Decision 25 — does prefer-to-work earn its place?** Recommended: ship it,
+   silent. The honest alternative is to cut it and see whether anyone asks.
+3. **Where the `sch_availability` toggle renders on `/schedule`.** The pattern is
+   settled (§B2 — on the page it governs, like overtime); the exact placement is
+   a layout call best made against the built page.
+
+Everything else in this audit now carries an answer.
+
+---
+
+# PART THREE — APPROVED DECISIONS (THE IMPLEMENTATION CONTRACT)
+
+**Approved 2026-08-14 by the owner.** All 34 decisions in §B1 and all Part Two
+recommendations are approved **as written**, with one override, below. This
+section is the contract Phase 6 is built against; where it and anything earlier
+disagree, this section wins.
+
+## B18. OVERRIDE — the setting, `sch_availability`
+
+*(§B1 numbered this S1; the owner refers to it as #35. Same decision.)*
+
+**Key name: `sch_availability`.** It governs **employee availability features
+only**:
+
+- recurring unavailable
+- recurring prefer-to-work
+- one-off unavailable
+- one-off prefer-to-work
+
+**It does not disable time-off requests, and it does not disable
+approved-time-off scheduling conflicts.**
+
+### Locked behaviour at `sch_availability = 0`
+
+| Surface | Behaviour |
+|---|---|
+| `My availability` tab | **Remains reachable** — it also owns Time Off |
+| Availability editing controls | **Hidden / disabled** |
+| Creating a new availability rule | **Refused** |
+| Existing availability rules | **Remain stored**, untouched |
+| Availability warnings / Issues | **Do not contribute** while disabled |
+| Time-off request submission | **Remains available** |
+| Manager Requests review | **Remains available** |
+| Approved-time-off conflicts | **Remain active** |
+| Time-off notifications | **Remain active** |
+
+**No second time-off setting in Phase 6.** Time off is unconditionally on.
+
+**Default: ON**, per §B2 — absent key reads as enabled, so the test is
+`getSetting('sch_availability','1') !== '0'`. Getting that backwards ships the
+feature invisible.
+
+**Server-side, not just UI.** "No new availability rules may be created" is a
+route-level refusal, not a hidden button. A disabled control that still accepts a
+POST is not disabled.
+
+## B19. Build directives
+
+Carried from the approval, and binding:
+
+1. **Measure resolver performance before building any UI.** §26 step 2. The
+   first audit declared this unmeasured; it stops being unmeasured before the
+   phase has a screen.
+2. **Measure 200% text zoom and mobile keyboard overlap once the real
+   `My availability` UI exists** — in the browser, per CLAUDE.md, not by reading
+   the CSS. §B4 names both as the two at-risk items.
+3. **Local only. Do not push.**
+4. **Do not start Phase 7.**
+
+## B20. Build sequence
+
+Per §26, amended for the directives above:
+
+| # | Step | Gate |
+|---|---|---|
+| 1 | Two tables + migration test proving zero rows changes nothing | §B11 invariant asserted |
+| 2 | `availabilityFor` / `availabilityForMany` + domain tests. **No UI** | §B5 overnight cases pass |
+| 3 | **Measure resolver performance** | Directive 1 — before any UI |
+| 4 | `sch_availability` reader + route-level refusal | §B18 |
+| 5 | Employee `My availability` — replace the `.ps-soon` branch | |
+| 6 | Time-off submit + withdraw | |
+| 7 | Manager review in the existing requests queue | |
+| 8 | Issues engine: two new kinds | |
+| 9 | Create/edit warning **through the same helper** | §17 |
+| 10 | Notifications, both directions | |
+| 11 | Privacy test extension for Everyone; locked-tab migration | §B9 |
+| 12 | **Measure zoom + keyboard overlap in the browser** | Directive 2 |

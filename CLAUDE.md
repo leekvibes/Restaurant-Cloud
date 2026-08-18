@@ -123,9 +123,17 @@ Phase 3 marker shipped invisible this way and nobody noticed for weeks.
 **CSRF stands down when `APP_PASSWORD` is unset.** Every dev machine and almost
 every test runs that way, so CSRF bugs are invisible locally and fatal in
 production. `test/auth.test.js` is the only file that runs with a password set —
-put CSRF assertions there. Forms must not carry a hand-written `_csrf`; a
-response-level stamper adds one, and two tokens parse as an array and refuse
-every submit.
+put CSRF assertions there.
+
+**Hand-write `_csrf` in every posting form.** This entry used to say the
+opposite — that a response-level stamper adds one and two tokens parse as an
+array — and following it literally now produces the very bug it warned about.
+The stamper skips any form that already carries the field (`server.js`, the
+`inner.indexOf` guard), so a duplicate is impossible; and the stamper only runs
+when `APP_PASSWORD` is set, which no dev machine and almost no test does. A form
+leaning on the stamper therefore ships with **no token field at all** in the mode
+we develop in, and breaks the day a password exists.
+`test/schedule-board.test.js` asserts this per page.
 
 **A green suite is not a working feature.** Assertions over source text pass
 while the rendered or computed reality is broken. Measure in the browser —

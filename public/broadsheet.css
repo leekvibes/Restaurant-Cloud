@@ -4431,6 +4431,17 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .sb-chip--ok   .sb-dot { background:var(--positive); }
 .sb-chip--warn .sb-dot { background:var(--accent); }
 .sb-chip--idle { color:var(--muted); }
+
+/* The availability switch. It is a BUTTON sitting among status chips, so it has
+   to read as something you can press rather than something being reported —
+   hence the pointer and the hover. State is carried by the word ("on"/"off")
+   and by aria-pressed, never by the dot alone: a chip that differs from its
+   neighbours only in colour tells a colour-blind manager nothing. */
+.sb-chip--av { cursor:pointer; }
+.sb-chip--av:hover { border-color:var(--ink); }
+.sb-chip--av[aria-pressed="true"]  .sb-dot { background:var(--positive); }
+.sb-chip--av[aria-pressed="false"] .sb-dot { background:var(--muted); }
+.sb-chip--av[aria-pressed="false"] { color:var(--muted); }
 .sb-chip--idle .sb-dot { background:var(--faint); }
 /* Publish / Unpublish live in the drawer, under a rule, because they are a
    different verb from Save: one moves the draft, the other moves the floor. */

@@ -18036,6 +18036,10 @@ app.get('/schedule', (req, res) => {
   }
   const { today, week } = sbWeek(req);
   const thisWeek = SCH.weekWindowFor(today);
+  // Phase 6. Governs employee-stated availability ONLY: time off is
+  // unconditional, because an absence a manager personally approved must keep
+  // warning them whatever this is set to.
+  const availOn = SCH.availabilityEnabled();
   const days = [];
   for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
 
@@ -18325,6 +18329,24 @@ app.get('/schedule', (req, res) => {
               <input type="hidden" name="w" value="${week.start}">
               <button class="sb-btn sb-go" type="submit"
                 title="Send this week to the people on it">Publish week</button>
+            </form>
+            <form method="post" action="/schedule/availability" style="margin:0">
+              ${''/* The token IS hand-written here, like every other form on this
+                     page. The response-level stamper only runs when APP_PASSWORD
+                     is set, which no dev machine and almost no test does — so a
+                     form leaning on it ships with no field at all in exactly the
+                     mode we develop in, and breaks the day a password exists.
+                     Two tokens are not a risk: the stamper skips any form that
+                     already carries one. */}
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="on" value="${availOn ? '0' : '1'}">
+              <input type="hidden" name="w" value="${week.start}">
+              <button class="sb-chip sb-chip--av" type="submit"
+                aria-pressed="${availOn ? 'true' : 'false'}"
+                title="${availOn
+                  ? 'Staff can say when they cannot work. Turn off to stop collecting it — nothing already stated is deleted, and time off is unaffected.'
+                  : 'Staff cannot state availability at the moment. Time off still works. Turn on to start collecting it again.'}">
+                <span class="sb-dot" aria-hidden="true"></span>Availability ${availOn ? 'on' : 'off'}</button>
             </form>
             <span class="sb-chip sb-chip--${wk.tone}" title="${esc(wk.title)}">
               <span class="sb-dot" aria-hidden="true"></span>${esc(wk.label)}${
@@ -18832,6 +18854,23 @@ app.post('/schedule/copy-week', (req, res) => {
 // --- publishing ------------------------------------------------------------
 // The only routes in the app that change what an employee can see. Everything
 // else on this page moves a draft the floor is not looking at.
+
+// The Phase 6 setting lives HERE rather than on /settings, following overtime:
+// a capability is toggled on the page it governs, and /settings is a card index
+// that links out rather than a page of switches.
+//
+// IT GOVERNS AVAILABILITY RULES ONLY. Time-off requests can still be made and
+// decided while this is off, and approved time off still conflicts with a shift.
+// Those are commitments; availability is a preference somebody stated.
+app.post('/schedule/availability', (req, res) => {
+  if (!navAllowed('/schedule')) return res.status(403).end();
+  const on = String(req.body.on || '') === '1';
+  setSetting('sch_availability', on ? '1' : '0');
+  const w = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.w || '')) ? `?w=${req.body.w}&` : '?';
+  return res.redirect(`/schedule${w}msg=` + encodeURIComponent(on
+    ? 'Availability on — staff can say when they cannot work.'
+    : 'Availability off — nothing stated has been deleted, and time off is unaffected.'));
+});
 
 app.post('/schedule/publish-week', (req, res) => {
   if (!sbGuard(req, res)) return;

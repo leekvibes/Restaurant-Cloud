@@ -247,7 +247,14 @@ test('multiple shifts on one day stack in chronological order, full size', async
   SCH.create({ employeeId: E.barista, position: 'barista',
     startsAt: `${day} 06:30`, endsAt: `${day} 11:00` });
   const html = await text('/schedule');
-  const row = (html.match(/Board Barista[\s\S]*?(?=<div class="sb-row">|<\/div>\s*<\/div>\s*<div class="sb-sum")/) || [])[0];
+  // Scope to the DESKTOP board before matching. /schedule renders the Phase 5
+  // mobile Today/Upcoming surface (.sbm-*) FIRST, and its cards carry the same
+  // employee name — so anchoring on the name alone finds whichever surface
+  // happens to mention them first. That silently became the mobile one as soon
+  // as these shifts fell inside the Upcoming window, which depends on the wall
+  // clock rather than on anything the test controls.
+  const board = html.slice(html.indexOf('<div class="sb">'));
+  const row = (board.match(/Board Barista[\s\S]*?(?=<div class="sb-row">|<\/div>\s*<\/div>\s*<div class="sb-sum")/) || [])[0];
   const times = [...row.matchAll(/<i>([^<]+)<\/i>/g)].map((m) => m[1]).filter((s) => /[ap]$/.test(s));
   const idxEarly = times.indexOf('6:30a–11:00a');
   const idxLate = times.indexOf('4:00p–10:00p');
@@ -1160,4 +1167,83 @@ test('the day header reads DATE, then people, then shifts', async () => {
   assert.match(src, /\$\{s\.p \? '' : ' sb-dh--none'\}/,
     'the class is emitted exactly when the people count is zero');
   assert.match(css, /font-variant-numeric:tabular-nums/, 'metrics line up column to column');
+});
+
+// ===========================================================================
+// Phase 6 checkpoint 1 — the sch_availability setting.
+//
+// It governs employee-stated availability ONLY. Time off is unconditional,
+// because an absence a manager personally approved has to keep warning them
+// however this is set. That asymmetry is the whole decision, so it is asserted
+// here rather than described.
+// ===========================================================================
+
+test('the schedule page carries an availability switch, on by default', async () => {
+  const P = require('../src/periods');
+  db.prepare("DELETE FROM settings WHERE key = 'sch_availability'").run();
+  const html = await text('/schedule');
+  assert.match(html, /action="\/schedule\/availability"/, 'the control posts somewhere real');
+  assert.match(html, /Availability on/, 'and an untouched install reads as ON');
+  assert.match(html, /aria-pressed="true"/, 'with the state exposed to assistive tech');
+  // State is never carried by colour alone.
+  assert.match(html, />Availability (on|off)</, 'the word is in the label');
+  assert.strictEqual(P.getSetting('sch_availability', '1'), '1', 'and reading it did not write it');
+});
+
+test('the switch turns it off and back on, and says what that means', async () => {
+  const P = require('../src/periods');
+  const off = await post('/schedule/availability', { on: '0' });
+  assert.strictEqual(off.status, 302, 'it redirects');
+  assert.strictEqual(P.getSetting('sch_availability', '1'), '0', 'and the setting moved');
+  assert.match(flashOf(off).msg, /nothing stated has been deleted/i,
+    'the message says what was NOT done, because "off" reads like "deleted"');
+  assert.match(flashOf(off).msg, /time off is unaffected/i, 'and that time off still works');
+
+  const html = await text('/schedule');
+  assert.match(html, /Availability off/, 'the switch reflects it');
+  assert.match(html, /aria-pressed="false"/);
+
+  const on = await post('/schedule/availability', { on: '1' });
+  assert.strictEqual(P.getSetting('sch_availability', '1'), '1', 'and back on again');
+  assert.match(flashOf(on).msg, /staff can say when they cannot work/i);
+});
+
+test('turning it off preserves the rules and still honours approved time off', async () => {
+  const P = require('../src/periods');
+  const TCm = require('../src/timeclock');
+  const day = dates.addDays(today(), 21);
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day)
+              VALUES (?, 'unavailable', ?, 1)`).run(E.barista, day);
+  db.prepare(`INSERT INTO time_off_requests (employee_id, starts_at, ends_at, all_day, status)
+              VALUES (?, ?, ?, 1, 'approved')`)
+    .run(E.barista, TCm.localInputToUtc(`${dates.addDays(day, 1)} 00:00`),
+      TCm.localInputToUtc(`${dates.addDays(day, 2)} 00:00`));
+
+  await post('/schedule/availability', { on: '0' });
+  const ruled = SCH.availabilityFor(E.barista,
+    TCm.localInputToUtc(`${day} 16:00`), TCm.localInputToUtc(`${day} 22:00`));
+  assert.strictEqual(ruled.state, 'available', 'the rule is not consulted while it is off');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM availability_rules').get().c, 1,
+    'but it is still there — off is not deleted');
+
+  const offDay = dates.addDays(day, 1);
+  const holiday = SCH.availabilityFor(E.barista,
+    TCm.localInputToUtc(`${offDay} 16:00`), TCm.localInputToUtc(`${offDay} 22:00`));
+  assert.strictEqual(holiday.state, 'unavailable',
+    'approved time off is a commitment, and the switch has no authority over it');
+
+  await post('/schedule/availability', { on: '1' });
+  db.prepare('DELETE FROM availability_rules').run();
+  db.prepare('DELETE FROM time_off_requests').run();
+});
+
+test('the switch is refused to an account without the schedule area', async () => {
+  // Same gate as every other schedule route. A capability toggle is a scheduling
+  // decision, so it lives under the permission that already governs planning
+  // rather than growing a tier of its own.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf("app.post('/schedule/availability'");
+  const body = src.slice(at, src.indexOf('});', at));
+  assert.match(body, /navAllowed\('\/schedule'\)/, 'the route checks the area server-side');
+  assert.match(body, /403/, 'and refuses rather than redirecting somewhere friendly');
 });

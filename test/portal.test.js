@@ -1076,8 +1076,16 @@ test('when a period ends, the people who owe a timesheet are told — twice at m
     s.kill();
     await new Promise((r) => setTimeout(r, 200));
   };
+  // Scoped to the period this test seeded, not to every timesheet reminder the
+  // person has ever had. ZWIN_SWEEP_NOW runs runStaffSweep() alongside
+  // runAdminSweep(), so the admin-sweep test earlier in this file already
+  // spawns servers that reminded whoever owed a timesheet at that moment — for
+  // a DIFFERENT period, under a different notifyOnce key. Counting across all
+  // periods made this test pass or fail on where today happens to sit inside
+  // the pay calendar, which is not what it is testing.
   const remindersFor = (id) => db.prepare(
-    "SELECT * FROM portal_events WHERE kind='timesheet' AND employee_id = ? ORDER BY id").all(id);
+    "SELECT * FROM portal_events WHERE kind='timesheet' AND employee_id = ? AND href = ? ORDER BY id")
+    .all(id, `/portal/timesheet?p=${per.start}`);
 
   await sweepOnce(PORT + 63);
   const first = remindersFor(owes);
