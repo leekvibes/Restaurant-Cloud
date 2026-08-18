@@ -1126,7 +1126,12 @@ function writeBreaks(shiftId, rows) {
 // employee names and the position names already loaded for the board.
 
 /** review = worth a look. action = wrong under today's rules. */
-const ISSUE_SEVERITY = { overlap: 'review', qualification: 'action', 'position-retired': 'action', 'cancelled-live': 'action' };
+// Phase 6 adds two and nothing structural. 'timeoff' is an ACTION because a
+// manager personally approved that absence and has now scheduled over it;
+// 'unavailable' is a REVIEW because the employee stated a constraint the manager
+// is explicitly allowed to override. Neither ever blocks.
+const ISSUE_SEVERITY = { overlap: 'review', qualification: 'action', 'position-retired': 'action', 'cancelled-live': 'action',
+  timeoff: 'action', unavailable: 'review' };
 
 /**
  * Every issue in one week.
@@ -1143,6 +1148,14 @@ function issuesFor(anyDate) {
 
   const live = rows.filter((r) => r.status !== 'cancelled');
   const held = heldPositionsFor(live.map((r) => r.employee_id));
+  // ONE load for the whole week. The measured cost of asking per shift was 28.6ms
+  // against Phase 4's 0.25ms budget for this entire function; loading once and
+  // resolving in memory brings it back under a millisecond. See the note above
+  // availabilityContext.
+  const avCtx = availabilityContext(
+    live.filter((r) => r.employee_id != null).map((r) => r.employee_id),
+    live.reduce((m, r) => (r.starts_at < m ? r.starts_at : m), '9999'),
+    live.reduce((m, r) => (r.ends_at > m ? r.ends_at : m), '0000'));
   const active = new Set(positions.active.all().map((p) => p.slug));
 
   for (const s of live) {
@@ -1178,6 +1191,41 @@ function issuesFor(anyDate) {
         shiftIds: [s.id],
         position: s.position,
       });
+    }
+
+    // --- Phase 6: an absence, or a stated constraint ------------------------
+    //
+    // DERIVED, never stored, exactly like every other issue here. There is no
+    // dismissal and no override flag: fix the schedule or fix the request and
+    // the issue goes. An override flag would be dismissal by another name, and
+    // Phase 4 settled that.
+    //
+    // A PENDING request is deliberately absent from this list. It is context for
+    // the drawer, not a count on the board — otherwise an employee can put a
+    // warning on their manager's week simply by asking.
+    if (s.employee_id != null) {
+      const av = resolveAvailability(avCtx, s.employee_id, s.starts_at, s.ends_at);
+      if (av.timeOff && av.timeOff.status === 'approved') {
+        add({
+          key: `timeoff:${s.id}:${av.timeOff.id}`,
+          kind: 'timeoff',
+          severity: ISSUE_SEVERITY.timeoff,
+          employeeId: s.employee_id,
+          businessDate: s.business_date,
+          shiftIds: [s.id],
+          requestId: av.timeOff.id,
+        });
+      } else if (av.state === 'unavailable' && av.rule) {
+        add({
+          key: `unavailable:${s.id}:${av.rule.id}`,
+          kind: 'unavailable',
+          severity: ISSUE_SEVERITY.unavailable,
+          employeeId: s.employee_id,
+          businessDate: s.business_date,
+          shiftIds: [s.id],
+          ruleId: av.rule.id,
+        });
+      }
     }
 
     // --- the position itself was retired -----------------------------------

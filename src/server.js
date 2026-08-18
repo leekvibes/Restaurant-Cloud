@@ -18303,6 +18303,29 @@ function sbFingerprintsBefore(week, extraIds = []) {
  * and compares UTC stamps, so a shift running past midnight is handled with no
  * special case. One implementation, one place.
  */
+/**
+ * The other half of the immediate warning: availability.
+ *
+ * Kept next to sbOverlapNote and built the same way — the DOMAIN answers, this
+ * only phrases it. Both are appended to the same flash so a manager who has just
+ * saved something questionable is told once, at the moment they did it, rather
+ * than finding out from a count later.
+ *
+ * It warns and never blocks, which is the rule every phase before this settled.
+ */
+function sbAvailNote(saved) {
+  if (!saved || saved.employee_id == null) return '';
+  const who = (sbEmpName.get(saved.employee_id) || {}).name || 'this person';
+  const av = SCH.availabilityFor(saved.employee_id, saved.starts_at, saved.ends_at);
+  if (av.timeOff && av.timeOff.status === 'approved') {
+    return ` Heads up — ${who} has approved time off then. The shift is saved; it will show as an issue.`;
+  }
+  if (av.state === 'unavailable') {
+    return ` Heads up — ${who} said they cannot work then. The shift is saved.`;
+  }
+  return '';
+}
+
 function sbOverlapNote(saved) {
   if (!saved) return '';
   const clash = SCH.overlapsFor(saved);
@@ -18527,6 +18550,15 @@ app.get('/schedule', (req, res) => {
     if (i.kind === 'position-retired') {
       return `${esc(posName(i.position))} is no longer an active position`;
     }
+    // Phase 6. The line names the person and the fact, and stops there: the
+    // REASON somebody gave for wanting a day off is theirs, and the board is a
+    // seven-column grid read at a glance by anyone standing behind the manager.
+    if (i.kind === 'timeoff') {
+      return `${esc(who)} has approved time off then`;
+    }
+    if (i.kind === 'unavailable') {
+      return `${esc(who)} said they cannot work then`;
+    }
     return `This cancelled shift is still visible to ${esc(who)}`;
   };
   // Worst severity per card, for the outline. A shift in two issues outlines
@@ -18537,6 +18569,32 @@ app.get('/schedule', (req, res) => {
       if (i.severity === 'action' || !issueOn.has(id)) issueOn.set(id, i.severity);
     }
   }
+
+  // Availability for every visible employee on every visible day, resolved once.
+  // Whole local days, because the drawer asks before any time has been chosen —
+  // it is context for placing a shift, not a verdict on one.
+  const sbAvailMap = (() => {
+    const out = {};
+    const ids = staff.map((e) => e.id);
+    if (!ids.length) return out;
+    const ctx = SCH.availabilityContext(ids,
+      TC.localInputToUtc(days[0] + ' 00:00'),
+      TC.localInputToUtc(addDays(days[days.length - 1], 1) + ' 00:00'));
+    for (const id of ids) {
+      for (const d of days) {
+        const r = SCH.resolveAvailability(ctx, id,
+          TC.localInputToUtc(d + ' 00:00'), TC.localInputToUtc(addDays(d, 1) + ' 00:00'));
+        // A pending request is reported here and NOWHERE ELSE — not as an issue
+        // and not in the count. The manager sees it while placing the shift,
+        // which is the whole of what was decided.
+        const pending = r.timeOff && r.timeOff.status === 'pending';
+        if (r.state === 'available' && !pending) continue;
+        (out[id] = out[id] || {})[d] = r.timeOff && r.timeOff.status === 'approved' ? 'off'
+          : pending ? 'asked' : r.state === 'preferred' ? 'prefer' : 'cannot';
+      }
+    }
+    return out;
+  })();
 
   // ---- Phase 5: the manager's phone -----------------------------------------
   //
@@ -18810,6 +18868,11 @@ app.get('/schedule', (req, res) => {
         var byId = {};
         shifts.forEach(function (s) { byId[s.id] = s; });
         var held = ${JSON.stringify(held)};
+        // Phase 6 context. Computed on the SERVER through the same resolver the
+        // Issues engine uses — the drawer must never carry a second opinion
+        // about whether somebody can work, which is exactly how sbOverlapNote
+        // once drifted by living in a route.
+        var sbAvail = ${JSON.stringify(sbAvailMap)};
         var posNames = ${JSON.stringify(posNames)};
         // Paid minutes already on the board this week, per person — the server's
         // own weekTotals, not a second count that could disagree with the row.
@@ -18880,6 +18943,15 @@ app.get('/schedule', (req, res) => {
             same.push((posNames[s.p] || s.p) + ' ' + sbFace(s.si) + '–' + sbFace(s.ei));
           });
           if (same.length) bits.push('already on that day: ' + same.join(', '));
+
+          // Phase 6. Words, not a colour, and the REASON is never here — a
+          // free-text reason belongs in the review queue, not on a board read
+          // at a glance by whoever is standing behind the manager.
+          var av = (sbAvail[empId] || {})[dateStr];
+          if (av === 'off') bits.push('APPROVED TIME OFF that day');
+          else if (av === 'cannot') bits.push('said they cannot work that day');
+          else if (av === 'asked') bits.push('has asked for that day off — not decided yet');
+          else if (av === 'prefer') bits.push('would rather work that day');
 
           box.textContent = bits.join(' · ');
           box.hidden = !bits.length;
@@ -19099,7 +19171,7 @@ app.post('/schedule/shift', (req, res) => {
     const made = SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
     // Saved either way. The warning rides along with the success message and
     // keeps the success styling — it must never read as though the save failed.
-    const note = sbOverlapNote(made);
+    const note = sbOverlapNote(made) + sbAvailNote(made);
     if (req.body.publish !== '1') {
       // Says what happened rather than that something happened. "Added to the
       // plan" left a manager guessing whether the floor had been told.
@@ -19128,7 +19200,7 @@ app.post('/schedule/shift/:id', (req, res) => {
   const w = sbWeekOf(req);
   try {
     const saved = SCH.edit(Number(req.params.id), sbForm(req.body));
-    sbBack(res, w, `Shift updated.${sbOverlapNote(saved)}`);
+    sbBack(res, w, `Shift updated.${sbOverlapNote(saved)}${sbAvailNote(saved)}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(res, w, e.message, true);

@@ -309,3 +309,102 @@ test('issuesFor only ever reads — it writes nothing', () => {
   issues(); issues(); issues();
   assert.deepStrictEqual(count(), before, 'derived means derived');
 });
+
+// ===========================================================================
+// Phase 6 — two new kinds, and the pending request that is deliberately not one.
+// ===========================================================================
+
+const P6 = require('../src/periods');
+const TC6 = require('../src/timeclock');
+
+const avRule = (empId, o) => db.prepare(`INSERT INTO availability_rules
+  (employee_id, avail_kind, weekday, on_date, all_day, start_min, end_min)
+  VALUES (@employee_id,@avail_kind,@weekday,@on_date,@all_day,@start_min,@end_min)`)
+  .run({ employee_id: empId, avail_kind: 'unavailable', weekday: null, on_date: null,
+    all_day: 1, start_min: null, end_min: null, ...o }).lastInsertRowid;
+const avOff = (empId, from, to, status = 'approved') => db.prepare(
+  `INSERT INTO time_off_requests (employee_id, starts_at, ends_at, all_day, status)
+   VALUES (?,?,?,1,?)`).run(empId, TC6.localInputToUtc(from + ' 00:00'),
+  TC6.localInputToUtc(to + ' 00:00'), status).lastInsertRowid;
+const cleanP6 = () => {
+  db.prepare('DELETE FROM availability_rules').run();
+  db.prepare('DELETE FROM time_off_requests').run();
+  P6.setSetting('sch_availability', '1');
+};
+
+test('a shift during approved time off is an ACTION issue', () => {
+  cleanP6();
+  const s = S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  const id = avOff(ANNA, DAY, addDays(DAY, 1));
+  const found = only('timeoff');
+  assert.strictEqual(found.length, 1, 'exactly one');
+  assert.strictEqual(found[0].severity, 'action', 'a manager approved it and then scheduled over it');
+  assert.strictEqual(found[0].key, `timeoff:${s.id}:${id}`, 'the key is deterministic');
+  assert.deepStrictEqual(found[0].shiftIds, [s.id]);
+  cleanP6();
+});
+
+test('a shift during stated unavailability is a REVIEW issue', () => {
+  cleanP6();
+  const s = S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  const rid = avRule(ANNA, { on_date: DAY });
+  const found = only('unavailable');
+  assert.strictEqual(found.length, 1);
+  assert.strictEqual(found[0].severity, 'review', 'the manager may override a stated constraint');
+  assert.strictEqual(found[0].key, `unavailable:${s.id}:${rid}`);
+  cleanP6();
+});
+
+test('a PENDING request raises no issue at all', () => {
+  cleanP6();
+  S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  avOff(ANNA, DAY, addDays(DAY, 1), 'pending');
+  assert.strictEqual(only('timeoff').length + only('unavailable').length, 0,
+    'asking for a day off must not let an employee put a count on the manager\'s board');
+  cleanP6();
+});
+
+test('approved time off outranks a stated rule — one issue, not two', () => {
+  cleanP6();
+  S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  avRule(ANNA, { on_date: DAY });
+  avOff(ANNA, DAY, addDays(DAY, 1));
+  assert.strictEqual(only('unavailable').length, 0, 'the stated rule stands down');
+  assert.strictEqual(only('timeoff').length, 1, 'and the approved absence is the one that speaks');
+  cleanP6();
+});
+
+test('the switch silences stated rules but never an approved absence', () => {
+  cleanP6();
+  S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  avRule(ANNA, { on_date: DAY });
+  try {
+    P6.setSetting('sch_availability', '0');
+    assert.strictEqual(only('unavailable').length, 0,
+      'a stated rule is not consulted while collecting is off');
+    avOff(ANNA, DAY, addDays(DAY, 1));
+    assert.strictEqual(only('timeoff').length, 1,
+      'but an absence the manager approved still warns them');
+  } finally { P6.setSetting('sch_availability', '1'); cleanP6(); }
+});
+
+test('the issue is derived — fixing the request clears it, with no dismissal', () => {
+  cleanP6();
+  S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  const id = avOff(ANNA, DAY, addDays(DAY, 1));
+  assert.strictEqual(only('timeoff').length, 1);
+  db.prepare("UPDATE time_off_requests SET status='rejected' WHERE id = ?").run(id);
+  assert.strictEqual(only('timeoff').length, 0,
+    'no dismissal anywhere — fix the request and the issue is simply gone');
+  cleanP6();
+});
+
+test('availability never blocks: the shift still saves, and Publish is untouched', () => {
+  cleanP6();
+  avRule(ANNA, { on_date: DAY });
+  const s = S.create({ employeeId: ANNA, position: 'server', startsAt: at(DAY, '16:00'), endsAt: at(DAY, '22:00') });
+  assert.ok(s && s.id, 'creating over a stated constraint is allowed');
+  assert.strictEqual(only('unavailable').length, 1, 'and reported rather than refused');
+  assert.doesNotThrow(() => S.publishWeek(DAY), 'a week with an availability issue still publishes');
+  cleanP6();
+});
