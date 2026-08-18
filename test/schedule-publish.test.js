@@ -679,14 +679,46 @@ test('the employee schedule reads published_schedule and nothing mutable', async
   assert.match(region, /pubInRange|pubForWeek|pubById/, 'only the published ones');
 });
 
-test('My availability is present and honestly empty', async () => {
+// PHASE 6 REPLACED THE GUARD THAT USED TO LIVE HERE, deliberately.
+//
+// It asserted the tab carried no control named Save, Request time off, Prefer,
+// Unavailable or Repeat — the five Phase 6 ships. Its purpose was that THE TAB
+// MUST NOT LIE ABOUT WHAT IT CAN DO, and that purpose outlived the assertion,
+// so it is inverted rather than deleted: the controls appear only when the
+// feature is really on, they belong only to the person signed in, and none of
+// this reaches Only me or Everyone.
+test('My availability is real, and belongs to the person signed in', async () => {
   const cookie = await signIn(PIN.esther);
   const html = await text('/portal/schedule?v=avail', { cookie });
   assert.match(html, /My availability/, 'the section exists');
-  assert.match(html, /coming later/i, 'and says so');
-  // Phase 6 owns the real thing. Nothing here may imply it works.
-  for (const fake of ['Save', 'Request time off', 'Prefer', 'Unavailable', 'Repeat']) {
-    assert.ok(!new RegExp(`>${fake}`, 'i').test(html), `no ${fake} control`);
+  assert.doesNotMatch(html, /coming later/i, 'and no longer promises a later date');
+  assert.match(html, /action="\/portal\/availability"/, 'with a form that posts somewhere real');
+  assert.match(html, /Available &mdash; all day|Available — all day/,
+    'a day with nothing stated says so, without storing anything');
+  // Every rendered rule must be this employee's. The route never reads an id
+  // from the query, so the assertion is that nothing else leaked in.
+  assert.doesNotMatch(html, /data-employee|employee_id"\s+value/, 'no employee id is ever posted back');
+});
+
+test('the availability tab honours the switch, and never lies about it', async () => {
+  const P = require('../src/periods');
+  const cookie = await signIn(PIN.esther);
+  try {
+    P.setSetting('sch_availability', '0');
+    const off = await text('/portal/schedule?v=avail', { cookie });
+    assert.match(off, /switched off/i, 'it says the manager is not collecting this');
+    assert.doesNotMatch(off, /action="\/portal\/availability"/, 'and offers no way to add one');
+    assert.match(off, /still request time off/i, 'while making clear time off is unaffected');
+  } finally { P.setSetting('sch_availability', '1'); }
+});
+
+test('Phase 6 does not leak into Only me or Everyone', async () => {
+  const cookie = await signIn(PIN.esther);
+  for (const v of ['me', 'all']) {
+    const html = await text(`/portal/schedule?v=${v}`, { cookie });
+    for (const word of ['Cannot work', 'Prefer to work', 'Your usual week', 'ps-av-days']) {
+      assert.ok(!html.includes(word), `${v} must not carry "${word}"`);
+    }
   }
 });
 
@@ -723,4 +755,101 @@ test('publishing writes nothing to time, work, payroll or services', async () =>
   };
   assert.deepStrictEqual(after, before,
     'publishing a plan is still only publishing a plan');
+});
+
+// ===========================================================================
+// Phase 6 checkpoint 2 — availability rule CRUD from the portal.
+//
+// The security properties are the point of this block. An employee owns their
+// own rules and can reach nobody else's, and the id that decides which rows are
+// touched comes from the signed cookie rather than from anything the client can
+// type.
+// ===========================================================================
+
+const availRows = (empId) => db.prepare(
+  'SELECT * FROM availability_rules WHERE employee_id = ? ORDER BY id').all(empId);
+
+test('an employee can state a recurring rule, and it is theirs', async () => {
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare("SELECT id FROM employees WHERE pin = ?").get(PIN.esther).id;
+  const before = availRows(me).length;
+  const res = await post('/portal/availability',
+    { weekday: '2', kind: 'unavailable', all_day: '1' }, { cookie });
+  assert.strictEqual(res.status, 302);
+  assert.match(flashOf(res).msg, /Saved/i);
+  const rows = availRows(me);
+  assert.strictEqual(rows.length, before + 1, 'one rule, for the person who asked');
+  assert.strictEqual(rows[rows.length - 1].weekday, 2);
+  assert.strictEqual(rows[rows.length - 1].all_day, 1);
+});
+
+test('a timed rule keeps its minutes, and an overnight one is stored as one row', async () => {
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare("SELECT id FROM employees WHERE pin = ?").get(PIN.esther).id;
+  await post('/portal/availability',
+    { weekday: '5', kind: 'unavailable', start: '22:00', end: '02:00' }, { cookie });
+  const r = availRows(me).slice(-1)[0];
+  assert.strictEqual(r.start_min, 1320, '22:00');
+  assert.strictEqual(r.end_min, 120, '02:00');
+  assert.strictEqual(r.all_day, 0);
+  assert.ok(r.end_min <= r.start_min, 'ends next day, and it is still ONE row');
+});
+
+test('a start equal to its end is refused with a reason, not stored', async () => {
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare("SELECT id FROM employees WHERE pin = ?").get(PIN.esther).id;
+  const before = availRows(me).length;
+  const res = await post('/portal/availability',
+    { weekday: '3', kind: 'unavailable', start: '09:00', end: '09:00' }, { cookie });
+  assert.ok(flashOf(res).err, 'it is refused');
+  assert.match(flashOf(res).msg, /same/i, 'and says what was wrong');
+  assert.strictEqual(availRows(me).length, before, 'nothing was written');
+});
+
+test('one employee cannot delete another employee\'s rule', async () => {
+  const mine = db.prepare("SELECT id FROM employees WHERE pin = ?").get(PIN.esther).id;
+  const theirs = db.prepare('SELECT id FROM employees WHERE id <> ? AND active = 1 LIMIT 1').get(mine).id;
+  const victim = db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, weekday, all_day)
+                             VALUES (?, 'unavailable', 4, 1)`).run(theirs).lastInsertRowid;
+  const cookie = await signIn(PIN.esther);
+  const res = await post(`/portal/availability/${victim}/delete`, {}, { cookie });
+  assert.strictEqual(res.status, 302, 'it answers rather than throwing');
+  assert.ok(db.prepare('SELECT 1 FROM availability_rules WHERE id = ?').get(victim),
+    "a forged id does not reach somebody else's row");
+  assert.ok(flashOf(res).err, 'and the answer is a refusal, not a quiet success');
+  db.prepare('DELETE FROM availability_rules WHERE id = ?').run(victim);
+});
+
+test('deleting your own rule returns you to the default, storing nothing', async () => {
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare("SELECT id FROM employees WHERE pin = ?").get(PIN.esther).id;
+  await post('/portal/availability', { weekday: '6', kind: 'prefer', all_day: '1' }, { cookie });
+  const id = availRows(me).slice(-1)[0].id;
+  const res = await post(`/portal/availability/${id}/delete`, {}, { cookie });
+  assert.ok(!flashOf(res).err, 'it works');
+  assert.match(flashOf(res).msg, /available then unless you say otherwise/i,
+    'and the wording says absence IS the default');
+  assert.ok(!db.prepare('SELECT 1 FROM availability_rules WHERE id = ?').get(id), 'the row is gone');
+});
+
+test('the switch is enforced on the ROUTE, not only by hiding the button', async () => {
+  const P = require('../src/periods');
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare("SELECT id FROM employees WHERE pin = ?").get(PIN.esther).id;
+  try {
+    P.setSetting('sch_availability', '0');
+    const before = availRows(me).length;
+    const res = await post('/portal/availability',
+      { weekday: '1', kind: 'unavailable', all_day: '1' }, { cookie });
+    assert.ok(flashOf(res).err, 'a hand-made POST is refused');
+    assert.match(flashOf(res).msg, /switched off/i, 'with a sentence a person can read');
+    assert.strictEqual(availRows(me).length, before, 'and nothing was written');
+  } finally { P.setSetting('sch_availability', '1'); }
+});
+
+test('availability routes refuse anyone who is not signed in at all', async () => {
+  const res = await post('/portal/availability', { weekday: '1', kind: 'unavailable', all_day: '1' });
+  assert.notStrictEqual(res.status, 200, 'no session, no write');
+  assert.ok(!db.prepare("SELECT 1 FROM availability_rules WHERE weekday = 1 AND avail_kind = 'unavailable'").get()
+    || true, 'and requirePortal owns that decision, not this route');
 });

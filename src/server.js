@@ -6194,6 +6194,30 @@ app.get('/portal/schedule', (req, res) => {
     ? 'Nothing published for the floor this week.'
     : 'Nothing scheduled for you this week.'}${nextLink}</p>`;
 
+  // Phase 6. Only loaded for the view that shows it, and only ever this
+  // employee's own rows — the id comes from the signed cookie, never from the
+  // query, so there is no request shape that reads somebody else's.
+  const avOn = SCH.availabilityEnabled();
+  const myRules = view !== 'avail' ? [] : db.prepare(
+    `SELECT * FROM availability_rules
+      WHERE employee_id = @emp
+        AND (effective_until IS NULL OR effective_until >= @today)
+      ORDER BY COALESCE(on_date, ''), weekday, start_min`).all({ emp: emp.id, today });
+  const DOWN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const mLab = (m) => {
+    const h = Math.floor(m / 60) % 24; const mi = m % 60;
+    const ap = h < 12 ? 'am' : 'pm'; const hh = (h % 12) === 0 ? 12 : h % 12;
+    return hh + (mi ? ':' + String(mi).padStart(2, '0') : '') + ap;
+  };
+  const ruleWhen = (r) => (r.all_day ? 'All day'
+    : mLab(r.start_min) + ' to ' + mLab(r.end_min) + (r.end_min <= r.start_min ? ' the next day' : ''));
+  const ruleWord = (r) => (r.avail_kind === 'prefer' ? 'Prefer to work' : 'Cannot work');
+  const oneOffs = myRules.filter((r) => r.on_date).filter((r) => r.on_date >= today);
+  const forDay = (wd) => myRules.filter((r) => r.weekday === wd);
+  const delForm = (r) => `<form method="post" action="/portal/availability/${r.id}/delete" class="ps-av-x">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      <button type="submit" aria-label="Remove: ${esc(ruleWord(r))}, ${esc(ruleWhen(r))}">Remove</button></form>`;
+
   res.send(portalPage('Schedule', `
     <div class="pt-body ps">
       <div class="ps-head">
@@ -6211,12 +6235,76 @@ app.get('/portal/schedule', (req, res) => {
       </div>
 
       ${view === 'avail' ? `
-        <div class="ps-soon">
-          <p class="ps-soon-t">My availability is coming later</p>
-          <p class="ps-soon-s">You will be able to tell your manager which days and
-            times you can work, and request time off, from here. It is not switched
-            on yet — for now, talk to your manager.</p>
-        </div>`
+        ${avOn ? '' : `<div class="ps-soon">
+          <p class="ps-soon-t">Availability is switched off right now</p>
+          <p class="ps-soon-s">Your manager is not collecting this at the moment. Anything
+            you saved before is still here and will count again if it is switched back on.
+            You can still request time off below.</p>
+        </div>`}
+
+        <section class="ps-av" aria-labelledby="ps-av-h">
+          <h2 class="ps-av-h" id="ps-av-h">Your usual week</h2>
+          <p class="ps-av-sub">Say nothing and you are treated as available. Only tell us
+            the times you <em>cannot</em> work, or would <em>rather</em> work.</p>
+          <ul class="ps-av-days">
+            ${DOWN.map((name, wd) => { const mine = forDay(wd); return `
+              <li class="ps-av-day">
+                <div class="ps-av-dh"><b>${name}</b>${
+                  mine.length ? '' : '<i>Available &mdash; all day</i>'}</div>
+                ${mine.map((r) => `<div class="ps-av-r ps-av-r--${r.avail_kind}">
+                    <span><b>${ruleWord(r)}</b> &middot; ${esc(ruleWhen(r))}</span>
+                    ${avOn ? delForm(r) : ''}</div>`).join('')}
+                ${avOn ? `<details class="ps-av-add">
+                  <summary>Add for ${name}</summary>
+                  <form method="post" action="/portal/availability" class="ps-av-f">
+                    <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                    <input type="hidden" name="weekday" value="${wd}">
+                    <fieldset class="ps-av-fs">
+                      <legend>What are you telling your manager?</legend>
+                      <label><input type="radio" name="kind" value="unavailable" checked> I cannot work</label>
+                      <label><input type="radio" name="kind" value="prefer"> I would rather work</label>
+                    </fieldset>
+                    <label class="ps-av-all">
+                      <input type="checkbox" name="all_day" value="1" checked
+                        data-avall> The whole day</label>
+                    <div class="ps-av-times">
+                      <label>From <input type="time" name="start" value="17:00" disabled></label>
+                      <label>To <input type="time" name="end" value="22:00" disabled></label>
+                    </div>
+                    <p class="ps-av-note" aria-live="polite"></p>
+                    <button class="ps-av-save" type="submit">Save</button>
+                  </form>
+                </details>` : ''}
+              </li>`; }).join('')}
+          </ul>
+
+          ${oneOffs.length ? `<h2 class="ps-av-h">Just this once</h2>
+            <ul class="ps-av-days">${oneOffs.map((r) => `
+              <li class="ps-av-day"><div class="ps-av-dh"><b>${esc(TC.dayLabel(r.on_date))}</b></div>
+                <div class="ps-av-r ps-av-r--${r.avail_kind}">
+                  <span><b>${ruleWord(r)}</b> &middot; ${esc(ruleWhen(r))}</span>
+                  ${avOn ? delForm(r) : ''}</div></li>`).join('')}</ul>` : ''}
+
+          ${avOn ? `<details class="ps-av-add ps-av-add--one">
+            <summary>Add a one-off day</summary>
+            <form method="post" action="/portal/availability" class="ps-av-f">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <label>Which day <input type="date" name="on_date" min="${today}" required></label>
+              <fieldset class="ps-av-fs">
+                <legend>What are you telling your manager?</legend>
+                <label><input type="radio" name="kind" value="unavailable" checked> I cannot work</label>
+                <label><input type="radio" name="kind" value="prefer"> I would rather work</label>
+              </fieldset>
+              <label class="ps-av-all"><input type="checkbox" name="all_day" value="1" checked data-avall> The whole day</label>
+              <div class="ps-av-times">
+                <label>From <input type="time" name="start" value="17:00" disabled></label>
+                <label>To <input type="time" name="end" value="22:00" disabled></label>
+              </div>
+              <button class="ps-av-save" type="submit">Save</button>
+            </form>
+          </details>` : ''}
+        </section>
+        ${psAvScript()}`
         : (weekCount ? `<div class="ps-days">${sep}${body}</div>`
           : (rows.length ? quiet : (view === 'all' ? emptyAll : empty)))}
     </div>
@@ -6226,6 +6314,110 @@ app.get('/portal/schedule', (req, res) => {
       ${tab('all', 'Everyone', '◎')}
       ${tab('avail', 'My availability', '☱')}
     </nav>`));
+});
+
+/**
+ * The all-day switch, and the overnight hint.
+ *
+ * A checkbox that toggles `disabled` on the two time inputs rather than hiding
+ * them: a range that silently ignores its own values is the accessibility
+ * failure people actually hit, and a disabled input still reads to a screen
+ * reader as a thing that exists and is currently not applicable.
+ *
+ * The hint is the ONLY place the employee learns that an end earlier than a
+ * start runs past midnight. They enter a day, a start and an end; the storage
+ * rule is ours, not theirs.
+ *
+ * No backticks and no dollar-brace in here — this is a template literal.
+ */
+function psAvScript() {
+  return '<script>' + [
+    '(function(){',
+    '  var forms = document.querySelectorAll(".ps-av-f");',
+    '  for (var i = 0; i < forms.length; i++) (function(f){',
+    '    var all = f.querySelector("[data-avall]");',
+    '    var times = f.querySelectorAll(".ps-av-times input");',
+    '    var note = f.querySelector(".ps-av-note");',
+    '    function hint(){',
+    '      if (!note) return;',
+    '      if (all.checked) { note.textContent = ""; return; }',
+    '      var a = times[0].value, b = times[1].value;',
+    '      note.textContent = (a && b && b <= a) ? "Ends the next day." : "";',
+    '    }',
+    '    function sync(){',
+    '      for (var k = 0; k < times.length; k++) times[k].disabled = all.checked;',
+    '      hint();',
+    '    }',
+    '    all.addEventListener("change", sync);',
+    '    for (var k = 0; k < times.length; k++) times[k].addEventListener("change", hint);',
+    '    sync();',
+    '  })(forms[i]);',
+    '})();',
+  ].join('\n') + '</script>';
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — the employee's own availability rules.
+//
+// OWNERSHIP IS NOT NEGOTIABLE. The employee id comes from requirePortal, which
+// reads a signed cookie; it is never taken from the body or the query. Deletes
+// re-check ownership in the WHERE clause rather than fetching and comparing, so
+// a forged id changes nothing rather than changing somebody else's week.
+//
+// The setting is enforced HERE and not only by hiding the controls. A disabled
+// button that still accepts a POST is not disabled.
+// ---------------------------------------------------------------------------
+const AV_KINDS = ['unavailable', 'prefer'];
+const avMin = (v) => {
+  const m = String(v || '').match(/^(\d{2}):(\d{2})$/);
+  return m ? (Number(m[1]) * 60 + Number(m[2])) : null;
+};
+
+app.post('/portal/availability', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const back = (msg, err) => res.redirect('/portal/schedule?v=avail&msg='
+    + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+  if (!SCH.availabilityEnabled()) {
+    return back('Availability is switched off by your manager at the moment.', true);
+  }
+  const kind = AV_KINDS.includes(req.body.kind) ? req.body.kind : 'unavailable';
+  const allDay = String(req.body.all_day || '') === '1';
+  const onDate = MX.isDate(req.body.on_date) ? req.body.on_date : null;
+  const weekday = onDate ? null : Number(req.body.weekday);
+  if (onDate === null && !(weekday >= 0 && weekday <= 6)) return back('Pick a day.', true);
+
+  let startMin = null; let endMin = null;
+  if (!allDay) {
+    startMin = avMin(req.body.start);
+    endMin = avMin(req.body.end);
+    if (startMin === null || endMin === null) return back('Enter a start and an end time.', true);
+    // Equal is not a zero-length window, it is the whole day expressed the long
+    // way round, and it would read as ends-next-day. Refuse it and say why.
+    if (startMin === endMin) return back('That start and end are the same. Choose the whole day instead.', true);
+  }
+  db.prepare(`INSERT INTO availability_rules
+      (employee_id, avail_kind, weekday, on_date, all_day, start_min, end_min)
+      VALUES (@employee_id, @avail_kind, @weekday, @on_date, @all_day, @start_min, @end_min)`)
+    .run({ employee_id: who.emp.id, avail_kind: kind, weekday, on_date: onDate,
+      all_day: allDay ? 1 : 0, start_min: startMin, end_min: endMin });
+  return back('Saved. Your manager will see this when they build the schedule.');
+});
+
+app.post('/portal/availability/:id/delete', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const back = (msg, err) => res.redirect('/portal/schedule?v=avail&msg='
+    + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+  if (!SCH.availabilityEnabled()) {
+    return back('Availability is switched off by your manager at the moment.', true);
+  }
+  // Ownership in the WHERE clause. A forged id matches nothing and changes
+  // nothing, which is a quieter failure than fetching a row that is not yours.
+  const out = db.prepare('DELETE FROM availability_rules WHERE id = ? AND employee_id = ?')
+    .run(Number(req.params.id), who.emp.id);
+  return back(out.changes ? 'Removed. You are available then unless you say otherwise.'
+    : 'That one is already gone.', !out.changes);
 });
 
 /** One published shift, for the employee it belongs to. */
