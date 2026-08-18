@@ -1230,7 +1230,7 @@ module.exports = {
   spanMinutes, paidMinutes,
   serviceFor, businessDateFor, heldPositions, heldPositionsFor,
   availabilityFor, availabilityForMany, availabilityEnabled, ruleWindowOn,
-  availabilityContext, resolveAvailability,
+  availabilityContext, resolveAvailability, approvedTimeOffOverlapping,
   q, DAYPARTS, STATUSES, ScheduleError,
   WINDOW_BACK, WINDOW_FORWARD,
 };
@@ -1486,6 +1486,27 @@ function resolveAvailability(ctx, employeeId, startsAt, endsAt) {
 function availabilityFor(employeeId, startsAt, endsAt) {
   const ctx = availabilityContext([employeeId], startsAt, endsAt);
   return resolveAvailability(ctx, employeeId, startsAt, endsAt);
+}
+
+/**
+ * An approved absence overlapping this window, or null.
+ *
+ * IT LIVES HERE, not in the route that needs it. There is exactly one
+ * definition of "these two spans overlap" in this codebase and this module owns
+ * it; a copy of the comparison in a route is how the create/edit path and the
+ * Issues engine drifted apart before Phase 4 pulled them together. A test pins
+ * that server.js carries no second copy.
+ *
+ * Approved only. A pending request is a question, not a commitment, and
+ * refusing a new request because of an unanswered one would let an employee
+ * lock their own calendar by asking.
+ */
+function approvedTimeOffOverlapping(employeeId, startsAt, endsAt) {
+  return db.prepare(
+    `SELECT id, starts_at, ends_at, all_day FROM time_off_requests
+      WHERE employee_id = ? AND status = 'approved'
+        AND starts_at < ? AND ends_at > ? LIMIT 1`)
+    .get(Number(employeeId), String(endsAt), String(startsAt)) || null;
 }
 
 /** The same question for a roster over one window. Returns Map(id -> facts). */

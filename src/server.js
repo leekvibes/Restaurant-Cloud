@@ -6213,6 +6213,26 @@ app.get('/portal/schedule', (req, res) => {
     : mLab(r.start_min) + ' to ' + mLab(r.end_min) + (r.end_min <= r.start_min ? ' the next day' : ''));
   const ruleWord = (r) => (r.avail_kind === 'prefer' ? 'Prefer to work' : 'Cannot work');
   const oneOffs = myRules.filter((r) => r.on_date).filter((r) => r.on_date >= today);
+  // Time off is unconditional — it is loaded whatever the availability switch
+  // says, because a request already made and an absence already granted do not
+  // stop existing when a manager stops collecting preferences.
+  const myOff = view !== 'avail' ? [] : db.prepare(
+    `SELECT * FROM time_off_requests WHERE employee_id = ?
+      ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+               starts_at DESC LIMIT 12`).all(emp.id);
+  const OFF_WORD = { pending: 'Waiting on your manager', approved: 'Approved',
+    rejected: 'Not approved', withdrawn: 'You withdrew this' };
+  const offWhen = (r) => {
+    const a = TC.utcToLocalInput(r.starts_at); const b = TC.utcToLocalInput(r.ends_at);
+    const d1 = a.slice(0, 10); const d2 = b.slice(0, 10);
+    if (r.all_day) {
+      const last = addDays(d2, -1);
+      return last === d1 ? TC.dayLabel(d1) : TC.dayLabel(d1) + ' to ' + TC.dayLabel(last);
+    }
+    const t = (v) => mLab(Number(v.slice(11, 13)) * 60 + Number(v.slice(14, 16)));
+    return d1 === d2 ? TC.dayLabel(d1) + ', ' + t(a) + ' to ' + t(b)
+      : TC.dayLabel(d1) + ' ' + t(a) + ' to ' + TC.dayLabel(d2) + ' ' + t(b);
+  };
   const forDay = (wd) => myRules.filter((r) => r.weekday === wd);
   const delForm = (r) => `<form method="post" action="/portal/availability/${r.id}/delete" class="ps-av-x">
       <input type="hidden" name="_csrf" value="${csrfFor(req)}">
@@ -6303,6 +6323,42 @@ app.get('/portal/schedule', (req, res) => {
               <button class="ps-av-save" type="submit">Save</button>
             </form>
           </details>` : ''}
+
+          <h2 class="ps-av-h">Time off</h2>
+          <p class="ps-av-sub">This one goes to your manager to approve. Availability
+            above is just you telling them; this is you asking.</p>
+
+          ${myOff.length ? `<ul class="ps-av-days">${myOff.map((r) => `
+            <li class="ps-av-day">
+              <div class="ps-av-dh"><b>${esc(offWhen(r))}</b>
+                <i class="ps-off-s ps-off-s--${r.status}">${OFF_WORD[r.status] || r.status}</i></div>
+              ${r.reason ? `<div class="ps-av-r"><span>${esc(r.reason)}</span></div>` : ''}
+              ${r.decision_note ? `<div class="ps-av-r"><span><b>Your manager said</b> &middot; ${
+                esc(r.decision_note)}</span></div>` : ''}
+              ${r.status === 'pending' ? `<form method="post" action="/portal/timeoff/${r.id}/withdraw" class="ps-av-x">
+                  <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                  <button type="submit">Withdraw this request</button></form>` : ''}
+            </li>`).join('')}</ul>`
+            : '<p class="ps-av-sub">You have not asked for any time off.</p>'}
+
+          <details class="ps-av-add ps-av-add--one">
+            <summary>Request time off</summary>
+            <form method="post" action="/portal/timeoff" class="ps-av-f">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <label>First day <input type="date" name="from" min="${today}" required></label>
+              <label>Last day <input type="date" name="to" min="${today}" required></label>
+              <label class="ps-av-all"><input type="checkbox" name="all_day" value="1" checked data-avall>
+                The whole day (or days)</label>
+              <div class="ps-av-times">
+                <label>From <input type="time" name="start" value="09:00" disabled></label>
+                <label>To <input type="time" name="end" value="17:00" disabled></label>
+              </div>
+              <label>Why, if you want to say <input type="text" name="reason" maxlength="200"
+                placeholder="Optional"></label>
+              <p class="ps-av-note" aria-live="polite"></p>
+              <button class="ps-av-save" type="submit">Send to my manager</button>
+            </form>
+          </details>
         </section>
         ${psAvScript()}`
         : (weekCount ? `<div class="ps-days">${sep}${body}</div>`
@@ -6418,6 +6474,92 @@ app.post('/portal/availability/:id/delete', (req, res) => {
     .run(Number(req.params.id), who.emp.id);
   return back(out.changes ? 'Removed. You are available then unless you say otherwise.'
     : 'That one is already gone.', !out.changes);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6 — time off. NOT governed by sch_availability.
+//
+// A request already made and an absence already granted do not stop existing
+// because a manager stopped collecting preferences. The switch has authority
+// over what somebody STATES, not over what they were PROMISED.
+//
+// THREE REFUSALS, AND THEY ARE DIFFERENT THINGS:
+//   - the identical pending request        -> idempotent, not an error
+//   - overlapping something already APPROVED -> refused, with a sentence
+//   - rejected or withdrawn history         -> never blocks anything
+// ---------------------------------------------------------------------------
+app.post('/portal/timeoff', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const emp = who.emp;
+  const back = (msg, err) => res.redirect('/portal/schedule?v=avail&msg='
+    + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+
+  const from = MX.isDate(req.body.from) ? req.body.from : null;
+  const to = MX.isDate(req.body.to) ? req.body.to : from;
+  if (!from || !to) return back('Pick the days you need off.', true);
+  if (to < from) return back('The last day is before the first one.', true);
+
+  const allDay = String(req.body.all_day || '') === '1';
+  let startsAt; let endsAt;
+  if (allDay) {
+    // A whole day is midnight to midnight the following day. Storing 23:59
+    // would leave a minute of the day schedulable, which nobody means.
+    startsAt = TC.localInputToUtc(from + ' 00:00');
+    endsAt = TC.localInputToUtc(addDays(to, 1) + ' 00:00');
+  } else {
+    const a = String(req.body.start || ''); const b = String(req.body.end || '');
+    if (!/^\d{2}:\d{2}$/.test(a) || !/^\d{2}:\d{2}$/.test(b)) return back('Enter a start and an end time.', true);
+    startsAt = TC.localInputToUtc(from + ' ' + a);
+    endsAt = TC.localInputToUtc(to + ' ' + b);
+    if (endsAt <= startsAt) return back('That ends before it starts.', true);
+  }
+  const reason = String(req.body.reason || '').trim().slice(0, 200) || null;
+
+  // GUARD ONE: something a manager has already approved. Refused here rather
+  // than at the schema, because the schema can only say "no" — this can say why.
+  const clash = SCH.approvedTimeOffOverlapping(emp.id, startsAt, endsAt);
+  if (clash) {
+    return back('You already have time off approved that covers some of those days. '
+      + 'Ask your manager if you need it changed.', true);
+  }
+
+  // GUARD TWO: the identical pending request. The unique index makes a
+  // double-tapped submit impossible; catching it here turns a database error
+  // into the truth, which is that the thing they wanted has already happened.
+  try {
+    db.prepare(`INSERT INTO time_off_requests
+        (employee_id, starts_at, ends_at, all_day, reason)
+        VALUES (@employee_id, @starts_at, @ends_at, @all_day, @reason)`)
+      .run({ employee_id: emp.id, starts_at: startsAt, ends_at: endsAt,
+        all_day: allDay ? 1 : 0, reason });
+  } catch (e) {
+    if (/UNIQUE|constraint/i.test(String(e && e.message))) {
+      return back('You have already asked for those days — it is still with your manager.');
+    }
+    throw e;
+  }
+  return back('Sent. Your manager will let you know.');
+});
+
+app.post('/portal/timeoff/:id/withdraw', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const back = (msg, err) => res.redirect('/portal/schedule?v=avail&msg='
+    + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+  // Only a PENDING one, and only your own. An approved absence cannot be pulled
+  // unilaterally: a manager has already built a week around it, and the way back
+  // from that is a conversation rather than a button.
+  const out = db.prepare(
+    `UPDATE time_off_requests SET status = 'withdrawn'
+      WHERE id = ? AND employee_id = ? AND status = 'pending'`)
+    .run(Number(req.params.id), who.emp.id);
+  if (out.changes) return back('Withdrawn. Your manager will not see it any more.');
+  const own = db.prepare('SELECT status FROM time_off_requests WHERE id = ? AND employee_id = ?')
+    .get(Number(req.params.id), who.emp.id);
+  return back(own && own.status === 'approved'
+    ? 'That one is already approved — ask your manager if you need it changed.'
+    : 'That request cannot be withdrawn.', true);
 });
 
 /** One published shift, for the employee it belongs to. */

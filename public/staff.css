@@ -1649,3 +1649,8 @@ body.bare {
   .ps-av-times { grid-template-columns: 1fr; }
   .ps-av-r { flex-wrap: wrap; }
 }
+/* Request status: the WORD carries it. The tint is a second signal only. */
+.ps-off-s { font-style: normal; font-size: 12px; font-weight: 650; }
+.ps-off-s--pending { color: var(--pt-amber); }
+.ps-off-s--approved { color: var(--pt-green); }
+.ps-off-s--rejected, .ps-off-s--withdrawn { color: var(--pt-second); }

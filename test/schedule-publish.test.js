@@ -853,3 +853,108 @@ test('availability routes refuse anyone who is not signed in at all', async () =
   assert.ok(!db.prepare("SELECT 1 FROM availability_rules WHERE weekday = 1 AND avail_kind = 'unavailable'").get()
     || true, 'and requirePortal owns that decision, not this route');
 });
+
+// ===========================================================================
+// Phase 6 checkpoint 3 — time off, and the three different refusals.
+// ===========================================================================
+
+const offRows = (empId) => db.prepare(
+  'SELECT * FROM time_off_requests WHERE employee_id = ? ORDER BY id').all(empId);
+const ME = () => db.prepare('SELECT id FROM employees WHERE pin = ?').get(PIN.esther).id;
+
+test('a request is sent, and lands as pending with the employee attached', async () => {
+  const cookie = await signIn(PIN.esther);
+  db.prepare('DELETE FROM time_off_requests').run();
+  const res = await post('/portal/timeoff',
+    { from: '2026-12-01', to: '2026-12-03', all_day: '1', reason: 'Away' }, { cookie });
+  assert.match(flashOf(res).msg, /Sent/i);
+  const r = offRows(ME()).slice(-1)[0];
+  assert.strictEqual(r.status, 'pending');
+  assert.strictEqual(r.all_day, 1);
+  assert.strictEqual(r.reason, 'Away');
+  // A whole day is midnight to midnight the day AFTER the last one — 23:59
+  // would leave a minute of the last day schedulable, which nobody means.
+  assert.match(r.ends_at, /^2026-12-04/, 'the end is the following midnight');
+});
+
+test('the identical pending request again is idempotent, not an error', async () => {
+  const cookie = await signIn(PIN.esther);
+  const before = offRows(ME()).length;
+  const res = await post('/portal/timeoff',
+    { from: '2026-12-01', to: '2026-12-03', all_day: '1' }, { cookie });
+  assert.ok(!flashOf(res).err, 'a double tap is not a failure');
+  assert.match(flashOf(res).msg, /already asked/i, 'it says the thing they wanted has happened');
+  assert.strictEqual(offRows(ME()).length, before, 'and no second row appeared');
+  assert.doesNotMatch(flashOf(res).msg, /UNIQUE|constraint|SQLITE/i, 'never a raw database error');
+});
+
+test('a request overlapping APPROVED time off is refused with a reason', async () => {
+  const cookie = await signIn(PIN.esther);
+  db.prepare('DELETE FROM time_off_requests').run();
+  await post('/portal/timeoff', { from: '2026-12-10', to: '2026-12-12', all_day: '1' }, { cookie });
+  db.prepare("UPDATE time_off_requests SET status='approved'").run();
+
+  const before = offRows(ME()).length;
+  const res = await post('/portal/timeoff',
+    { from: '2026-12-11', to: '2026-12-14', all_day: '1' }, { cookie });
+  assert.ok(flashOf(res).err, 'refused');
+  assert.match(flashOf(res).msg, /already have time off approved/i, 'and it explains itself');
+  assert.doesNotMatch(flashOf(res).msg, /UNIQUE|constraint|SQLITE/i, 'not a database error');
+  assert.strictEqual(offRows(ME()).length, before, 'nothing stored');
+});
+
+test('rejected and withdrawn history never blocks a new request', async () => {
+  const cookie = await signIn(PIN.esther);
+  for (const status of ['rejected', 'withdrawn']) {
+    db.prepare('DELETE FROM time_off_requests').run();
+    await post('/portal/timeoff', { from: '2026-12-20', to: '2026-12-21', all_day: '1' }, { cookie });
+    db.prepare('UPDATE time_off_requests SET status = ?').run(status);
+    const res = await post('/portal/timeoff',
+      { from: '2026-12-20', to: '2026-12-21', all_day: '1' }, { cookie });
+    assert.ok(!flashOf(res).err, `${status} history does not block asking again`);
+    assert.strictEqual(offRows(ME()).filter((r) => r.status === 'pending').length, 1,
+      'and the new one is pending');
+  }
+});
+
+test('a pending request can be withdrawn; an approved one cannot', async () => {
+  const cookie = await signIn(PIN.esther);
+  db.prepare('DELETE FROM time_off_requests').run();
+  await post('/portal/timeoff', { from: '2026-11-05', to: '2026-11-05', all_day: '1' }, { cookie });
+  const id = offRows(ME()).slice(-1)[0].id;
+  const ok = await post(`/portal/timeoff/${id}/withdraw`, {}, { cookie });
+  assert.ok(!flashOf(ok).err);
+  assert.strictEqual(db.prepare('SELECT status FROM time_off_requests WHERE id = ?').get(id).status, 'withdrawn');
+
+  db.prepare("UPDATE time_off_requests SET status='approved' WHERE id = ?").run(id);
+  const no = await post(`/portal/timeoff/${id}/withdraw`, {}, { cookie });
+  assert.ok(flashOf(no).err, 'an approved absence is not pulled unilaterally');
+  assert.match(flashOf(no).msg, /already approved/i, 'and it says to talk to the manager');
+  assert.strictEqual(db.prepare('SELECT status FROM time_off_requests WHERE id = ?').get(id).status, 'approved');
+});
+
+test('one employee cannot withdraw another employee\'s request', async () => {
+  const mine = ME();
+  const theirs = db.prepare('SELECT id FROM employees WHERE id <> ? AND active = 1 LIMIT 1').get(mine).id;
+  const victim = db.prepare(`INSERT INTO time_off_requests (employee_id, starts_at, ends_at, all_day, status)
+    VALUES (?, '2026-10-01 04:00:00', '2026-10-02 04:00:00', 1, 'pending')`).run(theirs).lastInsertRowid;
+  const cookie = await signIn(PIN.esther);
+  const res = await post(`/portal/timeoff/${victim}/withdraw`, {}, { cookie });
+  assert.ok(flashOf(res).err);
+  assert.strictEqual(db.prepare('SELECT status FROM time_off_requests WHERE id = ?').get(victim).status,
+    'pending', "a forged id does not reach somebody else's request");
+});
+
+test('time off keeps working while availability is switched OFF', async () => {
+  const P = require('../src/periods');
+  const cookie = await signIn(PIN.esther);
+  db.prepare('DELETE FROM time_off_requests').run();
+  try {
+    P.setSetting('sch_availability', '0');
+    const res = await post('/portal/timeoff', { from: '2026-09-09', to: '2026-09-09', all_day: '1' }, { cookie });
+    assert.ok(!flashOf(res).err, 'the switch has no authority over asking for time off');
+    assert.strictEqual(offRows(ME()).length, 1);
+    const html = await text('/portal/schedule?v=avail', { cookie });
+    assert.match(html, /Request time off/, 'and the form is still offered');
+  } finally { P.setSetting('sch_availability', '1'); db.prepare('DELETE FROM time_off_requests').run(); }
+});
