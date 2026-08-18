@@ -182,5 +182,13 @@ accounting. No multi-tenancy yet — see `docs/ZWIN-MULTI-TENANCY.md`, which als
 records that a fresh install currently seeds this restaurant's real staff and
 history, and must not be handed to anyone else until that is fixed.
 
-Scheduler phases 0–5 are shipped. Phase 6 (Availability + Time Off) is audited
-and awaiting product decisions — `docs/ZWIN-SCHEDULER-PHASE-6-AUDIT.md` §49.
+Scheduler phases 0–6 are shipped. Phase 6 (Availability + Time Off) was built
+against `docs/ZWIN-SCHEDULER-PHASE-6-AUDIT.md`, whose Part Three is the approved
+decision contract — read that before changing any of its behaviour.
+
+**Phase 6 invariants**, each with a test behind it: no availability rows means
+**available**, and "available" is never stored; `sch_availability` governs stated
+availability only and never time off, and an absent key means ON; a **pending**
+request is drawer context and never an Issue; availability warns and never
+blocks, including Publish; the reason an employee gives renders in exactly two
+places — their own page and the gated manager queue.
