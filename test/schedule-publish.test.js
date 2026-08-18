@@ -1089,3 +1089,110 @@ test('a declined request carries the manager\'s note into the notification', asy
   assert.match(ev.title, /not approved/i, 'it says the outcome plainly');
   assert.match(ev.body, /Two others already off/, 'and carries the reason, which is why it exists');
 });
+
+// ===========================================================================
+// Phase 6 checkpoint 7 — privacy and security.
+//
+// The audit called Everyone-view leakage the highest privacy risk in this
+// phase, and free-text reasons the most sensitive thing it creates. These are
+// the assertions that keep both shut.
+// ===========================================================================
+
+test('a coworker\'s reason, notes and requests never reach the Everyone view', async () => {
+  db.prepare('DELETE FROM time_off_requests').run();
+  db.prepare('DELETE FROM availability_rules').run();
+  const mine = db.prepare('SELECT id FROM employees WHERE pin = ?').get(PIN.esther).id;
+  const other = db.prepare('SELECT id, name FROM employees WHERE id <> ? AND active = 1 LIMIT 1').get(mine);
+
+  // Somebody else's most sensitive possible row.
+  db.prepare(`INSERT INTO time_off_requests
+      (employee_id, starts_at, ends_at, all_day, reason, status, decision_note)
+      VALUES (?, '2027-06-01 04:00:00', '2027-06-03 04:00:00', 1,
+              'Hospital appointment', 'approved', 'Cover arranged')`).run(other.id);
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, weekday, all_day)
+              VALUES (?, 'unavailable', 3, 1)`).run(other.id);
+
+  const cookie = await signIn(PIN.esther);
+  for (const v of ['me', 'all', 'avail']) {
+    const html = await text(`/portal/schedule?v=${v}`, { cookie });
+    for (const secret of ['Hospital appointment', 'Cover arranged']) {
+      assert.ok(!html.includes(secret),
+        `${v} leaked a coworker's "${secret}"`);
+    }
+  }
+  // And not on the shift detail either, which is the other page that names people.
+  const all = await text('/portal/schedule?v=all', { cookie });
+  assert.ok(!/Cannot work|Prefer to work|time off/i.test(all),
+    'Everyone shows who is on the floor, and nothing about who cannot be');
+});
+
+test('an employee sees their OWN reason and their manager\'s note, and only theirs', async () => {
+  const cookie = await signIn(PIN.esther);
+  await post('/portal/timeoff',
+    { from: '2027-07-04', to: '2027-07-04', all_day: '1', reason: 'My own business' }, { cookie });
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='pending'").get().id;
+  await post(`/timeclock/timeoff/${id}`, { decision: 'rejected', note: 'Holiday weekend' });
+  const html = await text('/portal/schedule?v=avail', { cookie });
+  assert.match(html, /My own business/, 'their own words are theirs to see');
+  assert.match(html, /Holiday weekend/, 'and so is the answer they were given');
+  assert.ok(!html.includes('Hospital appointment'), "but never the person's next to them");
+});
+
+test('the reason never reaches the manager\'s week board', async () => {
+  // The board is a seven-column grid read at a glance, often with somebody
+  // standing behind the manager. The reason belongs in the review queue.
+  const html = await text('/schedule');
+  assert.ok(!html.includes('Hospital appointment'), 'no reason on the board');
+  assert.ok(!html.includes('Cover arranged'), 'and no manager note either');
+});
+
+test('the requests queue is gated by the same area as the rest of the clock', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf("app.get('/timeclock/requests'");
+  assert.match(src.slice(at, at + 260), /punchReadable\(\)/,
+    'the only page that shows a reason to a manager checks it can');
+});
+
+test('availability and time off are never written into published_schedule', () => {
+  // The employee-facing table is shifts and nothing else. If a reason ever
+  // reached it, it would reach the Everyone view by construction.
+  const cols = db.prepare('PRAGMA table_info(published_schedule)').all().map((c) => c.name);
+  for (const bad of ['reason', 'decision_note', 'avail_kind', 'status_note']) {
+    assert.ok(!cols.includes(bad), `published_schedule must not carry ${bad}`);
+  }
+});
+
+test('a forged id cannot enumerate or touch another employee\'s rows', async () => {
+  const mine = db.prepare('SELECT id FROM employees WHERE pin = ?').get(PIN.esther).id;
+  const other = db.prepare('SELECT id FROM employees WHERE id <> ? AND active = 1 LIMIT 1').get(mine).id;
+  const rule = db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, weekday, all_day)
+                           VALUES (?, 'unavailable', 1, 1)`).run(other).lastInsertRowid;
+  const off = db.prepare(`INSERT INTO time_off_requests (employee_id, starts_at, ends_at, all_day, status)
+    VALUES (?, '2027-08-01 04:00:00', '2027-08-02 04:00:00', 1, 'pending')`).run(other).lastInsertRowid;
+  const cookie = await signIn(PIN.esther);
+
+  // Walk a range of ids rather than just the real one: enumeration is the
+  // attack, and a route that answers differently for "exists but not yours"
+  // than for "does not exist" is what makes it work.
+  for (const id of [rule, rule + 1, rule + 2]) {
+    await post(`/portal/availability/${id}/delete`, {}, { cookie });
+  }
+  for (const id of [off, off + 1, off + 2]) {
+    await post(`/portal/timeoff/${id}/withdraw`, {}, { cookie });
+  }
+  assert.ok(db.prepare('SELECT 1 FROM availability_rules WHERE id = ?').get(rule),
+    "another employee's rule survived");
+  assert.strictEqual(db.prepare('SELECT status FROM time_off_requests WHERE id = ?').get(off).status,
+    'pending', "another employee's request survived");
+});
+
+test('the portal never accepts an employee id from the client', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  for (const route of ["app.post('/portal/availability'", "app.post('/portal/timeoff'"]) {
+    const at = src.indexOf(route);
+    const body = src.slice(at, src.indexOf('\napp.', at + 10));
+    assert.match(body, /requirePortal\(req, res\)/, `${route} resolves who from the signed cookie`);
+    assert.ok(!/req\.body\.employee_id|req\.query\.employee_id/.test(body),
+      `${route} must never read an employee id from the client`);
+  }
+});
