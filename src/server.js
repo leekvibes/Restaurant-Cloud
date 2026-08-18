@@ -19484,7 +19484,7 @@ app.get('/timeclock', (req, res) => {
         ${/* Never absent. With nothing waiting it still reads "View requests",
                so "are there any?" is a question you can go and answer rather
                than infer from a panel that is not on the page. */''}
-        ${reqPill(pending.length)}
+        ${reqPill(pending.length + offWaiting())}
         <!-- The Timesheets button used to sit here, unguarded, and 403'd for
              anybody without the payroll area. The tab strip above carries that
              link now, and filters it by what the account can actually open. -->
@@ -20153,6 +20153,10 @@ function reqDiff(c) {
  * Rendering nothing at zero, which is what the old panel did, makes an empty
  * queue and a broken page look exactly the same.
  */
+const offWaiting = () => {
+  try { return db.prepare("SELECT COUNT(*) c FROM time_off_requests WHERE status = 'pending'").get().c; }
+  catch { return 0; }
+};
 const reqPill = (n) => (n
   ? `<a class="bs-req-pill on" href="/timeclock/requests"><b>${n}</b> Request${n === 1 ? '' : 's'}</a>`
   : '<a class="bs-req-pill" href="/timeclock/requests">View requests</a>');
@@ -20253,6 +20257,57 @@ app.get('/timeclock/requests', (req, res) => {
       ${e ? `<p class="bs-fine"><a class="bs-act" href="/timeclock/${e.id}">Open the entry and its history →</a></p>` : ''}`;
   })();
 
+  // ---- Phase 6: time off, on the same page and NOT through the same code path.
+  //
+  // The audit's rule was one place a manager looks, not one row shape for two
+  // different things. A correction proposes rewriting a punch and needs a
+  // before/after comparison; a time-off request proposes an absence and needs a
+  // date range. Forcing both through reqKind/reqDiff/decideCorrection would be
+  // the generic workflow engine the audit told us not to build.
+  const offPending = db.prepare(
+    "SELECT * FROM time_off_requests WHERE status = 'pending' ORDER BY starts_at").all();
+  const offHistory = db.prepare(
+    `SELECT * FROM time_off_requests WHERE status <> 'pending'
+      ORDER BY COALESCE(decided_at, requested_at) DESC, id DESC LIMIT 40`).all();
+  const offRows = tab === 'history' ? offHistory : offPending;
+  const offSpan = (r) => {
+    const a = TC.utcToLocalInput(r.starts_at); const b = TC.utcToLocalInput(r.ends_at);
+    const d1 = a.slice(0, 10);
+    if (r.all_day) {
+      const last = addDays(b.slice(0, 10), -1);
+      return last === d1 ? TC.dayLabel(d1) : TC.dayLabel(d1) + ' – ' + TC.dayLabel(last);
+    }
+    return TC.dayLabel(d1) + ', ' + a.slice(11, 16) + ' – ' + b.slice(11, 16);
+  };
+  const offBlock = `
+    <section class="bs-off" aria-labelledby="bs-off-h">
+      <h2 class="bs-off-h" id="bs-off-h">Time off ${
+        tab === 'history' ? '· decided' : `· waiting (${offPending.length})`}</h2>
+      ${offRows.length ? `<ul class="bs-off-l">${offRows.map((r) => `
+        <li class="bs-off-i">
+          <div class="bs-off-m">
+            <b>${esc(tcEmpName(r.employee_id))}</b>
+            <span>${esc(offSpan(r))}${r.all_day ? '' : ' · part day'}</span>
+            ${r.reason ? `<i>“${esc(r.reason)}”</i>` : ''}
+          </div>
+          ${r.status === 'pending' && w2 ? `<div class="bs-off-a">
+            <form method="post" action="/timeclock/timeoff/${r.id}">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="decision" value="rejected">
+              <input type="text" name="note" maxlength="200" placeholder="Why (optional)">
+              <button class="bs-btn-no" type="submit">Decline</button>
+            </form>
+            <form method="post" action="/timeclock/timeoff/${r.id}">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="decision" value="approved">
+              <button class="bs-btn-yes" type="submit">Approve</button>
+            </form>
+          </div>` : `<span class="bs-req-st ${esc(r.status)}">${esc(r.status)}</span>`}
+        </li>`).join('')}</ul>`
+        : `<div class="bs-req-none"><span class="bs-req-tick">✓</span><p>${
+            tab === 'history' ? 'Nothing decided yet' : 'Nobody is waiting'}</p></div>`}
+    </section>`;
+
   res.send(layout('Requests', `
     ${flash(req)}
     <div class="bs-page tcm-page">
@@ -20263,7 +20318,7 @@ app.get('/timeclock/requests', (req, res) => {
       </div>
 
       <nav class="pa-tabs">
-        <a class="pa-tab${tab === 'pending' ? ' on' : ''}" href="/timeclock/requests">Pending (${pending.length})</a>
+        <a class="pa-tab${tab === 'pending' ? ' on' : ''}" href="/timeclock/requests">Pending (${pending.length + offPending.length})</a>
         <a class="pa-tab${tab === 'history' ? ' on' : ''}" href="/timeclock/requests?tab=history">History</a>
       </nav>
 
@@ -20279,7 +20334,44 @@ app.get('/timeclock/requests', (req, res) => {
         </aside>
         <section class="bs-req-pane">${detail}</section>
       </div>
+      ${offBlock}
     </div>`));
+});
+
+/**
+ * Decide one time-off request.
+ *
+ * THE TRANSITION IS CONDITIONAL, not last-write-wins. Two managers on the same
+ * queue is not a rare case in a restaurant — it is Sunday morning — and the
+ * second one must be told the answer rather than quietly overwriting the first.
+ * This is the safeguard time_corrections already had; it is copied rather than
+ * reinvented.
+ *
+ * Approval IS the effect. There is no second write to record, which is why
+ * these rows carry no applied_at: the Issues engine reads status directly.
+ */
+app.post('/timeclock/timeoff/:id', (req, res) => {
+  if (!tcCanEdit(req, res)) return;
+  const id = Number(req.params.id);
+  const decision = req.body.decision === 'approved' ? 'approved' : 'rejected';
+  const note = String(req.body.note || '').trim().slice(0, 200) || null;
+  const back = (msg, err) => res.redirect('/timeclock/requests?msg='
+    + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+
+  const row = db.prepare('SELECT * FROM time_off_requests WHERE id = ?').get(id);
+  if (!row) return back('That request no longer exists.', true);
+
+  const out = db.prepare(
+    `UPDATE time_off_requests SET status = @decision, decided_by = @by,
+            decided_at = datetime('now'), decision_note = @note
+      WHERE id = @id AND status = 'pending'`)
+    .run({ id, decision, by: tcActor(req), note });
+  if (!out.changes) return back('That request was already decided.', true);
+
+  const name = tcEmpName(row.employee_id);
+  return back(decision === 'approved'
+    ? `Approved — ${name} is off. Any shift already planned in that time will show as an issue.`
+    : `Declined — ${name} has been told.`);
 });
 
 /**
@@ -21194,7 +21286,7 @@ app.get('/payroll/timesheets', (req, res) => {
         </form>
         ${/* Where the reference puts it: in the timesheets toolbar, because
                that is where somebody is when they notice a shift is wrong. */''}
-        ${reqPill(TC.q.pendingCorrections.all().length)}
+        ${reqPill(TC.q.pendingCorrections.all().length + offWaiting())}
       </nav>
       ${custom
         ? '<p class="tsm-counts">Overtime is only calculated for official pay periods.</p>'

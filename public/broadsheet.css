@@ -5392,3 +5392,32 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sbk--published > s, .sbm-k.sbk--published > s { display:none; }
 .sbk--draft > s, .sbm-k.sbk--draft > s   { outline:1.5px solid var(--pc); outline-offset:-1.5px; background:transparent; }
 .sbk--changed > s, .sbm-k.sbk--changed > s { background:var(--pc); outline:0; }
+
+/* ---------------------------------------------------------------------------
+   Phase 6 — time off in the Requests queue.
+
+   Its own block rather than a row in the corrections list: a correction
+   proposes rewriting a punch and needs a before/after comparison, a time-off
+   request proposes an absence and needs a date range. One page, two shapes.
+
+   NOTE .bs * kills box-shadow inside the owner shell, so separation here is
+   border and spacing only. A shadow would ship invisible.
+--------------------------------------------------------------------------- */
+.bs-off { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 18px; }
+.bs-off-h { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+.bs-off-l { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.bs-off-i { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.bs-off-m { display: grid; gap: 2px; min-width: 220px; }
+.bs-off-m b { font-size: 14px; font-weight: 650; }
+.bs-off-m span { font-size: 13px; color: var(--muted); }
+.bs-off-m i { font-style: normal; font-size: 13px; color: var(--muted); }
+.bs-off-a { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bs-off-a form { display: flex; align-items: center; gap: 6px; margin: 0; }
+.bs-off-a input[type="text"] { min-height: 36px; padding: 0 10px; font: inherit; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 8px; max-width: 190px; }
+@media (max-width: 620px) {
+  .bs-off-i { flex-direction: column; }
+  .bs-off-a { width: 100%; }
+  .bs-off-a input[type="text"] { max-width: none; flex: 1; }
+}

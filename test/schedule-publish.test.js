@@ -958,3 +958,62 @@ test('time off keeps working while availability is switched OFF', async () => {
     assert.match(html, /Request time off/, 'and the form is still offered');
   } finally { P.setSetting('sch_availability', '1'); db.prepare('DELETE FROM time_off_requests').run(); }
 });
+
+// ===========================================================================
+// Phase 6 checkpoint 4 — the manager decides, in the queue that already exists.
+// ===========================================================================
+
+test('a pending request appears in the manager queue and in its count', async () => {
+  db.prepare('DELETE FROM time_off_requests').run();
+  const cookie = await signIn(PIN.esther);
+  await post('/portal/timeoff', { from: '2027-01-04', to: '2027-01-05', all_day: '1', reason: 'Wedding' }, { cookie });
+  const html = await text('/timeclock/requests');
+  assert.match(html, /Time off/, 'it has a section on the page managers already use');
+  assert.match(html, /Wedding/, 'the reason is here, where a decision is made');
+  assert.match(html, /Pending \(1\)/, 'and it counts toward the queue');
+});
+
+test('approving records who, when, and turns it into a scheduling fact', async () => {
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='pending'").get().id;
+  const res = await post(`/timeclock/timeoff/${id}`, { decision: 'approved' });
+  assert.strictEqual(res.status, 302);
+  assert.match(flashOf(res).msg, /Approved/i);
+  assert.match(flashOf(res).msg, /issue/i, 'and warns that planned shifts will now show one');
+  const r = db.prepare('SELECT * FROM time_off_requests WHERE id = ?').get(id);
+  assert.strictEqual(r.status, 'approved');
+  assert.ok(r.decided_by, 'the actor is recorded');
+  assert.ok(r.decided_at, 'and when');
+});
+
+test('a second decision on the same request is refused, not applied', async () => {
+  // Two managers on the queue on a Sunday morning is not a rare case. The
+  // second one is told the answer rather than quietly overwriting the first.
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='approved'").get().id;
+  const res = await post(`/timeclock/timeoff/${id}`, { decision: 'rejected' });
+  assert.ok(flashOf(res).err);
+  assert.match(flashOf(res).msg, /already decided/i);
+  assert.strictEqual(db.prepare('SELECT status FROM time_off_requests WHERE id = ?').get(id).status,
+    'approved', 'the first decision stands');
+});
+
+test('declining carries the manager\'s note, and the employee can read it', async () => {
+  db.prepare('DELETE FROM time_off_requests').run();
+  const cookie = await signIn(PIN.esther);
+  await post('/portal/timeoff', { from: '2027-02-01', to: '2027-02-01', all_day: '1' }, { cookie });
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='pending'").get().id;
+  await post(`/timeclock/timeoff/${id}`, { decision: 'rejected', note: 'Short that weekend' });
+  const r = db.prepare('SELECT * FROM time_off_requests WHERE id = ?').get(id);
+  assert.strictEqual(r.status, 'rejected');
+  assert.strictEqual(r.decision_note, 'Short that weekend');
+  const mine = await text('/portal/schedule?v=avail', { cookie });
+  assert.match(mine, /Your manager said/, 'the note is shown to the person it is about');
+  assert.match(mine, /Short that weekend/, 'a decline without a reason is what people escalate');
+});
+
+test('deciding time off is refused to an account that cannot edit the clock', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf("app.post('/timeclock/timeoff/:id'");
+  const body = src.slice(at, at + 900);
+  assert.match(body, /tcCanEdit\(req, res\)/, 'the same gate the rest of the queue uses');
+  assert.match(body, /status = 'pending'/, 'and the transition is conditional, not last-write-wins');
+});
