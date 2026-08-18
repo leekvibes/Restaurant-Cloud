@@ -1600,7 +1600,18 @@ body.bare {
    home indicator with env(safe-area-inset-bottom), matching the rest of the
    portal rather than inventing a second convention.
 --------------------------------------------------------------------------- */
-.ps-av { margin: 4px 0 8px; }
+/* MEASURED, not assumed. Two fixed bars sit under this page: the portal nav
+   (61px) and the section tabs (52px at bottom:60px), so a control must clear
+   112px. The page rule .pt.has-tabs .ps allows 116px — four pixels of margin,
+   built from constants that are already slightly off (--ps-nav says 56 and the
+   bar measures 52; the nav is 61 and the sum assumes 60).
+
+   Four pixels survives nothing. Every other view on this page ends in a list
+   whose last card carries its own margin; this one ends in a PRIMARY ACTION
+   sitting flush against the padding, and at 200% text zoom the bars grow while
+   the four pixels do not. The extra room is here rather than in the shared rule
+   so the shift views keep the spacing they were designed with. */
+.ps-av { margin: 4px 0 8px; padding-bottom: 32px; }
 .ps-av-h { margin: 22px 0 4px; font-size: 15px; font-weight: 650; color: var(--pt-ink); }
 .ps-av-sub { margin: 0 0 14px; font-size: 13px; line-height: 1.55; color: var(--pt-second); }
 .ps-av-sub em { font-style: normal; font-weight: 650; color: var(--pt-ink); }
@@ -1629,7 +1640,11 @@ body.bare {
 
 .ps-av-f { display: grid; gap: 12px; padding: 6px 0 14px; }
 .ps-av-f label { font-size: 13.5px; color: var(--pt-ink); }
-.ps-av-f input[type="time"], .ps-av-f input[type="date"] {
+/* type="text" belongs here too. It was left out first time round and the reason
+   field measured 22px tall in the browser against a 44px floor — which the
+   stylesheet could not have told you, because the rule that was missing is the
+   one that would have said so. */
+.ps-av-f input[type="time"], .ps-av-f input[type="date"], .ps-av-f input[type="text"] {
   display: block; width: 100%; min-height: 46px; margin-top: 5px; padding: 0 12px;
   font: inherit; font-size: 16px;   /* 16px or iOS zooms the whole page on focus */
   border: 1px solid var(--pt-line); border-radius: 10px; background: var(--pt-field); color: var(--pt-ink); }

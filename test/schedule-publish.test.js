@@ -1196,3 +1196,47 @@ test('the portal never accepts an employee id from the client', () => {
       `${route} must never read an employee id from the client`);
   }
 });
+
+// ===========================================================================
+// Phase 6 checkpoint 8 — what the browser measured, kept from drifting back.
+//
+// These are source assertions and they are the WEAK half of the check on
+// purpose. The real verification was done in the browser with
+// getBoundingClientRect and elementFromPoint, and it found two things a green
+// suite could never have found: a 22px-tall reason field, and a primary action
+// with four pixels of clearance under two stacked fixed bars. What is pinned
+// here is only enough that somebody deleting the fix trips over a test.
+// ===========================================================================
+
+test('every text-ish input in the availability form has a real height', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  const rule = css.slice(css.indexOf('.ps-av-f input[type="time"]'));
+  for (const type of ['time', 'date', 'text']) {
+    assert.match(rule.slice(0, 200), new RegExp(`input\\[type="${type}"\\]`),
+      `${type} inputs need the 46px rule — the reason field measured 22px without it`);
+  }
+  assert.match(rule.slice(0, 400), /font-size:\s*16px/,
+    'and 16px, or iOS zooms the whole page the moment somebody taps it');
+});
+
+test('the availability section clears BOTH fixed bars, not just the page rule', () => {
+  // Measured: the portal nav is 61px and the section tabs are 52px sitting at
+  // bottom:60px, so a control must clear 112px. The shared rule allows 116px.
+  // Four pixels, from constants that are already off by a few. This section
+  // ends in a primary action rather than a list, so it adds its own room.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  const at = css.indexOf('.ps-av { margin:');
+  assert.ok(at > 0, 'the section rule exists');
+  assert.match(css.slice(at, at + 120), /padding-bottom:\s*\d+px/,
+    'with bottom room of its own');
+});
+
+test('nothing in the availability UI reports state by colour alone', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf('Your usual week');
+  const region = src.slice(at - 3000, at + 6000);
+  // Each state carries a word. A tinted bar beside it is a second signal.
+  for (const word of ['Cannot work', 'Prefer to work', 'Available &mdash; all day']) {
+    assert.ok(region.includes(word), `the state "${word}" is spelled out, not implied`);
+  }
+});
