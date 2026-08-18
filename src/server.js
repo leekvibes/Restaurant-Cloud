@@ -5485,7 +5485,8 @@ app.get('/notifications', (req, res) => {
   if (unseen.length) { try { PORTAL.q.adminMarkSeen.run({ uid }); } catch { /* the list still shows */ } }
 
   const GLYPH = { sales_day: '◇', shift: '✎', shift_ready: '✓', payroll: '❖', cash: '$',
-    floor: '⊘', incident: '‼', invoice: '¶', invoice_dup: '⧉', expense: '↩', document: '▦', user: '⊕' };
+    floor: '⊘', incident: '‼', invoice: '¶', invoice_dup: '⧉', expense: '↩', document: '▦', user: '⊕',
+    timeoff: '☂' };
 
   // Turn-on-push control — the same proven flow the portal uses, pointed at the
   // admin routes. Hidden until the client confirms push is possible. No backticks
@@ -6539,8 +6540,29 @@ app.post('/portal/timeoff', (req, res) => {
     }
     throw e;
   }
+  // The office hears about a REQUEST, because somebody now has to answer it.
+  // Nothing is sent when availability changes — that is a weekly per-employee
+  // edit, and three notifications were switched off in this codebase on
+  // 2026-08-14 for firing on nearly every save. A fourth was not the answer.
+  const fresh = db.prepare(
+    "SELECT id FROM time_off_requests WHERE employee_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1")
+    .get(emp.id);
+  PORTAL.adminNotify('timeoff', `${emp.name.split(' ')[0]} asked for time off`,
+    { body: `${offSpanOf(startsAt, endsAt, allDay)}${reason ? ' — ' + reason : ''}`,
+      href: '/timeclock/requests' });
   return back('Sent. Your manager will let you know.');
 });
+
+/** A date range as a person reads it. Shared by the notification and the queue. */
+function offSpanOf(startsAt, endsAt, allDay) {
+  const a = TC.utcToLocalInput(startsAt); const b = TC.utcToLocalInput(endsAt);
+  const d1 = a.slice(0, 10);
+  if (allDay) {
+    const last = addDays(b.slice(0, 10), -1);
+    return last === d1 ? TC.dayLabel(d1) : `${TC.dayLabel(d1)} to ${TC.dayLabel(last)}`;
+  }
+  return `${TC.dayLabel(d1)}, ${a.slice(11, 16)} to ${b.slice(11, 16)}`;
+}
 
 app.post('/portal/timeoff/:id/withdraw', (req, res) => {
   const who = requirePortal(req, res);
@@ -6554,7 +6576,13 @@ app.post('/portal/timeoff/:id/withdraw', (req, res) => {
     `UPDATE time_off_requests SET status = 'withdrawn'
       WHERE id = ? AND employee_id = ? AND status = 'pending'`)
     .run(Number(req.params.id), who.emp.id);
-  if (out.changes) return back('Withdrawn. Your manager will not see it any more.');
+  if (out.changes) {
+    // Told on withdrawal too: a manager who saw it in the queue and planned
+    // around it needs to know it is no longer coming.
+    PORTAL.adminNotify('timeoff', `${who.emp.name.split(' ')[0]} withdrew a time-off request`,
+      { body: 'It is no longer waiting on you.', href: '/timeclock/requests' });
+    return back('Withdrawn. Your manager will not see it any more.');
+  }
   const own = db.prepare('SELECT status FROM time_off_requests WHERE id = ? AND employee_id = ?')
     .get(Number(req.params.id), who.emp.id);
   return back(own && own.status === 'approved'
@@ -8082,7 +8110,7 @@ app.get('/portal/notifications', (req, res) => {
   const { emp } = who;
   const rows = PORTAL.q.eventsFor.all({ id: emp.id });
   const GLYPH = { special: '✦', special_86: '⊘', note: '◆', earnings: '❖',
-    timesheet: '▤', timeclock: '◷' };
+    timesheet: '▤', timeclock: '◷', timeoff: '☂' };
 
   // Grouped by day, because "when" is how anybody looks for one of these.
   const groups = [];
@@ -20439,6 +20467,15 @@ app.post('/timeclock/timeoff/:id', (req, res) => {
       WHERE id = @id AND status = 'pending'`)
     .run({ id, decision, by: tcActor(req), note });
   if (!out.changes) return back('That request was already decided.', true);
+
+  // The employee hears the outcome, once. The key carries the decision, so a
+  // retried POST or a second click cannot send it twice — and it must not
+  // depend on a disabled button, because the button is not the thing that
+  // retries.
+  PORTAL.notifyOnce(`timeoff:${id}:${decision}`, 'timeoff',
+    decision === 'approved' ? 'Your time off was approved' : 'Your time off was not approved',
+    { body: offSpanOf(row.starts_at, row.ends_at, row.all_day) + (note ? ` — ${note}` : ''),
+      employeeId: row.employee_id, href: '/portal/schedule?v=avail' });
 
   const name = tcEmpName(row.employee_id);
   return back(decision === 'approved'

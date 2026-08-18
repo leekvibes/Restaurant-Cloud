@@ -1017,3 +1017,75 @@ test('deciding time off is refused to an account that cannot edit the clock', ()
   assert.match(body, /tcCanEdit\(req, res\)/, 'the same gate the rest of the queue uses');
   assert.match(body, /status = 'pending'/, 'and the transition is conditional, not last-write-wins');
 });
+
+// ===========================================================================
+// Phase 6 checkpoint 6 — notifications, in both directions and no further.
+// ===========================================================================
+
+const adminEv = (kind) => db.prepare('SELECT * FROM admin_events WHERE kind = ? ORDER BY id').all(kind);
+const staffEv = (empId) => db.prepare(
+  "SELECT * FROM portal_events WHERE kind = 'timeoff' AND employee_id = ? ORDER BY id").all(empId);
+
+test('submitting tells the office; editing availability tells nobody', async () => {
+  db.prepare('DELETE FROM time_off_requests').run();
+  db.prepare("DELETE FROM admin_events WHERE kind = 'timeoff'").run();
+  db.prepare("DELETE FROM portal_events WHERE kind = 'timeoff'").run();
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get(PIN.esther).id;
+
+  // Availability is a weekly per-employee edit. Three notifications were
+  // switched off in this codebase for firing on nearly every save; a fourth
+  // would have been the same mistake.
+  await post('/portal/availability', { weekday: '4', kind: 'unavailable', all_day: '1' }, { cookie });
+  assert.strictEqual(adminEv('timeoff').length, 0, 'stating availability is not an announcement');
+
+  await post('/portal/timeoff', { from: '2027-03-01', to: '2027-03-02', all_day: '1', reason: 'Trip' }, { cookie });
+  const evs = adminEv('timeoff');
+  assert.strictEqual(evs.length, 1, 'asking for time off is');
+  assert.match(evs[0].title, /asked for time off/i);
+  assert.match(evs[0].href, /\/timeclock\/requests/, 'and it leads where the decision is made');
+  assert.ok(!staffEv(me).length, 'the employee is told nothing yet — they already know they asked');
+});
+
+test('withdrawing tells the office it is no longer waiting on them', async () => {
+  const cookie = await signIn(PIN.esther);
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='pending'").get().id;
+  const before = adminEv('timeoff').length;
+  await post(`/portal/timeoff/${id}/withdraw`, {}, { cookie });
+  const evs = adminEv('timeoff');
+  assert.strictEqual(evs.length, before + 1);
+  assert.match(evs[evs.length - 1].title, /withdrew/i,
+    'a manager who planned around it needs to know it is not coming');
+});
+
+test('a decision reaches the employee exactly once, however many times it is clicked', async () => {
+  db.prepare('DELETE FROM time_off_requests').run();
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get(PIN.esther).id;
+  db.prepare("DELETE FROM portal_events WHERE kind = 'timeoff'").run();
+  await post('/portal/timeoff', { from: '2027-04-01', to: '2027-04-01', all_day: '1' }, { cookie });
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='pending'").get().id;
+
+  await post(`/timeclock/timeoff/${id}`, { decision: 'approved' });
+  assert.strictEqual(staffEv(me).length, 1, 'told once');
+  assert.match(staffEv(me)[0].title, /approved/i);
+  assert.match(staffEv(me)[0].href, /\/portal\/schedule\?v=avail/, 'and the link goes somewhere real');
+
+  // A retried POST is the thing notifyOnce exists for. A disabled button is not
+  // what retries — the network is.
+  await post(`/timeclock/timeoff/${id}`, { decision: 'approved' });
+  assert.strictEqual(staffEv(me).length, 1, 'and never twice');
+});
+
+test('a declined request carries the manager\'s note into the notification', async () => {
+  db.prepare('DELETE FROM time_off_requests').run();
+  db.prepare("DELETE FROM portal_events WHERE kind = 'timeoff'").run();
+  const cookie = await signIn(PIN.esther);
+  const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get(PIN.esther).id;
+  await post('/portal/timeoff', { from: '2027-05-01', to: '2027-05-01', all_day: '1' }, { cookie });
+  const id = db.prepare("SELECT id FROM time_off_requests WHERE status='pending'").get().id;
+  await post(`/timeclock/timeoff/${id}`, { decision: 'rejected', note: 'Two others already off' });
+  const ev = staffEv(me).slice(-1)[0];
+  assert.match(ev.title, /not approved/i, 'it says the outcome plainly');
+  assert.match(ev.body, /Two others already off/, 'and carries the reason, which is why it exists');
+});
