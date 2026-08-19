@@ -5435,3 +5435,10 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sb-rep-d label { display: flex; align-items: center; gap: 6px; min-height: 40px; font-size: 13px; }
 .sb-rep-d input { width: 18px; height: 18px; accent-color: var(--primary); }
 @media (max-width: 560px) { .sb-rep-b { grid-template-columns: 1fr; } }
+/* Phase 7 — copy a day. Quiet until hovered: it lives in a header read at a
+   glance, and a button competing with the day's numbers would win. */
+.sb-dh-cp { margin: 4px 0 0; }
+.sb-dh-cp button { border: 0; background: none; padding: 2px 0; font: inherit; font-size: 11px;
+  color: var(--muted); text-decoration: underline; cursor: pointer; opacity: 0; transition: opacity .12s; }
+.sb-dh:hover .sb-dh-cp button, .sb-dh-cp button:focus { opacity: 1; }
+.sb-dh-cp button:hover { color: var(--primary); }

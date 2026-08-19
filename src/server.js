@@ -18782,10 +18782,23 @@ app.get('/schedule', (req, res) => {
           <div class="sb-grid" style="--sb-cols:${days.length}">
             <div class="sb-head">
               <div class="sb-emp sb-corner">Who</div>
-              ${days.map((d) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}${s.p ? '' : ' sb-dh--none'}">
+              ${days.map((d, di) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}${s.p ? '' : ' sb-dh--none'}">
                 <em>${esc(dow(d))} ${md(d)}${d === today ? ' <span class="sb-today">TODAY</span>' : ''}</em>
                 <b>${s.p} ${s.p === 1 ? 'person' : 'people'}</b>
                 <i>${s.n} shift${s.n === 1 ? '' : 's'} &middot; ${s.h}h</i>
+                ${/* Copy this day onto the next one. Offered only where there is
+                     something to copy AND somewhere to copy it to, so the header
+                     of an empty Monday does not carry a control that would do
+                     nothing. Never on the last column — there is no next day on
+                     screen to land in. */''}
+                ${s.n && di < days.length - 1 ? `<form method="post" action="/schedule/copy-day" class="sb-dh-cp">
+                  <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                  <input type="hidden" name="w" value="${week.start}">
+                  <input type="hidden" name="from" value="${d}">
+                  <input type="hidden" name="to" value="${days[di + 1]}">
+                  <button type="submit" title="Copy this day's shifts onto ${esc(dow(days[di + 1]))} as drafts"
+                    >Copy to ${esc(dow(days[di + 1]))}</button>
+                </form>` : ''}
               </div>`; }).join('')}
             </div>
             ${staff.length ? staff.map(row).join('')
@@ -19457,6 +19470,28 @@ app.post('/schedule/copy-week', (req, res) => {
 // IT GOVERNS AVAILABILITY RULES ONLY. Time-off requests can still be made and
 // decided while this is off, and approved time off still conflicts with a shift.
 // Those are commitments; availability is a preference somebody stated.
+// PHASE 7 — Saturday usually looks like Friday.
+app.post('/schedule/copy-day', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    const out = SCH.copyDay(req.body.from, req.body.to);
+    const n = out.made.length;
+    const already = out.skipped.filter((x) => /already/i.test(x.reason)).length;
+    const open = out.skipped.filter((x) => /open shift/i.test(x.reason)).length;
+    const refused = out.skipped.length - already - open;
+    let msg = n ? `${n} shift${n === 1 ? '' : 's'} copied as drafts — employees cannot see them yet.`
+      : 'Nothing to copy.';
+    if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already there.`;
+    if (open) msg += ` ${open} open shift${open === 1 ? '' : 's'} skipped.`;
+    if (refused) msg += ` ${refused} could not be copied.`;
+    return sbBack(res, w, msg);
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    return sbBack(res, w, e.message, true);
+  }
+});
+
 // PHASE 7 — save a shape. Not a shift: no employee and no date go in.
 app.post('/schedule/template', (req, res) => {
   if (!sbGuard(req, res)) return;

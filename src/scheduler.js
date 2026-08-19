@@ -1041,6 +1041,61 @@ function duplicate(id, opts = {}) {
  * that would duplicate one already in the target week — running it twice must
  * not double the schedule.
  */
+/**
+ * PHASE 7 — one day's staffing onto another day.
+ *
+ * copyWeek already existed and this is its smaller sibling, written the same way
+ * on purpose: same duplicate key, same "creates drafts", same refusal to publish.
+ * Saturday usually looks like Friday, and rebuilding it card by card is the work
+ * this phase exists to remove.
+ *
+ * Shifts are matched by BUSINESS DATE, not calendar date, so a Friday close
+ * running to 2am Saturday copies as part of Friday — which is what a manager
+ * clicking Friday means, and the only reading that keeps a night in one piece.
+ */
+function copyDay(fromDate, toDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromDate)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(toDate))) {
+    throw new ScheduleError('Pick a day to copy from and a day to copy into.', 'range');
+  }
+  if (fromDate === toDate) throw new ScheduleError('Choose a different day to copy into.', 'range');
+  const offset = daysApart(fromDate, toDate);
+  if (!Number.isFinite(offset) || offset === 0) throw new ScheduleError('Choose a different day.', 'range');
+
+  const source = q.inRangeAll.all(fromDate, fromDate).filter((r) => r.status !== 'cancelled');
+  const existing = q.inRangeAll.all(toDate, toDate).filter((r) => r.status !== 'cancelled');
+  const seen = new Set(existing.map((r) => `${r.employee_id}|${r.starts_at}|${r.position}`));
+
+  const made = []; const skipped = [];
+  for (const src of source) {
+    // An OPEN shift has nobody on it. Copying one forward is meaningful later,
+    // when Phase 8 gives it a way to be claimed; today it would just be an empty
+    // card nobody can act on, so it is skipped and counted rather than silently
+    // dropped.
+    if (src.employee_id == null) { skipped.push({ reason: 'open shift' }); continue; }
+    const startsAt = shiftUtcByDays(src.starts_at, offset);
+    if (seen.has(`${src.employee_id}|${startsAt}|${src.position}`)) {
+      skipped.push({ reason: 'already there' });
+      continue;
+    }
+    try {
+      made.push(create({
+        employeeId: src.employee_id,
+        position: src.position,
+        startsAt: TC.utcToLocalInput(startsAt).replace('T', ' '),
+        endsAt: TC.utcToLocalInput(shiftUtcByDays(src.ends_at, offset)).replace('T', ' '),
+        note: src.note || null,
+        createdBy: 'copy-day',
+      }));
+      seen.add(`${src.employee_id}|${startsAt}|${src.position}`);
+    } catch (e) {
+      // Somebody deactivated, or a position retired since. One refusal must not
+      // sink the rest of the day.
+      skipped.push({ reason: (e && e.message) || 'could not be created' });
+    }
+  }
+  return { made, skipped };
+}
+
 function copyWeek(fromStart, toStart, opts = {}) {
   // Both bounded by the same week definition the board uses, so a short final
   // week of a period cannot pull shifts out of the next one — and so that any
@@ -1430,7 +1485,7 @@ module.exports = {
   templates, saveTemplate, deleteTemplate,
   publishedFingerprint, issuesFor, ISSUE_SEVERITY,
   byId, inRange, weekFor, weekWindowFor, weekTotals,
-  publishedFor, overlapsFor, copyWeek,
+  publishedFor, overlapsFor, copyWeek, copyDay,
   spanMinutes, paidMinutes,
   serviceFor, businessDateFor, heldPositions, heldPositionsFor,
   availabilityFor, availabilityForMany, availabilityEnabled, ruleWindowOn,

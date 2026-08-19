@@ -796,7 +796,7 @@ test('a write route refuses an account without the schedule area', async () => {
   // The COUNT is the point. It is deliberately brittle: adding a write route
   // without a guard is exactly the mistake this catches, and it caught the two
   // above while they were being written.
-  assert.strictEqual(guards, 10, `all ten write routes call the guard (found ${guards})`);
+  assert.strictEqual(guards, 11, `all eleven write routes call the guard (found ${guards})`);
   assert.match(src.slice(src.indexOf('const sbGuard')), /navAllowed\('\/schedule'\)/,
     'and the guard asks the same question the sidebar does');
 });
@@ -1401,4 +1401,68 @@ test('the drawer offers saved templates, and deleting one leaves its shifts alon
   assert.ok(!db.prepare('SELECT 1 FROM shift_templates WHERE id = ?').get(t.id), 'the template is gone');
   assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM scheduled_shifts').get().n, shiftsBefore,
     'and not one shift went with it');
+});
+
+// ===========================================================================
+// Phase 7 — copy a day. copyWeek's smaller sibling, same rules.
+// ===========================================================================
+
+test('copying a day reproduces its staffing as drafts on the next one', async () => {
+  const from = dates.addDays(today(), 200);
+  const to = dates.addDays(from, 1);
+  SCH.create({ employeeId: E.server, position: 'server', startsAt: `${from} 16:00`, endsAt: `${from} 22:00` });
+  SCH.create({ employeeId: E.barista, position: 'barista', startsAt: `${from} 07:00`, endsAt: `${from} 15:00` });
+
+  const res = await post('/schedule/copy-day', { from, to });
+  assert.match(flashOf(res).msg, /2 shifts copied as drafts/);
+  assert.match(flashOf(res).msg, /cannot see them yet/i, 'and nobody has been told');
+  const rows = db.prepare(`SELECT employee_id, status FROM scheduled_shifts
+    WHERE business_date = ? ORDER BY employee_id`).all(to);
+  assert.strictEqual(rows.length, 2, 'both people came across');
+  assert.ok(rows.every((r) => r.status === 'draft'), 'as drafts');
+});
+
+test('copying the same day again adds nothing', async () => {
+  const from = dates.addDays(today(), 200);
+  const to = dates.addDays(from, 1);
+  const before = db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date = ?').get(to).n;
+  const res = await post('/schedule/copy-day', { from, to });
+  assert.match(flashOf(res).msg, /already there/i);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date = ?').get(to).n,
+    before, 'the target day is unchanged');
+});
+
+test('copying a day onto itself is refused rather than duplicating it', async () => {
+  const d = dates.addDays(today(), 200);
+  const before = db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date = ?').get(d).n;
+  const res = await post('/schedule/copy-day', { from: d, to: d });
+  assert.ok(flashOf(res).err);
+  assert.match(flashOf(res).msg, /different day/i);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date = ?').get(d).n, before);
+});
+
+test('an overnight shift copies as one piece, keeping its own end', async () => {
+  const from = dates.addDays(today(), 210);
+  const to = dates.addDays(from, 1);
+  // Explicit dates: create() takes what it is given, and it is the ROUTE that
+  // rolls an end earlier than its start onto the next day.
+  SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${from} 20:00`, endsAt: `${dates.addDays(from, 1)} 02:00` });
+  await post('/schedule/copy-day', { from, to });
+  const copied = db.prepare(`SELECT starts_at, ends_at, business_date FROM scheduled_shifts
+    WHERE business_date = ? AND employee_id = ?`).get(to, E.server);
+  assert.ok(copied, 'it came across');
+  assert.ok(copied.ends_at > copied.starts_at, 'and its end still follows its start');
+  // The night stays in one piece: business date is the day it STARTED.
+  assert.strictEqual(copied.business_date, to);
+});
+
+test('the day header offers the copy, and never on the last column', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /action="\/schedule\/copy-day"/, 'the control exists');
+  const headers = html.match(/<div class="sb-dh[^"]*">[\s\S]*?<\/div>\s*<\/div>/g) || [];
+  assert.ok(headers.length >= 1, 'day headers render');
+  // Nothing to copy INTO past the end of the visible week.
+  const forms = (html.match(/action="\/schedule\/copy-day"/g) || []).length;
+  assert.ok(forms <= 6, `at most six of seven days offer it (found ${forms})`);
 });
