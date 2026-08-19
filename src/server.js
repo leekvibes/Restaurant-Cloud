@@ -18860,6 +18860,41 @@ app.get('/schedule', (req, res) => {
             </select></label>
         </div>
         <label class="fld wide">Note<input name="note" id="sb-note" maxlength="200"></label>
+
+        ${/* PHASE 7. Shown only when CREATING — repeating an existing shift would
+             have to mean editing a series, and there is no series object here to
+             edit. One shift, repeated forward, is the whole feature. */''}
+        <details class="sb-rep" id="sb-rep" hidden>
+          <summary>Repeat this shift</summary>
+          <input type="hidden" name="repeat" value="1">
+          <div class="sb-rep-b">
+            <label class="fld">Every
+              <select name="repeat_every">
+                <option value="1">week</option>
+                <option value="2">2 weeks</option>
+                <option value="3">3 weeks</option>
+                <option value="4">4 weeks</option>
+              </select></label>
+            <label class="fld">For
+              <select name="repeat_weeks">
+                <option value="">— choose —</option>
+                <option value="3">3 more weeks</option>
+                <option value="5">5 more weeks</option>
+                <option value="7">7 more weeks</option>
+                <option value="11">11 more weeks</option>
+              </select></label>
+            <label class="fld wide">or until
+              <input type="date" name="repeat_until"></label>
+            <fieldset class="sb-rep-d">
+              <legend>On these days (leave blank to keep the same day each time)</legend>
+              ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => `
+                <label><input type="checkbox" name="repeat_days" value="${i}"> ${d}</label>`).join('')}
+            </fieldset>
+            <p class="sb-hint">Every one is made as a draft. Nobody is told until you
+              publish the week &mdash; including the weeks this reaches into.</p>
+          </div>
+        </details>
+
         <p class="sb-hint" id="sb-new" hidden>Saving keeps this as a draft &mdash; nobody
           sees it until the week is published. Publish sends this one shift now.</p>
         <div class="drawer-f">
@@ -18944,6 +18979,22 @@ app.get('/schedule', (req, res) => {
         // Read from the SAME data the board drew itself from, so the drawer and
         // the grid can never disagree. Advisory only: it reports, it never
         // refuses. Overlap is caught properly by the Issues engine.
+        // Repeat belongs to CREATE only. Editing one shift of a series edits that
+        // shift; there is no series object to edit, and offering "repeat" on an
+        // edit would imply there is. Closing it on hide also clears it, so a
+        // repeat set up and abandoned cannot ride along with the next shift.
+        function sbRepShow(on) {
+          var r = document.getElementById('sb-rep');
+          if (!r) return;
+          r.hidden = !on;
+          if (!on) {
+            r.open = false;
+            var f = r.querySelectorAll('input[type="checkbox"]');
+            for (var i = 0; i < f.length; i++) f[i].checked = false;
+            var sel = r.querySelector('select[name="repeat_weeks"]'); if (sel) sel.value = '';
+            var u = r.querySelector('input[name="repeat_until"]'); if (u) u.value = '';
+          }
+        }
         function sbFace(iso) {                     // '2026-08-11T16:30' -> '4:30p'
           var hh = Number(iso.slice(11, 13)), mm = iso.slice(14, 16);
           var ap = hh >= 12 ? 'p' : 'a', h12 = hh % 12 || 12;
@@ -19071,6 +19122,8 @@ app.get('/schedule', (req, res) => {
             document.getElementById('sb-save').textContent = 'Save Draft';
             document.getElementById('sb-savepub').hidden = false;
             document.getElementById('sb-new').hidden = false;
+          sbRepShow(true);
+            sbRepShow(true);
             sbDrawer(true);
             return;
           }
@@ -19094,6 +19147,7 @@ app.get('/schedule', (req, res) => {
           document.getElementById('sb-save').textContent = 'Save';
           document.getElementById('sb-savepub').hidden = true;
           document.getElementById('sb-new').hidden = true;
+          sbRepShow(false);
           // Duplicate and Delete are edit-only, and each posts its own form so
           // neither can be triggered by the drawer's Enter key. Rendered in the
           // markup and merely revealed here — building them as a string put an
@@ -19196,6 +19250,38 @@ app.post('/schedule/shift', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
+    // PHASE 7: a repeat makes a series. It goes through createSeries, which goes
+    // through create() once per occurrence, so nothing here is a second way to
+    // make a shift — the same guards refuse the same things.
+    //
+    // A SERIES IS NEVER PUBLISHED FROM HERE, whatever the publish box says.
+    // Generating a month and notifying everybody about it in the same click is
+    // the thing the roadmap names outright, and a manager who has just made
+    // twenty shifts has not read twenty shifts.
+    const rep = String(req.body.repeat || '') === '1' ? {
+      everyWeeks: req.body.repeat_every,
+      weeks: req.body.repeat_weeks,
+      until: req.body.repeat_until,
+      // Repeated keys arrive as an array; a single tick arrives as a string;
+      // and some clients join them with commas. Take all three rather than
+      // silently dropping the days somebody actually selected.
+      weekdays: String([].concat(req.body.repeat_days || []).join(','))
+        .split(',').map((d) => d.trim()).filter((d) => d !== ''),
+    } : null;
+    if (rep && (Number(rep.weeks) > 0 || rep.until)) {
+      const out = SCH.createSeries({ ...sbForm(req.body), createdBy: 'owner' }, rep);
+      const n = out.made.length;
+      const already = out.skipped.filter((x) => /already/i.test(x.reason)).length;
+      const refused = out.skipped.length - already;
+      let msg = n
+        ? `${n} shift${n === 1 ? '' : 's'} added as drafts — employees cannot see them yet.`
+        : 'Nothing added.';
+      if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already on the schedule.`;
+      if (refused) msg += ` ${refused} could not be made (${esc(out.skipped.find((x) => !/already/i.test(x.reason)).reason)}).`;
+      if (out.capped) msg += ' That is as far ahead as one repeat goes.';
+      return sbBack(res, w, msg + (n ? sbAvailNote(out.made[0]) : ''));
+    }
+
     const made = SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
     // Saved either way. The warning rides along with the success message and
     // keeps the success styling — it must never read as though the save failed.

@@ -1058,6 +1058,102 @@ function copyWeek(fromStart, toStart, opts = {}) {
   return { made, skipped };
 }
 
+/**
+ * PHASE 7 — one shift, repeated.
+ *
+ * The whole point is that a manager stops typing the same Friday six times. What
+ * it must NOT become is a second way to make a shift: every occurrence goes
+ * through create() so the inactive-employee guard, the held-position check, the
+ * daypart stamp and the break rules all apply exactly as they do to a shift made
+ * by hand. A recurrence that could place a shift an ordinary create would refuse
+ * is a hole, not a feature.
+ *
+ * IT MAKES DRAFTS. The roadmap states this outright and it is worth restating
+ * where somebody might be tempted: generating a month of shifts and publishing
+ * them in the same motion sends a month of notifications nobody reviewed.
+ *
+ * SKIPS RATHER THAN DUPLICATES, on the same key copyWeek uses
+ * (employee|starts_at|position). Running it twice must not double the week — a
+ * manager who is not sure whether it worked will run it again, and that is the
+ * behaviour that has to be safe.
+ *
+ * @param {object} base   the same shape create() takes — the FIRST occurrence
+ * @param {object} repeat {everyWeeks, weekdays, weeks, until}
+ */
+const SERIES_CAP = 60;
+
+function createSeries(base, repeat = {}) {
+  const every = Math.max(1, Math.min(8, Number(repeat.everyWeeks) || 1));
+  // weekdays is OPTIONAL. Without it the series lands on the day the first
+  // shift already falls on, which is what "repeat weekly" means to a person.
+  const days = Array.isArray(repeat.weekdays) && repeat.weekdays.length
+    ? [...new Set(repeat.weekdays.map(Number).filter((d) => d >= 0 && d <= 6))].sort()
+    : null;
+  const weeks = Math.max(0, Math.min(SERIES_CAP, Number(repeat.weeks) || 0));
+  const until = /^\d{4}-\d{2}-\d{2}$/.test(String(repeat.until || '')) ? repeat.until : null;
+
+  // Work out WHEN before creating anything, so the whole series can be checked
+  // against what is already there in one pass.
+  const startUtc = toUtc(base.startsAt);
+  const endUtc = toUtc(base.endsAt);
+  const baseDate = localDateOf(startUtc);
+  const baseDow = new Date(`${baseDate}T00:00:00Z`).getUTCDay();
+
+  const offsets = new Set([0]);
+  if (weeks || until) {
+    if (days) for (const d of days) { const o = d - baseDow; if (o > 0) offsets.add(o); }
+    for (let w = 1; w <= SERIES_CAP; w += 1) {
+      if (weeks && w > weeks) break;
+      const weekOffset = w * 7 * every;
+      if (days) { for (const d of days) offsets.add(weekOffset + (d - baseDow)); }
+      else offsets.add(weekOffset);
+    }
+  }
+
+  const wanted = [];
+  for (const off of [...offsets].sort((a, b) => a - b)) {
+    if (off < 0) continue;
+    const sAt = shiftUtcByDays(startUtc, off);
+    if (until && localDateOf(sAt) > until) continue;
+    wanted.push({ startsAt: sAt, endsAt: shiftUtcByDays(endUtc, off) });
+    if (wanted.length >= SERIES_CAP) break;
+  }
+
+  // ALREADY THERE? Then leave it alone. create() does NOT refuse a duplicate —
+  // overlaps are a warning by deliberate Phase 2 decision, because split shifts
+  // and doubles are real. That is right for one shift made on purpose and wrong
+  // for a series: a manager unsure whether the repeat worked will run it again,
+  // and the second run must not double the month. Same key copyWeek uses.
+  const first = wanted[0];
+  const last = wanted[wanted.length - 1];
+  const existing = first
+    ? q.inRangeAll.all(localDateOf(first.startsAt), addDays(localDateOf(last.startsAt), 1))
+    : [];
+  const seen = new Set(existing
+    .filter((r) => r.status !== 'cancelled')
+    .map((r) => `${r.employee_id}|${r.starts_at}|${r.position}`));
+
+  const made = []; const skipped = [];
+  for (const occ of wanted) {
+    const key = `${base.employeeId}|${occ.startsAt}|${base.position}`;
+    if (seen.has(key)) { skipped.push({ startsAt: occ.startsAt, reason: 'already on the schedule' }); continue; }
+    try {
+      made.push(create({
+        ...base,
+        startsAt: TC.utcToLocalInput(occ.startsAt).replace('T', ' '),
+        endsAt: TC.utcToLocalInput(occ.endsAt).replace('T', ' '),
+      }));
+      seen.add(key);
+    } catch (e) {
+      // One refusal must not sink the series. Telling somebody "six made, one
+      // refused because they no longer hold that position" is more use than
+      // refusing all seven and explaining nothing.
+      skipped.push({ startsAt: occ.startsAt, reason: (e && e.message) || 'could not be created' });
+    }
+  }
+  return { made, skipped, capped: wanted.length >= SERIES_CAP };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1271,7 +1367,7 @@ function issuesFor(anyDate) {
 }
 
 module.exports = {
-  create, edit, cancel, publish, duplicate, unpublish, publishWeek,
+  create, createSeries, edit, cancel, publish, duplicate, unpublish, publishWeek,
   publishedFingerprint, issuesFor, ISSUE_SEVERITY,
   byId, inRange, weekFor, weekWindowFor, weekTotals,
   publishedFor, overlapsFor, copyWeek,

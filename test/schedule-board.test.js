@@ -1247,3 +1247,91 @@ test('the switch is refused to an account without the schedule area', async () =
   assert.match(body, /navAllowed\('\/schedule'\)/, 'the route checks the area server-side');
   assert.match(body, /403/, 'and refuses rather than redirecting somewhere friendly');
 });
+
+// ===========================================================================
+// Phase 7 — repeat. One shift, forward.
+//
+// The property that matters most is that running it twice does not double the
+// month. create() deliberately does NOT refuse a duplicate — split shifts and
+// doubles are real, and Phase 2 settled that overlaps warn rather than block —
+// which is right for one shift made on purpose and wrong for a series, because
+// a manager unsure whether the repeat worked will simply run it again.
+// ===========================================================================
+
+test('a repeat makes drafts on the right days, and never publishes', async () => {
+  const start = dates.addDays(today(), 70);           // clear of every other test's week
+  const res = await post('/schedule/shift', {
+    employee_id: String(E.barista), position: 'barista', date: start,
+    start: '16:00', end: '22:00',
+    repeat: '1', repeat_every: '1', repeat_weeks: '3',
+  });
+  assert.strictEqual(res.status, 302);
+  assert.match(flashOf(res).msg, /4 shifts added as drafts/, 'the original plus three');
+  assert.match(flashOf(res).msg, /cannot see them yet/i, 'and it says nobody has been told');
+
+  const rows = db.prepare(`SELECT business_date, status FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date >= ? ORDER BY business_date`).all(E.barista, start);
+  assert.deepStrictEqual(rows.map((r) => r.business_date),
+    [start, dates.addDays(start, 7), dates.addDays(start, 14), dates.addDays(start, 21)]);
+  assert.ok(rows.every((r) => r.status === 'draft'), 'every one is a draft');
+  assert.strictEqual(db.prepare(`SELECT COUNT(*) n FROM published_schedule ps
+    JOIN scheduled_shifts s ON s.id = ps.scheduled_shift_id WHERE s.business_date >= ?`).get(start).n,
+  0, 'and not one of them reached an employee');
+});
+
+test('running the same repeat again does not double the month', async () => {
+  const start = dates.addDays(today(), 70);
+  const before = db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date >= ?').get(start).n;
+  const res = await post('/schedule/shift', {
+    employee_id: String(E.barista), position: 'barista', date: start,
+    start: '16:00', end: '22:00',
+    repeat: '1', repeat_every: '1', repeat_weeks: '3',
+  });
+  assert.match(flashOf(res).msg, /already on the schedule/i, 'it says what it skipped');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date >= ?').get(start).n,
+    before, 'and the board is unchanged');
+});
+
+test('selected weekdays put one shift on each, from the first week onward', async () => {
+  const monday = (() => { let d = dates.addDays(today(), 100);
+    while (new Date(`${d}T00:00:00Z`).getUTCDay() !== 1) d = dates.addDays(d, 1); return d; })();
+  // Built by hand: a browser sends repeat_days three times, and URLSearchParams
+  // would comma-join an array into one value that looks nothing like it.
+  const body = new URLSearchParams({
+    employee_id: String(E.server), position: 'server', date: monday,
+    start: '16:00', end: '22:00',
+    repeat: '1', repeat_every: '1', repeat_weeks: '1', _csrf: await token(),
+  });
+  for (const d of ['1', '3', '5']) body.append('repeat_days', d);
+  await fetch(`${BASE}/schedule/shift`, { method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+  const got = db.prepare(`SELECT business_date FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date >= ? ORDER BY business_date`).all(E.server, monday)
+    .map((r) => r.business_date);
+  // This Mon/Wed/Fri and next Mon/Wed/Fri.
+  assert.deepStrictEqual(got, [monday, dates.addDays(monday, 2), dates.addDays(monday, 4),
+    dates.addDays(monday, 7), dates.addDays(monday, 9), dates.addDays(monday, 11)]);
+});
+
+test('an end date stops the series, and a repeat cannot publish even if asked', async () => {
+  const start = dates.addDays(today(), 130);
+  const res = await post('/schedule/shift', {
+    employee_id: String(E.barista), position: 'barista', date: start,
+    start: '10:00', end: '14:00',
+    repeat: '1', repeat_every: '1', repeat_until: dates.addDays(start, 15),
+    publish: '1',                       // deliberately asking for it
+  });
+  const rows = db.prepare(`SELECT business_date, status FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date >= ? ORDER BY business_date`).all(E.barista, start);
+  assert.deepStrictEqual(rows.map((r) => r.business_date),
+    [start, dates.addDays(start, 7), dates.addDays(start, 14)], 'it stops at the end date');
+  assert.ok(rows.every((r) => r.status === 'draft'),
+    'and a series is never published in the same click, however the box was ticked');
+});
+
+test('the repeat control exists on the board and only offers whole weeks', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /id="sb-rep"/, 'the control is there');
+  assert.match(html, /name="repeat_days"/, 'with per-weekday selection');
+  assert.match(html, /Every one is made as a draft/, 'and says what it will do before you use it');
+});
