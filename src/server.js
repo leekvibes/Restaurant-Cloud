@@ -18425,6 +18425,7 @@ app.get('/schedule', (req, res) => {
   // unconditional, because an absence a manager personally approved must keep
   // warning them whatever this is set to.
   const availOn = SCH.availabilityEnabled();
+  const tmpls = SCH.templates();
   const days = [];
   for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
 
@@ -18861,6 +18862,28 @@ app.get('/schedule', (req, res) => {
         </div>
         <label class="fld wide">Note<input name="note" id="sb-note" maxlength="200"></label>
 
+        ${tmpls.length ? `<label class="fld wide">Start from a saved shape
+          <select id="sb-tmpl">
+            <option value="">— none —</option>
+            ${tmpls.map((t) => `<option value="${t.id}"
+              data-pos="${esc(t.position)}" data-a="${t.start_min}" data-b="${t.end_min}"
+              data-brk="${t.break_minutes || ''}" data-paid="${t.break_paid}">${esc(t.name)}</option>`).join('')}
+          </select></label>` : ''}
+
+        ${/* Saving the SHAPE, not the shift. No employee and no date go into it —
+             "Server Dinner 4-10" is a pattern the restaurant runs, and a person
+             attached to it would be a shift that never happened. */''}
+        <details class="sb-rep" id="sb-tsave">
+          <summary>Save these times as a template</summary>
+          <div class="sb-rep-b">
+            <label class="fld wide">Call it
+              <input type="text" id="sb-tname" maxlength="60" placeholder="Server Dinner"></label>
+            <p class="sb-hint">Saves the position and the times only — not the person or the day.
+              A name you have used before is replaced.</p>
+            <button class="btn" type="button" id="sb-tsave-go">Save template</button>
+          </div>
+        </details>
+
         ${/* PHASE 7. Shown only when CREATING — repeating an existing shift would
              have to mean editing a series, and there is no series object here to
              edit. One shift, repeated forward, is the whole feature. */''}
@@ -18983,6 +19006,58 @@ app.get('/schedule', (req, res) => {
         // shift; there is no series object to edit, and offering "repeat" on an
         // edit would imply there is. Closing it on hide also clears it, so a
         // repeat set up and abandoned cannot ride along with the next shift.
+        // Applying a shape fills the fields and stops. It does not save, and it
+        // does not touch the employee or the date — those are the two things a
+        // template deliberately does not know.
+        (function () {
+          var sel = document.getElementById('sb-tmpl');
+          if (!sel) return;
+          function hhmm(min) {
+            var m = ((Number(min) % 1440) + 1440) % 1440;
+            return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+          }
+          sel.addEventListener('change', function () {
+            var o = sel.options[sel.selectedIndex];
+            if (!o || !o.value) return;
+            var pos = document.getElementById('sb-pos');
+            if (pos) pos.value = o.getAttribute('data-pos');
+            var a = document.getElementById('sb-start'), b = document.getElementById('sb-end');
+            if (a) a.value = hhmm(o.getAttribute('data-a'));
+            if (b) b.value = hhmm(o.getAttribute('data-b'));
+            var brk = document.getElementById('sb-brk');
+            if (brk) brk.value = o.getAttribute('data-brk') || '';
+            var bp = document.getElementById('sb-brkpaid');
+            if (bp) bp.value = o.getAttribute('data-paid') === '1' ? '1' : '0';
+          });
+        })();
+        (function () {
+          var btn = document.getElementById('sb-tsave-go');
+          if (!btn) return;
+          btn.addEventListener('click', function () {
+            var name = (document.getElementById('sb-tname') || {}).value || '';
+            var pos = (document.getElementById('sb-pos') || {}).value || '';
+            var a = (document.getElementById('sb-start') || {}).value || '';
+            var b = (document.getElementById('sb-end') || {}).value || '';
+            if (!name.trim()) { window.alert('Give the template a name.'); return; }
+            if (!pos || !a || !b) { window.alert('Choose a position and both times first.'); return; }
+            // Read the token and the week off the drawer's own form rather than
+            // inlining them again. One source, and it cannot fall out of step.
+            function pick(n) {
+              var el = document.querySelector('#sb-form [name="' + n + '"]');
+              return el ? el.value : '';
+            }
+            var f = document.createElement('form');
+            f.method = 'post'; f.action = '/schedule/template';
+            [['name', name], ['position', pos], ['start', a], ['end', b],
+             ['break_minutes', (document.getElementById('sb-brk') || {}).value || ''],
+             ['break_paid', (document.getElementById('sb-brkpaid') || {}).value || '0'],
+             ['w', pick('w')], ['_csrf', pick('_csrf')]].forEach(function (kv) {
+              var i = document.createElement('input');
+              i.type = 'hidden'; i.name = kv[0]; i.value = kv[1]; f.appendChild(i);
+            });
+            document.body.appendChild(f); f.submit();
+          });
+        })();
         function sbRepShow(on) {
           var r = document.getElementById('sb-rep');
           if (!r) return;
@@ -19382,6 +19457,35 @@ app.post('/schedule/copy-week', (req, res) => {
 // IT GOVERNS AVAILABILITY RULES ONLY. Time-off requests can still be made and
 // decided while this is off, and approved time off still conflicts with a shift.
 // Those are commitments; availability is a preference somebody stated.
+// PHASE 7 — save a shape. Not a shift: no employee and no date go in.
+app.post('/schedule/template', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  const mins = (v) => {
+    const m = String(v || '').match(/^(\d{2}):(\d{2})$/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+  };
+  try {
+    const t = SCH.saveTemplate({
+      name: req.body.name, position: req.body.position,
+      startMin: mins(req.body.start), endMin: mins(req.body.end),
+      breakMinutes: req.body.break_minutes, breakPaid: String(req.body.break_paid || '') === '1',
+    });
+    return sbBack(res, w, `Saved "${t.name}" — pick it from the drawer next time.`);
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    return sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/template/:id/delete', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  return sbBack(res, w, SCH.deleteTemplate(req.params.id)
+    ? 'Template removed. Shifts already made from it are untouched.'
+    : 'That template is already gone.', false);
+});
+
 app.post('/schedule/availability', (req, res) => {
   if (!navAllowed('/schedule')) return res.status(403).end();
   const on = String(req.body.on || '') === '1';

@@ -222,6 +222,65 @@ db.exec(`
     WHERE status = 'pending';
 `);
 
+db.exec(`
+  -- PHASE 7 — a saved shape for a shift, not a saved shift.
+  --
+  -- It holds a POSITION and a TIME OF DAY and nothing else: no employee, no
+  -- date. "Server Dinner 4-10" is a pattern the restaurant runs, and attaching a
+  -- person to it would make it a shift that never happened — with all the
+  -- questions that follow about what it means when they leave.
+  --
+  -- Times are local minutes from midnight, like availability rules and for the
+  -- same reason: "dinner starts at four" is a statement about the clock on the
+  -- wall, and storing it as an instant would drift an hour twice a year.
+  -- end_min <= start_min means it finishes the next day, which is the ordinary
+  -- case for a close.
+  CREATE TABLE IF NOT EXISTS shift_templates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL,
+    position       TEXT NOT NULL,
+    start_min      INTEGER NOT NULL,
+    end_min        INTEGER NOT NULL,
+    break_minutes  INTEGER,
+    break_paid     INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (start_min BETWEEN 0 AND 1439),
+    CHECK (end_min BETWEEN 0 AND 1440)
+  );
+  -- One name, one shape. Two templates called "Dinner" is a way to pick the
+  -- wrong one every time.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_tmpl_name ON shift_templates (name COLLATE NOCASE);
+`);
+
+/** Every saved shape, in the order somebody would look for them. */
+function templates() {
+  return db.prepare('SELECT * FROM shift_templates ORDER BY position, start_min, name').all();
+}
+
+/**
+ * Save a shape. Re-saving a name REPLACES it, because a manager correcting
+ * "Dinner starts at 4:30 now" means the one called Dinner, not a second one.
+ */
+function saveTemplate({ name, position, startMin, endMin, breakMinutes, breakPaid }) {
+  const label = String(name || '').trim().slice(0, 60);
+  if (!label) throw new ScheduleError('Give the template a name.', 'name');
+  if (!position) throw new ScheduleError('Choose the position.', 'position');
+  const a = Number(startMin); const b = Number(endMin);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) throw new ScheduleError('Enter a start and an end.', 'time');
+  if (a === b) throw new ScheduleError('The start and end are the same.', 'time');
+  db.prepare(`INSERT INTO shift_templates (name, position, start_min, end_min, break_minutes, break_paid)
+    VALUES (@name, @position, @a, @b, @brk, @paid)
+    ON CONFLICT(name COLLATE NOCASE) DO UPDATE SET
+      position = excluded.position, start_min = excluded.start_min,
+      end_min = excluded.end_min, break_minutes = excluded.break_minutes,
+      break_paid = excluded.break_paid`)
+    .run({ name: label, position, a, b,
+      brk: Number(breakMinutes) > 0 ? Number(breakMinutes) : null, paid: breakPaid ? 1 : 0 });
+  return db.prepare('SELECT * FROM shift_templates WHERE name = ? COLLATE NOCASE').get(label);
+}
+
+const deleteTemplate = (id) => db.prepare('DELETE FROM shift_templates WHERE id = ?').run(Number(id)).changes > 0;
+
 const STATUSES = ['draft', 'published', 'cancelled'];
 
 /** Refusals a caller is meant to show, distinct from a genuine crash. */
@@ -1368,6 +1427,7 @@ function issuesFor(anyDate) {
 
 module.exports = {
   create, createSeries, edit, cancel, publish, duplicate, unpublish, publishWeek,
+  templates, saveTemplate, deleteTemplate,
   publishedFingerprint, issuesFor, ISSUE_SEVERITY,
   byId, inRange, weekFor, weekWindowFor, weekTotals,
   publishedFor, overlapsFor, copyWeek,

@@ -788,10 +788,15 @@ test('a write route refuses an account without the schedule area', async () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
   const region = src.slice(src.indexOf("app.post('/schedule/shift'"), src.indexOf("app.get('/timeclock'"));
   const guards = (region.match(/sbGuard\(req, res\)/g) || []).length;
-  // Phase 3 added three: publish-week, publish, unpublish. Every route that can
-  // change a draft OR what an employee sees asks the same question the sidebar
-  // does, so a hidden link is also a closed door.
-  assert.strictEqual(guards, 8, `all eight write routes call the guard (found ${guards})`);
+  // Phase 3 added three: publish-week, publish, unpublish. Phase 7 added two
+  // more: saving a shift template and deleting one. Every route that can change
+  // a draft, a saved shape, OR what an employee sees asks the same question the
+  // sidebar does, so a hidden link is also a closed door.
+  //
+  // The COUNT is the point. It is deliberately brittle: adding a write route
+  // without a guard is exactly the mistake this catches, and it caught the two
+  // above while they were being written.
+  assert.strictEqual(guards, 10, `all ten write routes call the guard (found ${guards})`);
   assert.match(src.slice(src.indexOf('const sbGuard')), /navAllowed\('\/schedule'\)/,
     'and the guard asks the same question the sidebar does');
 });
@@ -1334,4 +1339,66 @@ test('the repeat control exists on the board and only offers whole weeks', async
   assert.match(html, /id="sb-rep"/, 'the control is there');
   assert.match(html, /name="repeat_days"/, 'with per-weekday selection');
   assert.match(html, /Every one is made as a draft/, 'and says what it will do before you use it');
+});
+
+// ===========================================================================
+// Phase 7 — shift templates. A saved SHAPE, not a saved shift.
+// ===========================================================================
+
+test('a template saves the position and times, and never a person or a day', async () => {
+  const res = await post('/schedule/template', {
+    name: 'Server Dinner', position: 'server', start: '16:00', end: '22:00',
+    break_minutes: '30', break_paid: '0',
+  });
+  assert.match(flashOf(res).msg, /Saved "Server Dinner"/);
+  const t = db.prepare("SELECT * FROM shift_templates WHERE name = 'Server Dinner'").get();
+  assert.strictEqual(t.position, 'server');
+  assert.strictEqual(t.start_min, 960, '16:00 as minutes from midnight');
+  assert.strictEqual(t.end_min, 1320, '22:00');
+  assert.strictEqual(t.break_minutes, 30);
+  // The two things it must NOT know.
+  const cols = db.prepare('PRAGMA table_info(shift_templates)').all().map((c) => c.name);
+  assert.ok(!cols.includes('employee_id'), 'a template has no person');
+  assert.ok(!cols.some((c) => /date|business_date/.test(c)), 'and no day');
+});
+
+test('a close that runs past midnight is one template, not two', async () => {
+  await post('/schedule/template', { name: 'Kitchen Close', position: 'kitchen', start: '17:00', end: '01:00' });
+  const t = db.prepare("SELECT * FROM shift_templates WHERE name = 'Kitchen Close'").get();
+  assert.strictEqual(t.start_min, 1020);
+  assert.strictEqual(t.end_min, 60);
+  assert.ok(t.end_min <= t.start_min, 'the end being the smaller number IS the overnight case');
+});
+
+test('re-saving a name replaces it rather than making a second one', async () => {
+  await post('/schedule/template', { name: 'server dinner', position: 'server', start: '16:30', end: '22:00' });
+  const rows = db.prepare("SELECT * FROM shift_templates WHERE name = 'Server Dinner' COLLATE NOCASE").all();
+  assert.strictEqual(rows.length, 1, 'one name, one shape — two called Dinner is a way to pick the wrong one');
+  assert.strictEqual(rows[0].start_min, 990, 'and it is the corrected time');
+});
+
+test('a template with no name, or a zero-length shift, is refused with a reason', async () => {
+  for (const [body, why] of [
+    [{ name: '', position: 'server', start: '16:00', end: '22:00' }, /name/i],
+    [{ name: 'Nope', position: 'server', start: '16:00', end: '16:00' }, /same/i],
+  ]) {
+    const res = await post('/schedule/template', body);
+    assert.ok(flashOf(res).err, 'refused');
+    assert.match(flashOf(res).msg, why, 'and says which thing was wrong');
+  }
+});
+
+test('the drawer offers saved templates, and deleting one leaves its shifts alone', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /id="sb-tmpl"/, 'the picker is there once templates exist');
+  assert.match(html, /Server Dinner/, 'and lists them by name');
+  assert.match(html, /Save these times as a template/, 'with a way to add another');
+
+  const t = db.prepare("SELECT id FROM shift_templates WHERE name = 'Kitchen Close'").get();
+  const shiftsBefore = db.prepare('SELECT COUNT(*) n FROM scheduled_shifts').get().n;
+  const res = await post(`/schedule/template/${t.id}/delete`, {});
+  assert.match(flashOf(res).msg, /Shifts already made from it are untouched/i);
+  assert.ok(!db.prepare('SELECT 1 FROM shift_templates WHERE id = ?').get(t.id), 'the template is gone');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM scheduled_shifts').get().n, shiftsBefore,
+    'and not one shift went with it');
 });
