@@ -5442,3 +5442,5 @@ input[type="date"], input[type="time"], input[type="search"], select {
   color: var(--muted); text-decoration: underline; cursor: pointer; opacity: 0; transition: opacity .12s; }
 .sb-dh:hover .sb-dh-cp button, .sb-dh-cp button:focus { opacity: 1; }
 .sb-dh-cp button:hover { color: var(--primary); }
+/* Phase 7 — the saved-pattern picker sits with the other week tools. */
+.sb-tsel { max-width: 210px; font: inherit; font-size: 12px; padding: 0 8px; }

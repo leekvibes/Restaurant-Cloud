@@ -281,6 +281,198 @@ function saveTemplate({ name, position, startMin, endMin, breakMinutes, breakPai
 
 const deleteTemplate = (id) => db.prepare('DELETE FROM shift_templates WHERE id = ?').run(Number(id)).changes > 0;
 
+db.exec(`
+  -- PHASE 7 — DAY AND WEEK TEMPLATES. A saved staffing CONFIGURATION.
+  --
+  -- These hold people, and shift_templates deliberately does not. That is not an
+  -- inconsistency, it is the product distinction:
+  --
+  --   shift template  "Server Dinner 4-10"  a SHAPE anyone can work.
+  --                                          A person in it would be a shift
+  --                                          that never happened.
+  --   day/week        "Typical Friday"       a CONFIGURATION OF PEOPLE covering
+  --                                          a service. Strip the people and
+  --                                          almost nothing is saved.
+  --
+  -- Decided by the owner after an audit found the roadmap never resolved it: the
+  -- roadmap says copy-week "reproduces the prior week's ASSIGNMENTS" and calls
+  -- these a "staffing PATTERN", which is suggestive and not conclusive. What
+  -- settled it is that a shift with no employee IS an open shift in this schema,
+  -- and an open shift cannot be claimed until Phase 8 — so a structure-only
+  -- template would produce a board of cards nobody can act on.
+  CREATE TABLE IF NOT EXISTS schedule_templates (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,               -- 'day' | 'week'
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (kind IN ('day', 'week'))
+  );
+  -- One name per kind. A day called Friday and a week called Friday are
+  -- different objects and may coexist; two days called Friday may not.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_schedtmpl_name
+    ON schedule_templates (kind, name COLLATE NOCASE);
+
+  CREATE TABLE IF NOT EXISTS schedule_template_rows (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id  INTEGER NOT NULL REFERENCES schedule_templates(id) ON DELETE CASCADE,
+    -- RELATIVE, never a calendar date. 0 for a day template; 0-6 from the week
+    -- start for a week template. A stored source date would make the template a
+    -- copy of one particular week rather than a pattern.
+    day_offset   INTEGER NOT NULL,
+    -- NOT NULL on purpose: these templates never carry an open shift, and
+    -- applying one never falls back to creating one.
+    employee_id  INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    position     TEXT NOT NULL,
+    -- Local minutes from midnight, like shift_templates and availability rules.
+    -- end_min <= start_min means it finishes the next day.
+    start_min    INTEGER NOT NULL,
+    end_min      INTEGER NOT NULL,
+    break_minutes INTEGER,
+    break_paid   INTEGER NOT NULL DEFAULT 0,
+    note         TEXT,
+    CHECK (day_offset BETWEEN 0 AND 6),
+    CHECK (start_min BETWEEN 0 AND 1439),
+    CHECK (end_min BETWEEN 0 AND 1440)
+  );
+  CREATE INDEX IF NOT EXISTS idx_schedtmpl_rows ON schedule_template_rows (template_id, day_offset);
+`);
+
+/** Local minutes-from-midnight for a stored UTC instant. */
+const minsOf = (utc) => {
+  const local = TC.utcToLocalInput(utc);
+  return Number(local.slice(11, 13)) * 60 + Number(local.slice(14, 16));
+};
+
+/** Every saved day/week configuration, newest name order. */
+function scheduleTemplates(kind) {
+  const rows = kind
+    ? db.prepare('SELECT * FROM schedule_templates WHERE kind = ? ORDER BY name').all(kind)
+    : db.prepare('SELECT * FROM schedule_templates ORDER BY kind, name').all();
+  const count = db.prepare('SELECT COUNT(*) c FROM schedule_template_rows WHERE template_id = ?');
+  return rows.map((r) => ({ ...r, shifts: count.get(r.id).c }));
+}
+
+const templateRows = (id) => db.prepare(
+  'SELECT * FROM schedule_template_rows WHERE template_id = ? ORDER BY day_offset, start_min').all(Number(id));
+
+/**
+ * Save a day or a week as a named configuration.
+ *
+ * OPEN SHIFTS ARE NOT SAVED. A template holds people; a card with nobody on it
+ * has nothing to preserve, and applying one would have to create an open shift,
+ * which these deliberately never do.
+ *
+ * @param {'day'|'week'} kind
+ * @param {string} name
+ * @param {string} fromDate  any date in the day, or any date in the week
+ */
+function saveScheduleTemplate(kind, name, fromDate) {
+  if (kind !== 'day' && kind !== 'week') throw new ScheduleError('Unknown template kind.', 'kind');
+  const label = String(name || '').trim().slice(0, 60);
+  if (!label) throw new ScheduleError('Give the template a name.', 'name');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromDate))) throw new ScheduleError('Pick a day to save.', 'range');
+
+  const anchor = kind === 'week' ? weekWindowFor(fromDate).start : fromDate;
+  const last = kind === 'week' ? weekWindowFor(fromDate).end : fromDate;
+  const source = q.inRangeAll.all(anchor, last).filter((r) => r.status !== 'cancelled');
+  const usable = source.filter((r) => r.employee_id != null);
+  if (!usable.length) {
+    throw new ScheduleError(kind === 'week'
+      ? 'That week has nobody on it to save.' : 'That day has nobody on it to save.', 'empty');
+  }
+
+  const out = db.transaction(() => {
+    // Re-saving a name REPLACES it, like shift templates: a manager correcting
+    // "Friday has four servers now" means the one called Friday.
+    db.prepare('DELETE FROM schedule_templates WHERE kind = ? AND name = ? COLLATE NOCASE').run(kind, label);
+    const id = Number(db.prepare('INSERT INTO schedule_templates (name, kind) VALUES (?, ?)')
+      .run(label, kind).lastInsertRowid);
+    const ins = db.prepare(`INSERT INTO schedule_template_rows
+      (template_id, day_offset, employee_id, position, start_min, end_min, break_minutes, break_paid, note)
+      VALUES (@t, @off, @emp, @pos, @a, @b, @brk, @paid, @note)`);
+    for (const r of usable) {
+      const brk = db.prepare('SELECT minutes, paid FROM scheduled_breaks WHERE scheduled_shift_id = ? LIMIT 1').get(r.id);
+      ins.run({ t: id,
+        off: kind === 'week' ? Math.max(0, Math.min(6, daysApart(anchor, r.business_date))) : 0,
+        emp: r.employee_id, pos: r.position,
+        a: minsOf(r.starts_at), b: minsOf(r.ends_at),
+        brk: brk ? brk.minutes : null, paid: brk && brk.paid ? 1 : 0,
+        note: r.note || null });
+    }
+    return id;
+  })();
+  return { id: out, name: label, kind, shifts: usable.length,
+    skippedOpen: source.length - usable.length };
+}
+
+/**
+ * Apply a saved configuration onto a real day or week.
+ *
+ * DRAFTS ONLY. It calls create(), which makes drafts, and there is no publish
+ * path from here at all — not a flag, not an option.
+ *
+ * ONE STALE ASSIGNMENT MUST NOT SINK THE REST. Somebody who left, or who no
+ * longer holds the position they used to work, is skipped and counted with a
+ * reason. Nobody is substituted for them and no open shift is created in their
+ * place — either would be the app deciding who works, which the roadmap puts on
+ * the deliberately-not-building list.
+ */
+function applyScheduleTemplate(id, toDate) {
+  const tmpl = db.prepare('SELECT * FROM schedule_templates WHERE id = ?').get(Number(id));
+  if (!tmpl) throw new ScheduleError('That template no longer exists.', 'missing');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(toDate))) throw new ScheduleError('Pick a day to apply it to.', 'range');
+  const anchor = tmpl.kind === 'week' ? weekWindowFor(toDate).start : toDate;
+  const rows = templateRows(tmpl.id);
+  if (!rows.length) return { made: [], skipped: [], template: tmpl };
+
+  const dates = [...new Set(rows.map((r) => addDays(anchor, r.day_offset)))].sort();
+  const existing = q.inRangeAll.all(dates[0], dates[dates.length - 1])
+    .filter((r) => r.status !== 'cancelled');
+  // The SAME duplicate identity Repeat and Copy Day use.
+  const seen = new Set(existing.map((r) => `${r.employee_id}|${r.starts_at}|${r.position}`));
+
+  const active = new Set(db.prepare('SELECT id FROM employees WHERE active = 1').all().map((e) => e.id));
+  const heldBy = heldPositionsFor([...new Set(rows.map((r) => r.employee_id))]);
+  const nameOf = new Map(db.prepare('SELECT id, name FROM employees').all().map((e) => [e.id, e.name]));
+
+  const made = []; const skipped = [];
+  for (const r of rows) {
+    const who = nameOf.get(r.employee_id) || 'Someone';
+    if (!active.has(r.employee_id)) {
+      skipped.push({ employeeId: r.employee_id, who, reason: 'no longer active' });
+      continue;
+    }
+    if (!(heldBy[r.employee_id] || []).includes(r.position)) {
+      skipped.push({ employeeId: r.employee_id, who, reason: `no longer works ${r.position}` });
+      continue;
+    }
+    const date = addDays(anchor, r.day_offset);
+    const startsAt = localToUtc(`${date} ${hhmm(r.start_min)}`);
+    const endDate = r.end_min <= r.start_min || r.end_min >= 1440 ? addDays(date, 1) : date;
+    const endsAt = localToUtc(`${endDate} ${hhmm(r.end_min % 1440)}`);
+    const key = `${r.employee_id}|${startsAt}|${r.position}`;
+    if (seen.has(key)) { skipped.push({ employeeId: r.employee_id, who, reason: 'already on the schedule' }); continue; }
+    try {
+      made.push(create({
+        employeeId: r.employee_id, position: r.position,
+        startsAt: `${date} ${hhmm(r.start_min)}`,
+        endsAt: `${endDate} ${hhmm(r.end_min % 1440)}`,
+        note: r.note || null,
+        breaks: r.break_minutes ? [{ minutes: r.break_minutes, paid: !!r.break_paid }] : undefined,
+        createdBy: `template:${tmpl.kind}`,
+      }));
+      seen.add(key);
+    } catch (e) {
+      skipped.push({ employeeId: r.employee_id, who, reason: (e && e.message) || 'could not be created' });
+    }
+  }
+  return { made, skipped, template: tmpl };
+}
+
+const deleteScheduleTemplate = (id) => db.prepare('DELETE FROM schedule_templates WHERE id = ?')
+  .run(Number(id)).changes > 0;
+
+
 const STATUSES = ['draft', 'published', 'cancelled'];
 
 /** Refusals a caller is meant to show, distinct from a genuine crash. */
@@ -1483,6 +1675,7 @@ function issuesFor(anyDate) {
 module.exports = {
   create, createSeries, edit, cancel, publish, duplicate, unpublish, publishWeek,
   templates, saveTemplate, deleteTemplate,
+  scheduleTemplates, templateRows, saveScheduleTemplate, applyScheduleTemplate, deleteScheduleTemplate,
   publishedFingerprint, issuesFor, ISSUE_SEVERITY,
   byId, inRange, weekFor, weekWindowFor, weekTotals,
   publishedFor, overlapsFor, copyWeek, copyDay,

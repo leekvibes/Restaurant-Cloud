@@ -796,7 +796,7 @@ test('a write route refuses an account without the schedule area', async () => {
   // The COUNT is the point. It is deliberately brittle: adding a write route
   // without a guard is exactly the mistake this catches, and it caught the two
   // above while they were being written.
-  assert.strictEqual(guards, 11, `all eleven write routes call the guard (found ${guards})`);
+  assert.strictEqual(guards, 15, `all fifteen write routes call the guard (found ${guards})`);
   assert.match(src.slice(src.indexOf('const sbGuard')), /navAllowed\('\/schedule'\)/,
     'and the guard asks the same question the sidebar does');
 });
@@ -1465,4 +1465,162 @@ test('the day header offers the copy, and never on the last column', async () =>
   // Nothing to copy INTO past the end of the visible week.
   const forms = (html.match(/action="\/schedule\/copy-day"/g) || []).length;
   assert.ok(forms <= 6, `at most six of seven days offer it (found ${forms})`);
+});
+
+// ===========================================================================
+// Phase 7 — DAY AND WEEK TEMPLATES: a saved staffing configuration.
+//
+// These hold PEOPLE and shift templates deliberately do not. The audit found
+// the roadmap never resolved it — it says copy-week "reproduces the prior
+// week's assignments" and calls these a "staffing pattern" — and the owner
+// settled it: a shift with no employee IS an open shift, and an open shift
+// cannot be claimed until Phase 8, so a structure-only template would produce a
+// board of cards nobody can act on.
+// ===========================================================================
+
+const P7 = { A: null, B: null, C: null };
+const p7wipe = () => {
+  db.prepare('DELETE FROM schedule_templates').run();
+  for (const r of db.prepare("SELECT id FROM scheduled_shifts WHERE created_by LIKE 'p7%' OR business_date >= ?")
+    .all(dates.addDays(today(), 250))) {
+    db.prepare('DELETE FROM published_schedule WHERE scheduled_shift_id = ?').run(r.id);
+    db.prepare('DELETE FROM scheduled_breaks WHERE scheduled_shift_id = ?').run(r.id);
+    db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(r.id);
+  }
+};
+
+test('P7 setup: three people with real positions', () => {
+  const ins = db.prepare("INSERT INTO employees (name,role,hourly_rate_cents,active,pin) VALUES (?,?,1500,1,?)");
+  P7.A = Number(ins.run('P7 Ann', 'server', '6101').lastInsertRowid);
+  P7.B = Number(ins.run('P7 Ben', 'barista', '6102').lastInsertRowid);
+  P7.C = Number(ins.run('P7 Cal', 'server', '6103').lastInsertRowid);
+  const role = db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,1500)');
+  role.run(P7.A, 'server'); role.run(P7.B, 'barista'); role.run(P7.C, 'server');
+  assert.ok(P7.A && P7.B && P7.C);
+});
+
+test('a DAY template saves who works, with no calendar date anywhere in it', async () => {
+  p7wipe();
+  const src = dates.addDays(today(), 260);
+  SCH.create({ employeeId: P7.A, position: 'server', startsAt: `${src} 16:00`, endsAt: `${src} 22:00` });
+  SCH.create({ employeeId: P7.B, position: 'barista', startsAt: `${src} 07:00`, endsAt: `${src} 15:00` });
+
+  const res = await post('/schedule/save-day-template', { name: 'Typical Friday', from: src });
+  assert.match(flashOf(res).msg, /Saved "Typical Friday"/);
+  assert.match(flashOf(res).msg, /with who works them/i, 'and it says people are included');
+
+  const t = db.prepare("SELECT * FROM schedule_templates WHERE name='Typical Friday'").get();
+  assert.strictEqual(t.kind, 'day');
+  const rows = db.prepare('SELECT * FROM schedule_template_rows WHERE template_id = ?').all(t.id);
+  assert.strictEqual(rows.length, 2, 'both shifts saved');
+  assert.deepStrictEqual(rows.map((r) => r.employee_id).sort(), [P7.A, P7.B].sort(),
+    'ASSIGNMENTS PRESERVED — this is the whole decision');
+  assert.ok(rows.every((r) => r.day_offset === 0), 'a day template is all one day');
+
+  // Relative, never a stored source date.
+  const cols = db.prepare('PRAGMA table_info(schedule_template_rows)').all().map((c) => c.name);
+  assert.ok(!cols.some((c) => /^(business_)?date$|starts_at|ends_at/.test(c)),
+    'no calendar date and no instant is stored');
+  assert.ok(cols.includes('day_offset'), 'only a relative offset');
+});
+
+test('a WEEK template stores seven relative days, not the source week', async () => {
+  const wkStart = SCH.weekWindowFor(dates.addDays(today(), 260)).start;
+  const third = dates.addDays(wkStart, 3);
+  SCH.create({ employeeId: P7.C, position: 'server', startsAt: `${third} 20:00`, endsAt: `${dates.addDays(third, 1)} 02:00` });
+
+  const res = await post('/schedule/save-week-template', { name: 'Normal Week', from: wkStart });
+  assert.match(flashOf(res).msg, /Saved "Normal Week"/);
+  const t = db.prepare("SELECT * FROM schedule_templates WHERE name='Normal Week'").get();
+  const rows = db.prepare('SELECT * FROM schedule_template_rows WHERE template_id = ? ORDER BY day_offset').all(t.id);
+  assert.ok(rows.length >= 3, 'the whole week came across');
+  assert.ok(rows.every((r) => r.day_offset >= 0 && r.day_offset <= 6), 'offsets are 0-6');
+  assert.ok(rows.some((r) => r.day_offset > 0), 'and they really are relative to the week start');
+});
+
+test('applying a template creates DRAFTS, tells nobody, and touches nothing actual', async () => {
+  const t = db.prepare("SELECT id FROM schedule_templates WHERE name='Normal Week'").get();
+  const target = SCH.weekWindowFor(dates.addDays(today(), 300)).start;
+  const before = {
+    published: db.prepare('SELECT COUNT(*) n FROM published_schedule').get().n,
+    portalEvents: db.prepare('SELECT COUNT(*) n FROM portal_events').get().n,
+    entries: db.prepare('SELECT COUNT(*) n FROM time_entries').get().n,
+    work: db.prepare('SELECT COUNT(*) n FROM work').get().n,
+    services: db.prepare('SELECT COUNT(*) n FROM shifts').get().n,
+  };
+  const res = await post('/schedule/apply-template', { id: String(t.id), to: target });
+  assert.match(flashOf(res).msg, /added as drafts/);
+  assert.match(flashOf(res).msg, /cannot see them yet/i);
+
+  const made = db.prepare('SELECT * FROM scheduled_shifts WHERE business_date >= ?').all(target);
+  assert.ok(made.length >= 3, 'shifts landed');
+  assert.ok(made.every((r) => r.status === 'draft'), 'every one a draft');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM published_schedule').get().n, before.published,
+    'nothing published');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM portal_events').get().n, before.portalEvents,
+    'nobody notified');
+  for (const [k, v] of Object.entries(before)) {
+    if (k === 'published' || k === 'portalEvents') continue;
+    assert.strictEqual(db.prepare(`SELECT COUNT(*) n FROM ${k === 'services' ? 'shifts' : k === 'entries' ? 'time_entries' : k}`).get().n,
+      v, `${k} untouched — a plan never writes what happened`);
+  }
+});
+
+test('the same people come back, on the right relative days', async () => {
+  const target = SCH.weekWindowFor(dates.addDays(today(), 300)).start;
+  const rows = db.prepare(`SELECT employee_id, business_date, position FROM scheduled_shifts
+    WHERE business_date >= ? ORDER BY business_date`).all(target);
+  assert.ok(rows.some((r) => r.employee_id === P7.A), 'Ann came back');
+  assert.ok(rows.some((r) => r.employee_id === P7.B), 'Ben came back');
+  const cal = rows.find((r) => r.employee_id === P7.C);
+  assert.ok(cal, 'Cal came back');
+  assert.strictEqual(cal.business_date, dates.addDays(target, 3),
+    'and on the same RELATIVE day, three into the new week');
+});
+
+test('applying the same template again adds nothing', async () => {
+  const t = db.prepare("SELECT id FROM schedule_templates WHERE name='Normal Week'").get();
+  const target = SCH.weekWindowFor(dates.addDays(today(), 300)).start;
+  const before = db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date >= ?').get(target).n;
+  const res = await post('/schedule/apply-template', { id: String(t.id), to: target });
+  assert.match(flashOf(res).msg, /already there/i, 'it says what it skipped');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM scheduled_shifts WHERE business_date >= ?').get(target).n,
+    before, 'and the week is unchanged');
+});
+
+test('a leaver and a lost position are skipped by NAME; everyone else still lands', async () => {
+  const t = db.prepare("SELECT id FROM schedule_templates WHERE name='Normal Week'").get();
+  const target = SCH.weekWindowFor(dates.addDays(today(), 340)).start;
+  db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(P7.A);
+  db.prepare('DELETE FROM employee_roles WHERE employee_id = ? AND role = ?').run(P7.C, 'server');
+  db.prepare("UPDATE employees SET role = 'busser' WHERE id = ?").run(P7.C);
+  try {
+    const res = await post('/schedule/apply-template', { id: String(t.id), to: target });
+    const msg = flashOf(res).msg;
+    assert.match(msg, /P7 Ann \(no longer active\)/, 'the leaver is named, not counted');
+    assert.match(msg, /P7 Cal \(no longer works server\)/, 'and so is the lost position');
+    assert.match(msg, /Nobody was put in their place/i, 'NO SUBSTITUTION, and it says so');
+
+    const landed = db.prepare('SELECT * FROM scheduled_shifts WHERE business_date >= ?').all(target);
+    assert.ok(landed.length >= 1, 'one stale row did not sink the rest');
+    assert.ok(landed.some((r) => r.employee_id === P7.B), 'Ben still applied');
+    assert.ok(!landed.some((r) => r.employee_id === P7.A || r.employee_id === P7.C), 'the two stale ones did not');
+    assert.strictEqual(landed.filter((r) => r.employee_id == null).length, 0,
+      'NO OPEN-SHIFT FALLBACK — an unassignable card is worse than an honest gap');
+  } finally {
+    db.prepare('UPDATE employees SET active = 1 WHERE id = ?').run(P7.A);
+    db.prepare('INSERT OR IGNORE INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,1500)').run(P7.C, 'server');
+  }
+});
+
+test('the two kinds of template stay different objects', async () => {
+  // A shift template is a SHAPE with nobody in it. A day/week template is a
+  // CONFIGURATION OF PEOPLE. Keeping them apart is the product decision.
+  const shape = db.prepare('PRAGMA table_info(shift_templates)').all().map((c) => c.name);
+  const config = db.prepare('PRAGMA table_info(schedule_template_rows)').all().map((c) => c.name);
+  assert.ok(!shape.includes('employee_id'), 'a shift template holds no person');
+  assert.ok(config.includes('employee_id'), 'a day/week template does');
+  const html = await text('/schedule');
+  assert.match(html, /Save week as pattern/, 'the board offers saving a week');
+  assert.match(html, /Apply a pattern/, 'and applying one');
 });

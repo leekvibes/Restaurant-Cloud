@@ -18426,6 +18426,8 @@ app.get('/schedule', (req, res) => {
   // warning them whatever this is set to.
   const availOn = SCH.availabilityEnabled();
   const tmpls = SCH.templates();
+  const dayTmpls = SCH.scheduleTemplates('day');
+  const weekTmpls = SCH.scheduleTemplates('week');
   const days = [];
   for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
 
@@ -18745,6 +18747,27 @@ app.get('/schedule', (req, res) => {
               <button class="sb-btn" type="submit"
                 title="Copy the previous week's plan into this one">Copy last week</button>
             </form>
+            ${dayTmpls.length || weekTmpls.length ? `<form method="post" action="/schedule/apply-template" style="margin:0">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="w" value="${week.start}">
+              <input type="hidden" name="to" value="${week.start}">
+              <select class="sb-btn sb-tsel" name="id" onchange="if(this.value)this.form.submit()"
+                aria-label="Apply a saved staffing pattern">
+                <option value="">Apply a pattern&hellip;</option>
+                ${weekTmpls.map((t) => `<option value="${t.id}">Week &middot; ${esc(t.name)} (${t.shifts})</option>`).join('')}
+                ${dayTmpls.map((t) => `<option value="${t.id}">Day &middot; ${esc(t.name)} (${t.shifts}) &rarr; ${esc(dow(week.start))}</option>`).join('')}
+              </select>
+            </form>` : ''}
+            <form method="post" action="/schedule/save-week-template" style="margin:0"
+              onsubmit="var n=prompt('Name this week pattern (people included):');
+                        if(!n){return false;} this.querySelector('[name=name]').value=n;">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <input type="hidden" name="w" value="${week.start}">
+              <input type="hidden" name="from" value="${week.start}">
+              <input type="hidden" name="name" value="">
+              <button class="sb-btn" type="submit"
+                title="Save this week's staffing — who works what, without the dates">Save week as pattern</button>
+            </form>
             <form method="post" action="/schedule/publish-week" style="margin:0">
               <input type="hidden" name="_csrf" value="${csrfFor(req)}">
               <input type="hidden" name="w" value="${week.start}">
@@ -18791,6 +18814,15 @@ app.get('/schedule', (req, res) => {
                      of an empty Monday does not carry a control that would do
                      nothing. Never on the last column — there is no next day on
                      screen to land in. */''}
+                ${s.n ? `<form method="post" action="/schedule/save-day-template" class="sb-dh-cp"
+                  onsubmit="var n=prompt('Name this day pattern (people included):');
+                            if(!n){return false;} this.querySelector('[name=name]').value=n;">
+                  <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                  <input type="hidden" name="w" value="${week.start}">
+                  <input type="hidden" name="from" value="${d}">
+                  <input type="hidden" name="name" value="">
+                  <button type="submit" title="Save this day's staffing as a reusable pattern">Save as pattern</button>
+                </form>` : ''}
                 ${s.n && di < days.length - 1 ? `<form method="post" action="/schedule/copy-day" class="sb-dh-cp">
                   <input type="hidden" name="_csrf" value="${csrfFor(req)}">
                   <input type="hidden" name="w" value="${week.start}">
@@ -19470,6 +19502,71 @@ app.post('/schedule/copy-week', (req, res) => {
 // IT GOVERNS AVAILABILITY RULES ONLY. Time-off requests can still be made and
 // decided while this is off, and approved time off still conflicts with a shift.
 // Those are commitments; availability is a preference somebody stated.
+// PHASE 7 — day and week templates: a saved staffing CONFIGURATION, people
+// included. Distinct from a shift template, which is a shape with nobody in it.
+const schedTmplMsg = (out, what) => {
+  const n = out.made.length;
+  const by = {};
+  for (const s of out.skipped) by[s.reason] = (by[s.reason] || 0) + 1;
+  let msg = n ? `${n} shift${n === 1 ? '' : 's'} added as drafts — employees cannot see them yet.`
+    : `Nothing was added from ${what}.`;
+  const already = by['already on the schedule'] || 0;
+  if (already) { msg += ` ${already} ${already === 1 ? 'was' : 'were'} already there.`; delete by['already on the schedule']; }
+  // Names, not a count, for the stale ones: "2 skipped" sends a manager hunting.
+  const stale = out.skipped.filter((x) => x.reason !== 'already on the schedule');
+  if (stale.length) {
+    msg += ' Skipped ' + stale.map((x) => `${x.who} (${x.reason})`).join(', ')
+      + '. Nobody was put in their place — that is yours to decide.';
+  }
+  return msg;
+};
+
+app.post('/schedule/save-day-template', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    const t = SCH.saveScheduleTemplate('day', req.body.name, req.body.from);
+    return sbBack(res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'}, with who works them.`
+      + (t.skippedOpen ? ` ${t.skippedOpen} open shift${t.skippedOpen === 1 ? '' : 's'} left out.` : ''));
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    return sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/save-week-template', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    const t = SCH.saveScheduleTemplate('week', req.body.name, req.body.from || w);
+    return sbBack(res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'} across the week, with who works them.`
+      + (t.skippedOpen ? ` ${t.skippedOpen} open shift${t.skippedOpen === 1 ? '' : 's'} left out.` : ''));
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    return sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/apply-template', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    const out = SCH.applyScheduleTemplate(req.body.id, req.body.to || w);
+    return sbBack(res, w, schedTmplMsg(out, `"${out.template.name}"`));
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    return sbBack(res, w, e.message, true);
+  }
+});
+
+app.post('/schedule/drop-template', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  return sbBack(res, w, SCH.deleteScheduleTemplate(req.body.id)
+    ? 'Template removed. Shifts already made from it are untouched.'
+    : 'That template is already gone.');
+});
+
 // PHASE 7 — Saturday usually looks like Friday.
 app.post('/schedule/copy-day', (req, res) => {
   if (!sbGuard(req, res)) return;
