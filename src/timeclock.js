@@ -413,7 +413,6 @@ const DEFAULTS = {
   // theirs. Available for anybody who wants a second confirmation.
   tc_pin_out: '0',
   tc_pin_fix: '1',           // and for a correction request
-  tc_require_service: '1',   // must choose café or dinner at clock-in
   tc_alerts: '1',            // surface time-clock items on the dashboard
 };
 const setting = (k) => { const r = sq.get.get(k); return r === undefined ? DEFAULTS[k] : r.value; };
@@ -424,7 +423,6 @@ const settings = () => ({
   longShift: Number(setting('tc_long_shift')) || 16,
   // No pinAtOut. Clocking out never asks for a PIN — see /portal/clock/out.
   pinForFix: setting('tc_pin_fix') === '1',
-  requireService: setting('tc_require_service') === '1',
   alertsOn: setting('tc_alerts') === '1',
 });
 const saveSettings = (v) => {
@@ -435,7 +433,6 @@ const saveSettings = (v) => {
   sq.set.run({ key: 'tc_long_shift', value: String(clamp(v.longShift, 4, 24, 16)) });
   sq.set.run({ key: 'tc_break_paid', value: flag(v.breaksPaid) });
   sq.set.run({ key: 'tc_pin_fix', value: flag(v.pinForFix) });
-  sq.set.run({ key: 'tc_require_service', value: flag(v.requireService) });
   sq.set.run({ key: 'tc_alerts', value: flag(v.alertsOn) });
 };
 

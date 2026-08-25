@@ -7054,11 +7054,21 @@ function clockPage(req, who, opts = {}) {
       <p class="tcc-note">Ask your manager to add your position, then you can clock in.</p>`);
   } else {
     const one = allowed.length === 1;
-    const suggested = TC.suggestDaypart(TC.nowUtc(), cfg.dinnerFrom);
-    // Only what has to be asked. One position is not a choice, and the service
-    // is not one either unless this restaurant has said staff must confirm it —
-    // in which case it is asked, and otherwise it travels as the suggestion the
-    // route was always going to apply.
+    // THE SERVICE IS ALWAYS ASKED, AND NEVER PRE-ANSWERED.
+    //
+    // This used to arrive with an answer already in the box, guessed from the
+    // clock against a 4pm boundary — so anybody clocking in for a café shift at
+    // 4pm or later saw "Dinner" sitting there and tapped straight through. The
+    // punch was then dinner, and every honest thing downstream followed it: the
+    // hours, the tip-out, and a dinner service opening on the Services page for
+    // a café somebody actually worked.
+    //
+    // There is no boundary that fixes this. Café runs to 5 or 5:30 some days
+    // and not others, so any hour picked is wrong on the days it is wrong, and
+    // silently. The only thing the restaurant knows for certain is what the
+    // person standing there is about to do, so that is what it asks.
+    //
+    // One position is still not a choice. The service always is.
     card = shell('off', 'Clocked out', `
       <div class="tcc-cap">${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
       <form method="post" action="/portal/clock/in" class="tcc-form">
@@ -7069,16 +7079,17 @@ function clockPage(req, who, opts = {}) {
                  <option value="">Choose…</option>
                  ${allowed.map((r) => `<option value="${esc(r)}">${esc(posName(r))}</option>`).join('')}
                </select></label>`}
-        ${cfg.requireService
-          ? `<label class="tcc-field"><span>Service</span>
-               <select name="daypart" required>
-                 ${DAYPARTS.map((d) => `<option value="${d}"${d === suggested ? ' selected' : ''}>${dp(d)}</option>`).join('')}
-               </select></label>`
-          : `<input type="hidden" name="daypart" value="${esc(suggested)}">`}
+        <label class="tcc-field"><span>Service</span>
+          <select name="daypart" required>
+            ${/* Empty, and required. A placeholder that cannot be submitted is
+                  the whole point — an option somebody has to move off is the
+                  difference between choosing and tapping through. */''}
+            <option value="">Choose&hellip;</option>
+            ${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}
+          </select></label>
         <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Clock in</button>
       </form>
-      ${one && !cfg.requireService
-        ? `<p class="tcc-note">${esc(posName(allowed[0]))} · ${esc(dp(suggested))}</p>` : ''}`);
+      ${one ? `<p class="tcc-note">${esc(posName(allowed[0]))}</p>` : ''}`);
   }
 
   const entryRow = (e) => {
@@ -20146,8 +20157,6 @@ app.get('/timeclock/settings', (req, res) => {
               already passed rather than a thing happening now. */''}
         ${row('Ask for the PIN', check('pin_fix', c.pinForFix, 'when asking for a correction'),
           'Clocking in and out never asks — they are already signed in. Editing or adding a shift always does.')}
-        ${row('At clock-in', check('require_service', c.requireService, 'Staff must choose the service'),
-          'Off, the clock uses the suggestion above without asking.')}
         ${row('Dashboard', check('alerts', c.alertsOn, 'Show time-clock items that need attention'),
           'Only things somebody has to act on ever appear.')}
         ${w2 ? '<button class="bs-btn" type="submit">Save settings</button>' : '<p class="inc-hint">Your account is view-only.</p>'}
@@ -20160,7 +20169,7 @@ app.post('/timeclock/settings', (req, res) => {
   TC.saveSettings({
     cutoffHour: req.body.cutoff, dinnerFrom: req.body.dinner, longShift: req.body.long,
     breaksPaid: req.body.breaks_paid === '1',
-    pinForFix: req.body.pin_fix === '1', requireService: req.body.require_service === '1',
+    pinForFix: req.body.pin_fix === '1',
     alertsOn: req.body.alerts === '1',
   });
   res.redirect('/timeclock/settings?msg=' + encodeURIComponent('Saved.'));

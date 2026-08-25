@@ -1155,9 +1155,10 @@ test('settings save and take effect', async () => {
   assert.strictEqual(c.dinnerFrom, 17);
   assert.strictEqual(c.longShift, 12);
   assert.strictEqual(c.breaksPaid, true, 'breaks now default to paid');
-  assert.strictEqual(c.requireService, false, 'an unticked box is off');
+  assert.strictEqual(c.requireService, undefined,
+    'there is no require-service setting any more — the service is always asked');
   // Put it back so later assertions read the documented defaults.
-  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_out: '1', pin_fix: '1', require_service: '1', alerts: '1' });
+  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_out: '1', pin_fix: '1', alerts: '1' });
   assert.strictEqual(T.settings().breaksPaid, false);
 });
 
@@ -2551,20 +2552,38 @@ test('a preview run is not a send — nothing is recorded and nobody is told', a
 const lastCorr = () => db.prepare('SELECT * FROM time_corrections ORDER BY id DESC').get();
 const payloadOf = (c) => JSON.parse(c.payload || '{}');
 
-test('2B: clocked out — the card says so and asks only what it must', async () => {
-  const cookie = await signIn('3111');           // one position, service not required
-  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
-    pin_fix: '1', alerts: '1' });                // require_service off
+test('2B: clocked out — one position is not a question, the service always is', async () => {
+  // THE SERVICE IS NEVER PRE-ANSWERED. It used to arrive with an answer guessed
+  // from the clock against a 4pm boundary, so anybody clocking in for a café
+  // shift at 4pm or later saw "Dinner" already selected and tapped through —
+  // and a dinner service opened on the Services page for a café they worked.
+  // There is no boundary that fixes it: café runs to 5 or 5:30 some days.
+  const cookie = await signIn('3111');           // one position
   const html = await text('/portal/clock', { cookie });
   assert.match(html, /class="tcc tcc-off"/, 'the neutral state');
   assert.match(html, /Clocked out</, 'named');
   assert.ok(!/<select name="position"/.test(html), 'one position is not a question');
-  assert.ok(!/<select name="daypart"/.test(html), 'and neither is the service when it is not required');
-  assert.match(html, /name="position" value="server"/, 'both travel as hidden fields');
-  assert.match(html, /name="daypart" value="/, 'so the route still gets what it validates');
+  assert.match(html, /name="position" value="server"/, 'it travels as a hidden field');
+
+  assert.match(html, /<select name="daypart" required>/, 'the service is ALWAYS asked');
+  assert.ok(!/<input type="hidden" name="daypart"/.test(html),
+    'and never travels as a hidden field — that was the bug');
+  assert.match(html, /<option value="">Choose/, 'it starts on a placeholder that cannot be submitted');
+  assert.ok(!/<option value="(cafe|dinner)" selected/.test(html),
+    'and nothing is pre-selected, so there is nothing to tap past');
   assert.match(html, />Clock in</, 'one primary action');
-  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16',
-    pin_fix: '1', require_service: '1', alerts: '1' });
+});
+
+test('2B: the clock refuses a clock-in with no service, server-side', async () => {
+  // The placeholder is presentation. This is the part that cannot be bypassed.
+  const cookie = await signIn('3111');
+  const res = await post('/portal/clock/in', { position: 'server', daypart: '' }, { cookie });
+  const msg = decodeURIComponent(((res.headers.get('location') || '').split('err=')[1] || '')).replace(/\+/g, ' ');
+  assert.match(msg, /which service/i, 'it says what is missing');
+  const T = require('../src/timeclock');
+  const D = require('../src/db').db;
+  assert.ok(!T.q.active.get(D.prepare("SELECT id FROM employees WHERE pin = '3111'").get().id),
+    'and nobody was clocked in');
 });
 
 test('2B: working — live counter, the facts, and both actions in the open', async () => {

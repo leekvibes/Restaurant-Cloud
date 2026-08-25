@@ -254,8 +254,12 @@ test('INV7: the scheduler does not change how a punch is stamped', () => {
   // and still refuses without one. Asserted on the module surface, because the
   // route is not this phase's to change.
   assert.strictEqual(typeof TC.suggestDaypart, 'function', 'the clock keeps its own helper');
-  assert.strictEqual(TC.settings().requireService, true,
-    'and the setting that makes the clock ask is untouched');
+  // The clock ALWAYS asks now — the setting that could switch it off was
+  // removed, because a guessed service opened the wrong row on the Services
+  // page. suggestDaypart survives for the SCHEDULER, which stamps a plan a
+  // manager can see and change and which opens no service at all.
+  assert.strictEqual(TC.settings().requireService, undefined,
+    'no toggle can make the clock stop asking');
   // The scheduler reads that helper; it does not replace or wrap the clock's use.
   const utc = TC.localInputToUtc(at(TODAY, '18:00'));
   assert.strictEqual(S.serviceFor(utc), TC.suggestDaypart(utc, TC.settings().dinnerFrom),
