@@ -1182,7 +1182,11 @@ test('the day header reads DATE, then people, then shifts', async () => {
   const date = size('.sb-dh em'), people = size('.sb-dh b'), metrics = size('.sb-dh i');
   assert.ok(date > people, `the date (${date}px) leads the people count (${people}px)`);
   assert.ok(people > metrics, `and people (${people}px) leads shifts/hours (${metrics}px)`);
-  assert.ok(date >= 17 && date <= 19, `date is ${date}px, in the agreed range`);
+  // The range was 17-19px, set when the fix was making the date READ FIRST.
+  // The owner later asked for a far denser board — that header cost roughly two
+  // employee rows of vertical space per screen. The hierarchy above is the part
+  // that mattered and it still holds; the absolute size was never the point.
+  assert.ok(date >= 13 && date <= 15, `date is ${date}px, in the agreed range`);
 
   // A day with nobody on it must not shout just because the number is bold.
   assert.match(css, /\.sb-dh--none b \{ font-weight:500; color:var\(--muted\); \}/,
@@ -1635,6 +1639,41 @@ test('a leaver and a lost position are skipped by NAME; everyone else still land
   }
 });
 
+test('the board is dense on a mouse without shrinking a finger target', () => {
+  // The owner asked for a much more compact board: the toolbar was wrapping to
+  // two rows and only nine of a 150-person roster fit on a laptop screen. The
+  // space was going to two 44px touch targets — .sb-btn's height and .sb-add's
+  // min-height — plus two day-header buttons that were opacity:0 but still in
+  // flow, reserving ~44px per column for something invisible.
+  //
+  // 44px is CORRECT on a phone. The whole compaction is therefore guarded on a
+  // fine pointer, and that guard is the part worth pinning: drop it and the
+  // board silently becomes untappable on the device half the staff use.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+
+  assert.match(css, /\.sb-btn \{[^}]*height:44px/,
+    'the unguarded button keeps the 44px touch target');
+  assert.match(css, /\.sb-add \{[^}]*min-height:44px/,
+    'and so does the add-shift cell');
+
+  const guard = /@media \(min-width:900px\) and \(pointer:fine\) \{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(guard, 'the compaction lives behind a fine-pointer guard');
+  assert.match(guard[1], /\.sb-bar \.sb-btn \{[^}]*height:30px/,
+    'which is where the smaller button belongs');
+  assert.match(guard[1], /\.sb-add \{[^}]*min-height:28px/,
+    'and the smaller add target');
+
+  // Out of flow, so an invisible control costs no height.
+  assert.match(css, /\.sb-dh-acts \{[^}]*position: absolute/,
+    'the hover actions do not reserve space in the day header');
+  // And .sb-dh must NOT be given position:relative to host them: it is already
+  // sticky, and a later `position` declaration un-sticks the date row. That
+  // shipped once and only showed up on scroll.
+  const dhRules = css.split('\n').filter((l) => /^\.sb-dh \{/.test(l)).join('');
+  assert.doesNotMatch(dhRules, /position: ?relative/,
+    'the day header stays sticky');
+});
+
 test('the two kinds of template stay different objects', async () => {
   // A shift template is a SHAPE with nobody in it. A day/week template is a
   // CONFIGURATION OF PEOPLE. Keeping them apart is the product decision.
@@ -1643,7 +1682,12 @@ test('the two kinds of template stay different objects', async () => {
   assert.ok(!shape.includes('employee_id'), 'a shift template holds no person');
   assert.ok(config.includes('employee_id'), 'a day/week template does');
   const html = await text('/schedule');
-  assert.match(html, /Save week as pattern/, 'the board offers saving a week');
+  // The WEEK save button was taken off the toolbar at the owner's request (it
+  // crowded Copy last week and Publish week for a once-a-month job). The route
+  // still works — tested above — so this pins the removal rather than the loss
+  // of the capability. Saving a DAY is still offered, on each day header.
+  assert.doesNotMatch(html, /Save week as pattern/, 'the week-save button is off the toolbar');
+  assert.match(html, /Save as pattern/, 'saving a day still is');
   assert.match(html, /Apply a pattern/, 'and applying one');
 });
 

@@ -18890,16 +18890,12 @@ app.get('/schedule', (req, res) => {
                 ${dayTmpls.map((t) => `<option value="${t.id}">Day &middot; ${esc(t.name)} (${t.shifts}) &rarr; ${esc(dow(week.start))}</option>`).join('')}
               </select>
             </form>` : ''}
-            <form method="post" action="/schedule/save-week-template" style="margin:0"
-              onsubmit="var n=prompt('Name this week pattern (people included):');
-                        if(!n){return false;} this.querySelector('[name=name]').value=n;">
-              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-              <input type="hidden" name="w" value="${week.start}">
-              <input type="hidden" name="from" value="${week.start}">
-              <input type="hidden" name="name" value="">
-              <button class="sb-btn" type="submit"
-                title="Save this week's staffing — who works what, without the dates">Save week as pattern</button>
-            </form>
+            ${''/* "Save week as pattern" lived here and was removed at the owner's
+                   request: it was a third button competing with Copy last week
+                   and Publish week for a job done once a month. Saving a DAY as
+                   a pattern is still on each day header, and the week-template
+                   route and its tests are untouched — nothing was deleted, only
+                   taken off the toolbar. */}
             <form method="post" action="/schedule/publish-week" style="margin:0">
               <input type="hidden" name="_csrf" value="${csrfFor(req)}">
               <input type="hidden" name="w" value="${week.start}">
@@ -18946,6 +18942,7 @@ app.get('/schedule', (req, res) => {
                      of an empty Monday does not carry a control that would do
                      nothing. Never on the last column — there is no next day on
                      screen to land in. */''}
+                <div class="sb-dh-acts">
                 ${s.n ? `<form method="post" action="/schedule/save-day-template" class="sb-dh-cp"
                   onsubmit="var n=prompt('Name this day pattern (people included):');
                             if(!n){return false;} this.querySelector('[name=name]').value=n;">
@@ -18963,6 +18960,7 @@ app.get('/schedule', (req, res) => {
                   <button type="submit" title="Copy this day's shifts onto ${esc(dow(days[di + 1]))} as drafts"
                     >Copy to ${esc(dow(days[di + 1]))}</button>
                 </form>` : ''}
+                </div>
               </div>`; }).join('')}
             </div>
             ${staff.length ? staff.map(row).join('')

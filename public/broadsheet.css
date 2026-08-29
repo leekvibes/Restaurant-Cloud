@@ -4373,7 +4373,7 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   --c-orange:#e59457; --c-slate:#63707f;
 }
 
-.sb { --sb-lead:190px; --sb-col:minmax(132px,1fr); --sb-row:68px;
+.sb { --sb-lead:158px; --sb-col:minmax(122px,1fr); --sb-row:40px;
       --sb-r:6px; --sb-kr:5px; width:100%; min-width:0;
       /* A structured grid, not a cage: the vertical is the system's own rule,
          the horizontal a shade darker so the eye tracks ONE employee across
@@ -4423,7 +4423,7 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .sb-scroll { overflow:auto; overscroll-behavior:contain;
     /* Whatever is left after the masthead, the page heading and the toolbar.
        A fixed pixel height would be wrong on every screen but one. */
-    max-height:calc(100vh - 300px); min-height:320px; }
+    max-height:calc(100vh - 248px); min-height:320px; }
   /* THE STACKING ORDER MATTERS AND IT IS EASY TO GET WRONG. The names column
      was already sticky-left at z-index 3; the day headers were also 3, so the
      names scrolled up and painted OVER the headers — the top-left read as two
@@ -4434,8 +4434,11 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   .sb-corner { position:sticky; top:0; left:0; z-index:6; }
 }
 
-.sb-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
-  padding:10px 12px; border-bottom:1px solid var(--rule); background:var(--panel); }
+/* ONE ROW, not two. Everything here is a week-level control and it read as two
+   unrelated bars stacked — the week on top, the actions under it — because the
+   gaps and padding pushed it past the width. */
+.sb-bar { display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+  padding:7px 10px; border-bottom:1px solid var(--rule); background:var(--panel); }
 /* Wraps rather than clips: the frame hides overflow to keep its corners, which
    once cut "This week" in half at 390 — present and unreachable. */
 .sb-nav { display:flex; align-items:center; gap:2px; flex-wrap:wrap; }
@@ -4493,22 +4496,26 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
    the eye landed on "0 people" before it found which day that was, and a
    column of zeroes read louder than the week itself. The date leads now, and
    the two metrics step down from it. Same three lines, same height. */
+/* TIGHTER, so more of the roster is on screen at once. The header was 17.5px
+   over two more lines and roughly 60px of chrome per column — on a laptop that
+   is two employees' worth of rows spent on a date and a count you read once.
+   Same three lines, same information, about half the height. */
 .sb-dh { position:sticky; top:0; z-index:2; background:var(--panel);
-  padding:8px 12px 9px; border-bottom:1px solid var(--rule);
+  padding:6px 10px 6px; border-bottom:1px solid var(--rule);
   border-left:1px solid var(--sb-vline); }
-.sb-dh em { display:block; font-style:normal; font-size:17.5px; font-weight:680;
-  letter-spacing:-.015em; color:var(--headline); white-space:nowrap; line-height:1.15; }
-.sb-dh b { display:block; font-size:13px; font-weight:600; color:var(--body); margin-top:3px; }
-.sb-dh i { display:block; font-style:normal; font-family:var(--mono); font-size:11px;
-  font-weight:400; color:var(--muted); margin-top:1px; letter-spacing:-.02em;
-  white-space:nowrap; min-height:1.35em; font-variant-numeric:tabular-nums; }
+.sb-dh em { display:block; font-style:normal; font-size:13.5px; font-weight:680;
+  letter-spacing:-.015em; color:var(--headline); white-space:nowrap; line-height:1.2; }
+.sb-dh b { display:block; font-size:11px; font-weight:600; color:var(--body); margin-top:1px; }
+.sb-dh i { display:block; font-style:normal; font-family:var(--mono); font-size:10px;
+  font-weight:400; color:var(--muted); margin-top:0; letter-spacing:-.02em;
+  white-space:nowrap; min-height:1.3em; font-variant-numeric:tabular-nums; }
 /* A day with nobody on it must not shout. The number is the same size; only
    the emphasis goes, so an empty Saturday reads as quiet rather than as an
    alert. */
 .sb-dh--none b { font-weight:500; color:var(--muted); }
 
 .sb-emp { position:sticky; left:0; z-index:3; background:var(--panel);
-  padding:11px 12px; border-right:1px solid var(--rule);
+  padding:6px 10px; border-right:1px solid var(--rule);
   border-bottom:1px solid var(--sb-hline);
   display:flex; flex-direction:column; justify-content:center; }
 .sb-corner { z-index:4; border-bottom:1px solid var(--rule);
@@ -4522,7 +4529,7 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
   color:var(--muted); margin-top:3px; }
 .sb-emp.is-off i { font-family:inherit; font-style:italic; }
 
-.sb-cell { min-height:var(--sb-row); padding:6px; display:flex; flex-direction:column;
+.sb-cell { min-height:var(--sb-row); padding:4px; display:flex; flex-direction:column;
   justify-content:flex-start; gap:5px;
   border-bottom:1px solid var(--sb-hline);
   border-left:1px solid var(--sb-vline); }
@@ -4677,7 +4684,7 @@ body.sb-iss-open .sb-iss { transform: translateX(0); visibility: visible; }
 /* A 1280 desktop leaves about 1020 for the board after the sidebar and gutter.
    Trimmed so all seven days are visible there too — a week view that scrolls
    on a full-size screen reads as broken rather than as an affordance. */
-@media (max-width:1300px) { .sb { --sb-lead:160px; --sb-col:minmax(120px,1fr); } }
+@media (max-width:1300px) { .sb { --sb-lead:140px; --sb-col:minmax(112px,1fr); } }
 @media (max-width:900px) {
   .sb { --sb-lead:154px; --sb-col:minmax(128px,1fr); --sb-row:64px; }
   .bs-main:has(.sb) { padding-left:14px; padding-right:14px; }
@@ -5468,10 +5475,23 @@ input[type="date"], input[type="time"], input[type="search"], select {
 @media (max-width: 560px) { .sb-rep-b { grid-template-columns: 1fr; } }
 /* Phase 7 — copy a day. Quiet until hovered: it lives in a header read at a
    glance, and a button competing with the day's numbers would win. */
-.sb-dh-cp { margin: 4px 0 0; }
-.sb-dh-cp button { border: 0; background: none; padding: 2px 0; font: inherit; font-size: 11px;
-  color: var(--muted); text-decoration: underline; cursor: pointer; opacity: 0; transition: opacity .12s; }
-.sb-dh:hover .sb-dh-cp button, .sb-dh-cp button:focus { opacity: 1; }
+/* These two were opacity:0 but still IN FLOW, so every day header reserved
+   ~44px for buttons nobody could see — the single biggest source of the dead
+   space in the date row. Lifted out of flow entirely: the header is sized by
+   its three lines of text, and the actions overlay the bottom of it on hover.
+   They cover the shift-count line while open, which is fine: you only hover
+   when you want the action, and you just read the count to decide. */
+/* No `position: relative` on .sb-dh here — it is already `position: sticky`,
+   which is itself a containing block for absolute children, and this rule sits
+   AFTER the sticky one in the cascade, so adding it silently un-stuck the day
+   headers. */
+.sb-dh-acts { position: absolute; left: 10px; right: 10px; bottom: 4px;
+  display: flex; gap: 10px; align-items: baseline; pointer-events: none;
+  opacity: 0; transition: opacity .12s; background: var(--panel); }
+.sb-dh:hover .sb-dh-acts, .sb-dh-acts:focus-within { opacity: 1; pointer-events: auto; }
+.sb-dh-cp { margin: 0; }
+.sb-dh-cp button { border: 0; background: none; padding: 0; font: inherit; font-size: 10.5px;
+  color: var(--muted); text-decoration: underline; cursor: pointer; white-space: nowrap; }
 .sb-dh-cp button:hover { color: var(--primary); }
 /* Phase 7 — the saved-pattern picker sits with the other week tools. */
 .sb-tsel { max-width: 210px; font: inherit; font-size: 12px; padding: 0 8px; }
@@ -5548,3 +5568,29 @@ input[type="date"], input[type="time"], input[type="search"], select {
   width: 15px; height: 15px; border-radius: 0 var(--sb-kr) 0 6px;
   background: var(--danger); color: #fff;
   font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
+
+/* The week pill and the buttons beside it, sized to sit on one line together.
+   The pill was a headline; it is a control. */
+/* MOUSE ONLY. .sb-btn carries height:44px and .sb-add min-height:44px because
+   both are finger targets on a phone, and that is the right size there. On a
+   laptop it was costing 14px on every toolbar control and 13px on every row of
+   a 150-person roster — the toolbar wrapped to two lines and eleven people fit
+   on screen. Guarded on a fine pointer so the phone keeps its 44px. */
+@media (min-width:900px) and (pointer:fine) {
+  .sb-bar .sb-btn { height:30px; min-width:30px; padding:0 9px; font-size:12px; }
+  .sb-bar .sb-btn.is-on { font-size:12px; }
+  .sb-bar .sb-range { font-size:12.5px; }
+  .sb-bar .sb-chip { padding:3px 8px; font-size:11.5px; }
+  .sb-add { min-height:28px; font-size:11px; }
+}
+.sb-emp { padding:6px 10px; }
+.sb-emp b { font-size:13px; }
+.sb-emp i { font-size:10.5px; margin-top:1px; }
+/* "Not scheduled" printed on every unstaffed row is a second line of text
+   restating what the seven empty cells beside it already say — and with 150
+   people on the roster it was costing a line of height on nearly every row.
+   The hours line stays, because that one carries a number. */
+.sb-emp.is-off i { display:none; }
+.sbk { padding:5px 7px; }
+.sbk b { font-size:11.5px; }
+.sbk i { font-size:10.5px; }
