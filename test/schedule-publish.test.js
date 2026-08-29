@@ -589,15 +589,45 @@ test('every listed day sits under a band naming ITS OWN week', async () => {
   assert.ok(checked >= 1, 'at least one day was listed and checked');
 });
 
-test('the page opens on today, with the past above and the future below', async () => {
+test('the list starts on the selected day and never runs backward', async () => {
+  // CHANGED FROM the continuous list. That version opened on today with the
+  // past above it, and two things were wrong: scrolling into position went PAST
+  // the date strip, so the bar naming the day was off screen the moment the
+  // page opened, and scrolling up landed you in history nobody asked for.
+  //
+  // Earlier days are still reachable — you tap the day on the strip and the
+  // list starts there — but they are never above you.
   const cookie = await signIn(PIN.esther);
   const html = await text('/portal/schedule', { cookie });
-  // It scrolls to a real anchor rather than leaving the reader at the top of
-  // ninety days of history.
-  assert.match(html, /getElementById\('d-\d{4}-\d{2}-\d{2}'\)/, 'it anchors on a day');
-  assert.match(html, /scrollIntoView\(\{ block: 'start'/, 'putting that day at the top');
-  assert.match(html, /behavior: 'auto'/,
-    'without animating — this is where the page starts, not somewhere it travels to');
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const days = [...html.matchAll(/id="d-(\d{4}-\d{2}-\d{2})"/g)].map((m) => m[1]);
+  for (const d of days) {
+    assert.ok(d >= today, `${d} is not before today — nothing earlier is listed`);
+  }
+  assert.ok(!/scrollIntoView/.test(html),
+    'and nothing scrolls the page on load, which is what hid the strip');
+});
+
+test('picking an earlier day starts the list THERE, still going forward', async () => {
+  const cookie = await signIn(PIN.esther);
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const back = dates.addDays(today, -4);
+  const html = await text(`/portal/schedule?d=${back}`, { cookie });
+  const days = [...html.matchAll(/id="d-(\d{4}-\d{2}-\d{2})"/g)].map((m) => m[1]);
+  for (const d of days) {
+    assert.ok(d >= back, `${d} is not before the day that was picked`);
+  }
+  // The strip is what makes that reachable, so it has to be on the page.
+  assert.match(html, /class="ps-strip"/, 'the day strip is there to pick from');
+});
+
+test('the day strip is on Only me and Everyone, not just availability', async () => {
+  const cookie = await signIn(PIN.esther);
+  for (const v of ['me', 'all']) {
+    const html = await text(`/portal/schedule?v=${v}`, { cookie });
+    assert.match(html, /class="ps-strip"/, `${v} shows the date bar`);
+    assert.match(html, /class="ps-wknav"/, `${v} shows the week it is on`);
+  }
 });
 
 test('Publish on create reaches the employee; Save Draft reaches nobody', async () => {

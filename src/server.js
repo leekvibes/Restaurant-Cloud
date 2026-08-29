@@ -6162,7 +6162,17 @@ app.get('/portal/schedule', (req, res) => {
   //
   // The strip stays: it highlights where you are and jumps you somewhere else.
   // It is no longer a filter over what exists.
-  const listedDays = [...byDay.keys()].filter((d) => d >= from && d <= to).sort();
+  // FROM THE SELECTED DAY FORWARD, NEVER BACKWARD.
+  //
+  // This listed the whole window and scrolled to today, so the past sat above
+  // and you could scroll up into it. Two things were wrong with that. The
+  // scroll-to-today went PAST the date strip, so the bar naming the day was
+  // off-screen the moment the page opened — and scrolling up landed you in
+  // history you had not asked for.
+  //
+  // A schedule is a thing you look forward in. Earlier days are still reachable,
+  // deliberately: tap the day on the strip and the list starts there instead.
+  const listedDays = [...byDay.keys()].filter((d) => d >= picked && d <= to).sort();
   // A band before each week's first listed day. The list is continuous, so a
   // single header at the top would name one week while ninety days ran beneath
   // it — the exact defect that was fixed once already. Every day now sits under
@@ -6187,24 +6197,9 @@ app.get('/portal/schedule', (req, res) => {
     </div>`;
   }).join('');
 
-  // Where the page lands. Today if today has something; otherwise the first day
-  // AFTER today that does, because somebody opening their schedule is looking
-  // forward — falling back to the newest past day would open on history.
-  const anchorDay = listedDays.includes(today)
-    ? today
-    : (listedDays.find((d) => d > today) || null);
-  const anchorScript = anchorDay ? `<script>
-    (function () {
-      var el = document.getElementById('d-${anchorDay}');
-      if (!el) return;
-      // 'auto', not 'smooth': this is where the page STARTS, and animating into
-      // position reads as the page moving under somebody's thumb.
-      el.scrollIntoView({ block: 'start', behavior: 'auto' });
-      // The sticky day strip would otherwise cover the row it just scrolled to.
-      var strip = document.querySelector('.ps-head');
-      if (strip) window.scrollBy(0, -(strip.getBoundingClientRect().height + 8));
-    })();
-  </script>` : '';
+  // NO SCROLL SCRIPT ANY MORE. The first row IS the selected day, so the page
+  // opens at the top with the strip in view and nothing to jump to. Scrolling
+  // into position was what pushed the date bar off screen in the first place.
 
   // An arrow that would land outside the locked window is clamped to its edge,
   // so the last reachable week is still reachable; one that would not move at
@@ -6352,7 +6347,7 @@ app.get('/portal/schedule', (req, res) => {
         <button type="button" class="myav-req" id="myav-req">Request time off</button>
 
         ${avOn ? myavSheets(req, today, DAYPARTS) : ''}`
-        : (body ? `<div class="ps-days">${body}</div>${anchorScript}`
+        : (body ? `<div class="ps-days">${body}</div>`
           : (rows.length ? quiet : (view === 'all' ? emptyAll : empty)))}
     </div>
 
