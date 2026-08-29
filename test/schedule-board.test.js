@@ -1821,3 +1821,77 @@ test('the drop carries the target person as well as the target day', async () =>
   assert.match(html, /\['to_date', cell\.getAttribute\('data-d'\)\]/,
     'and dragging along a row is a day move');
 });
+
+// ===========================================================================
+// Unavailability where a manager can see it, and a board that stays legible
+// while you scroll it.
+// ===========================================================================
+
+test('a day somebody cannot work says so IN THE CELL, with the times', async () => {
+  // Far enough out that no other test in this file has put a shift there — a
+  // cell with a card in it renders the card, not the Add button.
+  const day = dates.addDays(today(), 602);
+  const timed = dates.addDays(day, 1);
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day)
+              VALUES (?, 'unavailable', ?, 1)`).run(E.server, day);
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day, start_min, end_min)
+              VALUES (?, 'unavailable', ?, 0, ?, ?)`).run(E.server, timed, 17 * 60, 22 * 60);
+  try {
+    const html = await text(`/schedule?w=${SCH.weekWindowFor(day).start}`);
+    assert.match(html, /class="sb-un sb-un--cannot"/, 'the cell carries a block of its own');
+    assert.match(html, /<b>Unavailable<\/b><i>All day<\/i>/, 'an all-day rule says all day');
+    assert.match(html, /<b>Unavailable<\/b><i>5p – 10p<\/i>/,
+      'and a timed one says WHEN — "Unavailable" over a day somebody is only out '
+      + 'for the evening tells a manager to leave the whole day alone');
+    assert.match(html, /class="sb-cell[^"]*sb-cell--un/, 'and the cell itself is marked');
+  } finally { db.prepare('DELETE FROM availability_rules').run(); }
+});
+
+test('the cell still offers Add — availability warns, it never blocks', async () => {
+  const day = dates.addDays(today(), 602);
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day)
+              VALUES (?, 'unavailable', ?, 1)`).run(E.server, day);
+  try {
+    const html = await text(`/schedule?w=${SCH.weekWindowFor(day).start}`);
+    // The Add button for that person on that day, found by its own label rather
+    // than by slicing the cell out of the markup.
+    assert.match(html, new RegExp(`data-new="1" data-emp="${E.server}" data-d="${day}"`),
+      'a manager may still place a shift there');
+    assert.match(html, /who said they cannot work/,
+      'and the button says so, so it is not a silent override');
+  } finally { db.prepare('DELETE FROM availability_rules').run(); }
+});
+
+test('a shift on a day they cannot work is flagged on the card itself', async () => {
+  const day = dates.addDays(today(), 610);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day)
+              VALUES (?, 'unavailable', ?, 1)`).run(E.server, day);
+  try {
+    const html = await text(`/schedule?w=${SCH.weekWindowFor(day).start}`);
+    assert.match(html, new RegExp(`sbk--iss-review[^"]*"[^>]*data-drag="${s.id}"`),
+      'the card carries the issue marker');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+    const rule = css.slice(css.indexOf('.sbk--iss-action, .sbk--iss-review'));
+    assert.match(rule.slice(0, 400), /border:\s*1\.5px solid var\(--danger\)/, 'a red edge');
+    assert.match(rule.slice(0, 700), /content:\s*'!'/, 'and a corner flag, not colour alone');
+  } finally { db.prepare('DELETE FROM availability_rules').run(); }
+});
+
+test('the grid scrolls, and everything you navigate by holds still', () => {
+  // Before this the PAGE scrolled, so the week range, Publish week and the day
+  // headers all left the screen — checking which day a column was meant
+  // scrolling back to the top. .sb-dh already said position:sticky and it did
+  // nothing, because nothing above it scrolled in the Y axis.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  const at = css.indexOf('@media (min-width: 900px)');
+  assert.ok(at > -1, 'the wide-screen block exists');
+  const block = css.slice(at, at + 1400);
+  assert.match(block, /\.sb-scroll \{ overflow:auto/, 'the grid is its own scroller');
+  assert.match(block, /max-height:calc\(100vh/, 'bounded by the viewport, not a fixed guess');
+  // Stacking, which was measured wrong once: names painted over the headers.
+  assert.match(block, /\.sb-dh \{ z-index:5; \}/, 'headers outrank the names column');
+  assert.match(block, /\.sb-corner \{ position:sticky; top:0; left:0; z-index:6; \}/,
+    'and the corner outranks both — it is the one cell holding against two axes');
+});

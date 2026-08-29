@@ -18605,10 +18605,24 @@ app.get('/schedule', (req, res) => {
         : 'Not scheduled'}</i></div>
       ${days.map((d) => {
         const list = cells.get(`${e.id}|${d}`) || [];
-        return `<div class="sb-cell${d === today ? ' is-today' : ''}" data-cell="1" data-emp="${e.id}" data-d="${d}">${
+        // WHAT THEY SAID, IN THE CELL. This used to live only in the drawer and
+        // the issue count — a manager had to open a shift to find out somebody
+        // could not work it, or notice a number in the toolbar. A day somebody
+        // has ruled out should look ruled out from across the room.
+        const av = (sbAvailMap[e.id] || {})[d];
+        const avBlock = av && (av.kind === 'off' || av.kind === 'cannot')
+          ? `<div class="sb-un sb-un--${av.kind}"
+               title="${av.kind === 'off' ? 'Approved time off' : 'They said they cannot work'}">
+              <b>${av.kind === 'off' ? 'Time off' : 'Unavailable'}</b><i>${esc(av.when)}</i>
+            </div>` : '';
+        return `<div class="sb-cell${d === today ? ' is-today' : ''}${
+            av && (av.kind === 'off' || av.kind === 'cannot') ? ' sb-cell--un' : ''}"
+            data-cell="1" data-emp="${e.id}" data-d="${d}">${avBlock}${
           list.length ? list.map(card).join('')
             : `<button class="sb-add" type="button" data-new="1" data-emp="${e.id}" data-d="${d}"
-                 aria-label="Add a shift for ${esc(e.name)} on ${esc(TC.dayLabel(d))}"><span>+ Add shift</span></button>`
+                 aria-label="Add a shift for ${esc(e.name)} on ${esc(TC.dayLabel(d))}${
+                   av && av.kind === 'off' ? ', who has approved time off'
+                   : av && av.kind === 'cannot' ? ', who said they cannot work' : ''}"><span>+ Add shift</span></button>`
         }</div>`;
       }).join('')}
     </div>`;
@@ -18726,8 +18740,25 @@ app.get('/schedule', (req, res) => {
         // which is the whole of what was decided.
         const pending = r.timeOff && r.timeOff.status === 'pending';
         if (r.state === 'available' && !pending) continue;
-        (out[id] = out[id] || {})[d] = r.timeOff && r.timeOff.status === 'approved' ? 'off'
+        const kind = r.timeOff && r.timeOff.status === 'approved' ? 'off'
           : pending ? 'asked' : r.state === 'preferred' ? 'prefer' : 'cannot';
+        // WHEN, not just whether. A cell reading "Unavailable" over a day
+        // somebody is only out for the evening tells a manager to leave the
+        // whole day alone, which is worse than saying nothing.
+        let when = 'All day';
+        const face = (min) => {
+          const h = Math.floor(min / 60) % 24; const mi = min % 60;
+          return `${(h % 12) === 0 ? 12 : h % 12}${mi ? ':' + String(mi).padStart(2, '0') : ''}${h < 12 ? 'a' : 'p'}`;
+        };
+        if (r.timeOff && !r.timeOff.allDay) {
+          const a = TC.utcToLocalInput(r.timeOff.startsAt).slice(11, 16);
+          const b = TC.utcToLocalInput(r.timeOff.endsAt).slice(11, 16);
+          const m = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+          when = `${face(m(a))} – ${face(m(b))}`;
+        } else if (!r.timeOff && r.rule && !r.rule.allDay) {
+          when = `${face(r.rule.startMin)} – ${face(r.rule.endMin)}`;
+        }
+        (out[id] = out[id] || {})[d] = { kind, when };
       }
     }
     return out;
@@ -19340,10 +19371,11 @@ app.get('/schedule', (req, res) => {
           // free-text reason belongs in the review queue, not on a board read
           // at a glance by whoever is standing behind the manager.
           var av = (sbAvail[empId] || {})[dateStr];
-          if (av === 'off') bits.push('APPROVED TIME OFF that day');
-          else if (av === 'cannot') bits.push('said they cannot work that day');
-          else if (av === 'asked') bits.push('has asked for that day off — not decided yet');
-          else if (av === 'prefer') bits.push('would rather work that day');
+          var k = av && av.kind, w = av && av.when ? ' (' + av.when + ')' : '';
+          if (k === 'off') bits.push('APPROVED TIME OFF' + w);
+          else if (k === 'cannot') bits.push('said they cannot work' + w);
+          else if (k === 'asked') bits.push('has asked for that day off — not decided yet');
+          else if (k === 'prefer') bits.push('would rather work that day');
 
           box.textContent = bits.join(' · ');
           box.hidden = !bits.length;

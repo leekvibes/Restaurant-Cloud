@@ -4406,6 +4406,34 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .sb-scroll { overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch;
   overscroll-behavior-x:contain; }
 
+/* THE GRID IS THE ONLY THING THAT SCROLLS, and the day you are working on stays
+   named while you do it.
+--------------------------------------------------------------------------------
+   Before this the PAGE scrolled: the toolbar, the week range, Publish week and
+   Copy last week all left the screen, and so did the day headers — so scrolling
+   to somebody near the bottom of the roster meant scrolling back up to check
+   which day a column was. .sb-dh already carried position:sticky and it did
+   nothing, because nothing above it was a scroll container in the Y axis.
+
+   Giving the grid its own height makes that sticky real. The toolbar sits
+   outside the scroller and therefore never moves at all. Wide screens only —
+   under 900px the Phase 5 mobile list is the surface, and a scroll box inside a
+   scroll box on a phone is how you lose a gesture. */
+@media (min-width: 900px) {
+  .sb-scroll { overflow:auto; overscroll-behavior:contain;
+    /* Whatever is left after the masthead, the page heading and the toolbar.
+       A fixed pixel height would be wrong on every screen but one. */
+    max-height:calc(100vh - 300px); min-height:320px; }
+  /* THE STACKING ORDER MATTERS AND IT IS EASY TO GET WRONG. The names column
+     was already sticky-left at z-index 3; the day headers were also 3, so the
+     names scrolled up and painted OVER the headers — the top-left read as two
+     employee names where "Who" should be. Measured on screen, not guessed.
+     Headers outrank names, and the corner outranks both, because it is the one
+     cell that has to hold against BOTH axes at once. */
+  .sb-dh { z-index:5; }
+  .sb-corner { position:sticky; top:0; left:0; z-index:6; }
+}
+
 .sb-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
   padding:10px 12px; border-bottom:1px solid var(--rule); background:var(--panel); }
 /* Wraps rather than clips: the frame hides overflow to keep its corners, which
@@ -5488,3 +5516,35 @@ input[type="date"], input[type="time"], input[type="search"], select {
   font-size: 14px; font-weight: 600; cursor: pointer; }
 .tsx-cancel { border: 1px solid var(--line); background: none; color: var(--ink); }
 .tsx-go { border: 0; background: var(--danger); color: #fff; }
+
+/* ---------------------------------------------------------------------------
+   Unavailability, in the cell.
+
+   It used to live in the drawer and in a count in the toolbar, so a manager had
+   to open a shift to discover somebody could not work it. A day somebody has
+   ruled out should look ruled out from across the room.
+
+   .bs * kills box-shadow in this shell, so this is background and border only.
+--------------------------------------------------------------------------- */
+.sb-un { border-radius: 6px; padding: 7px 8px; text-align: center; line-height: 1.25; }
+.sb-un b { display: block; font-size: 11.5px; font-weight: 650; }
+.sb-un i { display: block; font-style: normal; font-size: 11px; font-weight: 600; margin-top: 1px; }
+/* Approved time off and a stated constraint are different facts, so they do not
+   look identical — but BOTH say what they are in words, never colour alone. */
+.sb-un--off { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.sb-un--cannot { background: color-mix(in srgb, var(--danger) 8%, transparent); color: var(--danger); }
+.sb-cell--un { background: color-mix(in srgb, var(--danger) 4%, transparent); }
+/* A day already ruled out still offers Add — the manager may override, which is
+   the rule every phase settled on — but it stops competing for the eye. */
+.sb-cell--un .sb-add { opacity: .35; }
+.sb-cell--un:hover .sb-add { opacity: 1; }
+
+/* A shift placed on a day somebody cannot work. The card keeps its position
+   colour and gains a red edge and a corner flag, so it reads as "this one" in a
+   row of cards rather than as a different kind of object. */
+.sbk--iss-action, .sbk--iss-review { position: relative; border: 1.5px solid var(--danger) !important; }
+.sbk--iss-action::after, .sbk--iss-review::after {
+  content: '!'; position: absolute; top: -1px; right: -1px;
+  width: 15px; height: 15px; border-radius: 0 var(--sb-kr) 0 6px;
+  background: var(--danger); color: #fff;
+  font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
