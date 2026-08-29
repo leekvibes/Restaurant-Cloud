@@ -884,6 +884,49 @@ function edit(id, patch) {
 }
 
 /**
+ * PHASE 11 — move a shift to another day, or another person.
+ *
+ * IT IS NOT A SECOND EDIT PATH. It works out what changed and hands it to
+ * edit(), which is the one command that validates: held position, retired
+ * position, inactive employee, cross-midnight handling, the publish-state
+ * bookkeeping. A drag that could place a shift an ordinary edit would refuse
+ * would be a hole, and a silent one — the card would simply appear where it was
+ * dropped and nobody would look again.
+ *
+ * DOM POSITION IS NEVER THE SOURCE OF TRUTH. This takes a target day and a
+ * target employee, not pixels, and the board is re-rendered from the database
+ * afterwards. A refused drop leaves the card where it started because nothing
+ * moved, not because anything was put back.
+ *
+ * The whole shift moves by whole days, so a close running to 2am keeps its own
+ * end and its own length rather than being rebuilt from clock times.
+ */
+function moveShift(id, { toDate, toEmployeeId } = {}) {
+  const row = q.byId.get(Number(id));
+  if (!row) throw new ScheduleError('That shift is no longer there.', 'missing');
+
+  const patch = {};
+  if (toDate) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(toDate))) throw new ScheduleError('That is not a day.', 'range');
+    const off = daysApart(localDateOf(row.starts_at), toDate);
+    if (!Number.isFinite(off)) throw new ScheduleError('That is not a day.', 'range');
+    if (off !== 0) {
+      patch.startsAt = TC.utcToLocalInput(shiftUtcByDays(row.starts_at, off)).replace('T', ' ');
+      patch.endsAt = TC.utcToLocalInput(shiftUtcByDays(row.ends_at, off)).replace('T', ' ');
+    }
+  }
+  if (toEmployeeId !== undefined && toEmployeeId !== null && String(toEmployeeId) !== ''
+      && Number(toEmployeeId) !== row.employee_id) {
+    patch.employeeId = Number(toEmployeeId);
+  }
+  // Dropped where it already was. Not an error, and not a write either — an
+  // edit here would stamp changed_after_publish and tell the floor a published
+  // shift moved when it did not.
+  if (!Object.keys(patch).length) return { row, moved: false };
+  return { row: edit(Number(id), patch), moved: true };
+}
+
+/**
  * Cancel a planned assignment.
  *
  * The row stays — a cancelled plan is still a record of what was planned — but
@@ -1682,7 +1725,7 @@ function issuesFor(anyDate) {
 }
 
 module.exports = {
-  create, createSeries, edit, cancel, publish, duplicate, unpublish, publishWeek,
+  create, createSeries, edit, moveShift, cancel, publish, duplicate, unpublish, publishWeek,
   templates, saveTemplate, deleteTemplate,
   scheduleTemplates, templateRows, saveScheduleTemplate, applyScheduleTemplate, deleteScheduleTemplate,
   publishedFingerprint, issuesFor, ISSUE_SEVERITY,

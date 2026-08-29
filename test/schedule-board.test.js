@@ -695,19 +695,26 @@ test('the overlap warning writes nothing to time, work, payroll or services', as
     'and warning about a plan is still only reading a plan');
 });
 
-test('the overlap note is wired to create and edit only', () => {
+test('the overlap note is wired to the three routes that place a shift', () => {
+  // Create, edit, and now MOVE. A drag is an edit performed with a mouse — it
+  // lands somebody on a day, and landing them on a day they already work is
+  // exactly when a manager wants telling. Duplicate and copy-week stay silent
+  // for their own reasons, recorded below.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  const region = (from, to) => src.slice(src.indexOf(from), src.indexOf(to));
-  assert.match(region("app.post('/schedule/shift'", "app.post('/schedule/shift/:id'"),
-    /sbOverlapNote\(/, 'create warns');
-  assert.match(region("app.post('/schedule/shift/:id'", "app.post('/schedule/shift/:id/delete'"),
-    /sbOverlapNote\(/, 'edit warns');
-  assert.doesNotMatch(region("app.post('/schedule/shift/:id/duplicate'", "app.post('/schedule/copy-week'"),
-    /sbOverlapNote\(/, 'duplicate does not — it always overlaps itself');
-  assert.doesNotMatch(region("app.post('/schedule/copy-week'", "app.get('/timeclock'"),
-    /sbOverlapNote\(/, 'copy-week is outside the approved Q2 scope');
-  assert.strictEqual((src.match(/sbOverlapNote\(/g) || []).length, 3,
-    'one definition and exactly two call sites');
+  const routeBody = (name) => {
+    const at = src.indexOf(`app.post('${name}'`);
+    assert.ok(at > 0, `${name} exists`);
+    return src.slice(at, src.indexOf('\napp.', at + 10));
+  };
+  assert.match(routeBody('/schedule/shift'), /sbOverlapNote\(/, 'create warns');
+  assert.match(routeBody('/schedule/shift/:id'), /sbOverlapNote\(/, 'edit warns');
+  assert.match(routeBody('/schedule/shift/:id/move'), /sbOverlapNote\(/, 'and a drop warns');
+  assert.doesNotMatch(routeBody('/schedule/shift/:id/duplicate'), /sbOverlapNote\(/,
+    'duplicate does not — it always overlaps itself');
+  assert.doesNotMatch(routeBody('/schedule/copy-week'), /sbOverlapNote\(/,
+    'copy-week is outside the approved Q2 scope');
+  assert.strictEqual((src.match(/sbOverlapNote\(/g) || []).length, 4,
+    'one definition and exactly three call sites');
 });
 
 test('overlap is a WARNING, never a validation rule', () => {
@@ -811,7 +818,7 @@ test('a write route refuses an account without the schedule area', async () => {
   // The COUNT is the point. It is deliberately brittle: adding a write route
   // without a guard is exactly the mistake this catches, and it caught the two
   // above while they were being written.
-  assert.strictEqual(guards, 15, `all fifteen write routes call the guard (found ${guards})`);
+  assert.strictEqual(guards, 16, `all sixteen write routes call the guard (found ${guards})`);
   assert.match(src.slice(src.indexOf('const sbGuard')), /navAllowed\('\/schedule'\)/,
     'and the guard asks the same question the sidebar does');
 });
@@ -1638,4 +1645,102 @@ test('the two kinds of template stay different objects', async () => {
   const html = await text('/schedule');
   assert.match(html, /Save week as pattern/, 'the board offers saving a week');
   assert.match(html, /Apply a pattern/, 'and applying one');
+});
+
+// ===========================================================================
+// Phase 11 — drag a shift to another day.
+//
+// The rule the roadmap sets for this phase is the one worth testing: every drop
+// runs the same domain command and validation as an ordinary edit, and DOM
+// position is never the source of truth. So these tests never simulate a drag —
+// they post what a drop posts, which is a DAY, and check the domain behaved.
+// ===========================================================================
+
+test('a drop moves the shift to that day, keeping its times and its length', async () => {
+  const from = dates.addDays(today(), 400);
+  const to = dates.addDays(from, 2);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${from} 16:00`, endsAt: `${from} 22:00` });
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: to });
+  assert.strictEqual(res.status, 302);
+  assert.match(flashOf(res).msg, /Moved/i);
+
+  const moved = SCH.byId(s.id);
+  assert.strictEqual(moved.business_date, to, 'it is on the new day');
+  assert.strictEqual(moved.starts_at.slice(11), s.starts_at.slice(11), 'same clock time');
+  assert.strictEqual(
+    Date.parse(moved.ends_at.replace(' ', 'T') + 'Z') - Date.parse(moved.starts_at.replace(' ', 'T') + 'Z'),
+    Date.parse(s.ends_at.replace(' ', 'T') + 'Z') - Date.parse(s.starts_at.replace(' ', 'T') + 'Z'),
+    'and exactly as long as it was');
+});
+
+test('an overnight shift keeps its own end when dragged', async () => {
+  const from = dates.addDays(today(), 410);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${from} 20:00`, endsAt: `${dates.addDays(from, 1)} 02:00` });
+  const to = dates.addDays(from, 3);
+  await post(`/schedule/shift/${s.id}/move`, { to_date: to });
+  const moved = SCH.byId(s.id);
+  assert.strictEqual(moved.business_date, to);
+  assert.ok(moved.ends_at > moved.starts_at, 'the end still follows the start');
+  assert.strictEqual(moved.ends_at.slice(0, 10), dates.addDays(to, 1),
+    'and still lands on the following morning — the night moved in one piece');
+});
+
+test('a drop onto the cell it came from writes nothing at all', async () => {
+  // Not an error, and not an edit either: an edit here would stamp
+  // changed_after_publish and tell the floor a published shift moved.
+  const day = dates.addDays(today(), 420);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const before = SCH.byId(s.id);
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: day });
+  assert.strictEqual(res.status, 302, 'it answers');
+  assert.ok(!flashOf(res).err, 'and does not complain');
+  assert.deepStrictEqual(SCH.byId(s.id), before, 'the row is byte-for-byte what it was');
+});
+
+test('a drop runs the SAME validation as an ordinary edit', async () => {
+  // The whole roadmap rule for this phase. A drag that could place a shift an
+  // ordinary edit would refuse is a hole, and a silent one.
+  const day = dates.addDays(today(), 430);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const before = SCH.byId(s.id);
+
+  // Deactivate them, then try to drag their shift.
+  db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(E.server);
+  try {
+    const res = await post(`/schedule/shift/${s.id}/move`, { to_date: dates.addDays(day, 1) });
+    assert.ok(flashOf(res).err, 'refused');
+    assert.match(flashOf(res).msg, /Not moved/i, 'and it says nothing happened');
+    assert.deepStrictEqual(SCH.byId(s.id), before,
+      'the shift did not move — the card is where it was because nothing changed');
+  } finally {
+    db.prepare('UPDATE employees SET active = 1 WHERE id = ?').run(E.server);
+  }
+});
+
+test('a drop never writes a punch, an hour or a service', async () => {
+  const day = dates.addDays(today(), 440);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const count = (t) => db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n;
+  const before = ['time_entries', 'time_breaks', 'work', 'shifts'].map(count);
+  await post(`/schedule/shift/${s.id}/move`, { to_date: dates.addDays(day, 1) });
+  assert.deepStrictEqual(['time_entries', 'time_breaks', 'work', 'shifts'].map(count), before,
+    'moving a plan touches nothing that actually happened');
+});
+
+test('the board makes cards draggable and cells droppable, and still opens the drawer', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /draggable="true" data-drag="\d+"/, 'cards can be picked up');
+  assert.match(html, /data-cell="1" data-emp="\d+" data-d="\d{4}-\d{2}-\d{2}"/,
+    'and every cell knows which person and day it is');
+  // Dragging is a shortcut, never the only way in. The click path is the
+  // keyboard and screen-reader path and has to survive.
+  assert.match(html, /data-edit="\d+"/, 'the card still opens the drawer on click');
+  // The drop builds its form in script, so what is asserted is the script.
+  assert.match(html, /\/schedule\/shift\/' \+ dragId \+ '\/move/,
+    'and the drop posts to a real route rather than moving anything locally');
 });

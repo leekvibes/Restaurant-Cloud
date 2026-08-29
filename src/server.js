@@ -18495,6 +18495,7 @@ app.get('/schedule', (req, res) => {
     const st = pubOf(s);
     const iss = issueOn.get(s.id);
     return `<button class="sbk sbk--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}" type="button"
+      draggable="true" data-drag="${s.id}"
       data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))} to ${esc(sbTimeFull(s.ends_at))}, ${STATE_WORD[st]}${
       iss ? `, needs review` : ''}">
     <b>${esc(posName(s.position))}</b><i>${esc(sbTimeFull(s.starts_at))}–${esc(sbTimeFull(s.ends_at))}</i>
@@ -18510,7 +18511,7 @@ app.get('/schedule', (req, res) => {
         : 'Not scheduled'}</i></div>
       ${days.map((d) => {
         const list = cells.get(`${e.id}|${d}`) || [];
-        return `<div class="sb-cell${d === today ? ' is-today' : ''}">${
+        return `<div class="sb-cell${d === today ? ' is-today' : ''}" data-cell="1" data-emp="${e.id}" data-d="${d}">${
           list.length ? list.map(card).join('')
             : `<button class="sb-add" type="button" data-new="1" data-emp="${e.id}" data-d="${d}"
                  aria-label="Add a shift for ${esc(e.name)} on ${esc(TC.dayLabel(d))}"><span>+ Add shift</span></button>`
@@ -19114,6 +19115,87 @@ app.get('/schedule', (req, res) => {
             document.body.appendChild(f); f.submit();
           });
         })();
+        // ---- PHASE 11: drag a shift to another day -------------------------
+        //
+        // The drop posts a DAY, not a position on screen, and the page reloads
+        // from the database. A refused move leaves the card where it was
+        // because nothing moved — there is no snap-back animation to get wrong,
+        // and no local state that can disagree with the server.
+        //
+        // Dragging is a shortcut, never the only way: the card still opens the
+        // drawer on click, which is the keyboard and screen-reader path and
+        // stays the complete one.
+        (function () {
+          var board = document.querySelector('.sb-grid');
+          if (!board || !('draggable' in document.createElement('div'))) return;
+          var dragId = null;
+          var fromCell = null;
+
+          function cellOf(el) { return el && el.closest ? el.closest('[data-cell]') : null; }
+          function clearHover() {
+            var on = board.querySelectorAll('.sb-cell.is-drop');
+            for (var i = 0; i < on.length; i++) on[i].classList.remove('is-drop');
+          }
+
+          board.addEventListener('dragstart', function (ev) {
+            var card = ev.target.closest ? ev.target.closest('[data-drag]') : null;
+            if (!card) return;
+            dragId = card.getAttribute('data-drag');
+            fromCell = cellOf(card);
+            card.classList.add('is-dragging');
+            // Some browsers need data set or the drag never starts.
+            try { ev.dataTransfer.setData('text/plain', dragId); } catch (e) { /* older engines */ }
+            if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+          });
+
+          board.addEventListener('dragend', function () {
+            var d = board.querySelector('.is-dragging');
+            if (d) d.classList.remove('is-dragging');
+            clearHover(); dragId = null; fromCell = null;
+          });
+
+          board.addEventListener('dragover', function (ev) {
+            if (!dragId) return;
+            var cell = cellOf(ev.target);
+            if (!cell || cell === fromCell) return;
+            ev.preventDefault();                     // this is what allows a drop
+            if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+            if (!cell.classList.contains('is-drop')) { clearHover(); cell.classList.add('is-drop'); }
+          });
+
+          board.addEventListener('dragleave', function (ev) {
+            var cell = cellOf(ev.target);
+            if (cell) cell.classList.remove('is-drop');
+          });
+
+          board.addEventListener('drop', function (ev) {
+            if (!dragId) return;
+            var cell = cellOf(ev.target);
+            if (!cell || cell === fromCell) return;
+            ev.preventDefault();
+            clearHover();
+            function pick(n) {
+              var el = document.querySelector('#sb-form [name="' + n + '"]');
+              return el ? el.value : '';
+            }
+            var f = document.createElement('form');
+            f.method = 'post';
+            f.action = '/schedule/shift/' + dragId + '/move';
+            var fields = [
+              ['to_date', cell.getAttribute('data-d')],
+              ['w', pick('w')],
+              ['_csrf', pick('_csrf')],
+            ];
+            for (var i = 0; i < fields.length; i++) {
+              var inp = document.createElement('input');
+              inp.type = 'hidden'; inp.name = fields[i][0]; inp.value = fields[i][1];
+              f.appendChild(inp);
+            }
+            document.body.appendChild(f);
+            f.submit();
+          });
+        })();
+
         function sbRepShow(on) {
           var r = document.getElementById('sb-rep');
           if (!r) return;
@@ -19576,6 +19658,29 @@ app.post('/schedule/drop-template', (req, res) => {
   return sbBack(res, w, SCH.deleteScheduleTemplate(req.body.id)
     ? 'Template removed. Shifts already made from it are untouched.'
     : 'That template is already gone.');
+});
+
+// PHASE 11 — a dropped card. It posts a DAY and an employee, never pixels, and
+// the board is re-rendered from the database afterwards.
+app.post('/schedule/shift/:id/move', (req, res) => {
+  if (!sbGuard(req, res)) return;
+  const w = sbWeekOf(req);
+  try {
+    const out = SCH.moveShift(req.params.id, {
+      toDate: MX.isDate(req.body.to_date) ? req.body.to_date : null,
+      toEmployeeId: req.body.to_employee === undefined || req.body.to_employee === ''
+        ? undefined : req.body.to_employee,
+    });
+    if (!out.moved) return sbBack(res, w, '');          // dropped where it already was
+    const note = sbOverlapNote(out.row) + sbAvailNote(out.row);
+    const who = (sbEmpName.get(out.row.employee_id) || {}).name || 'that shift';
+    return sbBack(res, w, `Moved — ${esc(who)}, ${esc(TC.dayLabel(out.row.business_date))}.`
+      + (SCH.q.pubById.get(out.row.id) ? ' Publish the week to tell them.' : '') + note);
+  } catch (e) {
+    if (!(e instanceof SCH.ScheduleError)) throw e;
+    // Nothing moved, so the card is still where it was. Say why.
+    return sbBack(res, w, `Not moved — ${e.message}`, true);
+  }
 });
 
 // PHASE 7 — Saturday usually looks like Friday.

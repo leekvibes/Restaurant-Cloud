@@ -5444,3 +5444,11 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sb-dh-cp button:hover { color: var(--primary); }
 /* Phase 7 — the saved-pattern picker sits with the other week tools. */
 .sb-tsel { max-width: 210px; font: inherit; font-size: 12px; padding: 0 8px; }
+
+/* Phase 11 — drag a shift to another day.
+   .bs * kills box-shadow inside the owner shell, so the drop target is drawn
+   with an outline and a background. A shadow here would ship invisible. */
+.sbk[draggable="true"] { cursor: grab; }
+.sbk.is-dragging { opacity: .4; cursor: grabbing; }
+.sb-cell.is-drop { outline: 2px dashed var(--primary); outline-offset: -3px;
+  background: color-mix(in srgb, var(--primary) 8%, transparent); border-radius: 6px; }
