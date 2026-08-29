@@ -168,16 +168,31 @@ test('Q6: Draft is a compact chip, not a full-width banner', async () => {
     'and says one of the states it can actually be in');
 });
 
-test('Q1: the week shown is the pay period\'s workweek, not a calendar Monday', async () => {
+test('Q1: the week shown runs Monday to Sunday, like a calendar', async () => {
+  // Was the reverse: the board followed the pay period so its seven days were
+  // the seven overtime is measured over. The anchor is a Saturday and nobody
+  // reads a schedule Saturday-first, so the owner changed it. The cost — the
+  // board week is no longer the OT workweek — is pinned in scheduler.test.js.
   const html = await text('/schedule');
   const wk = week();
-  const per = P.periodFor(wk.start);
-  const off = Math.round(
-    (Date.parse(`${wk.start}T00:00:00Z`) - Date.parse(`${per.start}T00:00:00Z`)) / 86400000,
-  );
-  assert.strictEqual(off % 7, 0, 'aligned to the pay period, which is what OT is measured against');
+  const dow = (iso) => new Date(`${iso}T00:00:00Z`).getUTCDay();
+  assert.strictEqual(dow(wk.start), 1, 'the first column is a Monday');
+  assert.strictEqual(dow(wk.end), 0, 'the last is a Sunday');
   assert.strictEqual(Number((html.match(/--sb-cols:(\d+)/) || [])[1]), 7, 'seven columns');
   assert.ok(html.includes(TC.dayLabel(wk.start)) && html.includes(TC.dayLabel(wk.end)));
+});
+
+test('Q1: next and previous land on the next and previous Monday', async () => {
+  // "the next 7 dates", as asked for — not a jump that re-derives from anything.
+  const wk = week();
+  const dow = (iso) => new Date(`${iso}T00:00:00Z`).getUTCDay();
+  const next = dates.addDays(wk.start, 7);
+  const prev = dates.addDays(wk.start, -7);
+  assert.strictEqual(dow(next), 1, 'forward a week is still a Monday');
+  assert.strictEqual(dow(prev), 1, 'and so is back a week');
+  const html = await text(`/schedule?w=${next}`);
+  assert.ok(html.includes(TC.dayLabel(next)), 'the board opens on that Monday');
+  assert.ok(html.includes(TC.dayLabel(dates.addDays(next, 6))), 'through the Sunday after it');
 });
 
 test('prev and next move exactly one week', async () => {

@@ -986,26 +986,35 @@ function inRange(from, to) {
  *   reports.js:120   const midDate = shiftDate(from, 7);
  *                    const weekKey = (d) => (d < midDate ? 'wk1' : 'wk2');
  *
- * The OT workweek is the period start and start + 7, whatever weekday that is —
- * a Saturday, as the anchor currently stands. A board showing Monday to Sunday
- * would total a different seven days from the one deciding whether hour 41 is
- * paid at time and a half, and nobody would notice until a pay run.
+ * MONDAY TO SUNDAY, always, like a wall calendar. The owner asked for this
+ * directly and the reason is that a schedule is read by people who think in
+ * weeks, not in pay periods.
  *
- * Derived from periods.js rather than restated here, so moving the anchor or
- * the period length moves the board with it and changes no scheduler code.
+ * IT IS NO LONGER THE OVERTIME WORKWEEK, and that is the trade. This used to be
+ * derived from the pay-period anchor so the board's seven days were the same
+ * seven days overtime is measured over — the anchor is a Saturday, so OT runs
+ * Saturday to Friday. It now does not. A manager reading "44h" on this board
+ * cannot infer anything about overtime from it.
  *
- * Pure ISO-date arithmetic: no getDay(), no bare `new Date(string)`, nothing
- * that reads the server's zone.
+ * That is survivable ONLY because the roadmap already forbids this board from
+ * saying anything about overtime: projected OT was deliberately left out, and
+ * actual OT in payroll is authoritative. The board totals scheduled hours and
+ * makes no claim about what they cost. If that ever changes, this decoupling
+ * has to be revisited first.
+ *
+ * The clean way to realign them is to move the PAY PERIOD anchor to a Monday,
+ * which is a payroll change affecting existing period boundaries and signed
+ * timesheets, and therefore not one to make quietly.
+ *
+ * Pure ISO-date arithmetic in explicit UTC: no local getDay(), nothing that
+ * reads the server's zone.
  */
 function weekWindowFor(businessDate) {
-  const p = P.periodFor(businessDate);
-  const offset = daysApart(p.start, businessDate);
-  const start = addDays(p.start, Math.floor(offset / 7) * 7);
-  // A period whose length is not a whole number of weeks leaves a short final
-  // stretch. Clamp to the period rather than running a week past its end and
-  // colliding with the next one.
-  const end = addDays(start, 6);
-  return { start, end: end > p.end ? p.end : end };
+  // 0 = Sunday in getUTCDay, so a Monday-based index is (dow + 6) % 7:
+  // Mon->0, Tue->1 … Sun->6. That is how far back the week started.
+  const dow = new Date(`${businessDate}T00:00:00Z`).getUTCDay();
+  const start = addDays(businessDate, -((dow + 6) % 7));
+  return { start, end: addDays(start, 6) };
 }
 
 /** The week window plus the shifts in it, for the board. */

@@ -455,17 +455,43 @@ test('the employee window is a rolling tail, not a calendar week', () => {
 
 // --- D2 / D3: the week ------------------------------------------------------
 
-test('D2: the board week is the pay-period workweek, not a hard-coded Monday', () => {
+test('D2: the board week is Monday to Sunday, like a calendar', () => {
+  // CHANGED BY THE OWNER, and it is a trade rather than a free win.
+  //
+  // This used to assert the opposite: the board week was derived from the pay
+  // period so its seven days were the seven overtime is measured over. The
+  // anchor is a Saturday, so that board ran Saturday to Friday and nobody reads
+  // a schedule that way.
+  //
+  // The cost is real and is recorded here so it is not rediscovered: the board
+  // week is NO LONGER the overtime workweek. It is survivable only because the
+  // roadmap already forbids this board from projecting overtime at all — it
+  // totals scheduled hours and makes no claim about what they cost. If that
+  // ever changes, this decoupling has to be revisited first.
+  const DOW = (iso) => new Date(`${iso}T00:00:00Z`).getUTCDay();
   const w = S.weekWindowFor(TODAY);
+  assert.strictEqual(DOW(w.start), 1, 'starts on a Monday');
+  assert.strictEqual(DOW(w.end), 0, 'ends on a Sunday');
+  assert.strictEqual(
+    Math.round((Date.parse(`${w.end}T00:00:00Z`) - Date.parse(`${w.start}T00:00:00Z`)) / 86400000),
+    6, 'and is always a full seven days — never clamped to a period boundary');
+});
+
+test('D2: the board week is deliberately NOT the overtime workweek any more', () => {
+  // Pinned so the divergence is a decision somebody made rather than a drift
+  // somebody caused. Payroll splits overtime on the period anchor; the board
+  // does not, and must not start pretending it does.
   const p = P.periodFor(TODAY);
+  const w = S.weekWindowFor(TODAY);
   const off = Math.round(
     (Date.parse(`${w.start}T00:00:00Z`) - Date.parse(`${p.start}T00:00:00Z`)) / 86400000,
   );
-  // This is the whole point: aggregatePayroll splits overtime at period start
-  // and start + 7. A board week that is not a multiple of 7 from the anchor
-  // totals a different seven days from the one that decides overtime.
-  assert.strictEqual(off % 7, 0, 'the week is aligned to the pay period');
-  assert.ok(w.start >= p.start && w.end <= p.end, 'and never spills out of its period');
+  const anchorDow = new Date(`${p.start}T00:00:00Z`).getUTCDay();
+  if (anchorDow !== 1) {
+    assert.notStrictEqual(off % 7, 0,
+      'with a non-Monday anchor the two windows genuinely differ — that is the trade');
+  }
+  assert.ok(true, 'and with a Monday anchor they would coincide again, harmlessly');
 });
 
 test('D2: every day of a week resolves to the same window', () => {
@@ -477,30 +503,22 @@ test('D2: every day of a week resolves to the same window', () => {
   assert.strictEqual(seen.size, 1, 'seven days, one week');
 });
 
-test('D2: moving the pay-period anchor moves the board with it', () => {
+test('D2: the pay-period anchor no longer moves the board', () => {
+  // The inverse of what this asserted before. The board week is a calendar week
+  // now, so moving the anchor changes when people are PAID and not what the
+  // schedule shows. Pinned because "the board follows the anchor" was true for
+  // seven phases and somebody will remember it.
   const before = S.weekWindowFor(TODAY);
   const original = P.anchor();
   try {
     P.setSetting('period_anchor', addDays(original, 1));
     const after = S.weekWindowFor(TODAY);
-    assert.notStrictEqual(after.start, before.start, 'the window moved with the anchor');
-    // NOT "moved by one day". An earlier version asserted that, which is only
-    // true when TODAY sits in a period's FIRST week — shift the anchor when it
-    // sits in the second and the window jumps back six days into week one
-    // instead. That test passed on the day it was written and went red the next
-    // morning. The real property is the one that has to hold every day:
-    // whatever the anchor, the window still contains TODAY and is still a whole
-    // number of weeks from the period start.
+    assert.strictEqual(after.start, before.start, 'the board did not move');
+    assert.strictEqual(after.end, before.end);
     assert.ok(after.start <= TODAY && TODAY <= after.end, 'and still contains today');
-    const p = P.periodFor(TODAY);
-    const off = Math.round(
-      (Date.parse(`${after.start}T00:00:00Z`) - Date.parse(`${p.start}T00:00:00Z`)) / 86400000,
-    );
-    assert.strictEqual(off % 7, 0, 'still aligned to the moved period');
   } finally {
     P.setSetting('period_anchor', original);
   }
-  assert.deepStrictEqual(S.weekWindowFor(TODAY), before, 'and comes back when the anchor does');
 });
 
 test('D3: weeks tile without gap or overlap across the DST change', () => {
