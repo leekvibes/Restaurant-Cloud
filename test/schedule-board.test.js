@@ -1744,3 +1744,80 @@ test('the board makes cards draggable and cells droppable, and still opens the d
   assert.match(html, /\/schedule\/shift\/' \+ dragId \+ '\/move/,
     'and the drop posts to a real route rather than moving anything locally');
 });
+
+// --- Phase 11, the rest: dragging to another person -------------------------
+
+test('dragging down a column reassigns the shift, keeping its day and times', async () => {
+  const day = dates.addDays(today(), 460);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  // E.multi holds server as well, so this is a legal reassignment.
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: day, to_employee: String(E.multi) });
+  assert.ok(!flashOf(res).err, `it moved: ${flashOf(res).msg}`);
+  assert.match(flashOf(res).msg, /Moved to/i, 'and says who it went to');
+
+  const moved = SCH.byId(s.id);
+  assert.strictEqual(moved.employee_id, E.multi, 'the new person owns it');
+  assert.strictEqual(moved.business_date, day, 'the day did not change');
+  assert.strictEqual(moved.starts_at, s.starts_at, 'nor the times');
+  assert.strictEqual(moved.position, s.position, 'nor the position');
+});
+
+test('a diagonal drag changes the person AND the day in one move', async () => {
+  const day = dates.addDays(today(), 470);
+  const to = dates.addDays(day, 3);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: to, to_employee: String(E.multi) });
+  assert.ok(!flashOf(res).err);
+  // The message names both, because saying only one reads like half of it failed.
+  assert.match(flashOf(res).msg, /Moved to/i);
+  const moved = SCH.byId(s.id);
+  assert.strictEqual(moved.employee_id, E.multi);
+  assert.strictEqual(moved.business_date, to);
+});
+
+test('dropping on somebody who does not hold the position is refused, and nothing moves', async () => {
+  // The same rule the drawer enforces. A drag that could place a shift an
+  // ordinary edit would refuse is a hole, and a silent one.
+  const day = dates.addDays(today(), 480);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const before = SCH.byId(s.id);
+  const res = await post(`/schedule/shift/${s.id}/move`,
+    { to_date: day, to_employee: String(E.barista) });   // barista does not do server
+  assert.ok(flashOf(res).err, 'refused');
+  assert.match(flashOf(res).msg, /Not moved/i);
+  assert.deepStrictEqual(SCH.byId(s.id), before, 'and the shift is exactly where it was');
+});
+
+test('dropping on an inactive employee is refused', async () => {
+  const day = dates.addDays(today(), 490);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const before = SCH.byId(s.id);
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: day, to_employee: String(E.gone) });
+  assert.ok(flashOf(res).err, 'refused');
+  assert.deepStrictEqual(SCH.byId(s.id), before, 'nothing moved');
+});
+
+test('a reassignment onto an overlapping shift warns but still moves', async () => {
+  // Warn, never block — the rule every phase before this settled on.
+  const day = dates.addDays(today(), 500);
+  SCH.create({ employeeId: E.multi, position: 'server',
+    startsAt: `${day} 17:00`, endsAt: `${day} 21:00` });
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: day, to_employee: String(E.multi) });
+  assert.ok(!flashOf(res).err, 'it still moves');
+  assert.match(flashOf(res).msg, /overlaps/i, 'and the manager is told');
+  assert.strictEqual(SCH.byId(s.id).employee_id, E.multi);
+});
+
+test('the drop carries the target person as well as the target day', async () => {
+  const html = await text('/schedule');
+  assert.match(html, /\['to_employee', cell\.getAttribute\('data-emp'\)\]/,
+    'so dragging down a column is a reassignment, with no special case');
+  assert.match(html, /\['to_date', cell\.getAttribute\('data-d'\)\]/,
+    'and dragging along a row is a day move');
+});

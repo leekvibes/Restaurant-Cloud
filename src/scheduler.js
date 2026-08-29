@@ -922,8 +922,8 @@ function moveShift(id, { toDate, toEmployeeId } = {}) {
   // Dropped where it already was. Not an error, and not a write either — an
   // edit here would stamp changed_after_publish and tell the floor a published
   // shift moved when it did not.
-  if (!Object.keys(patch).length) return { row, moved: false };
-  return { row: edit(Number(id), patch), moved: true };
+  if (!Object.keys(patch).length) return { row, moved: false, was: row.employee_id };
+  return { row: edit(Number(id), patch), moved: true, was: row.employee_id };
 }
 
 /**

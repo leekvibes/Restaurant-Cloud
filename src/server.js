@@ -19181,8 +19181,14 @@ app.get('/schedule', (req, res) => {
             var f = document.createElement('form');
             f.method = 'post';
             f.action = '/schedule/shift/' + dragId + '/move';
+            // BOTH, always. The cell knows which person and which day it is,
+            // and moveShift ignores whichever of the two did not actually
+            // change — so dragging along a row is a day move, dragging down a
+            // column is a reassignment, and dragging diagonally is both, with
+            // no special case anywhere.
             var fields = [
               ['to_date', cell.getAttribute('data-d')],
+              ['to_employee', cell.getAttribute('data-emp')],
               ['w', pick('w')],
               ['_csrf', pick('_csrf')],
             ];
@@ -19674,7 +19680,13 @@ app.post('/schedule/shift/:id/move', (req, res) => {
     if (!out.moved) return sbBack(res, w, '');          // dropped where it already was
     const note = sbOverlapNote(out.row) + sbAvailNote(out.row);
     const who = (sbEmpName.get(out.row.employee_id) || {}).name || 'that shift';
-    return sbBack(res, w, `Moved — ${esc(who)}, ${esc(TC.dayLabel(out.row.business_date))}.`
+    // Names the person AND the day, because a diagonal drag changed both and a
+    // message saying only one of them reads like half the move failed.
+    const reassigned = out.was != null && out.was !== out.row.employee_id;
+    const from = reassigned ? (sbEmpName.get(out.was) || {}).name : null;
+    return sbBack(res, w, (reassigned
+      ? `Moved to ${esc(who)}${from ? ` from ${esc(from)}` : ''} — ${esc(TC.dayLabel(out.row.business_date))}.`
+      : `Moved — ${esc(who)}, ${esc(TC.dayLabel(out.row.business_date))}.`)
       + (SCH.q.pubById.get(out.row.id) ? ' Publish the week to tell them.' : '') + note);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
