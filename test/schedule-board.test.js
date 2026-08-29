@@ -953,11 +953,14 @@ test('the drawer says what that person already has — hours, and that same day'
   assert.strictEqual(flashOf(a).err, false);
 
   const html = await text('/schedule');
-  assert.match(html, /var wkMins = \{/, 'the week minutes reach the page');
+  // The drawer's data moved into a #sb-data block so a no-reload refresh can
+  // re-read it. Same numbers, same server, one parse instead of two.
+  assert.match(html, /id="sb-data"/, 'the week minutes reach the page');
   assert.match(html, /id="sb-ctx"/, 'and there is somewhere to say it');
 
   // Same source as the row, so the drawer and the grid cannot disagree.
-  const mins = JSON.parse(/var wkMins = (\{.*?\});/.exec(html)[1]);
+  const blob = /id="sb-data" hidden>([\s\S]*?)<\/div>/.exec(html)[1];
+  const mins = JSON.parse(blob.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')).mins;
   const t = SCH.weekTotals(SCH.inRange(week().start, week().end));
   assert.strictEqual(mins[E.barista], t.byEmployee[String(E.barista)].paidMinutes,
     'the figure is weekTotals, not a second count');
@@ -1861,11 +1864,120 @@ test('a reassignment onto an overlapping shift warns but still moves', async () 
   assert.strictEqual(SCH.byId(s.id).employee_id, E.multi);
 });
 
+// ===========================================================================
+// The "..." menu on a card, and the no-reload write path.
+//
+// Four actions live behind one trigger: Duplicate, Multi duplicate, Unpublish,
+// Delete. Every one of them posts to a route that already existed and already
+// had tests — what is new is the trigger, the count, and the fact that none of
+// them reload the document. So these test the parts that are genuinely new,
+// and lean on the existing route tests for the rest.
+// ===========================================================================
+
+test('every card carries an actions trigger, and it is not nested in the card button', async () => {
+  const day = dates.addDays(week().start, 2);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  const html = await text('/schedule');
+  assert.match(html, new RegExp(`data-dots="${s.id}"`), 'the shift has a trigger');
+  // A <button> inside a <button> is not a thing browsers agree on, so the
+  // trigger is a SIBLING inside .sbk-w. If that ever collapses back into the
+  // card, dragging from the dots starts a drag and the menu stops opening.
+  assert.match(html, /<div class="sbk-w">\s*<button class="sbk /,
+    'the card and its trigger are siblings in a wrapper');
+  // Asserted as "the card CLOSES before the trigger opens". A doesNotMatch on
+  // the two appearing in sequence passes whatever the nesting is, because the
+  // sibling layout puts them in sequence too — it proved nothing.
+  assert.match(html, /<button class="sbk [\s\S]*?<\/button>\s*<button class="sbk-dots/,
+    'the trigger is never inside the card button');
+});
+
+test('the menu offers exactly the four actions, and sits outside the scrolling box', async () => {
+  const html = await text('/schedule');
+  for (const act of ['duplicate', 'multi', 'unpublish', 'delete']) {
+    assert.match(html, new RegExp(`data-act="${act}"`), `the menu offers ${act}`);
+  }
+  // Nothing else. The reference this was built from carries Select, Assign,
+  // Allocate and Start chat as well; the owner asked for four, and a menu that
+  // grows on its own is how a two-click action becomes a five-click one.
+  const acts = [...html.matchAll(/data-act="([a-z-]+)"/g)].map((m) => m[1]);
+  assert.deepStrictEqual([...new Set(acts)].sort(),
+    ['delete', 'duplicate', 'multi', 'multi-go', 'unpublish'],
+    'and nothing beyond them (multi-go is the submenu button)');
+
+  // Inside .sb-scroll it would be clipped by overflow:auto at the right-hand
+  // edge of the week — the classic way this control ships half-drawn.
+  const menuAt = html.indexOf('id="sb-menu"');
+  const scrollAt = html.indexOf('class="sb-scroll');
+  assert.ok(menuAt > -1 && scrollAt > -1 && menuAt < scrollAt,
+    'the menu is rendered before the scrolling box, not inside it');
+});
+
+test('multi duplicate makes exactly the number asked for, and refuses to be told a silly one', async () => {
+  // A day of its own. Sharing one with another test makes the counts below
+  // depend on the order the file happens to run in.
+  const day = dates.addDays(week().start, 271);
+  const mk = () => SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 09:00`, endsAt: `${day} 13:00` });
+  const count = () => SCH.inRange(day, day).filter((r) => r.status !== 'cancelled').length;
+
+  const a = mk();
+  assert.strictEqual(count(), 1);
+  await post(`/schedule/shift/${a.id}/duplicate`, { count: '3', w: week().start });
+  assert.strictEqual(count(), 4, 'three copies joined the original');
+
+  // The field is a text box on a menu. A slip of the keyboard should cost a
+  // wasted click, not two hundred drafts to undo one at a time.
+  const b = mk();
+  const before = count();
+  await post(`/schedule/shift/${b.id}/duplicate`, { count: '500', w: week().start });
+  assert.strictEqual(count(), before + 20, 'clamped to twenty, not five hundred');
+
+  // Junk and absence both mean "once", which is what the plain Duplicate item
+  // posts and what every caller before this change relied on.
+  const c = mk();
+  const was = count();
+  await post(`/schedule/shift/${c.id}/duplicate`, { count: 'lots', w: week().start });
+  assert.strictEqual(count(), was + 1, 'nonsense means once');
+  const d = mk();
+  const was2 = count();
+  await post(`/schedule/shift/${d.id}/duplicate`, { w: week().start });
+  assert.strictEqual(count(), was2 + 1, 'and so does saying nothing');
+
+  const e = mk();
+  const was3 = count();
+  await post(`/schedule/shift/${e.id}/duplicate`, { count: '0', w: week().start });
+  assert.strictEqual(count(), was3 + 1, 'zero is not a way to make nothing happen quietly');
+});
+
+test('a board action posts with fetch and swaps regions, rather than reloading', async () => {
+  const html = await text('/schedule');
+  // The whole point of the change: the drop and the menu stopped submitting
+  // forms. If this reverts to f.submit() the page blinks again and the scroll
+  // position goes with it.
+  assert.match(html, /function sbPost\(/, 'there is one write path');
+  assert.match(html, /fetch\(action, \{/, 'and it posts with fetch');
+  assert.match(html, /SB_REGIONS = \['\.sb-bar', '\.sb-grid', '\.sb-sum', '#sb-data', '#sb-flash'\]/,
+    'swapping the regions the server just re-rendered');
+  // The elements themselves survive, which is what keeps the delegated
+  // listeners bound and the scroll box scrolled.
+  assert.match(html, /to\.innerHTML = from\.innerHTML/, 'by innerHTML, so the elements stay');
+  // Scroll is restored explicitly, because an empty grid clamps it to zero
+  // mid-swap. Measured: 120px became 72px on a box that could hold 295.
+  assert.match(html, /void sc\.scrollHeight;/, 'after forcing the pending layout');
+  assert.match(html, /sc\.scrollTop = top;/, 'the scroll position is put back');
+});
+
 test('the drop carries the target person as well as the target day', async () => {
   const html = await text('/schedule');
-  assert.match(html, /\['to_employee', cell\.getAttribute\('data-emp'\)\]/,
+  // The drop posts through sbPost now instead of building a form, so these
+  // are object keys rather than array pairs. What is asserted is unchanged:
+  // BOTH fields travel on every drop, and moveShift ignores whichever did not
+  // change — that is what keeps a row-drag, a column-drag and a diagonal one
+  // from each needing their own special case.
+  assert.match(html, /to_employee: cell\.getAttribute\('data-emp'\)/,
     'so dragging down a column is a reassignment, with no special case');
-  assert.match(html, /\['to_date', cell\.getAttribute\('data-d'\)\]/,
+  assert.match(html, /to_date: cell\.getAttribute\('data-d'\)/,
     'and dragging along a row is a day move');
 });
 

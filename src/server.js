@@ -18336,6 +18336,21 @@ const sbTimeFull = (utc) => TC.clockFace(utc)
   .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
 
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
+// The app's icon set has no copy, no trash and nothing for unpublish, so these
+// four are drawn here rather than approximated with a document or a list that
+// would mean something else. Same 24-box and stroke weight as views.js icon(),
+// so they sit with the rest of the shell instead of beside it.
+const SB_ICON = {
+  copy: '<rect x="8.5" y="8.5" width="11" height="11" rx="2"/>'
+    + '<path d="M15.5 5.5H6.5a2 2 0 0 0-2 2v9"/>',
+  copies: '<rect x="10" y="10" width="10" height="10" rx="2"/>'
+    + '<path d="M16.5 6.5h-9a2 2 0 0 0-2 2v9"/><path d="M13 13v4M15 15h-4"/>',
+  unpublish: '<circle cx="12" cy="12" r="8.2"/><path d="M8.4 12h7.2"/>',
+  trash: '<path d="M4.8 6.6h14.4"/><path d="M9.4 6.6V5.2a1.4 1.4 0 0 1 1.4-1.4h2.4a1.4 1.4 0 0 1 1.4 1.4v1.4"/>'
+    + '<path d="M6.6 6.6l.9 12.1a1.6 1.6 0 0 0 1.6 1.5h5.8a1.6 1.6 0 0 0 1.6-1.5l.9-12.1"/>',
+};
+const sbIcon = (k) => `<svg class="sb-menu-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${SB_ICON[k]}</svg>`;
 // Whole dollars on the board. Cents on a planned figure would read as a
 // precision the plan does not have — nobody works to the minute.
 const sbUSD = (cents) => '$' + Math.round((cents || 0) / 100).toLocaleString('en-US');
@@ -18624,13 +18639,21 @@ app.get('/schedule', (req, res) => {
   const card = (s) => {
     const st = pubOf(s);
     const iss = issueOn.get(s.id);
-    return `<button class="sbk sbk--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}" type="button"
+    // The trigger is a SIBLING of the card, not a child: the card is itself a
+    // <button> and a button inside a button is not a thing browsers agree on.
+    // The wrapper is what positions it, and it is also why dragging from the
+    // dots does not start a drag — only .sbk carries draggable.
+    return `<div class="sbk-w">
+  <button class="sbk sbk--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}" type="button"
       draggable="true" data-drag="${s.id}"
       data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))} to ${esc(sbTimeFull(s.ends_at))}, ${STATE_WORD[st]}${
       iss ? `, needs review` : ''}">
     <b>${esc(posName(s.position))}</b><i>${esc(sbTimeFull(s.starts_at))}–${esc(sbTimeFull(s.ends_at))}</i>
     <s aria-hidden="true"></s>
-  </button>`;
+  </button>
+  <button class="sbk-dots" type="button" data-dots="${s.id}" aria-haspopup="menu" aria-expanded="false"
+    aria-label="Actions for ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))}">&hellip;</button>
+</div>`;
   };
 
   const row = (e) => {
@@ -18903,7 +18926,9 @@ app.get('/schedule', (req, res) => {
     </section>`;
 
   const body = `<div class="bs-page">
-    ${flash(req)}
+    ${/* Wrapped, and always present even when empty: an update with no page
+         load has to be able to put a message here, and to clear the last one. */''}
+    <div id="sb-flash">${flash(req)}</div>
     <div class="bs-head"><h1>Schedule</h1></div>
     <div class="sb-view sb-view--${sbView}">
 
@@ -18915,6 +18940,30 @@ app.get('/schedule', (req, res) => {
     </nav>
 
     ${sbMobile}
+
+    ${/* The card menu lives at page level, positioned with fixed coordinates
+         from the trigger's rect. Inside the board it would be clipped by
+         .sb-scroll's overflow, which is the classic way this control ends up
+         half-drawn against the right-hand edge of the week. */''}
+    <div class="sb-menu" id="sb-menu" role="menu" hidden aria-label="Shift actions">
+      <button class="sb-menu-i" type="button" data-act="duplicate" role="menuitem">
+        ${sbIcon('copy')}Duplicate</button>
+      <div class="sb-menu-sub">
+        <button class="sb-menu-i" type="button" data-act="multi" role="menuitem" aria-expanded="false">
+          ${sbIcon('copies')}Multi duplicate
+          <span class="sb-menu-ar" aria-hidden="true">&rsaquo;</span></button>
+        <div class="sb-menu-pop" id="sb-menu-pop" hidden>
+          <label class="sb-menu-lab" for="sb-menu-n">Copies</label>
+          <input class="sb-menu-n" id="sb-menu-n" type="number" min="1" max="20" step="1" value="2"
+            inputmode="numeric" aria-label="How many copies">
+          <button class="sb-menu-go" type="button" data-act="multi-go">Duplicate</button>
+        </div>
+      </div>
+      <button class="sb-menu-i" type="button" data-act="unpublish" role="menuitem">
+        ${sbIcon('unpublish')}Unpublish</button>
+      <button class="sb-menu-i sb-menu-i--del" type="button" data-act="delete" role="menuitem">
+        ${sbIcon('trash')}Delete</button>
+    </div>
 
     <div class="sb">
       <div class="sb-frame">
@@ -19020,6 +19069,21 @@ app.get('/schedule', (req, res) => {
               : '<div class="sb-empty">Nobody on staff yet. Add people under Staff, then plan their week here.</div>'}
           </div>
         </div>
+
+        ${/* Everything the drawer needs about this week, in one block inside
+             the frame so a no-reload refresh can re-read it from the fetched
+             document. Not a <script> tag: swapped-in scripts do not execute,
+             and this is data, so it is parsed rather than run. */''}
+        <div id="sb-data" hidden>${esc(JSON.stringify({
+    shifts: shifts.map((s) => ({
+      id: s.id, e: s.employee_id, p: s.position,
+      si: TC.utcToLocalInput(s.starts_at), ei: TC.utcToLocalInput(s.ends_at),
+      dp: s.daypart, n: s.note || '', pub: pubOf(s),
+      bm: (s.breaks[0] || {}).minutes || '', bp: (s.breaks[0] || {}).paid ? '1' : '0',
+    })),
+    avail: sbAvailMap,
+    mins: Object.fromEntries(Object.entries(totals.byEmployee).map(([id, t]) => [id, t.paidMinutes])),
+  }))}</div>
 
         <div class="sb-sum">
           <div class="sb-sum-c"><span>Hours</span><b>${sbHours(totals.total.paidMinutes)}</b></div>
@@ -19179,26 +19243,27 @@ app.get('/schedule', (req, res) => {
         // Prefilled from the LOCAL rendering of each stored UTC stamp, through
         // the same converter the clock uses, so a 4pm shift shows 16:00 in the
         // form whatever the server's zone and whichever side of DST it is on.
-        var shifts = ${JSON.stringify(shifts.map((s) => ({
-          id: s.id, e: s.employee_id, p: s.position,
-          si: TC.utcToLocalInput(s.starts_at), ei: TC.utcToLocalInput(s.ends_at),
-          dp: s.daypart, n: s.note || '', pub: pubOf(s),
-          bm: (s.breaks[0] || {}).minutes || '', bp: (s.breaks[0] || {}).paid ? '1' : '0',
-        })))};
-        var byId = {};
-        shifts.forEach(function (s) { byId[s.id] = s; });
+        // Read from the JSON block below rather than written inline, because a
+        // drag or a menu action refreshes the board WITHOUT a page load and
+        // then has to refresh this too. One shape, one parser, both times —
+        // the alternative is a drawer that opens on a shift that has moved.
+        var shifts = [], byId = {}, sbAvail = {}, wkMins = {};
+        function sbReadData(root) {
+          var el = (root || document).querySelector('#sb-data');
+          if (!el) return;
+          var d = JSON.parse(el.textContent);
+          shifts = d.shifts; sbAvail = d.avail; wkMins = d.mins;
+          byId = {};
+          shifts.forEach(function (s) { byId[s.id] = s; });
+        }
+        sbReadData(document);
         var held = ${JSON.stringify(held)};
-        // Phase 6 context. Computed on the SERVER through the same resolver the
-        // Issues engine uses — the drawer must never carry a second opinion
-        // about whether somebody can work, which is exactly how sbOverlapNote
-        // once drifted by living in a route.
-        var sbAvail = ${JSON.stringify(sbAvailMap)};
+        // Phase 6 context and the week's minutes both travel in #sb-data above,
+        // computed on the SERVER through the same resolver the Issues engine
+        // uses — the drawer must never carry a second opinion about whether
+        // somebody can work, which is exactly how sbOverlapNote once drifted
+        // by living in a route.
         var posNames = ${JSON.stringify(posNames)};
-        // Paid minutes already on the board this week, per person — the server's
-        // own weekTotals, not a second count that could disagree with the row.
-        var wkMins = ${JSON.stringify(Object.fromEntries(
-    Object.entries(totals.byEmployee).map(([id, t]) => [id, t.paidMinutes]),
-  ))};
 
         // The position list belongs to the PERSON, not to the table. Rebuilt
         // whenever the employee changes, so the only positions on offer are the
@@ -19292,12 +19357,205 @@ app.get('/schedule', (req, res) => {
             document.body.appendChild(f); f.submit();
           });
         })();
+        // ---- ONE WRITE PATH, NO PAGE LOAD ---------------------------------
+        //
+        // Every board action posts the same forms to the same routes as before
+        // and the server still redirects to the board — this just does the POST
+        // with fetch, follows that redirect, and swaps in the four regions of
+        // the answer instead of letting the browser repaint the document.
+        //
+        // The server therefore stays the ONLY thing that decides what the board
+        // says. Nothing here computes an hour, a total or a position; it copies
+        // rendered HTML. That matters because the numbers on this page are
+        // wages and hours, and a client-side guess at them that drifts from the
+        // server is worse than a page flash.
+        //
+        // Regions are swapped by innerHTML on elements that STAY, so the
+        // delegated listeners bound to .sb-grid survive and .sb-scroll keeps
+        // its scroll position — which is most of what "smooth" means here.
+        var SB_REGIONS = ['.sb-bar', '.sb-grid', '.sb-sum', '#sb-data', '#sb-flash'];
+        var sbBusy = false;
+
+        function sbFieldsFrom(form) {
+          var out = {};
+          function pick(n) {
+            var el = document.querySelector('#sb-form [name="' + n + '"]');
+            return el ? el.value : '';
+          }
+          out.w = pick('w'); out._csrf = pick('_csrf');
+          return out;
+        }
+
+        function sbSwap(html) {
+          var doc = new DOMParser().parseFromString(html, 'text/html');
+          // Held across the swap. The element survives, but for the instant the
+          // grid is empty the browser clamps scrollTop to the new maximum —
+          // zero — and does not put it back when the rows return. Measured
+          // dropping 40px to 15.5px on a one-card move, which is precisely the
+          // jump this whole change exists to remove.
+          var sc = document.querySelector('.sb-scroll');
+          var top = sc ? sc.scrollTop : 0, left = sc ? sc.scrollLeft : 0;
+
+          for (var i = 0; i < SB_REGIONS.length; i++) {
+            var sel = SB_REGIONS[i];
+            var to = document.querySelector(sel), from = doc.querySelector(sel);
+            if (to && from) to.innerHTML = from.innerHTML;
+          }
+          sbReadData(document);
+
+          if (sc) {
+            // Reading scrollHeight forces the pending layout to run NOW. Without
+            // it the assignment below lands while the grid is still measured as
+            // empty and gets clamped to zero — which is what actually happened:
+            // 120px became 72px on a container that could hold 295.
+            void sc.scrollHeight;
+            sc.scrollTop = top; sc.scrollLeft = left;
+            // And once more after the next frame, for the row heights that only
+            // settle after fonts and grid tracks resolve.
+            requestAnimationFrame(function () {
+              if (sc.scrollTop !== top) sc.scrollTop = top;
+              if (sc.scrollLeft !== left) sc.scrollLeft = left;
+            });
+          }
+        }
+
+        // Falls back to a real navigation rather than leaving the board wrong.
+        // A failed fetch here means the browser and the database disagree, and
+        // the only honest fix for that is to go and ask the database again.
+        function sbPost(action, fields, done) {
+          if (sbBusy) return;
+          sbBusy = true;
+          var body = new URLSearchParams();
+          var base = sbFieldsFrom();
+          for (var k in base) if (base[k]) body.set(k, base[k]);
+          for (var j in fields) body.set(j, fields[j]);
+          fetch(action, {
+            method: 'POST', body: body, credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          }).then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.text();
+          }).then(function (html) {
+            sbSwap(html);
+            sbBusy = false;
+            if (done) done(true);
+          }).catch(function () {
+            sbBusy = false;
+            if (done) done(false);
+            var f = document.createElement('form');
+            f.method = 'post'; f.action = action;
+            // Explicit rather than inherited from the body above. Built in
+            // script, and form.submit() skips both the response-level stamper
+            // (it only sees forms in the served HTML) and any submit listener,
+            // so the token has to be put here by name or the fallback fails
+            // exactly when it is needed — in production, where CSRF is on.
+            if (!body.has('_csrf')) body.set('_csrf', sbFieldsFrom()._csrf);
+            body.forEach(function (v, k) {
+              var i2 = document.createElement('input');
+              i2.type = 'hidden'; i2.name = k; i2.value = v; f.appendChild(i2);
+            });
+            document.body.appendChild(f); f.submit();
+          });
+        }
+
+        // ---- the "..." menu on a card --------------------------------------
+        (function () {
+          var menu = document.getElementById('sb-menu');
+          var pop = document.getElementById('sb-menu-pop');
+          if (!menu) return;
+          var openId = null, openBtn = null;
+
+          function close() {
+            menu.hidden = true;
+            if (pop) pop.hidden = true;
+            var m = menu.querySelector('[data-act="multi"]');
+            if (m) m.setAttribute('aria-expanded', 'false');
+            if (openBtn) openBtn.setAttribute('aria-expanded', 'false');
+            var lit = document.querySelector('.sbk-w.is-menu');
+            if (lit) lit.classList.remove('is-menu');
+            openId = null; openBtn = null;
+          }
+          window.sbMenuClose = close;
+
+          function open(btn) {
+            openId = btn.getAttribute('data-dots');
+            openBtn = btn;
+            btn.setAttribute('aria-expanded', 'true');
+            var w = btn.closest('.sbk-w'); if (w) w.classList.add('is-menu');
+            menu.hidden = false;
+            // Measured after it is visible, then flipped to whichever side and
+            // corner it actually fits — the last column of the week is the
+            // whole reason this is not just "below and to the right".
+            var r = btn.getBoundingClientRect();
+            var mw = menu.offsetWidth, mh = menu.offsetHeight;
+            var left = r.right - mw;
+            if (left < 8) left = 8;
+            if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+            var top = r.bottom + 4;
+            if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 4);
+            menu.style.left = Math.round(left) + 'px';
+            menu.style.top = Math.round(top) + 'px';
+          }
+
+          document.addEventListener('click', function (ev) {
+            var dots = ev.target.closest ? ev.target.closest('[data-dots]') : null;
+            if (dots) {
+              ev.preventDefault(); ev.stopPropagation();
+              var was = openId;
+              close();
+              if (was !== dots.getAttribute('data-dots')) open(dots);
+              return;
+            }
+            var item = ev.target.closest ? ev.target.closest('[data-act]') : null;
+            if (!item || !menu.contains(item)) { if (!menu.hidden) close(); return; }
+            ev.preventDefault();
+            var act = item.getAttribute('data-act');
+            var id = openId;
+            if (!id) return;
+
+            if (act === 'multi') {
+              if (!pop) return;
+              pop.hidden = !pop.hidden;
+              item.setAttribute('aria-expanded', pop.hidden ? 'false' : 'true');
+              if (!pop.hidden) { var n = document.getElementById('sb-menu-n'); if (n) { n.focus(); n.select(); } }
+              return;
+            }
+            if (act === 'multi-go') {
+              var el = document.getElementById('sb-menu-n');
+              var count = Math.max(1, Math.min(20, Number(el && el.value) || 1));
+              close();
+              sbPost('/schedule/shift/' + id + '/duplicate', { count: String(count) });
+              return;
+            }
+            close();
+            if (act === 'duplicate') sbPost('/schedule/shift/' + id + '/duplicate', {});
+            else if (act === 'unpublish') sbPost('/schedule/shift/' + id + '/unpublish', {});
+            else if (act === 'delete') sbPost('/schedule/shift/' + id + '/delete', {});
+          });
+
+          document.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Escape' && !menu.hidden) { close(); if (openBtn) openBtn.focus(); }
+          });
+          // A menu pinned to fixed coordinates is wrong the moment anything
+          // moves under it, and the board scrolls inside its own box.
+          window.addEventListener('resize', close);
+          var sc = document.querySelector('.sb-scroll');
+          if (sc) sc.addEventListener('scroll', close, { passive: true });
+          window.addEventListener('scroll', close, { passive: true });
+        })();
+
         // ---- PHASE 11: drag a shift to another day -------------------------
         //
-        // The drop posts a DAY, not a position on screen, and the page reloads
-        // from the database. A refused move leaves the card where it was
-        // because nothing moved — there is no snap-back animation to get wrong,
-        // and no local state that can disagree with the server.
+        // The drop posts a DAY, not a position on screen. It used to submit a
+        // form and reload the document; it now posts the same fields with
+        // fetch and swaps the answer in, so the board does not blink and the
+        // scroll position survives.
+        //
+        // The card is moved in the DOM first, before the request, so the drop
+        // feels immediate. That optimism is safe ONLY because the swap that
+        // follows overwrites the whole grid with the server's version a moment
+        // later — a refused move puts the card back without any snap-back code,
+        // because the board is simply redrawn from what is actually stored.
         //
         // Dragging is a shortcut, never the only way: the card still opens the
         // drawer on click, which is the keyboard and screen-reader path and
@@ -19351,31 +19609,29 @@ app.get('/schedule', (req, res) => {
             if (!cell || cell === fromCell) return;
             ev.preventDefault();
             clearHover();
-            function pick(n) {
-              var el = document.querySelector('#sb-form [name="' + n + '"]');
-              return el ? el.value : '';
+            if (window.sbMenuClose) window.sbMenuClose();
+
+            // Move it now. The server's answer replaces the whole grid in a
+            // moment either way, so this is a preview of the likely outcome
+            // rather than a second source of truth — and if the move is
+            // refused, the redraw puts it back with no snap-back code.
+            var card = board.querySelector('[data-drag="' + dragId + '"]');
+            var wrap = card && card.closest ? card.closest('.sbk-w') : null;
+            var add = cell.querySelector('.sb-add');
+            if (wrap) {
+              wrap.classList.add('is-pending');
+              if (add) cell.insertBefore(wrap, add); else cell.appendChild(wrap);
             }
-            var f = document.createElement('form');
-            f.method = 'post';
-            f.action = '/schedule/shift/' + dragId + '/move';
+
             // BOTH, always. The cell knows which person and which day it is,
             // and moveShift ignores whichever of the two did not actually
             // change — so dragging along a row is a day move, dragging down a
             // column is a reassignment, and dragging diagonally is both, with
             // no special case anywhere.
-            var fields = [
-              ['to_date', cell.getAttribute('data-d')],
-              ['to_employee', cell.getAttribute('data-emp')],
-              ['w', pick('w')],
-              ['_csrf', pick('_csrf')],
-            ];
-            for (var i = 0; i < fields.length; i++) {
-              var inp = document.createElement('input');
-              inp.type = 'hidden'; inp.name = fields[i][0]; inp.value = fields[i][1];
-              f.appendChild(inp);
-            }
-            document.body.appendChild(f);
-            f.submit();
+            sbPost('/schedule/shift/' + dragId + '/move', {
+              to_date: cell.getAttribute('data-d'),
+              to_employee: cell.getAttribute('data-emp'),
+            });
           });
         })();
 
@@ -19736,7 +19992,24 @@ app.post('/schedule/shift/:id/duplicate', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    SCH.duplicate(Number(req.params.id), { createdBy: 'owner' });
+    // Multi duplicate is the same operation N times, not a new one. Clamped to
+    // 20 because the field is a text box on a menu and a slip of the keyboard
+    // should cost a wasted click, not two hundred drafts to undo one at a time.
+    const asked = Math.floor(Number(req.body.count));
+    const n = Number.isFinite(asked) ? Math.max(1, Math.min(20, asked)) : 1;
+    // Stops at the first refusal rather than pressing on: if the second copy
+    // is invalid the tenth will be too, and the message a manager needs is the
+    // reason, not nine more of it. Whatever landed before it stays — they are
+    // real drafts, and silently rolling them back would be a worse surprise.
+    let made = 0;
+    try {
+      for (let i = 0; i < n; i++) { SCH.duplicate(Number(req.params.id), { createdBy: 'owner' }); made += 1; }
+    } catch (e) {
+      if (!(e instanceof SCH.ScheduleError)) throw e;
+      if (!made) throw e;
+      return sbBack(res, w, `Made ${made} of ${n} — ${e.message}`, true);
+    }
+    if (n > 1) return sbBack(res, w, `Duplicated ${n} times into the same day.`);
     // Deliberately NO overlap note here. A duplicate lands in the same cell at
     // the same times, so it always overlaps its own original — the warning
     // would fire every time and tell the manager the thing they just asked
