@@ -4841,9 +4841,12 @@ body.sb-iss-open .sb-iss { transform: translateX(0); visibility: visible; }
 .tsg-sheet { padding: 0; overflow-x: auto; }
 .tsg-h, .tsg-r {
   display: grid;
-  grid-template-columns: minmax(96px,1fr) minmax(120px,1.3fr) minmax(88px,.9fr) minmax(88px,.9fr)
+  /* A narrow column between Date and Position for the delete, added rather than
+     squeezed into an existing one — a control that shares a cell with a value
+     is a control somebody hits by accident. */
+  grid-template-columns: minmax(96px,1fr) 58px minmax(120px,1.3fr) minmax(88px,.9fr) minmax(88px,.9fr)
                          minmax(70px,.7fr) minmax(70px,.7fr) minmax(70px,.7fr) minmax(64px,.6fr) minmax(56px,.6fr);
-  align-items: center; gap: 4px; min-width: 720px;
+  align-items: center; gap: 4px; min-width: 778px;
 }
 .tsg-h {
   padding: 9px 14px; border-bottom: 1.5px solid var(--rule-heavy);
@@ -5452,3 +5455,13 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sbk.is-dragging { opacity: .4; cursor: grabbing; }
 .sb-cell.is-drop { outline: 2px dashed var(--primary); outline-offset: -3px;
   background: color-mix(in srgb, var(--primary) 8%, transparent); border-radius: 6px; }
+
+/* The delete on a timesheet row. Red, and words rather than an icon: a bin
+   glyph between two columns of numbers is the thing somebody taps by mistake.
+   .bs * kills box-shadow in this shell, so the focus ring is an outline. */
+.tsg-del { border: 0; background: none; padding: 6px 2px; font: inherit; font-size: 12px;
+  font-weight: 600; color: var(--danger); text-decoration: underline; cursor: pointer;
+  text-align: left; opacity: .75; }
+.tsg-del:hover { opacity: 1; }
+.tsg-del:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; opacity: 1; }
+.tsg-del.ro { cursor: default; }

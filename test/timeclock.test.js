@@ -3843,3 +3843,57 @@ test('every route that decides a correction also syncs the service', () => {
   assert.match(region, /TC\.syncShiftHours\(/,
     'approving a correction writes the new hours to the service');
 });
+
+// ===========================================================================
+// Deleting a shift from the admin timesheet.
+//
+// It posts to the punch route that already exists, so what is asserted here is
+// that the control is IN THE RIGHT PLACE and reuses those guards — not that a
+// second delete path behaves itself.
+// ===========================================================================
+
+test('the timesheet row offers a delete, between the date and the position', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const row = src.slice(src.indexOf('const punchRows = (d) => d.entries.map'),
+    src.indexOf('const punchRows = (d) => d.entries.map') + 1800);
+  const dateAt = row.indexOf('class="tsg-d"');
+  const delAt = row.indexOf('class="tsg-del"');
+  const posAt = row.indexOf("'position'");
+  assert.ok(dateAt > -1 && delAt > -1 && posAt > -1, 'all three are on the row');
+  assert.ok(dateAt < delAt && delAt < posAt,
+    'and the delete sits between the date and the position, where it was asked for');
+  assert.match(row, /data-del="\$\{e\.id\}"/, 'it names the entry it would remove');
+});
+
+test('the delete reuses the punch route rather than opening a second way in', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /f\.action = '\/timeclock\/' \+ b\.getAttribute\('data-del'\) \+ '\/delete'/,
+    'it posts to the existing route, so the freeze check, the audit line and the '
+    + 'hours resync are the ones already written');
+  // That route's guards, restated here so removing one is a failing test.
+  const at = src.indexOf("app.post('/timeclock/:id/delete'");
+  const route = src.slice(at, at + 1400);
+  assert.match(route, /tcCanEdit\(req, res, e\)/, 'permission and the frozen-period check');
+  assert.match(route, /needs a reason/, 'a reason is required');
+  assert.match(route, /locked/, 'a locked punch is refused');
+  assert.match(route, /TC\.syncShiftHours/, 'and the hours it put on the shift go with it');
+  assert.match(route, /logEvent\('entry', e\.id, 'deleted'/, 'recorded against the shift');
+});
+
+test('a view-only account gets no delete control at all', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const row = src.slice(src.indexOf('const punchRows = (d) => d.entries.map'),
+    src.indexOf('const punchRows = (d) => d.entries.map') + 1800);
+  assert.match(row, /\$\{editable \? `<button type="button" class="tsg-del"/,
+    'the control is behind the same editable flag every other cell on the row uses');
+});
+
+test('the prompt carries no escape sequence', () => {
+  // A backslash-n inside a server-side template literal reaches the browser as
+  // a real newline, ends the string mid-line and takes every handler on the
+  // page with it. It has shipped that way here before.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf("var why = window.prompt(");
+  assert.ok(at > -1, 'the prompt exists');
+  assert.ok(!/\\n/.test(src.slice(at, at + 200)), 'and contains no backslash-n');
+});

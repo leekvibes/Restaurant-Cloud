@@ -22418,8 +22418,40 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                   overtime, and editing an earlier day re-splits the later ones.
                   Position, not "type": it is the thing that differs shift to
                   shift here, and the thing that decides the wage. */''}
+            ${/* Deleting asks for a reason and then posts to the punch route, so
+                   the audit line, the freeze check and the hours resync are the
+                   ones that already exist rather than a second set written here.
+                   The form is built in script to avoid nesting one inside the
+                   row's own editing form. */''}
+            <script>
+            (function () {
+              document.addEventListener('click', function (ev) {
+                var b = ev.target.closest ? ev.target.closest('[data-del]') : null;
+                if (!b) return;
+                var what = b.getAttribute('data-what') || 'this shift';
+                // No escape sequences in this string. A backslash-n inside a
+                // server-side template literal reaches the browser as a REAL
+                // newline, ends the string mid-line and takes every handler on
+                // the page with it. That has shipped here before.
+                var why = window.prompt('Delete ' + what + '? Say why — it is recorded against the shift:');
+                if (why === null) return;
+                if (!why.trim()) { window.alert('A reason is needed to delete a punch.'); return; }
+                var f = document.createElement('form');
+                f.method = 'post';
+                f.action = '/timeclock/' + b.getAttribute('data-del') + '/delete';
+                var tok = document.querySelector('input[name="_csrf"]');
+                [['reason', why.trim()], ['back', location.pathname + location.search],
+                 ['_csrf', tok ? tok.value : '']].forEach(function (kv) {
+                  var i = document.createElement('input');
+                  i.type = 'hidden'; i.name = kv[0]; i.value = kv[1];
+                  f.appendChild(i);
+                });
+                document.body.appendChild(f); f.submit();
+              });
+            })();
+            </script>
             <div class="tsg-h" role="row">
-              <span>Date</span><span>Position</span><span>Start</span><span>End</span>
+              <span>Date</span><span></span><span>Position</span><span>Start</span><span>End</span>
               <span>Breaks</span><span>Total</span><span>Regular</span><span>OT</span><span></span>
             </div>
             ${(() => {
@@ -22463,6 +22495,17 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
                 return `<div class="tsg-r${iss.some((i2) => i2.blocking) ? ' warn' : ''}" id="e-${e.id}" data-entry="${e.id}">
                   <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                  ${/* Removing a shift outright, from the page a manager is
+                        already looking at when they find one that should not be
+                        there. It posts to the SAME delete route the punch page
+                        uses, so it clears the same checks: the period must not
+                        be signed, the punch must not be locked, and a reason is
+                        required. Nothing about deleting is made easier here
+                        except finding it. */''}
+                  ${editable ? `<button type="button" class="tsg-del" data-del="${e.id}"
+                    data-what="${esc(TC.dayLabel(d.date))} · ${esc(posName(e.position))}"
+                    aria-label="Delete this shift on ${esc(TC.dayLabel(d.date))}">Delete</button>`
+                    : '<span class="tsg-del ro" aria-hidden="true"></span>'}
                   ${cell(e.id, 'position', posName(e.position) + (e.daypart ? ' · ' + dp(e.daypart) : ''), e.position)}
                   ${cell(e.id, 'in', TC.clockFace(e.clock_in_at), hhmm(e.clock_in_at))}
                   ${e.clock_out_at
