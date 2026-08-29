@@ -11,6 +11,21 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// A DATABASE OF ITS OWN. Without this the file inherits DB_PATH's default and
+// writes into data.db — the dev database somebody is actually using. This one
+// left two employees behind on every run, so the roster grew by two people
+// each time the suite was run, for as long as that went unnoticed.
+//
+// Set BEFORE ../src/db is required: db.js reads DB_PATH at module load, so a
+// require that happens first pins the wrong file and nothing here can move it.
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zwin-prod-'));
+process.env.DB_PATH = path.join(dir, 'prod.db');
+process.env.TZ = 'America/New_York';
+process.env.ZWIN_SKIP_BACKFILL = '1';
 const { db } = require('../src/db');
 const { q, matchProduct, reviewRows, trendOf } = require('../src/products');
 

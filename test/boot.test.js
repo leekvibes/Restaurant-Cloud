@@ -95,6 +95,50 @@ test('the app boots against a database from before Products existed', async () =
   }
 });
 
+// A test file that never sets DB_PATH inherits the default, which is data.db —
+// the database somebody is actually developing against. schedule-issues.test.js
+// did that for as long as it existed, seeding two employees per run and
+// cleaning up neither: the dev roster reached 320 fixture rows against 14 real
+// people, and the schedule board was mostly strangers named "Issue Anna".
+//
+// Nothing failed, which is why it lasted. A leak into a database no assertion
+// reads has no symptom until somebody looks at the app.
+test('every test file that touches the database gets one of its own', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dir = __dirname;
+
+  // engine.test.js is deliberately different: it compares the SQL wage rule
+  // against the JS one across whatever shifts REALLY exist, which is the whole
+  // point of it — a fresh database has none to compare. It only reads, and the
+  // one place it writes is wrapped in BEGIN/ROLLBACK. Any other file added
+  // here needs the same two properties spelled out.
+  const READS_LIVE_DATA = new Set(['engine.test.js']);
+
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.test.js'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    // An actual require, not any mention of one — this very file names the
+    // module as a search string two lines up, and matched itself the first
+    // time this ran.
+    const m = /=\s*require\('\.\.\/src\/db'\)/.exec(src);
+    if (!m) continue;
+    const usesDb = m.index;
+    if (READS_LIVE_DATA.has(f)) {
+      // Hold the exception to its bargain rather than trusting the comment.
+      assert.ok(!/\b(INSERT|UPDATE|DELETE)\b/.test(src) || /db\.exec\('ROLLBACK'\)/.test(src),
+        `${f} is exempt from DB_PATH, so every write it makes must be rolled back`);
+      continue;
+    }
+    const setsPath = src.indexOf('process.env.DB_PATH');
+    assert.notStrictEqual(setsPath, -1,
+      `${f} requires src/db without setting DB_PATH — it will write into data.db`);
+    // db.js reads DB_PATH when it is required, so setting it afterwards is the
+    // same as not setting it at all, and looks correct while it happens.
+    assert.ok(setsPath < usesDb,
+      `${f} sets DB_PATH after requiring src/db, which is too late to matter`);
+  }
+});
+
 // Two files binding the same port is not a test failure, it is a coin toss:
 // the suite runs them in parallel and whichever loses shows up as a dozen
 // unrelated assertions failing in a file you did not touch. Cheaper to check
