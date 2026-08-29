@@ -3867,7 +3867,7 @@ test('the timesheet row offers a delete, between the date and the position', asy
 
 test('the delete reuses the punch route rather than opening a second way in', async () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  assert.match(src, /f\.action = '\/timeclock\/' \+ b\.getAttribute\('data-del'\) \+ '\/delete'/,
+  assert.match(src, /f\.action = '\/timeclock\/' \+ id \+ '\/delete'/,
     'it posts to the existing route, so the freeze check, the audit line and the '
     + 'hours resync are the ones already written');
   // That route's guards, restated here so removing one is a failing test.
@@ -3888,12 +3888,33 @@ test('a view-only account gets no delete control at all', async () => {
     'the control is behind the same editable flag every other cell on the row uses');
 });
 
-test('the prompt carries no escape sequence', () => {
-  // A backslash-n inside a server-side template literal reaches the browser as
-  // a real newline, ends the string mid-line and takes every handler on the
-  // page with it. It has shipped that way here before.
+test('the confirmation is a REAL form carrying a REAL token', () => {
+  // The first version built its form in script and read the token off the page.
+  // This page renders none, and the response-level stamper only sees forms that
+  // exist in the HTML — so with a password set the POST was refused and nothing
+  // happened, while locally, with CSRF stood down, it worked. That is the trap
+  // CLAUDE.md describes, and this is what keeps it shut.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  const at = src.indexOf("var why = window.prompt(");
-  assert.ok(at > -1, 'the prompt exists');
-  assert.ok(!/\\n/.test(src.slice(at, at + 200)), 'and contains no backslash-n');
+  const at = src.indexOf('<form class="tsx-box"');
+  assert.ok(at > -1, 'the dialog is a form in the markup');
+  const form = src.slice(at, at + 1400);
+  assert.match(form, /name="_csrf" value="\$\{csrfFor\(req\)\}"/, 'with a token the server put there');
+  assert.match(form, /name="reason"/, 'a reason still travels');
+  assert.match(form, /name="back"/, 'and it comes back to the timesheet');
+  assert.ok(!/window\.prompt\(/.test(src.slice(src.indexOf('data-del'), src.indexOf('data-del') + 4000)),
+    'and nothing depends on a browser prompt any more');
+});
+
+test('the dialog is centred, dismissable, and can be told not to ask again', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css.slice(css.indexOf('.tsx {')), /place-items: center/,
+    'centred — a stop, not a drawer sliding up');
+  assert.match(src, /id="tsx-skip"/, 'there is a do-not-ask-again box');
+  assert.match(src, /localStorage\.setItem\(KEY, '1'\)/, 'remembered on this device');
+  assert.match(src, /if \(skipping\(\)\) \{ f\.submit\(\); return; \}/,
+    'and once set it goes straight through');
+  assert.match(src, /catch \(e\) \{ return false; \}/,
+    'a browser that refuses storage still asks rather than throwing');
+  assert.match(src, /ev\.key === 'Escape'/, 'Escape closes it');
 });

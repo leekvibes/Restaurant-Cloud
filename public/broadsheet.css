@@ -5465,3 +5465,26 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .tsg-del:hover { opacity: 1; }
 .tsg-del:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; opacity: 1; }
 .tsg-del.ro { cursor: default; }
+
+/* The delete confirmation. Centred, because it is a stop rather than a drawer —
+   a sheet sliding up from the bottom reads as "here is more", and this is "are
+   you sure". .bs * kills box-shadow in this shell, so depth is a border. */
+.tsx { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 20px; }
+.tsx[hidden] { display: none; }
+.tsx-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.45); }
+.tsx-box { position: relative; width: 100%; max-width: 420px; background: var(--card, #fff);
+  border: 1px solid var(--line); border-radius: 14px; padding: 22px; display: grid; gap: 10px; }
+.tsx-box h2 { margin: 0; font-size: 17px; font-weight: 650; }
+.tsx-box p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--muted); }
+.tsx-what { font-weight: 600; color: var(--ink) !important; }
+.tsx-why { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.tsx-why input { min-height: 42px; padding: 0 11px; font: inherit; font-size: 14px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--field, #fff); color: var(--ink); }
+.tsx-again { display: flex; align-items: center; gap: 8px; min-height: 40px;
+  font-size: 13px; color: var(--muted); cursor: pointer; }
+.tsx-again input { width: 16px; height: 16px; accent-color: var(--primary); }
+.tsx-acts { display: flex; gap: 10px; justify-content: flex-end; padding-top: 4px; }
+.tsx-cancel, .tsx-go { min-height: 42px; padding: 0 18px; border-radius: 8px; font: inherit;
+  font-size: 14px; font-weight: 600; cursor: pointer; }
+.tsx-cancel { border: 1px solid var(--line); background: none; color: var(--ink); }
+.tsx-go { border: 0; background: var(--danger); color: #fff; }

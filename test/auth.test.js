@@ -1002,3 +1002,70 @@ test('the stamper leaves a form that already has a token alone', () => {
   assert.match(region, /inner\.indexOf\(`name="\$\{CSRF_FIELD\}"`\) !== -1\) return m/,
     'a form carrying its own token is returned untouched');
 });
+
+// ===========================================================================
+// Deleting a shift from the timesheet, WITH A PASSWORD SET.
+//
+// This is the only file that runs that way, and it is the only mode in which
+// the bug existed. The first version of that dialog built its form in script
+// and read the token off the page — but the timesheet renders none, and the
+// response-level stamper only sees forms already in the HTML. With CSRF stood
+// down it worked; with a password set the POST was refused and, from the
+// manager's side, clicking Delete simply did nothing.
+// ===========================================================================
+
+test('the timesheet delete dialog carries a token the server will accept', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const db2 = require('../src/db').db;
+  const emp = db2.prepare('SELECT id FROM employees WHERE active = 1 LIMIT 1').get();
+  const P2 = require('../src/periods');
+  const period = P2.recentPeriods(2)[1];
+
+  const html = await (await as(owner, `/payroll/timesheets/${emp.id}?p=${period.start}`)).text();
+  // The dialog is in the markup, so csrfFor() filled it in server-side.
+  const at = html.indexOf('id="tsx-f"');
+  assert.ok(at > -1, 'the confirmation form is rendered');
+  const token = (html.slice(at, at + 400).match(/name="_csrf" value="([a-f0-9]{32})"/) || [])[1];
+  assert.ok(token, 'and it carries a real token — this is what was missing');
+});
+
+test('a delete posted with that token is accepted, and without one is refused', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const TC2 = require('../src/timeclock');
+  const db2 = require('../src/db').db;
+  const P2 = require('../src/periods');
+  const emp = db2.prepare('SELECT id FROM employees WHERE active = 1 LIMIT 1').get();
+  const period = P2.recentPeriods(2)[1];
+  const day = require('../src/dates').addDays(period.start, 3);
+
+  const mk = () => {
+    db2.prepare('INSERT OR IGNORE INTO shifts (date, daypart) VALUES (?, ?)').run(day, 'cafe');
+    const sh = db2.prepare('SELECT id FROM shifts WHERE date = ? AND daypart = ?').get(day, 'cafe');
+    return TC2.createEntry({ employee_id: emp.id, shift_id: sh.id, business_date: day,
+      daypart: 'cafe', position: 'server',
+      clock_in_at: TC2.localInputToUtc(`${day} 09:00`), clock_out_at: TC2.localInputToUtc(`${day} 15:00`),
+      source: 'manager', created_by: 'auth-test' });
+  };
+
+  // Without a token: refused, and the punch survives. This is what the manager
+  // was hitting — a click that did nothing.
+  const doomed = mk();
+  const body = new URLSearchParams({ reason: 'no token', back: '/payroll/timesheets' });
+  const bad = await as(owner, `/timeclock/${doomed}/delete`,
+    { method: 'POST', body, headers: { 'content-type': 'application/x-www-form-urlencoded', origin: BASE } });
+  assert.notStrictEqual(bad.status, 302, 'a tokenless delete does not go through');
+  assert.ok(db2.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(doomed),
+    'and the shift is still there');
+
+  // With the token the dialog actually carries: it works.
+  const html = await (await as(owner, `/payroll/timesheets/${emp.id}?p=${period.start}`)).text();
+  const at = html.indexOf('id="tsx-f"');
+  const token = (html.slice(at, at + 400).match(/name="_csrf" value="([a-f0-9]{32})"/) || [])[1];
+  const ok = await as(owner, `/timeclock/${doomed}/delete`, {
+    method: 'POST',
+    body: new URLSearchParams({ reason: 'wrong service', back: '/payroll/timesheets', _csrf: token }),
+    headers: { 'content-type': 'application/x-www-form-urlencoded', origin: BASE },
+  });
+  assert.strictEqual(ok.status, 302, 'the real dialog posts through');
+  assert.ok(!db2.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(doomed), 'and the shift is gone');
+});

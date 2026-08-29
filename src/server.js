@@ -22418,35 +22418,75 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                   overtime, and editing an earlier day re-splits the later ones.
                   Position, not "type": it is the thing that differs shift to
                   shift here, and the thing that decides the wage. */''}
-            ${/* Deleting asks for a reason and then posts to the punch route, so
-                   the audit line, the freeze check and the hours resync are the
-                   ones that already exist rather than a second set written here.
-                   The form is built in script to avoid nesting one inside the
-                   row's own editing form. */''}
+            ${/* THE DIALOG IS A REAL FORM, and that is the fix rather than the
+                   decoration. The first version built its form in script and
+                   read the CSRF token off the page — but this page renders no
+                   token, and the response-level stamper only sees forms that
+                   exist in the HTML, not ones JavaScript makes afterwards. With
+                   no password set the whole layer stands down, so it worked
+                   locally and was refused in production, silently. Exactly the
+                   trap CLAUDE.md describes.
+
+                   Now the form is in the markup, the stamper and csrfFor both
+                   reach it, and script only points it at the right entry. */''}
+            <div class="tsx" id="tsx" hidden aria-hidden="true">
+              <div class="tsx-scrim" data-tsx-close></div>
+              <form class="tsx-box" method="post" id="tsx-f" role="dialog" aria-modal="true"
+                aria-labelledby="tsx-h" aria-describedby="tsx-b">
+                <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                <input type="hidden" name="back" value="">
+                <h2 id="tsx-h">Delete this shift?</h2>
+                <p id="tsx-b">This removes the punch and takes its hours back off the
+                  service. It cannot be undone.</p>
+                <p class="tsx-what" data-tsx-what></p>
+                <label class="tsx-why"><span>Why</span>
+                  <input type="text" name="reason" maxlength="300" value="Removed from the timesheet"></label>
+                <label class="tsx-again"><input type="checkbox" id="tsx-skip"> Don&rsquo;t ask again</label>
+                <div class="tsx-acts">
+                  <button type="button" class="tsx-cancel" data-tsx-close>Cancel</button>
+                  <button type="submit" class="tsx-go">Delete</button>
+                </div>
+              </form>
+            </div>
             <script>
             (function () {
+              var box = document.getElementById('tsx');
+              var f = document.getElementById('tsx-f');
+              if (!box || !f) return;
+              var KEY = 'zwin_tsdel_skip';
+              var opener = null;
+              function skipping() {
+                try { return window.localStorage.getItem(KEY) === '1'; } catch (e) { return false; }
+              }
+              function aim(id) {
+                f.action = '/timeclock/' + id + '/delete';
+                f.querySelector('[name="back"]').value = location.pathname + location.search;
+              }
+              function close() {
+                box.hidden = true; box.setAttribute('aria-hidden', 'true');
+                if (opener && opener.focus) opener.focus();
+              }
               document.addEventListener('click', function (ev) {
                 var b = ev.target.closest ? ev.target.closest('[data-del]') : null;
-                if (!b) return;
-                var what = b.getAttribute('data-what') || 'this shift';
-                // No escape sequences in this string. A backslash-n inside a
-                // server-side template literal reaches the browser as a REAL
-                // newline, ends the string mid-line and takes every handler on
-                // the page with it. That has shipped here before.
-                var why = window.prompt('Delete ' + what + '? Say why — it is recorded against the shift:');
-                if (why === null) return;
-                if (!why.trim()) { window.alert('A reason is needed to delete a punch.'); return; }
-                var f = document.createElement('form');
-                f.method = 'post';
-                f.action = '/timeclock/' + b.getAttribute('data-del') + '/delete';
-                var tok = document.querySelector('input[name="_csrf"]');
-                [['reason', why.trim()], ['back', location.pathname + location.search],
-                 ['_csrf', tok ? tok.value : '']].forEach(function (kv) {
-                  var i = document.createElement('input');
-                  i.type = 'hidden'; i.name = kv[0]; i.value = kv[1];
-                  f.appendChild(i);
-                });
-                document.body.appendChild(f); f.submit();
+                if (b) {
+                  aim(b.getAttribute('data-del'));
+                  if (skipping()) { f.submit(); return; }
+                  opener = b;
+                  var w = box.querySelector('[data-tsx-what]');
+                  if (w) w.textContent = b.getAttribute('data-what') || '';
+                  box.hidden = false; box.setAttribute('aria-hidden', 'false');
+                  var first = f.querySelector('input[type="text"]');
+                  if (first) { first.focus(); first.select(); }
+                  return;
+                }
+                if (ev.target.closest && ev.target.closest('[data-tsx-close]')) { close(); }
+              });
+              document.addEventListener('keydown', function (ev) {
+                if (ev.key === 'Escape' && !box.hidden) { ev.preventDefault(); close(); }
+              });
+              f.addEventListener('submit', function () {
+                var s = document.getElementById('tsx-skip');
+                if (s && s.checked) { try { window.localStorage.setItem(KEY, '1'); } catch (e) { /* private mode */ } }
               });
             })();
             </script>
