@@ -702,7 +702,14 @@ test('the shift-sheet hours are summed before they are rounded', () => {
 test('an unsigned timesheet can be approved, but not without being told', async () => {
   const P = require('../src/periods');
   const emp = E.clockOnly;
-  const per = P.recentPeriods(2)[1];
+  // A SETTLED period — two back, not one. recentPeriods(2)[1] is the period
+  // that has just ended, and on the FIRST DAY of a new one that period ends
+  // YESTERDAY, which is exactly where clockThrough() backdates its punches. So
+  // once a fortnight this test found somebody else's open punch inside its
+  // period, the page said "1 to fix" instead of "has not submitted this yet",
+  // and three tests here went red for a reason that had nothing to do with what
+  // they check. Two back can never contain a now-relative punch.
+  const per = P.recentPeriods(3)[2];
   const day = plusDays(per.start, 1);
   await punch(emp, day, '09:00', '17:00');
   db.prepare('DELETE FROM timesheets WHERE employee_id = ? AND period_start = ?').run(emp, per.start);
@@ -737,7 +744,7 @@ test('a state contradiction is never overridable, however good the reason', asyn
   // judgement calls.
   const P = require('../src/periods');
   const emp = E.clockOnly;
-  const per = P.recentPeriods(2)[1];
+  const per = P.recentPeriods(3)[2];
   db.prepare("UPDATE timesheets SET status = 'locked' WHERE employee_id = ? AND period_start = ?")
     .run(emp, per.start);
 
@@ -758,7 +765,7 @@ test('a state contradiction is never overridable, however good the reason', asyn
 test('an approved timesheet freezes the punches underneath it', async () => {
   const P = require('../src/periods');
   const emp = E.corrected;
-  const day = P.recentPeriods(2)[1].start;
+  const day = P.recentPeriods(3)[2].start;
   const per = P.periodFor(day);
   const e = await punch(emp, day, '09:00', '17:00');
   const sh = shiftOn(day, 'dinner');
@@ -1002,14 +1009,27 @@ const plusDays = (iso, n) => new Date(Date.parse(iso) + n * 864e5).toISOString()
 
 // The grid only draws when the period has somebody in it, so these tests put
 // punches there themselves rather than depending on another test's leftovers.
+// Set BEFORE the punches, not after. It used to be set last, so a single
+// refused punch left the flag false and every later test re-ran the seeder —
+// turning one real failure into twenty-three that all reported the seeder
+// colliding with itself and hid the actual cause.
 let gridReady = false;
 async function seedGridPeriod() {
   if (gridReady) return;
+  gridReady = true;
   const per = gridPeriod();
   await punch(E.split, per.start, '09:00', '16:30');            // 7.5h, first day
   await punch(E.split, plusDays(per.start, 3), '10:00', '15:00');  // 5h, a gap either side
-  await punch(E.both, per.end, '12:00', '20:00');               // the LAST day
-  gridReady = true;
+  // EARLY MORNING, and the hour matters. E.both also gets a backdated punch
+  // from clockThrough() that ends at "now" — and on the first day of a pay
+  // period, per.end IS yesterday, so a midday-to-evening punch here collides
+  // with it. That happens once a fortnight, and today was the day: the whole
+  // file went red because this one punch was refused and every later test
+  // re-ran the seeder, hitting its own first punch.
+  //
+  // 05:00 is after the 4am cutoff, so it still belongs to per.end, and it can
+  // never meet an evening punch that runs to midnight.
+  await punch(E.both, per.end, '05:00', '09:00');               // the LAST day
 }
 
 test('the grid draws every date in the period, including the ones nobody worked', async () => {

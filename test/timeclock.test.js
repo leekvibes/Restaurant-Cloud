@@ -77,6 +77,23 @@ test.before(async () => {
     .run(EMP.none, 'No Position', '', '3333', 1400);
   db.prepare("INSERT INTO employee_roles (employee_id, role, wage_cents) VALUES (?,?,?)")
     .run(EMP.multi, 'busser', 1700);
+
+  // ANCHOR THE PAY CALENDAR SO TODAY IS ALWAYS MID-PERIOD.
+  //
+  // Most of this file asserts against P.currentPeriod(), and a period behaves
+  // differently on its FIRST day and its LAST: on the last it is already
+  // submittable (the rule is `today < p.end`), and on the first the period that
+  // "just ended" is yesterday — which is where backdated punches live. So nine
+  // tests here went red once a fortnight, on a date nobody chose, for reasons
+  // that had nothing to do with what they check.
+  //
+  // Fixed the way business-date.test.js fixes the same class: move the CUTOFF,
+  // not the clock. Anchoring four days back puts today mid-period whatever the
+  // real date is, and the tests exercise the RULES instead of the calendar.
+  // This database is this file's own, so nothing else sees it.
+  const D0 = require('../src/dates');
+  require('../src/periods').setSetting('period_anchor',
+    D0.addDays(D0.isoDate(D0.startOfToday()), -4));
 });
 
 test.after(() => { if (child) child.kill(); try { db.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
