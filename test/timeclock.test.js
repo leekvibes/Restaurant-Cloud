@@ -1425,15 +1425,33 @@ test('weekly overtime is shown on the week, never on the day', async () => {
 
 test('a period still being worked cannot be signed off', async () => {
   const cookie = await signIn('3333');
-  const now = P.currentPeriod();
-  const html = await text(`/portal/timesheet?p=${now.start}`, { cookie });
-  assert.match(html, /still running/, 'the page says why not');
-  assert.ok(!/Submit timesheet<\/button>/.test(html), 'and offers no submit button');
-  // The route refuses it too, so a stale form cannot get around the screen.
-  const res = await post('/portal/timesheet/submit',
-    { period: now.start, confirm: '1', pin: '3333', seen: '0' }, { cookie });
-  assert.match(decodeURIComponent(res.headers.get('location') || ''), /still running/,
-    'the route refuses it as well');
+  // A period counts as ENDED on its final day — the rule is `today < p.end`, so
+  // on the last day of a fortnight it is already submittable and this test was
+  // asserting the opposite. It failed once every two weeks, on that day, for a
+  // reason unrelated to what it checks.
+  //
+  // Fixed the way business-date.test.js fixes the same class of problem: move
+  // the CUTOFF, not the clock. Re-anchoring the pay calendar two days back puts
+  // today mid-period whatever day it really is. Restored immediately, because
+  // the anchor is global and every later test reads it.
+  const D = require('../src/dates');
+  const wasAnchor = P.getSetting('period_anchor', null);
+  let html;
+  try {
+    P.setSetting('period_anchor', D.addDays(D.isoDate(D.startOfToday()), -2));
+    const now = P.currentPeriod();
+    html = await text(`/portal/timesheet?p=${now.start}`, { cookie });
+    assert.match(html, /still running/, 'the page says why not');
+    assert.ok(!/Submit timesheet<\/button>/.test(html), 'and offers no submit button');
+    // The route refuses it too, so a stale form cannot get around the screen.
+    const res = await post('/portal/timesheet/submit',
+      { period: now.start, confirm: '1', pin: '3333', seen: '0' }, { cookie });
+    assert.match(decodeURIComponent(res.headers.get('location') || ''), /still running/,
+      'the route refuses it as well');
+  } finally {
+    if (wasAnchor === null) db.prepare("DELETE FROM settings WHERE key = 'period_anchor'").run();
+    else P.setSetting('period_anchor', wasAnchor);
+  }
 });
 
 test('a finished period offers submission from the menu and the page', async () => {
