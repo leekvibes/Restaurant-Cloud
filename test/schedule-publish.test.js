@@ -556,27 +556,48 @@ test('Only me shows published shifts and no draft', async () => {
   assert.ok(hidden.id);
 });
 
-test('the week the header names is the week the page lists', async () => {
+test('every listed day sits under a band naming ITS OWN week', async () => {
   // The defect this locks: the header showed the picked week while the list
   // below it ran ninety days out, so "Aug 1 – Aug 7" sat directly on top of a
   // block headed "Aug 8 – Aug 14 · 4 shifts" and the arrows appeared dead.
-  const quiet = nearWeek();                 // consecutive by construction, and
-  const w = nearWeek();                     // nothing of hers is in the first
+  //
+  // The list is CONTINUOUS now — it opens on today and scrolls both ways — so
+  // the fix is no longer "list only this week". It is that a band travels with
+  // the list and every day sits under one naming the week it is actually in. A
+  // single header at the top would tell the same lie in a new place.
+  const w = nearWeek();
   const shift = mk(E.esther, w.start, '16:00', '22:00');
   await post(`/schedule/shift/${shift.id}/publish`, { w: w.start });
 
   const cookie = await signIn(PIN.esther);
-  const empty = await text(`/portal/schedule?d=${quiet.start}`, { cookie });
-  assert.doesNotMatch(empty, /4p – 10p/, 'next week\'s shift is not listed under this week\'s header');
-  assert.match(empty, /Nothing scheduled for you this week/, 'the quiet week says so');
-  assert.match(empty, /Your next shift is/, 'and points at the one that exists');
+  const html = await text('/portal/schedule', { cookie });
 
-  // The offered jump lands on the week that actually holds it.
-  const href = /class="ps-next" href="([^"]+)"/.exec(empty);
-  assert.ok(href, 'the jump is a link');
-  const landed = await text(href[1].replace(/&amp;/g, '&'), { cookie });
-  assert.match(landed, /4p – 10p/, 'and there it is');
-  assert.match(landed, /Week summary/, 'with the summary for that week');
+  // Pull the bands and the day rows in the order they appear, and check each
+  // row falls inside the band above it.
+  const parts = [...html.matchAll(/<div class="ps-wk"><b>Week summary<\/b>\s*<i>([^<]*)<\/i>|id="d-(\d{4}-\d{2}-\d{2})"/g)];
+  let currentBand = null; let checked = 0;
+  for (const m of parts) {
+    if (m[1]) { currentBand = m[1]; continue; }
+    const day = m[2];
+    assert.ok(currentBand, `the day ${day} has a band above it`);
+    const wk = SCH.weekWindowFor(day);
+    const label = TC.dayLabel(wk.start).replace(/^\w+, /, '');
+    assert.ok(currentBand.includes(label),
+      `${day} sits under a band for its own week (band said "${currentBand}", expected ${label})`);
+    checked += 1;
+  }
+  assert.ok(checked >= 1, 'at least one day was listed and checked');
+});
+
+test('the page opens on today, with the past above and the future below', async () => {
+  const cookie = await signIn(PIN.esther);
+  const html = await text('/portal/schedule', { cookie });
+  // It scrolls to a real anchor rather than leaving the reader at the top of
+  // ninety days of history.
+  assert.match(html, /getElementById\('d-\d{4}-\d{2}-\d{2}'\)/, 'it anchors on a day');
+  assert.match(html, /scrollIntoView\(\{ block: 'start'/, 'putting that day at the top');
+  assert.match(html, /behavior: 'auto'/,
+    'without animating — this is where the page starts, not somewhere it travels to');
 });
 
 test('Publish on create reaches the employee; Save Draft reaches nobody', async () => {
@@ -693,8 +714,8 @@ test('My availability is real, and belongs to the person signed in', async () =>
   assert.match(html, /My availability/, 'the section exists');
   assert.doesNotMatch(html, /coming later/i, 'and no longer promises a later date');
   assert.match(html, /action="\/portal\/availability"/, 'with a form that posts somewhere real');
-  assert.match(html, /Available &mdash; all day|Available — all day/,
-    'a day with nothing stated says so, without storing anything');
+  assert.match(html, /class="myav-days"/, 'and a row for each day of the week on screen');
+  assert.match(html, /data-add="\d{4}-\d{2}-\d{2}"/, 'each one offering to add something');
   // Every rendered rule must be this employee's. The route never reads an id
   // from the query, so the assertion is that nothing else leaked in.
   assert.doesNotMatch(html, /data-employee|employee_id"\s+value/, 'no employee id is ever posted back');
@@ -708,6 +729,7 @@ test('the availability tab honours the switch, and never lies about it', async (
     const off = await text('/portal/schedule?v=avail', { cookie });
     assert.match(off, /switched off/i, 'it says the manager is not collecting this');
     assert.doesNotMatch(off, /action="\/portal\/availability"/, 'and offers no way to add one');
+    assert.doesNotMatch(off, /data-add=/, 'not even the button that opens the sheet');
     assert.match(off, /still request time off/i, 'while making clear time off is unaffected');
   } finally { P.setSetting('sch_availability', '1'); }
 });
@@ -716,7 +738,7 @@ test('Phase 6 does not leak into Only me or Everyone', async () => {
   const cookie = await signIn(PIN.esther);
   for (const v of ['me', 'all']) {
     const html = await text(`/portal/schedule?v=${v}`, { cookie });
-    for (const word of ['Cannot work', 'Prefer to work', 'Your usual week', 'ps-av-days']) {
+    for (const word of ['Cannot work', 'Prefer to work', 'Declare unavailability', 'myav-days']) {
       assert.ok(!html.includes(word), `${v} must not carry "${word}"`);
     }
   }
@@ -1208,35 +1230,49 @@ test('the portal never accepts an employee id from the client', () => {
 // here is only enough that somebody deleting the fix trips over a test.
 // ===========================================================================
 
-test('every text-ish input in the availability form has a real height', () => {
+test('the sheet\'s own controls are a real size, and 16px', () => {
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
-  const rule = css.slice(css.indexOf('.ps-av-f input[type="time"]'));
-  for (const type of ['time', 'date', 'text']) {
-    assert.match(rule.slice(0, 200), new RegExp(`input\\[type="${type}"\\]`),
-      `${type} inputs need the 46px rule — the reason field measured 22px without it`);
-  }
-  assert.match(rule.slice(0, 400), /font-size:\s*16px/,
-    'and 16px, or iOS zooms the whole page the moment somebody taps it');
+  const times = css.slice(css.indexOf('.myav-times input {'));
+  assert.match(times.slice(0, 300), /min-height:\s*48px/, 'a finger lands on the time inputs');
+  assert.match(times.slice(0, 300), /font-size:\s*16px/, 'and 16px, or iOS zooms the whole page on focus');
+  const area = css.slice(css.indexOf('.myav-narea textarea {'));
+  assert.match(area.slice(0, 240), /font-size:\s*16px/, 'so does the note');
+  const opt = css.slice(css.indexOf('.myav-opt {'));
+  assert.match(opt.slice(0, 240), /min-height:\s*64px/, 'and the two choices are big targets');
 });
 
-test('the availability section clears BOTH fixed bars, not just the page rule', () => {
-  // Measured: the portal nav is 61px and the section tabs are 52px sitting at
-  // bottom:60px, so a control must clear 112px. The shared rule allows 116px.
-  // Four pixels, from constants that are already off by a few. This section
-  // ends in a primary action rather than a list, so it adds its own room.
+test('the sheet sits ABOVE the two fixed bars rather than under them', () => {
+  // It is fixed and bottom-anchored, so it clears the tab bars by stacking
+  // order rather than by padding — and its own footer pads the home indicator.
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
-  const at = css.indexOf('.ps-av { margin:');
-  assert.ok(at > 0, 'the section rule exists');
-  assert.match(css.slice(at, at + 120), /padding-bottom:\s*\d+px/,
-    'with bottom room of its own');
+  const sheet = css.slice(css.indexOf('.myav-sheet {'));
+  assert.match(sheet.slice(0, 260), /z-index:\s*var\(--pt-z-sheet\)/, 'above the bars');
+  const panel = css.slice(css.indexOf('.myav-panel {'));
+  assert.match(panel.slice(0, 320), /env\(safe-area-inset-bottom\)/, 'and clear of the home indicator');
+  assert.match(panel.slice(0, 320), /max-height:\s*88vh/, 'and never taller than the screen');
+});
+
+test('the availability prefix does not collide with a class that already exists', () => {
+  // .ps-av WAS ALREADY TAKEN — the 32px avatar circle absolutely positioned on
+  // a shift card. Reusing it put this whole tab into a 32px box pinned to the
+  // top right, off the side of the screen. The class NAME was the bug, so the
+  // name is what this guards.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(css, /^\.ps-av \{ position: absolute;/m, 'the avatar rule still owns .ps-av');
+  assert.ok(!/class="myav[^"]*"/.test(css), 'the stylesheet is not the place that decides this');
+  assert.match(src, /class="myav-days"/, 'and the tab uses its own prefix');
+  // Scoped to the availability tab: the shift card still uses class="ps-av"
+  // legitimately for its avatar, which is the whole reason the name was taken.
+  const tab = src.slice(src.indexOf('class="myav-days"'), src.indexOf('function myavSheets('));
+  assert.ok(!/\bps-av\b/.test(tab), 'and the tab itself never touches the taken one');
 });
 
 test('nothing in the availability UI reports state by colour alone', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  const at = src.indexOf('Your usual week');
-  const region = src.slice(at - 3000, at + 6000);
-  // Each state carries a word. A tinted bar beside it is a second signal.
-  for (const word of ['Cannot work', 'Prefer to work', 'Available &mdash; all day']) {
+  const at = src.indexOf('function myavSheets(');
+  const region = src.slice(at, at + 9000);
+  for (const word of ['Prefer to work', 'Mark unavailability', 'Declare unavailability']) {
     assert.ok(region.includes(word), `the state "${word}" is spelled out, not implied`);
   }
 });

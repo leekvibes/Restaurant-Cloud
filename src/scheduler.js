@@ -222,6 +222,10 @@ db.exec(`
     WHERE status = 'pending';
 `);
 
+// A note on a rule. Added after the tables shipped, so it is an ALTER guarded by
+// a try — SQLite has no ADD COLUMN IF NOT EXISTS, and re-running must be a no-op.
+try { db.exec('ALTER TABLE availability_rules ADD COLUMN note TEXT'); } catch { /* already there */ }
+
 db.exec(`
   -- PHASE 7 — a saved shape for a shift, not a saved shift.
   --

@@ -1589,83 +1589,101 @@ body.bare {
   .ps-d b { font-size: 15px; }
 }
 
-/* ---------------------------------------------------------------------------
-   Phase 6 — My availability.
-
-   Native controls throughout: type="time", type="date", radios in a fieldset
-   with a legend. No custom pickers, because the one control this portal does
-   hand-roll (the PIN keypad) needs an aria-label per key, which is the cost.
-
-   Targets are >= 44px everywhere a finger lands, and the footer clears the
-   home indicator with env(safe-area-inset-bottom), matching the rest of the
-   portal rather than inventing a second convention.
---------------------------------------------------------------------------- */
-/* MEASURED, not assumed. Two fixed bars sit under this page: the portal nav
-   (61px) and the section tabs (52px at bottom:60px), so a control must clear
-   112px. The page rule .pt.has-tabs .ps allows 116px — four pixels of margin,
-   built from constants that are already slightly off (--ps-nav says 56 and the
-   bar measures 52; the nav is 61 and the sum assumes 60).
-
-   Four pixels survives nothing. Every other view on this page ends in a list
-   whose last card carries its own margin; this one ends in a PRIMARY ACTION
-   sitting flush against the padding, and at 200% text zoom the bars grow while
-   the four pixels do not. The extra room is here rather than in the shared rule
-   so the shift views keep the spacing they were designed with. */
-.ps-av { margin: 4px 0 8px; padding-bottom: 32px; }
-.ps-av-h { margin: 22px 0 4px; font-size: 15px; font-weight: 650; color: var(--pt-ink); }
-.ps-av-sub { margin: 0 0 14px; font-size: 13px; line-height: 1.55; color: var(--pt-second); }
-.ps-av-sub em { font-style: normal; font-weight: 650; color: var(--pt-ink); }
-
-.ps-av-days { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.ps-av-day { border: 1px solid var(--pt-line); border-radius: 12px; padding: 12px 14px; }
-.ps-av-dh { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.ps-av-dh b { font-size: 14.5px; font-weight: 650; color: var(--pt-ink); }
-.ps-av-dh i { font-style: normal; font-size: 12.5px; color: var(--pt-second); }
-
-/* The state is in the WORD ("Cannot work" / "Prefer to work"). The bar is a
-   second signal, never the only one. */
-.ps-av-r { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin-top: 8px; padding: 9px 11px; border-radius: 9px; font-size: 13.5px;
-  background: var(--pt-page); border-left: 3px solid var(--pt-second); }
-.ps-av-r--unavailable { border-left-color: var(--pt-red); }
-.ps-av-r--prefer { border-left-color: var(--pt-green); }
-.ps-av-r b { font-weight: 650; }
-.ps-av-x button { min-height: 44px; padding: 0 12px; border: 0; background: none;
-  font: inherit; font-size: 13px; color: var(--pt-second); text-decoration: underline; cursor: pointer; }
-
-.ps-av-add { margin-top: 10px; }
-.ps-av-add summary { min-height: 44px; display: flex; align-items: center;
-  font-size: 13.5px; font-weight: 600; color: var(--pt-blue); cursor: pointer; }
-.ps-av-add--one { border: 1px dashed var(--pt-line); border-radius: 12px; padding: 4px 14px; margin-top: 14px; }
-
-.ps-av-f { display: grid; gap: 12px; padding: 6px 0 14px; }
-.ps-av-f label { font-size: 13.5px; color: var(--pt-ink); }
-/* type="text" belongs here too. It was left out first time round and the reason
-   field measured 22px tall in the browser against a 44px floor — which the
-   stylesheet could not have told you, because the rule that was missing is the
-   one that would have said so. */
-.ps-av-f input[type="time"], .ps-av-f input[type="date"], .ps-av-f input[type="text"] {
-  display: block; width: 100%; min-height: 46px; margin-top: 5px; padding: 0 12px;
-  font: inherit; font-size: 16px;   /* 16px or iOS zooms the whole page on focus */
-  border: 1px solid var(--pt-line); border-radius: 10px; background: var(--pt-field); color: var(--pt-ink); }
-.ps-av-fs { border: 0; margin: 0; padding: 0; display: grid; gap: 2px; }
-.ps-av-fs legend { padding: 0; font-size: 13px; font-weight: 600; color: var(--pt-second); }
-.ps-av-fs label, .ps-av-all { display: flex; align-items: center; gap: 9px; min-height: 44px; }
-.ps-av-fs input, .ps-av-all input { width: 20px; height: 20px; accent-color: var(--pt-blue); }
-.ps-av-times { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.ps-av-times input:disabled { opacity: .45; }
-.ps-av-note { margin: 0; min-height: 18px; font-size: 12.5px; color: var(--pt-second); }
-.ps-av-save { min-height: 48px; border: 0; border-radius: 10px; font: inherit;
-  font-size: 15px; font-weight: 650; color: #fff; background: var(--pt-blue); cursor: pointer; }
-
-/* Large text must not clip the day rows: everything grows rather than being
-   pinned to a fixed track. */
-@media (max-width: 380px) {
-  .ps-av-times { grid-template-columns: 1fr; }
-  .ps-av-r { flex-wrap: wrap; }
-}
 /* Request status: the WORD carries it. The tint is a second signal only. */
 .ps-off-s { font-style: normal; font-size: 12px; font-weight: 650; }
 .ps-off-s--pending { color: var(--pt-amber); }
 .ps-off-s--approved { color: var(--pt-green); }
 .ps-off-s--rejected, .ps-off-s--withdrawn { color: var(--pt-second); }
+
+/* ---------------------------------------------------------------------------
+   My availability.
+
+   The prefix is myav- and not ps-av-, because .ps-av WAS ALREADY TAKEN: it is
+   the 32px avatar circle absolutely positioned on a shift card. Reusing it put
+   this whole tab into a 32px box pinned to the top right and pushed the content
+   off screen. The class name was the bug.
+--------------------------------------------------------------------------- */
+.myav-days { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 0; }
+.myav-day { display: grid; grid-template-columns: 46px 1fr; gap: 12px; align-items: start;
+  padding: 14px 0; border-bottom: 1px solid var(--pt-line); }
+.myav-day.is-today .myav-dl b { color: var(--pt-blue); }
+.myav-dl { text-align: center; }
+.myav-dl b { display: block; font-size: 20px; font-weight: 400; color: var(--pt-ink); line-height: 1.1; }
+.myav-dl i { font-style: normal; font-size: 12px; color: var(--pt-second); }
+.myav-dr { display: grid; gap: 6px; min-width: 0; }
+
+.myav-r { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 11px; border-radius: 9px; background: var(--pt-page);
+  border-left: 3px solid var(--pt-second); min-width: 0; }
+.myav-r--unavailable { border-left-color: var(--pt-red); }
+.myav-r--prefer { border-left-color: var(--pt-green); }
+.myav-r span { display: grid; min-width: 0; }
+.myav-r b { font-size: 13.5px; font-weight: 650; color: var(--pt-ink); }
+.myav-r i { font-style: normal; font-size: 12px; color: var(--pt-second);
+  overflow: hidden; text-overflow: ellipsis; }
+.myav-r button { min-height: 44px; padding: 0 10px; border: 0; background: none; font: inherit;
+  font-size: 12.5px; color: var(--pt-second); text-decoration: underline; cursor: pointer; }
+.myav-add { min-height: 44px; padding: 0; border: 0; background: none; font: inherit;
+  font-size: 15px; font-weight: 600; color: var(--pt-blue); text-align: left; cursor: pointer; }
+
+.myav-h { margin: 26px 0 4px; font-size: 15px; font-weight: 650; color: var(--pt-ink); }
+.myav-sub { margin: 0 0 12px; font-size: 13px; line-height: 1.55; color: var(--pt-second); }
+.myav-off { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.myav-o { border: 1px solid var(--pt-line); border-radius: 12px; padding: 12px 14px; }
+.myav-o div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.myav-o b { font-size: 14px; font-weight: 650; }
+.myav-o p { margin: 6px 0 0; font-size: 13px; color: var(--pt-second); }
+.myav-o button { min-height: 44px; border: 0; background: none; font: inherit; font-size: 13px;
+  color: var(--pt-second); text-decoration: underline; cursor: pointer; padding: 0; }
+/* 32px of its own below the last control. The shared page rule allows 116px
+   against 112px of fixed chrome — four pixels, from constants already a little
+   off, and this section ends in a button rather than a list. Same fix, same
+   reason, as the one made when this tab first shipped. */
+.myav-req { width: 100%; min-height: 48px; margin-top: 14px; margin-bottom: 32px; border: 1px solid var(--pt-line);
+  border-radius: 10px; background: var(--pt-card, var(--pt-field)); font: inherit; font-size: 15px;
+  font-weight: 650; color: var(--pt-blue); cursor: pointer; }
+
+/* --- the two sheets ------------------------------------------------------ */
+.myav-sheet { position: fixed; inset: 0; z-index: var(--pt-z-sheet);
+  display: flex; align-items: flex-end; justify-content: center; }
+.myav-sheet[hidden] { display: none; }
+.myav-scrim { position: absolute; inset: 0; background: rgba(0,0,0,.4); }
+.myav-panel { position: relative; width: 100%; max-width: 460px; background: var(--pt-field);
+  border-radius: 18px 18px 0 0; padding: 4px 20px calc(16px + env(safe-area-inset-bottom));
+  max-height: 88vh; overflow-y: auto; }
+.myav-head { display: flex; align-items: center; justify-content: center; position: relative;
+  min-height: 56px; border-bottom: 1px solid var(--pt-line); margin: 0 -20px 4px; padding: 0 56px; }
+.myav-head h2 { margin: 0; font-size: 16px; font-weight: 650; color: var(--pt-ink); text-align: center; }
+.myav-x { position: absolute; left: 12px; top: 6px; width: 44px; height: 44px; border: 0;
+  background: none; font-size: 24px; line-height: 1; color: var(--pt-second); cursor: pointer; }
+
+.myav-opt { display: grid; gap: 2px; width: 100%; text-align: left; min-height: 64px;
+  padding: 12px 14px; margin-top: 10px; border: 1px solid var(--pt-line); border-radius: 12px;
+  background: none; font: inherit; cursor: pointer; }
+.myav-opt b { font-size: 15px; font-weight: 650; color: var(--pt-ink); }
+.myav-opt i { font-style: normal; font-size: 13px; color: var(--pt-second); }
+.myav-opt--unavailable { border-left: 3px solid var(--pt-red); }
+.myav-opt--prefer { border-left: 3px solid var(--pt-green); }
+
+.myav-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 56px; border-bottom: 1px solid var(--pt-line); font-size: 15px; color: var(--pt-ink); }
+.myav-row b { font-weight: 600; color: var(--pt-blue); }
+.myav-sw { width: 46px; height: 28px; accent-color: var(--pt-blue); }
+.myav-times { display: flex; align-items: center; gap: 10px; padding: 14px 0;
+  border-bottom: 1px solid var(--pt-line); }
+.myav-times label { flex: 1; min-width: 0; }
+.myav-times em { font-style: normal; font-size: 14px; color: var(--pt-second); }
+.myav-times input { width: 100%; min-height: 48px; padding: 0 12px; font: inherit; font-size: 16px;
+  border: 0; border-radius: 10px; background: var(--pt-page); color: var(--pt-ink); text-align: center; }
+.myav-times input:disabled { opacity: .45; }
+.myav-lab { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.myav-note-hint { margin: 6px 0 0; min-height: 16px; font-size: 12.5px; color: var(--pt-second); }
+.myav-narea { display: block; padding: 12px 0; }
+.myav-narea textarea { width: 100%; padding: 12px; font: inherit; font-size: 16px;
+  border: 1px solid var(--pt-line); border-radius: 10px; background: var(--pt-field);
+  color: var(--pt-ink); resize: vertical; }
+.myav-foot { display: flex; gap: 10px; padding-top: 14px; }
+.myav-cancel, .myav-confirm { flex: 1; min-height: 50px; border-radius: 25px; font: inherit;
+  font-size: 15px; font-weight: 650; cursor: pointer; }
+.myav-cancel { border: 1px solid var(--pt-line); background: none; color: var(--pt-ink); }
+.myav-confirm { border: 0; background: var(--pt-blue); color: #fff; }

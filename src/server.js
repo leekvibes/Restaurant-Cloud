@@ -6153,14 +6153,58 @@ app.get('/portal/schedule', (req, res) => {
       <i>${esc(TC.dayLabel(stripWeek.start).replace(/^\w+, /, ''))} &ndash; ${
         esc(TC.dayLabel(stripWeek.end).replace(/^\w+, /, ''))} &middot; ${
         weekCount} shift${weekCount === 1 ? '' : 's'}</i></div>` : '';
-  const body = days.map((d) => {
+  // EVERY day in the window that has something, not just the week on the strip.
+  //
+  // The page opens scrolled to TODAY and today sits at the top, so the past is
+  // above it and the future below — one list you scroll, the way a phone
+  // calendar behaves. Rendering only the strip week made "last Tuesday" reachable
+  // solely through an arrow, and made an empty week look like an empty schedule.
+  //
+  // The strip stays: it highlights where you are and jumps you somewhere else.
+  // It is no longer a filter over what exists.
+  const listedDays = [...byDay.keys()].filter((d) => d >= from && d <= to).sort();
+  // A band before each week's first listed day. The list is continuous, so a
+  // single header at the top would name one week while ninety days ran beneath
+  // it — the exact defect that was fixed once already. Every day now sits under
+  // a band naming ITS week, and the band travels with the list.
+  let bandFor = null;
+  const body = listedDays.map((d) => {
     const list = mine(d);
-    if (!list.length) return '';                     // empty days stay clean
-    return `<div class="ps-row${d === today ? ' now' : ''}" id="d-${d}">
+    if (!list.length) return '';
+    const wk = SCH.weekWindowFor(d);
+    let band = '';
+    if (wk.start !== bandFor) {
+      bandFor = wk.start;
+      const n = listedDays.filter((x) => x >= wk.start && x <= wk.end)
+        .reduce((a, x) => a + mine(x).length, 0);
+      band = `<div class="ps-wk"><b>Week summary</b>
+        <i>${esc(TC.dayLabel(wk.start).replace(/^\w+, /, ''))} &ndash; ${
+          esc(TC.dayLabel(wk.end).replace(/^\w+, /, ''))} &middot; ${n} shift${n === 1 ? '' : 's'}</i></div>`;
+    }
+    return `${band}<div class="ps-row${d === today ? ' now' : ''}" id="d-${d}">
       <div class="ps-dt"><b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i></div>
       <div class="ps-ks">${list.map(shiftCard).join('')}</div>
     </div>`;
   }).join('');
+
+  // Where the page lands. Today if today has something; otherwise the first day
+  // AFTER today that does, because somebody opening their schedule is looking
+  // forward — falling back to the newest past day would open on history.
+  const anchorDay = listedDays.includes(today)
+    ? today
+    : (listedDays.find((d) => d > today) || null);
+  const anchorScript = anchorDay ? `<script>
+    (function () {
+      var el = document.getElementById('d-${anchorDay}');
+      if (!el) return;
+      // 'auto', not 'smooth': this is where the page STARTS, and animating into
+      // position reads as the page moving under somebody's thumb.
+      el.scrollIntoView({ block: 'start', behavior: 'auto' });
+      // The sticky day strip would otherwise cover the row it just scrolled to.
+      var strip = document.querySelector('.ps-head');
+      if (strip) window.scrollBy(0, -(strip.getBoundingClientRect().height + 8));
+    })();
+  </script>` : '';
 
   // An arrow that would land outside the locked window is clamped to its edge,
   // so the last reachable week is still reachable; one that would not move at
@@ -6245,7 +6289,7 @@ app.get('/portal/schedule', (req, res) => {
         <h1 class="pt-title">Schedule</h1>
         <p class="pt-sub">${view === 'all' ? 'Who is on the floor'
           : view === 'avail' ? 'When you can work' : 'Your published shifts'}</p>
-        ${view === 'avail' ? '' : `
+        ${`
           <div class="ps-wknav">
             ${arrow(-7, 'Earlier week', '&larr;')}
             <b>${esc(TC.dayLabel(stripWeek.start).replace(/^\w+, /, ''))} &ndash; ${
@@ -6258,111 +6302,57 @@ app.get('/portal/schedule', (req, res) => {
       ${view === 'avail' ? `
         ${avOn ? '' : `<div class="ps-soon">
           <p class="ps-soon-t">Availability is switched off right now</p>
-          <p class="ps-soon-s">Your manager is not collecting this at the moment. Anything
-            you saved before is still here and will count again if it is switched back on.
-            You can still request time off below.</p>
+          <p class="ps-soon-s">Your manager is not collecting this at the moment. Anything you
+            saved before is still here. You can still request time off below.</p>
         </div>`}
 
-        <section class="ps-av" aria-labelledby="ps-av-h">
-          <h2 class="ps-av-h" id="ps-av-h">Your usual week</h2>
-          <p class="ps-av-sub">Say nothing and you are treated as available. Only tell us
-            the times you <em>cannot</em> work, or would <em>rather</em> work.</p>
-          <ul class="ps-av-days">
-            ${DOWN.map((name, wd) => { const mine = forDay(wd); return `
-              <li class="ps-av-day">
-                <div class="ps-av-dh"><b>${name}</b>${
-                  mine.length ? '' : '<i>Available &mdash; all day</i>'}</div>
-                ${mine.map((r) => `<div class="ps-av-r ps-av-r--${r.avail_kind}">
-                    <span><b>${ruleWord(r)}</b> &middot; ${esc(ruleWhen(r))}</span>
-                    ${avOn ? delForm(r) : ''}</div>`).join('')}
-                ${avOn ? `<details class="ps-av-add">
-                  <summary>Add for ${name}</summary>
-                  <form method="post" action="/portal/availability" class="ps-av-f">
-                    <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-                    <input type="hidden" name="weekday" value="${wd}">
-                    <fieldset class="ps-av-fs">
-                      <legend>What are you telling your manager?</legend>
-                      <label><input type="radio" name="kind" value="unavailable" checked> I cannot work</label>
-                      <label><input type="radio" name="kind" value="prefer"> I would rather work</label>
-                    </fieldset>
-                    <label class="ps-av-all">
-                      <input type="checkbox" name="all_day" value="1" checked
-                        data-avall> The whole day</label>
-                    <div class="ps-av-times">
-                      <label>From <input type="time" name="start" value="17:00" disabled></label>
-                      <label>To <input type="time" name="end" value="22:00" disabled></label>
-                    </div>
-                    <p class="ps-av-note" aria-live="polite"></p>
-                    <button class="ps-av-save" type="submit">Save</button>
-                  </form>
-                </details>` : ''}
-              </li>`; }).join('')}
-          </ul>
-
-          ${oneOffs.length ? `<h2 class="ps-av-h">Just this once</h2>
-            <ul class="ps-av-days">${oneOffs.map((r) => `
-              <li class="ps-av-day"><div class="ps-av-dh"><b>${esc(TC.dayLabel(r.on_date))}</b></div>
-                <div class="ps-av-r ps-av-r--${r.avail_kind}">
-                  <span><b>${ruleWord(r)}</b> &middot; ${esc(ruleWhen(r))}</span>
-                  ${avOn ? delForm(r) : ''}</div></li>`).join('')}</ul>` : ''}
-
-          ${avOn ? `<details class="ps-av-add ps-av-add--one">
-            <summary>Add a one-off day</summary>
-            <form method="post" action="/portal/availability" class="ps-av-f">
-              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-              <label>Which day <input type="date" name="on_date" min="${today}" required></label>
-              <fieldset class="ps-av-fs">
-                <legend>What are you telling your manager?</legend>
-                <label><input type="radio" name="kind" value="unavailable" checked> I cannot work</label>
-                <label><input type="radio" name="kind" value="prefer"> I would rather work</label>
-              </fieldset>
-              <label class="ps-av-all"><input type="checkbox" name="all_day" value="1" checked data-avall> The whole day</label>
-              <div class="ps-av-times">
-                <label>From <input type="time" name="start" value="17:00" disabled></label>
-                <label>To <input type="time" name="end" value="22:00" disabled></label>
+        ${/* One row per day of the week the strip is showing, so scrolling the
+              dates scrolls what you are editing. Everything already stated for
+              that day sits under it; a day with nothing says so and stores
+              nothing. */''}
+        <ul class="myav-days">
+          ${days.map((d) => {
+            const mine_ = myRules.filter((r) => r.on_date === d
+              || (r.weekday === new Date(`${d}T00:00:00Z`).getUTCDay() && !r.on_date
+                  && (!r.effective_from || r.effective_from <= d)
+                  && (!r.effective_until || r.effective_until >= d)));
+            return `<li class="myav-day${d === today ? ' is-today' : ''}">
+              <div class="myav-dl">
+                <b>${Number(d.slice(8))}</b><i>${esc(TC.dayLabel(d).slice(0, 3))}</i>
               </div>
-              <button class="ps-av-save" type="submit">Save</button>
-            </form>
-          </details>` : ''}
-
-          <h2 class="ps-av-h">Time off</h2>
-          <p class="ps-av-sub">This one goes to your manager to approve. Availability
-            above is just you telling them; this is you asking.</p>
-
-          ${myOff.length ? `<ul class="ps-av-days">${myOff.map((r) => `
-            <li class="ps-av-day">
-              <div class="ps-av-dh"><b>${esc(offWhen(r))}</b>
-                <i class="ps-off-s ps-off-s--${r.status}">${OFF_WORD[r.status] || r.status}</i></div>
-              ${r.reason ? `<div class="ps-av-r"><span>${esc(r.reason)}</span></div>` : ''}
-              ${r.decision_note ? `<div class="ps-av-r"><span><b>Your manager said</b> &middot; ${
-                esc(r.decision_note)}</span></div>` : ''}
-              ${r.status === 'pending' ? `<form method="post" action="/portal/timeoff/${r.id}/withdraw" class="ps-av-x">
-                  <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-                  <button type="submit">Withdraw this request</button></form>` : ''}
-            </li>`).join('')}</ul>`
-            : '<p class="ps-av-sub">You have not asked for any time off.</p>'}
-
-          <details class="ps-av-add ps-av-add--one">
-            <summary>Request time off</summary>
-            <form method="post" action="/portal/timeoff" class="ps-av-f">
-              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-              <label>First day <input type="date" name="from" min="${today}" required></label>
-              <label>Last day <input type="date" name="to" min="${today}" required></label>
-              <label class="ps-av-all"><input type="checkbox" name="all_day" value="1" checked data-avall>
-                The whole day (or days)</label>
-              <div class="ps-av-times">
-                <label>From <input type="time" name="start" value="09:00" disabled></label>
-                <label>To <input type="time" name="end" value="17:00" disabled></label>
+              <div class="myav-dr">
+                ${mine_.map((r) => `<div class="myav-r myav-r--${r.avail_kind}">
+                    <span><b>${ruleWord(r)}</b><i>${esc(ruleWhen(r))}${
+                      r.on_date ? '' : ' &middot; every week'}</i></span>
+                    ${avOn ? `<form method="post" action="/portal/availability/${r.id}/delete">
+                      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                      <button type="submit" aria-label="Remove ${esc(ruleWord(r))} ${esc(ruleWhen(r))}">Remove</button>
+                    </form>` : ''}
+                  </div>`).join('')}
+                ${avOn ? `<button type="button" class="myav-add" data-add="${d}"
+                  aria-label="Add availability for ${esc(TC.dayLabel(d))}">+ Add</button>` : ''}
               </div>
-              <label>Why, if you want to say <input type="text" name="reason" maxlength="200"
-                placeholder="Optional"></label>
-              <p class="ps-av-note" aria-live="polite"></p>
-              <button class="ps-av-save" type="submit">Send to my manager</button>
-            </form>
-          </details>
-        </section>
-        ${psAvScript()}`
-        : (weekCount ? `<div class="ps-days">${sep}${body}</div>`
+            </li>`;
+          }).join('')}
+        </ul>
+
+        <h2 class="myav-h">Time off</h2>
+        <p class="myav-sub">Availability above is you telling your manager. This is you asking.</p>
+        ${myOff.length ? `<ul class="myav-off">${myOff.map((r) => `
+          <li class="myav-o">
+            <div><b>${esc(offWhen(r))}</b>
+              <i class="ps-off-s ps-off-s--${r.status}">${OFF_WORD[r.status] || r.status}</i></div>
+            ${r.reason ? `<p>${esc(r.reason)}</p>` : ''}
+            ${r.decision_note ? `<p><b>Your manager said</b> &middot; ${esc(r.decision_note)}</p>` : ''}
+            ${r.status === 'pending' ? `<form method="post" action="/portal/timeoff/${r.id}/withdraw">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <button type="submit">Withdraw</button></form>` : ''}
+          </li>`).join('')}</ul>`
+          : '<p class="myav-sub">You have not asked for any time off.</p>'}
+        <button type="button" class="myav-req" id="myav-req">Request time off</button>
+
+        ${avOn ? myavSheets(req, today, DAYPARTS) : ''}`
+        : (body ? `<div class="ps-days">${body}</div>${anchorScript}`
           : (rows.length ? quiet : (view === 'all' ? emptyAll : empty)))}
     </div>
 
@@ -6373,44 +6363,147 @@ app.get('/portal/schedule', (req, res) => {
     </nav>`));
 });
 
+
 /**
- * The all-day switch, and the overnight hint.
+ * The two sheets behind "+ Add", in the order the owner asked for.
  *
- * A checkbox that toggles `disabled` on the two time inputs rather than hiding
- * them: a range that silently ignores its own values is the accessibility
- * failure people actually hit, and a disabled input still reads to a screen
- * reader as a thing that exists and is currently not applicable.
+ * FIRST the choice — prefer to work, or cannot work — because those are two
+ * different statements and a single form with a radio buried in it makes them
+ * look like the same one. THEN the detail sheet, which is the same shape for
+ * both and only changes its title and what it posts.
  *
- * The hint is the ONLY place the employee learns that an end earlier than a
- * start runs past midnight. They enter a day, a start and an end; the storage
- * rule is ours, not theirs.
- *
- * No backticks and no dollar-brace in here — this is a template literal.
+ * No backticks and no dollar-brace below: this whole function is interpolated
+ * into a template literal.
  */
-function psAvScript() {
-  return '<script>' + [
-    '(function(){',
-    '  var forms = document.querySelectorAll(".ps-av-f");',
-    '  for (var i = 0; i < forms.length; i++) (function(f){',
-    '    var all = f.querySelector("[data-avall]");',
-    '    var times = f.querySelectorAll(".ps-av-times input");',
-    '    var note = f.querySelector(".ps-av-note");',
-    '    function hint(){',
-    '      if (!note) return;',
-    '      if (all.checked) { note.textContent = ""; return; }',
-    '      var a = times[0].value, b = times[1].value;',
-    '      note.textContent = (a && b && b <= a) ? "Ends the next day." : "";',
-    '    }',
-    '    function sync(){',
-    '      for (var k = 0; k < times.length; k++) times[k].disabled = all.checked;',
-    '      hint();',
-    '    }',
-    '    all.addEventListener("change", sync);',
-    '    for (var k = 0; k < times.length; k++) times[k].addEventListener("change", hint);',
-    '    sync();',
-    '  })(forms[i]);',
-    '})();',
-  ].join('\n') + '</script>';
+function myavSheets(req, today, dayparts) {
+  const csrf = csrfFor(req);
+  return `
+  <div class="myav-sheet" id="myav-pick" hidden aria-hidden="true">
+    <div class="myav-scrim" data-myav-close></div>
+    <div class="myav-panel" role="dialog" aria-modal="true" aria-labelledby="myav-pick-h">
+      <div class="myav-head"><h2 id="myav-pick-h">Add for <span data-myav-day></span></h2>
+        <button type="button" class="myav-x" data-myav-close aria-label="Close">&times;</button></div>
+      <button type="button" class="myav-opt myav-opt--prefer" data-kind="prefer">
+        <b>Prefer to work</b><i>Tell your manager you would rather be on</i></button>
+      <button type="button" class="myav-opt myav-opt--unavailable" data-kind="unavailable">
+        <b>Mark unavailability</b><i>Tell them you cannot work</i></button>
+    </div>
+  </div>
+
+  <div class="myav-sheet" id="myav-form" hidden aria-hidden="true">
+    <div class="myav-scrim" data-myav-close></div>
+    <form class="myav-panel" method="post" action="/portal/availability" id="myav-f"
+      role="dialog" aria-modal="true" aria-labelledby="myav-f-h">
+      <input type="hidden" name="_csrf" value="${csrf}">
+      <input type="hidden" name="kind" id="myav-kind" value="unavailable">
+      <input type="hidden" name="on_date" id="myav-date">
+      <input type="hidden" name="weekday" id="myav-wd">
+
+      <div class="myav-head"><h2 id="myav-f-h">Declare unavailability</h2>
+        <button type="button" class="myav-x" data-myav-close aria-label="Close">&times;</button></div>
+
+      <label class="myav-row"><span>All day</span>
+        <input type="checkbox" name="all_day" value="1" id="myav-all" class="myav-sw" checked></label>
+
+      <div class="myav-row"><span>Date</span><b data-myav-dayfull></b></div>
+
+      <div class="myav-times" id="myav-times">
+        <label><span class="myav-lab">From</span>
+          <input type="time" name="start" value="09:00" disabled></label>
+        <em>To</em>
+        <label><span class="myav-lab">To</span>
+          <input type="time" name="end" value="17:00" disabled></label>
+      </div>
+      <p class="myav-note-hint" aria-live="polite" id="myav-hint"></p>
+
+      <label class="myav-narea"><span class="myav-lab">Note</span>
+        <textarea name="note" maxlength="200" rows="3" placeholder="Add note (optional)"></textarea></label>
+
+      <label class="myav-row"><span>Repeat every week</span>
+        <input type="checkbox" name="repeat" value="1" id="myav-rep" class="myav-sw"></label>
+
+      <div class="myav-foot">
+        <button type="button" class="myav-cancel" data-myav-close>Cancel</button>
+        <button type="submit" class="myav-confirm">Confirm</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+  (function () {
+    var pick = document.getElementById('myav-pick');
+    var form = document.getElementById('myav-form');
+    if (!pick || !form) return;
+    var day = null, opener = null;
+    var DOWFULL = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function pretty(iso) {
+      var p = iso.split('-');
+      var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+      return DOWFULL[d.getUTCDay()].slice(0,3) + ', ' + MON[d.getUTCMonth()] + ' ' + d.getUTCDate();
+    }
+    function open(el) {
+      el.hidden = false; el.setAttribute('aria-hidden', 'false');
+      document.body.style.overflow = 'hidden';
+      var f = el.querySelector('button, input, textarea'); if (f) f.focus();
+    }
+    function close(el) {
+      el.hidden = true; el.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+      if (opener && opener.focus) opener.focus();
+    }
+    function closeAll() { close(pick); close(form); }
+
+    document.addEventListener('click', function (ev) {
+      var add = ev.target.closest ? ev.target.closest('[data-add]') : null;
+      if (add) {
+        day = add.getAttribute('data-add'); opener = add;
+        var spans = pick.querySelectorAll('[data-myav-day]');
+        for (var i = 0; i < spans.length; i++) spans[i].textContent = pretty(day);
+        open(pick); return;
+      }
+      if (ev.target.closest && ev.target.closest('[data-myav-close]')) { closeAll(); return; }
+      var opt = ev.target.closest ? ev.target.closest('[data-kind]') : null;
+      if (opt) {
+        var kind = opt.getAttribute('data-kind');
+        document.getElementById('myav-kind').value = kind;
+        document.getElementById('myav-f-h').textContent =
+          kind === 'prefer' ? 'Prefer to work' : 'Declare unavailability';
+        document.getElementById('myav-date').value = day;
+        var d = new Date(day + 'T00:00:00Z');
+        document.getElementById('myav-wd').value = String(d.getUTCDay());
+        var full = form.querySelectorAll('[data-myav-dayfull]');
+        for (var k = 0; k < full.length; k++) full[k].textContent = pretty(day);
+        close(pick); open(form); sync(); return;
+      }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && (!pick.hidden || !form.hidden)) { ev.preventDefault(); closeAll(); }
+    });
+
+    // The all-day switch DISABLES the times rather than hiding them: a range
+    // that silently ignores its own values is the failure people actually hit.
+    var all = document.getElementById('myav-all');
+    var times = form.querySelectorAll('#myav-times input');
+    var hint = document.getElementById('myav-hint');
+    function sync() {
+      for (var i = 0; i < times.length; i++) times[i].disabled = all.checked;
+      var a = times[0].value, b = times[1].value;
+      hint.textContent = (!all.checked && a && b && b <= a) ? 'Ends the next day.' : '';
+    }
+    all.addEventListener('change', sync);
+    for (var i = 0; i < times.length; i++) times[i].addEventListener('change', sync);
+
+    // Repeating means a weekly rule, so the one-off date must not also travel —
+    // the table allows exactly one of the two and refuses both.
+    var rep = document.getElementById('myav-rep');
+    form.addEventListener('submit', function () {
+      if (rep.checked) document.getElementById('myav-date').value = '';
+      else document.getElementById('myav-wd').value = '';
+    });
+    sync();
+  })();
+  </script>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -6442,6 +6535,7 @@ app.post('/portal/availability', (req, res) => {
   const allDay = String(req.body.all_day || '') === '1';
   const onDate = MX.isDate(req.body.on_date) ? req.body.on_date : null;
   const weekday = onDate ? null : Number(req.body.weekday);
+  const note = String(req.body.note || '').trim().slice(0, 200) || null;
   if (onDate === null && !(weekday >= 0 && weekday <= 6)) return back('Pick a day.', true);
 
   let startMin = null; let endMin = null;
@@ -6454,10 +6548,10 @@ app.post('/portal/availability', (req, res) => {
     if (startMin === endMin) return back('That start and end are the same. Choose the whole day instead.', true);
   }
   db.prepare(`INSERT INTO availability_rules
-      (employee_id, avail_kind, weekday, on_date, all_day, start_min, end_min)
-      VALUES (@employee_id, @avail_kind, @weekday, @on_date, @all_day, @start_min, @end_min)`)
+      (employee_id, avail_kind, weekday, on_date, all_day, start_min, end_min, note)
+      VALUES (@employee_id, @avail_kind, @weekday, @on_date, @all_day, @start_min, @end_min, @note)`)
     .run({ employee_id: who.emp.id, avail_kind: kind, weekday, on_date: onDate,
-      all_day: allDay ? 1 : 0, start_min: startMin, end_min: endMin });
+      all_day: allDay ? 1 : 0, start_min: startMin, end_min: endMin, note });
   return back('Saved. Your manager will see this when they build the schedule.');
 });
 
