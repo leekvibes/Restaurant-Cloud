@@ -238,6 +238,50 @@ test('a view-only account can open its areas and is refused every write', async 
  * matching, so neither one being wrong on its own reopens it. This test walks
  * every area rather than the handful somebody thought to try.
  */
+/**
+ * The schedule board shows what the week will COST — each person's planned
+ * wages on their row, and the week's total in the summary bar.
+ *
+ * Schedule and Payroll are separate feature keys on purpose: a shift lead can
+ * be trusted with the roster without being shown what everybody earns. So the
+ * money is gated on Payroll while the board itself is gated on Schedule, and
+ * this is the assertion that keeps those apart.
+ *
+ * It lives here because permissions only bite when somebody is signed in, and
+ * this is the only file that runs with APP_PASSWORD set. A test that renders
+ * the board with no user proves nothing about what a shift lead can see.
+ */
+test('planned wages on the schedule board need Payroll, not just Schedule', async () => {
+  const owner = await login({ password: 'test-manager-password' });
+  const mk = async (email, feats) => {
+    const old = users.byEmail.get(email);
+    if (old) users.del.run(old.id);
+    await as(owner, '/users', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams([['name', 'Pay ' + feats.join('-')], ['email', email],
+        ['password', 'pay-password-1'], ['role', 'editor'],
+        ['features', 'dashboard'], ...feats.map((f) => ['features', f])]).toString(),
+    });
+    return login({ email, password: 'pay-password-1' });
+  };
+
+  const rosterOnly = await mk('paysched@test.local', ['schedule']);
+  const both = await mk('paysched2@test.local', ['schedule', 'payroll']);
+
+  const r1 = await as(rosterOnly, '/schedule');
+  assert.strictEqual(r1.status, 200, 'the board still opens for a shift lead');
+  const h1 = await r1.text();
+  assert.doesNotMatch(h1, /sb-pay/, 'but carries no per-person wage figure');
+  assert.doesNotMatch(h1, /Planned wages/, 'and no week total');
+  // The board itself is intact — this is a withheld column, not a broken page.
+  assert.match(h1, /sb-sum-c/, 'the summary bar is still there');
+
+  const r2 = await as(both, '/schedule');
+  assert.strictEqual(r2.status, 200);
+  const h2 = await r2.text();
+  assert.match(h2, /Planned wages/, 'payroll authority sees the week total');
+});
+
 test('a restricted account cannot reach an area by changing the case of the path', async () => {
   const owner = await login({ password: 'test-manager-password' });
   const existing = users.byEmail.get('case@test.local');

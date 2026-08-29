@@ -1109,10 +1109,26 @@ function paidMinutes(shift) {
  * shifts (no employee) are counted in the day and grand totals under the key
  * 'open', so a week's staffing does not silently shrink by ignoring them.
  */
-function weekTotals(shifts) {
-  const blank = () => ({ spanMinutes: 0, paidMinutes: 0, count: 0 });
-  const bump = (bucket, span, paid) => {
+function weekTotals(shifts, rateFor) {
+  const blank = () => ({
+    spanMinutes: 0, paidMinutes: 0, count: 0,
+    // Planned wage cost, and how much of it we could actually work out. A
+    // total is only honest next to the number of shifts it could not price:
+    // if three of a week's shifts have no wage on file, a confident dollar
+    // figure understates the week and nothing on screen says so.
+    costCents: 0, costedCount: 0, unratedCount: 0, salariedCount: 0,
+  });
+  const bump = (bucket, span, paid, rate) => {
     bucket.spanMinutes += span; bucket.paidMinutes += paid; bucket.count += 1;
+    if (rate == null) return;
+    if (rate.salaried) { bucket.salariedCount += 1; return; }
+    if (!(rate.cents > 0)) { bucket.unratedCount += 1; return; }
+    // Rounded per shift, not at the end. A shift is the thing that has a rate
+    // and a length; summing rounded shifts is the figure you could check by
+    // hand against the board, and the sub-cent drift is not worth a total
+    // nobody can reproduce.
+    bucket.costCents += Math.round((rate.cents * paid) / 60);
+    bucket.costedCount += 1;
   };
 
   const byEmployee = {}; const byDate = {}; const byCell = {};
@@ -1124,11 +1140,15 @@ function weekTotals(shifts) {
     const paid = paidMinutes(s);
     const who = s.employee_id == null ? 'open' : String(s.employee_id);
     const day = s.business_date;
+    // `undefined` when no resolver was passed, which leaves every cost field
+    // at zero — the shape stays constant so callers never branch on it, and a
+    // caller that did not ask for money cannot accidentally show 0 dollars.
+    const rate = rateFor ? rateFor(s) : null;
 
-    bump(byEmployee[who] || (byEmployee[who] = blank()), span, paid);
-    bump(byDate[day] || (byDate[day] = blank()), span, paid);
-    bump(byCell[`${who}|${day}`] || (byCell[`${who}|${day}`] = blank()), span, paid);
-    bump(total, span, paid);
+    bump(byEmployee[who] || (byEmployee[who] = blank()), span, paid, rate);
+    bump(byDate[day] || (byDate[day] = blank()), span, paid, rate);
+    bump(byCell[`${who}|${day}`] || (byCell[`${who}|${day}`] = blank()), span, paid, rate);
+    bump(total, span, paid, rate);
   }
   return { byEmployee, byDate, byCell, total };
 }

@@ -609,6 +609,92 @@ test('D4: an open shift is counted, under its own key', () => {
   assert.strictEqual(t.total.count, 1, 'and it is in the week total');
 });
 
+// --- D4b: what the plan would cost ------------------------------------------
+//
+// weekTotals takes an optional per-shift rate resolver. The board passes one
+// that mirrors shiftInputs(): salaried means no hourly wage, then the wage set
+// for the position being planned, then the person's default rate. These tests
+// are about the arithmetic and the honesty of the total, not the resolver —
+// the resolver is the caller's business, which is the point of the split.
+
+test('D4b: a shift is priced at the rate for THAT position, not one rate per person', () => {
+  // Sched Server defaults to $15 and is on file as a busser at $11. Pricing
+  // their week at a single rate gets it wrong in whichever direction they
+  // worked more of, and this fixture exists to make that visible.
+  const day = addDays(TODAY, 300);
+  const a = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '16:00'), endsAt: at(day, '22:00') });
+  const b = S.create({ employeeId: SERVER, position: 'busser',
+    startsAt: at(day, '09:00'), endsAt: at(day, '14:00') });
+  const RATE = { server: 1500, busser: 1100 };
+  const t = S.weekTotals([S.byId(a.id), S.byId(b.id)],
+    (sh) => ({ cents: RATE[sh.position], salaried: false }));
+
+  assert.strictEqual(t.byEmployee[String(SERVER)].costCents, 9000 + 5500,
+    '6h at $15 plus 5h at $11 — not 11h at either');
+  assert.strictEqual(t.total.costedCount, 2);
+  assert.strictEqual(t.total.unratedCount, 0);
+});
+
+test('D4b: a shift nobody could price is left out of the total AND counted', () => {
+  // A total that silently drops what it could not price reads as complete and
+  // is not. Salaried and no-wage-on-file are counted apart because they are
+  // different facts: one is a real zero hourly cost, the other is a gap in the
+  // staff record that somebody should go and fill.
+  const day = addDays(TODAY, 301);
+  const paid = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '16:00'), endsAt: at(day, '22:00') });
+  const boss = S.create({ employeeId: SALARIED, position: 'server',
+    startsAt: at(day, '09:00'), endsAt: at(day, '17:00') });
+  const nowage = S.create({ employeeId: BARISTA, position: 'barista',
+    startsAt: at(day, '10:00'), endsAt: at(day, '16:00') });
+
+  const t = S.weekTotals([S.byId(paid.id), S.byId(boss.id), S.byId(nowage.id)], (sh) => (
+    sh.employee_id === SALARIED ? { cents: 0, salaried: true }
+      : sh.employee_id === BARISTA ? { cents: 0, salaried: false }
+        : { cents: 2000, salaried: false }));
+
+  assert.strictEqual(t.total.costCents, 12000, 'only the shift with a rate is priced');
+  assert.strictEqual(t.total.costedCount, 1);
+  assert.strictEqual(t.total.salariedCount, 1, 'salaried counted apart');
+  assert.strictEqual(t.total.unratedCount, 1, 'and a missing wage apart from that');
+  // Per person too, so a row can mark itself short rather than only the week.
+  assert.strictEqual(t.byEmployee[String(BARISTA)].unratedCount, 1);
+  assert.strictEqual(t.byEmployee[String(BARISTA)].costedCount, 0);
+  assert.strictEqual(t.byEmployee[String(SALARIED)].unratedCount, 0,
+    'a salaried row is not missing anything');
+});
+
+test('D4b: cost follows PAID minutes, and a cancellation costs nothing', () => {
+  const day = addDays(TODAY, 302);
+  const withBreak = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '12:00'), endsAt: at(day, '20:00'), breaks: [{ minutes: 30 }] });
+  const rate = () => ({ cents: 1200, salaried: false });
+  const t = S.weekTotals([S.byId(withBreak.id)], rate);
+  assert.strictEqual(t.total.costCents, Math.round((1200 * 450) / 60),
+    'you do not pay for the unpaid half hour, so the plan must not price it');
+
+  const gone = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '06:00'), endsAt: at(day, '10:00') });
+  S.cancel(gone.id);
+  const c = S.weekTotals([S.byId(gone.id)], rate);
+  assert.strictEqual(c.total.costCents, 0, 'a called-off plan costs nothing');
+  assert.strictEqual(c.total.count, 0);
+});
+
+test('D4b: no resolver means NO money, which is not the same as zero money', () => {
+  // Every caller that never asked for cost keeps the same shape, with
+  // costedCount at zero — so a screen can tell "not asked" from "costs $0".
+  const day = addDays(TODAY, 303);
+  const a = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(day, '10:00'), endsAt: at(day, '18:00') });
+  const t = S.weekTotals([S.byId(a.id)]);
+  assert.strictEqual(t.total.costCents, 0);
+  assert.strictEqual(t.total.costedCount, 0);
+  assert.strictEqual(t.total.unratedCount, 0);
+  assert.strictEqual(t.total.paidMinutes, 480, 'hours are still counted');
+});
+
 // --- D5: breaks are checked, not quietly discarded --------------------------
 
 const day5 = addDays(TODAY, 84);

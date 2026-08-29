@@ -18336,6 +18336,9 @@ const sbTimeFull = (utc) => TC.clockFace(utc)
   .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
 
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
+// Whole dollars on the board. Cents on a planned figure would read as a
+// precision the plan does not have — nobody works to the minute.
+const sbUSD = (cents) => '$' + Math.round((cents || 0) / 100).toLocaleString('en-US');
 
 const sbEmpName = db.prepare('SELECT name FROM employees WHERE id = ?');
 
@@ -18532,7 +18535,45 @@ app.get('/schedule', (req, res) => {
   for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
 
   const shifts = SCH.inRange(week.start, week.end);
-  const totals = SCH.weekTotals(shifts);
+
+  // PLANNED WAGE COST. Not payroll, and deliberately not pretending to be: the
+  // clock is what somebody gets paid, this is what the plan would cost if the
+  // week ran exactly as drawn.
+  //
+  // Gated on Payroll, not on Schedule. A shift lead can be given the roster
+  // without being given what everybody earns, and those are separate feature
+  // keys precisely so that stays possible. Without the key the board renders
+  // exactly as it did before.
+  const showPay = navAllowed('/payroll');
+  // Two reads for the whole board rather than one per shift. Both tables are
+  // small (one row per person, one per person-and-position) and a week can
+  // carry a couple of hundred shifts.
+  const roleWages = new Map();
+  const payById = new Map();
+  if (showPay) {
+    for (const r of db.prepare('SELECT employee_id, role, wage_cents FROM employee_roles').all()) {
+      roleWages.set(`${r.employee_id}|${r.role}`, r.wage_cents);
+    }
+    // Every employee, not just the active ones: somebody deactivated mid-week
+    // still holds shifts on this board, and their rows should still price.
+    for (const r of db.prepare('SELECT id, hourly_rate_cents, pay_type FROM employees').all()) {
+      payById.set(r.id, r);
+    }
+  }
+  // The same resolution shiftInputs() uses for a worked shift, minus the
+  // per-shift override, which only exists once a shift has been worked:
+  // salaried means no hourly wage at all, then the wage set for the position
+  // being planned, then the person's default rate. Zero anywhere means NOT SET
+  // and falls through rather than quietly pricing somebody at nothing.
+  const rateFor = !showPay ? null : (sh) => {
+    if (sh.employee_id == null) return { cents: 0, salaried: false };
+    const e = payById.get(sh.employee_id);
+    if (!e) return { cents: 0, salaried: false };
+    if (e.pay_type === 'salary') return { cents: 0, salaried: true };
+    const rw = roleWages.get(`${sh.employee_id}|${sh.position}`);
+    return { cents: (rw > 0 ? rw : (e.hourly_rate_cents || 0)), salaried: false };
+  };
+  const totals = SCH.weekTotals(shifts, rateFor);
 
   // Everybody active, plus anybody holding a shift this week even if they have
   // since been deactivated — a row that vanishes is a plan nobody can find to
@@ -18595,7 +18636,19 @@ app.get('/schedule', (req, res) => {
   const row = (e) => {
     const t = totals.byEmployee[String(e.id)] || { paidMinutes: 0, count: 0 };
     return `<div class="sb-row">
-      <div class="sb-emp${t.count ? '' : ' is-off'}"><b>${esc(e.name)}</b><i>${t.count
+      <div class="sb-emp${t.count ? '' : ' is-off'}">
+        <span class="sb-empn"><b>${esc(e.name)}</b>${showPay && t.count ? `<u class="sb-pay${
+          // The "+" marker means "at least this much", so it only makes sense
+          // beside an actual figure. On a dash there is no figure to be short of.
+          t.unratedCount && t.costedCount ? ' sb-pay--part' : ''}" title="${
+          t.salariedCount ? 'Salaried — no hourly cost for these shifts. '
+          : t.unratedCount ? `No wage on file for ${t.unratedCount} of these shifts, so this is lower than the real cost. Set it under Staff. `
+          : ''}Planned wages at straight time. No overtime, no tips.">${
+          // Nothing here could be priced — every shift is salaried or has no
+          // wage on file. "$0" beside somebody with six scheduled hours reads
+          // as a bug; a dash reads as what it is, which is no figure.
+          t.costedCount ? sbUSD(t.costCents) : '&mdash;'}</u>` : ''}</span>
+        <i>${t.count
         ? `${sbHours(t.paidMinutes)}h · ${t.count} shift${t.count === 1 ? '' : 's'}`
         : 'Not scheduled'}</i></div>
       ${days.map((d) => {
@@ -18972,6 +19025,12 @@ app.get('/schedule', (req, res) => {
           <div class="sb-sum-c"><span>Hours</span><b>${sbHours(totals.total.paidMinutes)}</b></div>
           <div class="sb-sum-c"><span>Shifts</span><b>${totals.total.count}</b></div>
           <div class="sb-sum-c"><span>People</span><b>${new Set(shifts.map((s) => s.employee_id)).size}</b></div>
+          ${showPay ? `<div class="sb-sum-c sb-sum-c--pay"><span>Planned wages</span><b>${
+            sbUSD(totals.total.costCents)}</b>${
+            totals.total.unratedCount
+              ? `<em class="sb-sum-warn" title="Set their wage under Staff and this total will be complete.">${
+                  totals.total.unratedCount} shift${totals.total.unratedCount === 1 ? '' : 's'} with no wage on file</em>`
+              : ''}</div>` : ''}
         </div>
       </div>
     </div>

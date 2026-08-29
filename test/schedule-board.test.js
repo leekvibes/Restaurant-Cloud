@@ -279,10 +279,13 @@ test('multiple shifts on one day stack in chronological order, full size', async
 
 test('the employee column shows hours and shift count, never a "primary" position', async () => {
   const html = await text('/schedule');
-  assert.match(html, /<b>Board Multi<\/b><i>[\d.]+h · \d+ shifts?<\/i>/,
+  // The planned-wage figure now sits on the name line, between the two, so
+  // this allows anything that is not another element opening a new line. The
+  // point of the test is unchanged: totals under the name, never a position.
+  assert.match(html, /<b>Board Multi<\/b>[^<]*(<u[^>]*>[^<]*<\/u>)?[^<]*<\/span>\s*<i>[\d.]+h · \d+ shifts?<\/i>/,
     'name then totals');
   // Multi works server AND bartender; naming one under the name would be wrong.
-  assert.doesNotMatch(html, /<b>Board Multi<\/b><i>(Server|Bartender)/i);
+  assert.doesNotMatch(html, /<b>Board Multi<\/b>[\s\S]{0,120}?<i>(Server|Bartender)/i);
 });
 
 test('an active employee with no shifts stays visible, at the bottom', async () => {
