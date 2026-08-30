@@ -5669,3 +5669,32 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .sbk-dots { opacity: .8; }
   .sbk > s { opacity: 0; }
 }
+
+/* --- when a wage change starts ---------------------------------------------
+   The default is "from today" and it is the right answer nearly every time, so
+   the set reads as one obvious choice with two deliberate alternatives rather
+   than three equal options. */
+.wg-when { margin: 0; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 10px;
+  background: var(--paper); }
+.wg-when legend { padding: 0 6px; font-size: 12px; font-weight: 650; color: var(--headline); }
+/* Scoped through .wg-when to outrank `.form label { display: block }` in
+   styles.css, which is a class-and-element and so beats a bare class. Without
+   it the row is not a flex row at all and the date input drops onto a line of
+   its own at full width — which it did, and only a browser could say so. */
+.wg-when .wg-opt { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0;
+  margin-bottom: 0; cursor: pointer; font-weight: 400; }
+.wg-when .wg-opt input[type="radio"] { margin-top: 3px; width: 16px; height: 16px; flex: none; }
+/* The label is a flex row: the text block has to be allowed to shrink or the
+   date input beside it is pushed onto a line of its own. */
+.wg-when .wg-opt span { display: block; flex: 1 1 auto; min-width: 0; }
+.wg-when .wg-opt b { display: block; font-size: 13.5px; font-weight: 600; color: var(--headline); }
+.wg-when .wg-opt i { display: block; font-style: normal; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+/* width:auto is load-bearing: the form's own `input { width: 100% }` made this
+   922px wide inside a flex row, which crushed the label text beside it to one
+   word per line. */
+.wg-when .wg-date { margin-left: auto; flex: 0 0 auto; width: auto; max-width: 165px;
+  padding: 4px 8px; font: inherit; font-size: 13px;
+  border: 1px solid var(--rule); border-radius: 7px; background: var(--panel); color: var(--ink); }
+/* Rewriting what somebody was already paid at is the one destructive choice
+   here, so it is the one that is coloured. */
+.wg-when .wg-opt--all b { color: var(--danger, #a3341f); }

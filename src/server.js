@@ -9105,6 +9105,85 @@ app.post('/employees', (req, res) => {
   res.redirect('/employees?msg=' + encodeURIComponent(`${name} added.`));
 });
 
+/**
+ * "When does this wage start?" — the control, and the one place that acts on it.
+ *
+ * A wage change used to be a single number with no date, so raising it restated
+ * every shift the person had ever worked. Now the manager says WHEN, and the
+ * default is the answer that is right almost every time: from today, leaving
+ * what was already paid alone.
+ *
+ * A wage change is paperwork, not a service, so it uses the calendar date
+ * rather than the business date — the 4am cutoff belongs to the question "which
+ * night was this", and a raise does not have a night.
+ */
+/**
+ * What the wage change did, in the confirmation. Silence here would leave a
+ * manager guessing whether "from a date" took, and whether "all shifts"
+ * rewrote four rows or four hundred.
+ */
+function wageNote(wage) {
+  if (!wage) return '';
+  if (wage.mode === 'all') {
+    return wage.restamped
+      ? ` Wage applied to every shift — ${wage.restamped} worked shift${wage.restamped === 1 ? '' : 's'} rewritten.`
+      : ' Wage applied to every shift.';
+  }
+  if (wage.future) return ` New wage starts ${wage.from} — nothing changes until then.`;
+  return ` New wage effective ${wage.from}. Earlier shifts keep what they were paid.`;
+}
+
+function wageWhenFields(employeeId, role, opts = {}) {
+  const today = isoDate(startOfToday());
+  // Counted on the server and printed into the label, so the count is known
+  // BEFORE the choice rather than reported after it. "All shifts" on somebody
+  // with four hundred worked shifts should say four hundred out loud.
+  const worked = employeeId ? WAGES.countAffected(employeeId, role || null, '0001-01-01', today) : 0;
+  const n = opts.idSuffix || 'w';
+  return `<fieldset class="wg-when">
+    <legend>When does this wage start?</legend>
+    <label class="wg-opt"><input type="radio" name="wage_from" value="today" checked>
+      <span><b>From today</b><i>Shifts already worked keep the wage they were paid at.</i></span></label>
+    <label class="wg-opt"><input type="radio" name="wage_from" value="date">
+      <span><b>From a date</b><i>A raise that starts on a particular day &mdash; back-dated or ahead.</i></span>
+      <input class="wg-date" type="date" name="wage_date" value="${today}"
+        aria-label="The day this wage starts" onfocus="var r=this.form.querySelector('[value=date]'); if(r) r.checked=true;"></label>
+    <label class="wg-opt wg-opt--all"><input type="radio" name="wage_from" value="all" id="wg-all-${n}">
+      <span><b>All shifts, including past</b><i>${worked
+        ? `Rewrites the rate on ${worked} worked shift${worked === 1 ? '' : 's'}. For a wage that was typed wrong, not for a raise.`
+        : 'They have no worked shifts yet, so this is the same as from today.'}</i></span></label>
+  </fieldset>`;
+}
+
+/**
+ * Apply one wage change, and say in words what it did.
+ *
+ * Keeps `employees.hourly_rate_cents` / `employee_roles.wage_cents` as the
+ * CURRENT wage, because every screen that asks "what do they earn" reads those
+ * and none of them should have to learn about dates. A change that starts in
+ * the future does not move them yet — it is not what the person earns today.
+ */
+function applyWageChange(employeeId, role, cents, body, actor) {
+  const today = isoDate(startOfToday());
+  const mode = ['today', 'date', 'all'].includes(body.wage_from) ? body.wage_from : 'today';
+  const asked = MX.isDate(body.wage_date) ? body.wage_date : today;
+  const from = mode === 'all' ? WAGES.EPOCH : (mode === 'date' ? asked : today);
+
+  WAGES.setWage(employeeId, role || null, cents, from, {
+    by: actor || null,
+    note: mode === 'all' ? 'applied to all shifts' : null,
+  });
+
+  let restamped = 0;
+  if (mode === 'all') {
+    // The ONE thing that overwrites a rate recorded on a shift. Reachable only
+    // by choosing it, having been shown the count first.
+    restamped = WAGES.restamp(employeeId, role || null, cents, '0001-01-01', today);
+  }
+  const future = from > today;
+  return { from, future, restamped, mode };
+}
+
 app.get('/employees/:id/edit', (req, res) => {
   const e = q.employee.get(Number(req.params.id));
   if (!e) return res.status(404).send(layout('Not found', '<h1>Staff member not found</h1>'));
@@ -9114,6 +9193,10 @@ app.get('/employees/:id/edit', (req, res) => {
   const roleRows = q.rolesForEmployee.all(e.id).map((r) => `
     <tr><td>${r.role}</td><td class="num">${money(r.wage_cents)}/h</td>
       <td><form method="post" action="/employees/${e.id}/roles/delete"><input type="hidden" name="role" value="${r.role}"><button class="link-danger">remove</button></form></td></tr>`).join('');
+  // What this wage has been, and since when. Without it a dated change is
+  // invisible after the fact: the page would show one number and give no way
+  // to tell whether last month was priced at it.
+  const wageLog = WAGES.historyFor(e.id).filter((r) => r.effective_from !== WAGES.EPOCH);
   const isSalary = e.pay_type === 'salary';
   const body = `
     ${flash(req)}
@@ -9126,6 +9209,7 @@ app.get('/employees/:id/edit', (req, res) => {
       <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" value="${val(e.pin)}"></label>
       <label>Pay type <select name="pay_type"><option value="hourly"${isSalary ? '' : ' selected'}>Hourly</option><option value="salary"${isSalary ? ' selected' : ''}>Salary</option></select></label>
       <label>Default hourly wage <input name="rate" type="number" step="0.01" min="0" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}"></label>
+      ${isSalary ? '' : `<div style="grid-column:1/-1">${wageWhenFields(e.id, null, { idSuffix: 'def' })}</div>`}
       <label>Salary (if salaried) <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" placeholder="per pay period"></label>
       <label>Benugin ID <input name="pos_id" value="${val(e.pos_id)}"></label>
       <label class="emp-check" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:9px;font-weight:600">
@@ -9143,8 +9227,24 @@ app.get('/employees/:id/edit', (req, res) => {
     <form method="post" action="/employees/${e.id}/roles" class="card form grid">
       <label>Role <select name="role">${payRoles.map((r) => `<option value="${r}">${r}</option>`).join('')}</select></label>
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="0.00" required></label>
+      ${/* Counted for the person rather than the role: the role is chosen in
+           the select beside this and the count would have to change with it.
+           The route counts the ACTUAL role before it rewrites anything. */''}
+      <div style="grid-column:1/-1">${wageWhenFields(e.id, null, { idSuffix: 'role' })}</div>
       <button class="btn" type="submit">Add role &amp; wage</button>
     </form>
+
+    ${wageLog.length ? `<h2>Wage changes</h2>
+    <p class="sub">Each shift is priced at the wage that was in force on the day it was worked, so a raise never restates what somebody was already paid. Wages set before this was recorded are not listed &mdash; they simply applied from the beginning.</p>
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>From</th><th>Role</th><th class="num">Wage</th><th>Set by</th></tr></thead>
+      <tbody>${wageLog.map((r) => `<tr>
+        <td>${esc(r.effective_from)}${r.effective_from > isoDate(startOfToday()) ? ' <span class="sub">(upcoming)</span>' : ''}</td>
+        <td>${r.role ? esc(r.role) : '<span class="muted">default</span>'}</td>
+        <td class="num">${money(r.wage_cents)}/h</td>
+        <td class="sub">${esc(r.created_by || '')}${r.note ? ` &middot; ${esc(r.note)}` : ''}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>` : ''}
 
     <form method="post" action="/employees/${e.id}/deactivate" onsubmit="return confirm('Remove ${esc(e.name)} from active staff? Their past shifts stay intact.')" style="margin-top:18px">
       <button class="link-danger">Deactivate this person</button>
@@ -9166,20 +9266,37 @@ app.post('/employees/:id', (req, res) => {
       // to fire, because reassigning a PIN is exactly when you collide with one.
       `${clash.name} already uses that PIN. Pick a different one — staff sign in to the tips page with their PIN.`));
   }
+  // The wage change is recorded BEFORE the row is updated, because a change
+  // starting in the future must not move what they earn today.
+  const newRate = toCents(rate);
+  const rateMoved = newRate > 0 && newRate !== (e.hourly_rate_cents || 0);
+  const wage = rateMoved ? applyWageChange(e.id, null, newRate, req.body, tcActor(req)) : null;
+
   q.updateEmployee.run({
     id: e.id, name: name.trim(), role, email: (email || '').trim() || null,
-    pin: (pin || '').trim() || null, hourly_rate_cents: toCents(rate), pos_id: (pos_id || '').trim() || null,
+    // A raise that starts next month is not what they earn now. Leaving the
+    // current wage alone until then is what makes "from a date" mean anything.
+    pin: (pin || '').trim() || null,
+    hourly_rate_cents: wage && wage.future ? (e.hourly_rate_cents || 0) : newRate,
+    pos_id: (pos_id || '').trim() || null,
     pay_type: pay_type === 'salary' ? 'salary' : 'hourly', salary_cents: toCents(req.body.salary),
   });
   // Overtime eligibility is its own column, set here — the checkbox only arrives
   // when ticked, so an absent value means exempt.
   OT.setExempt(e.id, req.body.ot_eligible !== '1');
-  res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.`));
+  res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.${wageNote(wage)}`));
 });
 
 app.post('/employees/:id/roles', (req, res) => {
-  q.setRole.run({ employee_id: Number(req.params.id), role: req.body.role, wage_cents: toCents(req.body.wage) });
-  res.redirect(`/employees/${req.params.id}/edit?msg=` + encodeURIComponent('Role & wage saved.'));
+  const id = Number(req.params.id);
+  const cents = toCents(req.body.wage);
+  const role = req.body.role;
+  const wage = cents > 0 ? applyWageChange(id, role, cents, req.body, tcActor(req)) : null;
+  // A wage starting in the future is history, not the current rate for the
+  // role — writing it here would be the retroactive change all over again,
+  // pointing the other way.
+  if (!wage || !wage.future) q.setRole.run({ employee_id: id, role, wage_cents: cents });
+  res.redirect(`/employees/${id}/edit?msg=` + encodeURIComponent(`Role & wage saved.${wageNote(wage)}`));
 });
 
 app.post('/employees/:id/roles/delete', (req, res) => {

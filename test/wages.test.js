@@ -166,3 +166,40 @@ test('nothing on file reads as nothing on file, not as a wage of zero', () => {
   assert.strictEqual(W.wageOn(nobody, 'server', '2026-05-01'), 0,
     'zero here means "fall through and look elsewhere", which every caller does');
 });
+
+// --- the choice a manager actually makes -------------------------------------
+//
+// The mechanism above is only half of it. The other half is that the person
+// changing a wage is ASKED what they mean, with the safe answer as the default
+// and the destructive one labelled with what it will destroy.
+
+test('the wage form offers three answers, and the safe one is the default', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const block = /function wageWhenFields\(([\s\S]*?)\n}/.exec(src)[1];
+
+  for (const v of ['"today"', '"date"', '"all"']) {
+    assert.ok(block.includes(`value=${v}`), `the form offers ${v}`);
+  }
+  // "From today" is right almost every time, so it is what happens if nobody
+  // reads the fieldset at all.
+  assert.match(block, /value="today" checked/, 'from today is preselected');
+  // The count is printed into the label, not reported after the fact: "all
+  // shifts" on somebody with four hundred shifts should say so out loud.
+  assert.match(block, /countAffected/, 'the destructive option counts first');
+});
+
+test('an unrecognised or missing choice falls back to "from today"', () => {
+  // A hand-made POST, an old cached form, a bad value: none of them may end up
+  // rewriting history. Anything that is not one of the three known answers is
+  // treated as the safe one.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const fn = /function applyWageChange\(([\s\S]*?)\n}/.exec(src)[1];
+  assert.match(fn, /\['today', 'date', 'all'\]\.includes\(body\.wage_from\)/,
+    'the mode is validated against a list');
+  assert.match(fn, /: 'today'/, 'and anything else becomes today');
+  // EPOCH is reachable only through the explicit "all" answer.
+  assert.match(fn, /mode === 'all' \? WAGES\.EPOCH/,
+    'nothing but an explicit "all" back-dates a wage to the beginning');
+  assert.match(fn, /mode === 'all'\) \{[\s\S]*?restamp/,
+    'and nothing but "all" rewrites a recorded rate');
+});
