@@ -1989,7 +1989,15 @@ test('the drop carries the target person as well as the target day', async () =>
 test('a day somebody cannot work says so IN THE CELL, with the times', async () => {
   // Far enough out that no other test in this file has put a shift there — a
   // cell with a card in it renders the card, not the Add button.
-  const day = dates.addDays(today(), 602);
+  // Anchored to the START of a week, not to an offset from today. Both rules
+  // have to land in the ONE week this test renders, and "today + 602" only
+  // does that on six days in seven: when today is a Sunday that date is the
+  // last column of its week, so day+1 belongs to the next week and never
+  // appears. The Monday-start change made a Sunday the end of a week rather
+  // than the beginning, which turned a passing test into one that fails one
+  // day a week — and it did, the first Sunday after it shipped.
+  const week602 = SCH.weekWindowFor(dates.addDays(today(), 602));
+  const day = week602.start;
   const timed = dates.addDays(day, 1);
   db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day)
               VALUES (?, 'unavailable', ?, 1)`).run(E.server, day);
