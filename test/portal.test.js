@@ -442,7 +442,24 @@ test('history starts where the manager says it starts', async () => {
 test('a shift shows the hours and the rate it was worked at', async () => {
   // "What did I make" is two questions for anybody paid hourly, and the
   // portal only ever answered the tips half.
-  db.prepare('UPDATE employees SET hourly_rate_cents = 1650 WHERE name = ?').run('Marco Diaz');
+  // Set through the DATED path, not by writing the column. Since wages carry
+  // the day they start, changing what somebody earns now no longer restates
+  // what a shift they already worked was priced at — that is the whole point
+  // of the change, and this test asked for the old behaviour by writing the
+  // current wage and expecting a past shift to follow it.
+  //
+  // Written through THIS file's own handle, not by requiring src/wages: the
+  // server here is a separate process and this process never sets DB_PATH, so
+  // requiring the module opens the default database and writes the row into
+  // whatever the developer is working on — against an id that means somebody
+  // else entirely over there. That is exactly what happened when this test was
+  // first updated: a wage for "Marco Diaz" landed on employee 2 of data.db.
+  const marco = db.prepare('SELECT id FROM employees WHERE name = ?').get('Marco Diaz');
+  db.prepare('UPDATE employees SET hourly_rate_cents = 1650 WHERE id = ?').run(marco.id);
+  db.prepare(`INSERT INTO wage_history (employee_id, role, wage_cents, effective_from, created_by)
+              VALUES (?, NULL, 1650, '2000-01-01', 'test')
+              ON CONFLICT (employee_id, IFNULL(role, ''), effective_from)
+              DO UPDATE SET wage_cents = excluded.wage_cents`).run(marco.id);
   const html = await shiftPage(await signIn('2222'), 'Marco Diaz');
   assert.match(html, /8 hrs/, 'the hours they worked');
   assert.match(html, /\$16\.50\/hr/, 'the rate behind them');

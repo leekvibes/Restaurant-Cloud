@@ -17,9 +17,16 @@ const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
 
 /**
  * One person's hourly rate on one shift, in cents, as SQL — the same rule
- * shiftInputs() applies in JS: a per-shift override wins, then the wage set
- * for the role they actually worked, then their default rate. A rate of 0
- * anywhere means "not set", so it falls through rather than paying nothing.
+ * shiftInputs() applies in JS: the rate recorded on the shift wins, then the
+ * wage that was IN FORCE ON sh.date for the role they actually worked, then
+ * the wage on file now. A rate of 0 anywhere means "not set", so it falls
+ * through rather than paying nothing.
+ *
+ * The dated step is why every query using this must have `sh` (shifts) in
+ * scope. All of them already did — it is the shift being priced — but the
+ * requirement is now load-bearing rather than incidental: without it a raise
+ * restates every shift the person has ever worked, which is the bug this
+ * fragment was changed to fix.
  *
  * It exists as a fragment because the shifts list needs wage cost for every
  * shift at once, and running the tip engine per shift to get it costs ~1ms
@@ -27,7 +34,8 @@ const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
  * (employees) and `er` (employee_roles, LEFT JOINed on employee_id + role).
  */
 const WAGE_RATE_SQL =
-  'COALESCE(NULLIF(w.hourly_rate_cents, 0), NULLIF(er.wage_cents, 0), e.hourly_rate_cents, 0)';
+  `COALESCE(NULLIF(w.hourly_rate_cents, 0), ${require('./wages').wageOnSql('sh.date')},`
+  + ' NULLIF(er.wage_cents, 0), e.hourly_rate_cents, 0)';
 
 /** Sales (food+coffee+alcohol) and labor (wages) for a date range, in cents. */
 /** Everything a shift rang, if you've entered it. 0 means not entered yet. */

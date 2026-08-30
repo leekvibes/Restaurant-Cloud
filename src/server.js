@@ -17,6 +17,7 @@ const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
+const WAGES = require('./wages');
 const OT = require('./overtime');
 const TC = require('./timeclock');
 // The planning domain. Requiring it here is what creates scheduled_shifts,
@@ -18585,6 +18586,12 @@ app.get('/schedule', (req, res) => {
     const e = payById.get(sh.employee_id);
     if (!e) return { cents: 0, salaried: false };
     if (e.pay_type === 'salary') return { cents: 0, salaried: true };
+    // Priced against the day the shift is PLANNED FOR, not today. A raise that
+    // starts next Monday makes next week cost more and leaves last week alone,
+    // which is the whole point of dating a wage — and it is also why a manager
+    // can see what a promotion will cost before it takes effect.
+    const dated = WAGES.wageOn(sh.employee_id, sh.position, sh.business_date);
+    if (dated > 0) return { cents: dated, salaried: false };
     const rw = roleWages.get(`${sh.employee_id}|${sh.position}`);
     return { cents: (rw > 0 ? rw : (e.hourly_rate_cents || 0)), salaried: false };
   };
@@ -24152,6 +24159,21 @@ app.use((err, req, res, _next) => {                        // eslint-disable-lin
   }
   res.type('text/plain').send('Something went wrong. Nothing was changed.');
 });
+
+// Wage history, seeded once from the wages on file so every historical lookup
+// answers exactly what it answered before dated wages existed. Runs here, at
+// boot, rather than when the module is imported: an import that writes reaches
+// into whatever database the importer happened to open, which is how three
+// test files ended up seeding the developer's own data.db.
+try {
+  const w = WAGES.seedFromCurrent();
+  if (w.seeded) console.log(`  Wage history: seeded ${w.seeded} wages as effective since the beginning.`);
+} catch (e) {
+  // Never fatal. A server that will not start is worse than one whose wage
+  // history is a migration behind — and every resolver falls back to the wage
+  // on file, which is what it used before this existed.
+  console.error('  Wage history seed skipped:', e.message);
+}
 
 app.listen(PORT, () => {
   console.log(`\n  ${RESTAURANT} ops running →  http://localhost:${PORT}\n`);

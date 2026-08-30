@@ -439,10 +439,14 @@ const w = {
   deleteWork: db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?'),
   workRow: db.prepare('SELECT * FROM work WHERE shift_id = ? AND employee_id = ?'),
   workForShift: db.prepare(
+    // sh.date rides along because the wage is resolved against the day the
+    // work happened, and fetching it per row instead would be a query inside
+    // a loop on the page that closes every service.
     `SELECT w.role, w.hours, w.employee_id, w.hours_source,
-            w.hourly_rate_cents AS shift_rate_cents,
+            w.hourly_rate_cents AS shift_rate_cents, sh.date AS worked_on,
             e.name, e.email, e.hourly_rate_cents AS default_rate_cents, e.pay_type
-     FROM work w JOIN employees e ON e.id = w.employee_id WHERE w.shift_id = ?`
+     FROM work w JOIN employees e ON e.id = w.employee_id
+     JOIN shifts sh ON sh.id = w.shift_id WHERE w.shift_id = ?`
   ),
   // Sales only. Card tips used to ride along here and were written on every
   // save, so an empty card field cleared a figure to zero while an empty cash
@@ -504,16 +508,27 @@ function shiftInputs(shiftId) {
   const support = [];
   const kinds = positionKinds();
   for (const row of workRows) {
-    // Wage resolution: salaried → no hourly wage; else per-shift override →
-    // the wage set for THIS role → the employee's default rate.
+    // Wage resolution: salaried → no hourly wage; else the rate recorded on
+    // the shift → the wage that was IN FORCE ON THE DAY it was worked → the
+    // wage on file now.
+    //
+    // The dated step is what stops a raise restating history. Required lazily:
+    // wages.js reads this module, so requiring it at the top would be a cycle,
+    // and by the time this function runs both are loaded.
     const salaried = row.pay_type === 'salary';
     let rateCents = 0;
     if (!salaried) {
       if (row.shift_rate_cents > 0) {
         rateCents = row.shift_rate_cents;
       } else {
-        const rw = q.roleWage.get(row.employee_id, row.role);
-        rateCents = rw && rw.wage_cents ? rw.wage_cents : (row.default_rate_cents || 0);
+        const dated = row.worked_on
+          ? require('./wages').wageOn(row.employee_id, row.role, row.worked_on) : 0;
+        if (dated > 0) {
+          rateCents = dated;
+        } else {
+          const rw = q.roleWage.get(row.employee_id, row.role);
+          rateCents = rw && rw.wage_cents ? rw.wage_cents : (row.default_rate_cents || 0);
+        }
       }
     }
     if (row.role === 'server') {

@@ -390,9 +390,14 @@ test('the SQL wage rate resolves exactly like shiftInputs does', () => {
   const { WAGE_RATE_SQL } = require('../src/reports');
   const { db, shiftInputs } = require('../src/db');
 
+  // `shifts sh` is joined because the fragment now resolves the wage that was
+  // in force on sh.date. That requirement is the point of the change: without
+  // a date there is no answer to "what were they earning then", only to "what
+  // are they earning now", which is the bug.
   const wageOf = db.prepare(`
     SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0) AS cents
       FROM work w JOIN employees e ON e.id = w.employee_id
+      JOIN shifts sh ON sh.id = w.shift_id
       LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
      WHERE w.shift_id = ? AND COALESCE(e.pay_type, 'hourly') <> 'salary'`);
 
@@ -451,11 +456,16 @@ test('a wage set for a role beats the default when that role is worked', () => {
   // different rate. Working a busser shift has to pay the busser rate — this
   // is the case a two-level COALESCE gets wrong and nobody notices, because
   // the number it produces is perfectly plausible.
+  // The synthetic `w` now has to carry an employee_id and a role as well as a
+  // zero override, because the dated lookup joins on both — and a date, which
+  // is taken from a real shift so the row is one the resolver could meet.
   const row = db.prepare(`
     SELECT ${WAGE_RATE_SQL} AS rate, e.hourly_rate_cents AS deflt, er.wage_cents AS role_rate
       FROM employees e
       LEFT JOIN employee_roles er ON er.employee_id = e.id AND er.role = 'busser'
-      JOIN (SELECT 0 AS hourly_rate_cents) w
+      JOIN (SELECT 0 AS hourly_rate_cents, e2.id AS employee_id, 'busser' AS role
+              FROM employees e2) w ON w.employee_id = e.id
+      JOIN (SELECT MAX(date) AS date FROM shifts) sh
      WHERE er.wage_cents > 0 AND er.wage_cents <> e.hourly_rate_cents LIMIT 1`).get();
   if (!row) return; // nobody has a distinct second-role wage on file
   assert.strictEqual(row.rate, row.role_rate, 'pays the rate for the role worked');
