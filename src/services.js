@@ -22,10 +22,22 @@
  *   2. MEMBERSHIP. Which services a person works, relationally, so somebody
  *      can be on one, both, or a third we add later.
  *
- * NO ROWS MEANS EVERY SERVICE. The same shape Phase 6 uses for availability:
- * absence is not a restriction. It is what keeps the day this ships uneventful
- * — nobody has to be bulk-assigned before the clock works — and it is the
- * owner's stated choice.
+ * UNTICKED MEANS NOWHERE — once somebody has been set up. That is the owner's
+ * rule, and it is what makes the checkboxes mean anything: take a person off
+ * Evening and they are off Evening, on the board and at the clock.
+ *
+ * But "nobody has decided yet" is a different fact from "decided: none", and
+ * conflating them is how a new hire ends up unable to clock in anywhere on
+ * their first shift while their manager wonders what is broken. So the two are
+ * stored apart: `employees.svc_set` records that a human has been through this
+ * form, and until they have, the person is on every schedule.
+ *
+ * The result reads the way somebody would expect it to:
+ *   new employee, never touched  -> on every schedule, can work
+ *   ticked Day only              -> Day only
+ *   ticked nothing at all        -> nowhere, deliberately
+ *   NEW SCHEDULE                 -> starts empty of the already-set-up; they
+ *                                   appear as unticked boxes to be added
  */
 
 const { db } = require('./db');
@@ -138,30 +150,41 @@ function unarchive(slug) {
 
 // --- who works what ---------------------------------------------------------
 
+// Marks that somebody has actually been through the Services form. Without it
+// there is no way to tell "decided: none" from "nobody has looked yet", and
+// those two have to behave differently — see the note at the top.
+try {
+  const cols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
+  if (!cols.includes('svc_set')) {
+    db.exec('ALTER TABLE employees ADD COLUMN svc_set INTEGER NOT NULL DEFAULT 0');
+  }
+} catch { /* older engine; forEmployee falls back to every schedule */ }
+
+const qSet = db.prepare('SELECT COALESCE(svc_set, 0) v FROM employees WHERE id = ?');
+function wasSetUp(employeeId) {
+  try { const r = qSet.get(employeeId); return !!(r && r.v); } catch { return false; }
+}
+
 const qMine = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ? AND active = 1');
 
 /**
- * The services this person may work.
+ * The schedules this person is on. No rows means none.
  *
- * NO ROWS MEANS EVERY ACTIVE SERVICE. Absence is not a restriction — the same
- * rule availability follows, and the reason nothing breaks the day this ships.
+ * Filtered against the live list, so archiving a schedule takes it off
+ * everybody without having to touch a membership row.
  */
 function forEmployee(employeeId) {
-  if (!employeeId) return all().map((s) => s.slug);
+  if (!employeeId) return [];
+  // Never set up: on everything, so a new hire can work their first shift.
+  if (!wasSetUp(employeeId)) return all().map((x) => x.slug);
   let rows = [];
   try { rows = qMine.all(employeeId).map((r) => r.service_slug); } catch { rows = []; }
-  if (!rows.length) return all().map((s) => s.slug);
-  // Filtered against active services, so archiving one takes it off everybody
-  // without having to touch a membership row.
   const live = new Set(all().map((s) => s.slug));
-  const kept = rows.filter((r) => live.has(r));
-  return kept.length ? kept : all().map((s) => s.slug);
+  return rows.filter((r) => live.has(r));
 }
 
-/** Has this person been given an explicit list, or are they on everything? */
-function isAssigned(employeeId) {
-  try { return qMine.all(employeeId).length > 0; } catch { return false; }
-}
+/** Has a human been through this person's Services form? */
+const isAssigned = (employeeId) => wasSetUp(employeeId);
 
 /**
  * THE GATE. Server-side, and the only thing any route should ask.
@@ -171,7 +194,14 @@ function isAssigned(employeeId) {
  */
 const canWork = (employeeId, slug) => forEmployee(employeeId).includes(slug);
 
-/** Replace somebody's whole list. An empty list means "every service" again. */
+/**
+ * Replace somebody's whole list. Every tick is stored, including all of them.
+ *
+ * An earlier version collapsed "all ticked" to no rows on the reasoning that
+ * they mean the same thing. They no longer do: no rows now means none, so
+ * collapsing would have silently taken somebody off every schedule at the
+ * moment their manager ticked every box.
+ */
 function setForEmployee(employeeId, slugs) {
   const live = new Set(all().map((s) => s.slug));
   const want = [...new Set((slugs || []).filter((s) => live.has(s)))];
@@ -179,26 +209,42 @@ function setForEmployee(employeeId, slugs) {
     db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(employeeId);
     const ins = db.prepare(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
                             VALUES (?, ?)`);
-    // All of them selected is the same fact as none selected — both mean "works
-    // everything" — and storing it as none means adding a service later
-    // includes them automatically, which is what somebody ticking every box
-    // meant. It also keeps one representation of one idea.
-    if (want.length && want.length < live.size) for (const s of want) ins.run(employeeId, s);
+    for (const s of want) ins.run(employeeId, s);
+    // Saving the form IS the decision, including a decision of none. From here
+    // on, unticked means nowhere for this person.
+    try { db.prepare('UPDATE employees SET svc_set = 1 WHERE id = ?').run(employeeId); } catch { /* older engine */ }
   })();
 }
 
-/** Everybody who may work a service — for scoping a board or a roster. */
+/**
+ * No migration is needed, and that is the point of svc_set.
+ *
+ * Every existing employee has svc_set = 0, so they are on every schedule until
+ * somebody says otherwise — nothing empties itself on deploy, and no rows had
+ * to be written to make that true. Kept as a named no-op because "why is there
+ * no backfill" is a fair question to ask of a change like this.
+ */
+function backfill() { return { added: 0, skipped: true }; }
+
+/**
+ * Everybody on a schedule: those added to it, plus anybody nobody has set up
+ * yet. A new hire appears on every board until their manager narrows them,
+ * rather than being invisible on the day they start.
+ */
 function employeesFor(slug) {
-  const explicit = db.prepare(`SELECT employee_id FROM employee_services
-                               WHERE service_slug = ? AND active = 1`).all(slug).map((r) => r.employee_id);
-  const assigned = new Set(db.prepare(`SELECT DISTINCT employee_id FROM employee_services
-                                       WHERE active = 1`).all().map((r) => r.employee_id));
-  const everyone = db.prepare('SELECT id FROM employees WHERE active = 1').all().map((r) => r.id);
-  // Anybody with no list at all works everything, so they belong to every slug.
-  return everyone.filter((id) => !assigned.has(id) || explicit.includes(id));
+  const added = db.prepare(`SELECT es.employee_id FROM employee_services es
+                     JOIN employees e ON e.id = es.employee_id
+                     WHERE es.service_slug = ? AND es.active = 1 AND e.active = 1`)
+    .all(slug).map((r) => r.employee_id);
+  let untouched = [];
+  try {
+    untouched = db.prepare(`SELECT id FROM employees
+      WHERE active = 1 AND COALESCE(svc_set, 0) = 0`).all().map((r) => r.id);
+  } catch { untouched = []; }
+  return [...new Set([...added, ...untouched])];
 }
 
 module.exports = {
-  BUILT_IN, seed, all, bySlug, nameOf, isActive, create, rename, archive, unarchive,
+  BUILT_IN, seed, backfill, all, bySlug, nameOf, isActive, create, rename, archive, unarchive,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };

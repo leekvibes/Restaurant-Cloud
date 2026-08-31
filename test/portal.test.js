@@ -2023,6 +2023,10 @@ test('somebody can only clock into a service they are on, checked on the POST', 
   // Day Service only — the reported problem, in the form it was reported.
   db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
   db.prepare(`INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')`).run(marco.id);
+  // svc_set is what separates "narrowed to Day" from "nobody has looked yet".
+  // Without it he reads as a new hire and is on everything, which is exactly
+  // the distinction this test exists to prove works.
+  db.prepare('UPDATE employees SET svc_set = 1 WHERE id = ?').run(marco.id);
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(marco.id);
 
   const cookie = await signIn('2222');
@@ -2048,11 +2052,13 @@ test('somebody can only clock into a service they are on, checked on the POST', 
 
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(marco.id);
   db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
+  db.prepare('UPDATE employees SET svc_set = 0 WHERE id = ?').run(marco.id);
 });
 
-test('with no services assigned, everybody can still clock into anything', async () => {
-  // The rule that keeps the day this ships uneventful. If absence meant "no
-  // services" the whole roster would be locked out by a deploy.
+test('somebody nobody has set up yet can still clock into anything', async () => {
+  // "Nobody has decided" is not "decided: none". Without that distinction a
+  // new hire cannot clock in on their first shift, and every existing employee
+  // would have come off every schedule the day this deployed.
   const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
   db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);

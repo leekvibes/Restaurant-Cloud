@@ -6067,6 +6067,43 @@ const sbPortalRows = (view, empId, from, to) => (view === 'all'
   ? SCH.q.pubInRange.all(from, to)
   : SCH.q.pubForWeek.all({ emp: empId, from, to }));
 
+/**
+ * Which schedule — the first thing an employee on more than one sees.
+ *
+ * Cards rather than a filter on the schedule itself: on a phone, choosing
+ * between two things is a decision worth its own screen, and it makes the
+ * schedule that follows unambiguously ONE schedule rather than a filtered view
+ * of two. Anybody on a single schedule never reaches this.
+ */
+function portalSchedulePicker(req, emp, mySvcs, from, to) {
+  const mine = SERVICES.all().filter((x) => mySvcs.includes(x.slug));
+  const rows = sbPortalRows('me', emp.id, from, to);
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  return portalPage('Schedule', `
+    <div class="pt-body ps">
+      <div class="ps-head">
+        <h1 class="pt-title">Schedule</h1>
+        <p class="pt-sub">You are on ${mine.length} schedules &mdash; pick one</p>
+      </div>
+      <div class="psp-cards">
+        ${mine.map((sv) => {
+    // What is actually coming up on it, so the card answers "is there
+    // anything for me here" before it is opened.
+    const mineOn = rows.filter((r) => r.daypart === sv.slug && r.business_date >= today);
+    const next = mineOn[0];
+    return `<a class="psp-card" href="/portal/schedule?svc=${encodeURIComponent(sv.slug)}">
+          <b class="psp-name">${esc(sv.name)}</b>
+          <span class="psp-next">${next
+      ? `Next: ${esc(TC.dayLabel(next.business_date).replace(/,.*$/, ''))} ${esc(sbTimeFull(next.starts_at))}`
+      : 'Nothing coming up'}</span>
+          <span class="psp-count">${mineOn.length} upcoming shift${mineOn.length === 1 ? '' : 's'}</span>
+          <span class="psp-go" aria-hidden="true">&rsaquo;</span>
+        </a>`;
+  }).join('')}
+      </div>
+    </div>`);
+}
+
 app.get('/portal/schedule', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -6083,15 +6120,18 @@ app.get('/portal/schedule', (req, res) => {
   const picked = MX.isDate(req.query.d) && req.query.d >= from && req.query.d <= to
     ? req.query.d : today;
 
-  // Service pills, but only for somebody who actually works more than one.
-  // Making a one-service employee choose between one thing is a screen that
-  // teaches nothing, so they never see it.
+  // WHICH SCHEDULE. Somebody on one goes straight into it and never sees a
+  // chooser — a page asking you to pick between one thing is a page that only
+  // costs a tap. Somebody on two picks first, and everything after is theirs.
   const mySvcs = SERVICES.forEmployee(emp.id);
-  const pills = mySvcs.length > 1 ? SERVICES.all().filter((x) => mySvcs.includes(x.slug)) : [];
-  const pick = pills.length && pills.some((x) => x.slug === req.query.svc) ? req.query.svc : '';
+  const pick = mySvcs.includes(String(req.query.svc)) ? String(req.query.svc)
+    : (mySvcs.length === 1 ? mySvcs[0] : '');
+  if (!pick && mySvcs.length > 1 && view !== 'avail') {
+    return res.send(portalSchedulePicker(req, emp, mySvcs, from, to));
+  }
   const allRows = view === 'avail' ? [] : sbPortalRows(view, emp.id, from, to);
-  // A published shift they can see is filtered by the pill; with no pill
-  // chosen they see all of theirs, which is what the page has always shown.
+  // Scoped to the schedule they chose. With none chosen there is nothing to
+  // scope to — they are on one, or looking at availability, which spans them.
   const rows = pick ? allRows.filter((r) => r.daypart === pick) : allRows;
   const names = new Map(q.allEmployees.all().map((e) => [e.id, e.name]));
 
@@ -6310,18 +6350,13 @@ app.get('/portal/schedule', (req, res) => {
             ${arrow(7, 'Later week', '&rarr;')}
           </div>
           <nav class="ps-strip" aria-label="Days">${strip}</nav>`}
-        ${/* Service pills, and only for somebody who works more than one. A
-              chooser between one option is a screen that teaches nothing, so a
-              Day-only employee never sees this and their schedule opens the way
-              it always did. */''}
-        ${pills.length ? `<nav class="ps-svc" aria-label="Service">
-          <a class="ps-svc-p${pick ? '' : ' on'}" href="/portal/schedule?v=${esc(view)}${
-            picked ? `&d=${esc(picked)}` : ''}"${pick ? '' : ' aria-current="true"'}>All</a>
-          ${pills.map((sv) => `<a class="ps-svc-p${pick === sv.slug ? ' on' : ''}"
-            href="/portal/schedule?v=${esc(view)}&svc=${encodeURIComponent(sv.slug)}${
-              picked ? `&d=${esc(picked)}` : ''}"${pick === sv.slug ? ' aria-current="true"' : ''}
-            >${esc(sv.name)}</a>`).join('')}
-        </nav>` : ''}
+        ${/* The schedule they chose, and the way back to the cards. Only ever
+              here for somebody on more than one — anybody else came straight
+              in and has nothing to go back to. */''}
+        ${mySvcs.length > 1 ? `<div class="ps-svc-bar">
+          <a class="ps-svc-back" href="/portal/schedule">&larr; Schedules</a>
+          <b>${esc(SERVICES.nameOf(pick))}</b>
+        </div>` : ''}
       </div>
 
       ${view === 'avail' ? `
@@ -9214,9 +9249,17 @@ function applyWageChange(employeeId, role, cents, body, actor) {
   const asked = MX.isDate(body.wage_date) ? body.wage_date : today;
   const from = mode === 'all' ? WAGES.EPOCH : (mode === 'date' ? asked : today);
 
+  // The choice itself is recorded, not only its result. "Effective 1 March"
+  // does not say whether somebody picked a date or rewrote history to get
+  // there, and those are very different acts to be reading back later.
+  const WORD = {
+    today: 'from today',
+    date: 'from a chosen date',
+    all: 'applied to ALL shifts, including past',
+  };
   WAGES.setWage(employeeId, role || null, cents, from, {
     by: actor || null,
-    note: mode === 'all' ? 'applied to all shifts' : null,
+    note: WORD[mode],
   });
 
   let restamped = 0;
@@ -9301,14 +9344,20 @@ app.get('/employees/:id/edit', (req, res) => {
     </form>
 
     ${wageLog.length ? `<h2>Wage changes</h2>
-    <p class="sub">Each shift is priced at the wage that was in force on the day it was worked, so a raise never restates what somebody was already paid. Wages set before this was recorded are not listed &mdash; they simply applied from the beginning.</p>
+    <p class="sub">Every change, what was chosen when it was made, and when. Each shift is priced at the wage in force on the day it was worked, so a raise never restates what somebody was already paid. Wages set before this was recorded are not listed &mdash; they simply applied from the beginning.</p>
     <div class="table-wrap"><table class="table">
-      <thead><tr><th>From</th><th>Role</th><th class="num">Wage</th><th>Set by</th></tr></thead>
+      <thead><tr><th>Effective from</th><th>Role</th><th class="num">Wage</th>
+        <th>Option chosen</th><th>Changed</th><th>By</th></tr></thead>
       <tbody>${wageLog.map((r) => `<tr>
         <td>${esc(r.effective_from)}${r.effective_from > isoDate(startOfToday()) ? ' <span class="sub">(upcoming)</span>' : ''}</td>
         <td>${r.role ? esc(r.role) : '<span class="muted">default</span>'}</td>
         <td class="num">${money(r.wage_cents)}/h</td>
-        <td class="sub">${esc(r.created_by || '')}${r.note ? ` &middot; ${esc(r.note)}` : ''}</td>
+        <td class="sub">${r.note ? esc(r.note) : '<span class="muted">&mdash;</span>'}</td>
+        ${/* When the change was MADE, which is a different fact from the day
+              it takes effect — a raise entered in March starting in June has
+              two dates and only one of them says who knew what, when. */''}
+        <td class="sub">${esc(r.created_at || '')}</td>
+        <td class="sub">${esc(r.created_by || '')}</td>
       </tr>`).join('')}</tbody>
     </table></div>` : ''}
 
@@ -18817,6 +18866,11 @@ function sbForm(body) {
  * teaches nothing and costs a tap.
  */
 function serviceCards(req, base, opts = {}) {
+  // The word on screen is the thing the picker fronts — "Schedules" in front of
+  // Schedule, "Time clocks" in front of Time Clock — never "Services". They are
+  // the same rows underneath, but a back arrow that says Services when you came
+  // from Schedule reads as a different part of the app.
+  const backWord = opts.backWord || 'Schedules';
   const list = SERVICES.all();
   const w = canWrite(req);
   return layout(opts.title || 'Choose a service', `
@@ -18866,11 +18920,11 @@ function serviceCards(req, base, opts = {}) {
         </section>`;
   }).join('')}
         ${w ? `<form class="bs-panel svc-card svc-card--new" method="post" action="/services"
-          onsubmit="var n=prompt('Name the new service'); if(!n){return false;} this.querySelector('[name=name]').value=n;">
+          onsubmit="var n=prompt('Name the new ' + '${esc(backWord.replace(/s$/, '').toLowerCase())}'); if(!n){return false;} this.querySelector('[name=name]').value=n;">
           <input type="hidden" name="_csrf" value="${csrfFor(req)}">
           <input type="hidden" name="name" value="">
           <input type="hidden" name="back" value="${esc(base)}">
-          <button type="submit" class="svc-card-add">+ Add a service</button>
+          <button type="submit" class="svc-card-add">+ Add a ${esc(backWord.replace(/s$/, '').toLowerCase())}</button>
         </form>` : ''}
       </div>
     </div>`);
@@ -18906,7 +18960,8 @@ app.get('/schedule', (req, res) => {
   const svc = svcParam(req);
   if (!svc && req.query.v !== 'today') {
     return res.send(serviceCards(req, '/schedule', {
-      title: 'Schedule', sub: 'Pick a service to plan. Each one has its own week, its own people and its own tip-out.',
+      title: 'Schedules', backWord: 'Schedules',
+      sub: 'Pick a schedule to plan. Each one has its own week, its own people and its own tip-out.',
       countLabel: 'Shifts this week',
       countOf: (slug) => SCH.inRange(thisWeek.start, thisWeek.end)
         .filter((x) => x.daypart === slug && x.status !== 'cancelled').length,
@@ -19350,7 +19405,7 @@ app.get('/schedule', (req, res) => {
     <div class="sb">
       <div class="sb-frame">
         ${SERVICES.all().length > 1 ? `<div class="sb-svc">
-          <a class="sb-svc-back" href="/schedule">&larr; Services</a>
+          <a class="sb-svc-back" href="/schedule">&larr; Schedules</a>
           <b>${esc(svc === 'all' ? 'All services' : SERVICES.nameOf(svc))}</b>
           ${svc === 'all' ? '' : '<a class="sb-svc-all" href="/schedule?svc=all">See all services</a>'}
         </div>` : ''}
@@ -20675,8 +20730,8 @@ app.get('/timeclock', (req, res) => {
     const cfg0 = TC.settings();
     const d0 = TC.businessDateOf(TC.nowUtc(), cfg0.cutoffHour);
     return res.send(serviceCards(req, '/timeclock', {
-      title: 'Time clock',
-      sub: 'Pick a service. Punches, timesheets and corrections are the same tools, scoped to it.',
+      title: 'Time clocks', backWord: 'Time clocks',
+      sub: 'Pick a time clock. Punches, timesheets and corrections are the same tools, scoped to it.',
       countLabel: 'On now',
       countOf: (slug) => TC.q.allActive.all().filter((e) => e.daypart === slug).length,
     }));
@@ -24599,6 +24654,11 @@ app.use((err, req, res, _next) => {                        // eslint-disable-lin
 try {
   const sv = SERVICES.seed();
   if (sv.seeded) console.log(`  Services: seeded ${sv.seeded} (Day Service, Evening Service).`);
+  // Everybody onto every schedule, once. Not being on a schedule now MEANS not
+  // being on it, so without this the meaning-flip would take the whole roster
+  // off every board at the moment it deployed.
+  const bf = SERVICES.backfill();
+  if (bf.added) console.log(`  Services: put ${bf.added} existing staff memberships in place.`);
 } catch (e) {
   console.error('  Services seed skipped:', e.message);
 }

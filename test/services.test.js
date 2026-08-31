@@ -41,10 +41,11 @@ test('the two services that always existed are seeded with names', () => {
   assert.strictEqual(SVC.seed().seeded, 0);
 });
 
-test('NO ROWS MEANS EVERY SERVICE — which is why nothing breaks on day one', () => {
-  // The single most important rule here. If absence meant "no services", every
-  // employee would be locked out of the clock the moment this shipped.
-  assert.strictEqual(SVC.isAssigned(ALICE), false, 'nobody has been assigned yet');
+test('somebody nobody has set up yet is on every schedule', () => {
+  // "Nobody has decided" is not "decided: none". Conflating them is how a new
+  // hire cannot clock in anywhere on their first shift, and how every existing
+  // employee would have come off every board the day this deployed.
+  assert.strictEqual(SVC.isAssigned(ALICE), false, 'nobody has been through the form yet');
   assert.deepStrictEqual(SVC.forEmployee(ALICE), ['cafe', 'dinner']);
   assert.ok(SVC.canWork(ALICE, 'cafe'));
   assert.ok(SVC.canWork(ALICE, 'dinner'));
@@ -58,24 +59,30 @@ test('assigning one service excludes the other', () => {
   assert.ok(!SVC.canWork(ALICE, 'dinner'), 'the reported problem: he should not have the option');
 });
 
-test('ticking every box is stored as ticking none, because they mean the same', () => {
-  // Not a shortcut — it is what keeps one idea in one representation, and it
-  // means a service added next year includes them without anybody revisiting
-  // this page.
+test('every tick is stored, and a NEW schedule starts empty of set-up people', () => {
+  // Ticking every box used to collapse to storing none. It cannot now: none
+  // means none, so collapsing would take somebody off everything at the moment
+  // their manager ticked everything.
   SVC.setForEmployee(BOB, ['cafe', 'dinner']);
-  assert.strictEqual(SVC.isAssigned(BOB), false, 'stored as no list');
-  assert.deepStrictEqual(SVC.forEmployee(BOB), ['cafe', 'dinner'], 'and still works both');
+  assert.strictEqual(SVC.isAssigned(BOB), true, 'the decision is recorded');
+  assert.deepStrictEqual(SVC.forEmployee(BOB), ['cafe', 'dinner'], 'and both are stored');
 
+  // A new schedule arrives EMPTY of anybody already set up — it is a thing the
+  // owner fills, not one he has to empty.
   SVC.create({ slug: 'brunch', name: 'Brunch' });
-  assert.ok(SVC.canWork(BOB, 'brunch'), 'so a new service includes them automatically');
-  assert.ok(!SVC.canWork(ALICE, 'brunch'), 'but not somebody deliberately narrowed');
+  assert.ok(!SVC.canWork(BOB, 'brunch'), 'set-up people are not added to it automatically');
+  assert.ok(!SVC.canWork(ALICE, 'brunch'), 'nor is somebody narrowed to one schedule');
   SVC.archive('brunch');
 });
 
-test('clearing the list puts them back on everything', () => {
+test('unticking everything means NOWHERE, which is the owner\'s rule', () => {
+  // The whole point of the checkboxes. Take somebody off every schedule and
+  // they are off every schedule — not quietly restored to all of them.
   SVC.setForEmployee(ALICE, []);
-  assert.strictEqual(SVC.isAssigned(ALICE), false);
-  assert.ok(SVC.canWork(ALICE, 'dinner'));
+  assert.strictEqual(SVC.isAssigned(ALICE), true, 'the decision was recorded');
+  assert.deepStrictEqual(SVC.forEmployee(ALICE), [], 'and it is honoured');
+  assert.ok(!SVC.canWork(ALICE, 'cafe'));
+  assert.ok(!SVC.canWork(ALICE, 'dinner'), 'they cannot clock in anywhere');
   SVC.setForEmployee(ALICE, ['cafe']);        // put it back for later tests
 });
 
@@ -87,10 +94,10 @@ test('archiving takes a service off everybody without touching a membership row'
 
   SVC.archive('latenight');
   assert.ok(!SVC.all().some((x) => x.slug === 'latenight'), 'gone from the live list');
-  // Their only service is archived, so they fall back to everything rather
-  // than to nothing — a person is never left unable to clock in at all.
-  assert.deepStrictEqual(SVC.forEmployee(BOB), ['cafe', 'dinner']);
-  SVC.setForEmployee(BOB, []);
+  // Their only schedule is archived, so they are on nothing — and that is
+  // correct rather than convenient: the schedule they were on no longer runs.
+  assert.deepStrictEqual(SVC.forEmployee(BOB), []);
+  SVC.setForEmployee(BOB, ['cafe', 'dinner']);
 });
 
 test('a service is archived, never deleted, and the last one cannot go', () => {
@@ -111,17 +118,25 @@ test('a rename changes the name and never the stored value', () => {
   SVC.rename('cafe', 'Day Service');
 });
 
-test('employeesFor includes both the assigned and the unrestricted', () => {
+test('employeesFor is who was added, plus anybody not set up yet', () => {
   SVC.setForEmployee(ALICE, ['cafe']);
-  SVC.setForEmployee(BOB, []);
+  SVC.setForEmployee(BOB, ['cafe', 'dinner']);
   const cafe = SVC.employeesFor('cafe');
   const dinner = SVC.employeesFor('dinner');
-  assert.ok(cafe.includes(ALICE) && cafe.includes(BOB), 'both can work Day');
+  assert.ok(cafe.includes(ALICE) && cafe.includes(BOB), 'both are on Day');
   assert.ok(!dinner.includes(ALICE), 'Alice is Day only');
-  assert.ok(dinner.includes(BOB), 'Bob has no list, so he is on everything');
+  assert.ok(dinner.includes(BOB), 'Bob is on both');
+
+  // A brand-new hire nobody has touched shows on every board rather than
+  // vanishing until somebody remembers this screen exists.
+  const fresh = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active, pin)
+    VALUES ('Svc Fresh', 'server', 1500, 1, '7803')`).run().lastInsertRowid);
+  assert.ok(SVC.employeesFor('cafe').includes(fresh));
+  assert.ok(SVC.employeesFor('dinner').includes(fresh));
+  assert.ok(SVC.canWork(fresh, 'dinner'), 'and can clock in on day one');
 });
 
-test('a bad or unknown service in a POST cannot be stored', () => {
+test('a bad or unknown schedule in a POST cannot be stored', () => {
   SVC.setForEmployee(ALICE, ['cafe', 'nonsense', '']);
   assert.deepStrictEqual(SVC.forEmployee(ALICE), ['cafe'],
     'anything that is not a live service is dropped rather than stored');

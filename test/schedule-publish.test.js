@@ -33,8 +33,22 @@ let child; let Database; let db; let SCH; let TC; let dates;
 // /schedule now shows a service picker first; these tests are about
 // publishing, so the helper asks for every service and they assert what they
 // always did. The picker has its own tests in schedule-board.test.js.
-const svcd = (p) => (/^\/schedule(\?|$)/.test(p) && !/[?&]svc=/.test(p)
-  ? p + (p.includes('?') ? '&' : '?') + 'svc=all' : p);
+const svcd = (p) => {
+  if (/^\/schedule(\?|$)/.test(p) && !/[?&]svc=/.test(p)) {
+    return p + (p.includes('?') ? '&' : '?') + 'svc=all';
+  }
+  // The PORTAL schedule now asks which one first, for anybody on more than one
+  // — which is everybody until a manager narrows them. These tests are about
+  // what the schedule shows, so they name a schedule; the picker itself is
+  // tested separately.
+  if (/^\/portal\/schedule(\?|$)/.test(p) && !/[?&]svc=/.test(p)) {
+    // 'dinner', because every fixture in this file starts at 16:00 and so
+    // lands on Evening. A blanket default of Day silently hid all of them and
+    // four tests started asserting against an empty schedule.
+    return p + (p.includes('?') ? '&' : '?') + 'svc=dinner';
+  }
+  return p;
+};
 const text = async (p, headers = {}) => (await fetch(BASE + svcd(p), { headers })).text();
 const status = async (p, headers = {}) => (await fetch(BASE + p, { headers, redirect: 'manual' })).status;
 const post = async (p, body, headers = {}) => fetch(BASE + p, {
@@ -675,16 +689,20 @@ test('Only me never contains a coworker, anywhere in the page source', async () 
 
 test('Everyone shows published coworkers, and still no drafts or private fields', async () => {
   const w = nearWeek();
+  // All three on the SAME schedule. The portal shows one schedule at a time
+  // now, so a coworker on the other one would be absent for a reason that has
+  // nothing to do with publishing — and every doesNotMatch below would pass
+  // against a page that was simply showing nothing.
   mk(E.esther, w.start, '16:00', '22:00', { note: 'SECRET note' });
-  const draft = mk(E.kevin, dates.addDays(w.start, 1), '09:00', '15:00');
+  const draft = mk(E.kevin, dates.addDays(w.start, 1), '17:00', '23:00');
   await post(`/schedule/publish-week`, { w: w.start });
   // Now add one more that is NOT published.
-  const unpublished = mk(E.kevin, dates.addDays(w.start, 2), '06:00', '10:00');
+  const unpublished = mk(E.kevin, dates.addDays(w.start, 2), '18:00', '22:00');
 
   const cookie = await signIn(PIN.esther);
   const html = await text(`/portal/schedule?v=all&d=${w.start}`, { cookie });
   assert.match(html, /Kevin Pub/, 'coworkers are visible on the floor schedule');
-  assert.doesNotMatch(html, /6a – 10a/, 'but only what was published');
+  assert.doesNotMatch(html, /6p – 10p/, 'but only what was published');
   assert.doesNotMatch(html, /SECRET/, 'no notes');
   assert.doesNotMatch(html, /Planned break/, 'and no coworker break detail');
   // No service on a COWORKER'S CARD. The page itself now carries service pills
@@ -718,15 +736,19 @@ test('a forged employee id in the querystring changes nothing', async () => {
 
   // On the week he IS published. Asking for a week nobody works hides him for
   // the wrong reason, and the forgery would go untested.
+  // svc=cafe, because this fixture is a 9am shift — unlike the rest of this
+  // file. It matters: the assertions below are all doesNotMatch, so they would
+  // pass against a page showing nothing at all, and this line is what proves
+  // the page was showing something to begin with.
   const asKevin = await signIn(PIN.kevin);
-  assert.match(await text(`/portal/schedule?d=${w.start}`, { cookie: asKevin }), /9a – 3p/,
+  assert.match(await text(`/portal/schedule?svc=cafe&d=${w.start}`, { cookie: asKevin }), /9a – 3p/,
     'his own shift is on his own page that week');
 
   const cookie = await signIn(PIN.esther);
   // Every shape somebody might try. The route reads the SESSION, never a param.
   for (const q of [`?employee=${E.kevin}`, `?emp=${E.kevin}`, `?employee_id=${E.kevin}`,
     `?v=me&employee=${E.kevin}`]) {
-    const html = await text(`/portal/schedule${q}&d=${w.start}`, { cookie });
+    const html = await text(`/portal/schedule${q}&svc=cafe&d=${w.start}`, { cookie });
     assert.doesNotMatch(html, /Kevin Pub/, `${q} does not hand over somebody else's schedule`);
     assert.doesNotMatch(html, /9a – 3p/, `${q} does not hand over his hours either`);
   }
@@ -1315,5 +1337,79 @@ test('nothing in the availability UI reports state by colour alone', () => {
   const region = src.slice(at, at + 9000);
   for (const word of ['Prefer to work', 'Mark unavailability', 'Declare unavailability']) {
     assert.ok(region.includes(word), `the state "${word}" is spelled out, not implied`);
+  }
+});
+// ===========================================================================
+// The portal's own schedule picker.
+//
+// Every other portal fetch in this file goes through a helper that names a
+// schedule, so without these the picker would be invisible to the suite.
+// ===========================================================================
+
+test('somebody on two schedules picks one before seeing any shifts', async () => {
+  const cookie = await signIn(PIN.esther);
+  const html = await (await fetch(BASE + '/portal/schedule', { headers: { cookie } })).text();
+  assert.match(html, /psp-card/, 'cards, not a schedule');
+  assert.match(html, /Day Service/);
+  assert.match(html, /Evening Service/);
+  assert.doesNotMatch(html, /ps-strip/, 'and no day strip yet — nothing has been chosen');
+});
+
+test('somebody on ONE schedule goes straight in and is never asked', async () => {
+  // A page asking you to choose between one thing is a page that only costs a
+  // tap. This is the half of the rule that is easy to forget to build.
+  const kev = db.prepare('SELECT id FROM employees WHERE name = ?').get('Kevin Pub');
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(kev.id);
+  db.prepare("INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'dinner')").run(kev.id);
+  db.prepare('UPDATE employees SET svc_set = 1 WHERE id = ?').run(kev.id);
+  try {
+    const cookie = await signIn(PIN.kevin);
+    const html = await (await fetch(BASE + '/portal/schedule', { headers: { cookie } })).text();
+    assert.doesNotMatch(html, /psp-card/, 'no picker');
+    assert.match(html, /ps-strip/, 'straight into the schedule');
+    assert.doesNotMatch(html, /ps-svc-back/, 'and nothing to go back to');
+  } finally {
+    db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(kev.id);
+    db.prepare('UPDATE employees SET svc_set = 0 WHERE id = ?').run(kev.id);
+  }
+});
+
+test('a chosen schedule shows only its own shifts, and says which it is', async () => {
+  // nearWeek, not freshWeek: freshWeek walks a week further out on every call
+  // and is soon past the ninety days the portal renders, so the fixture would
+  // be invisible for a reason that has nothing to do with schedules.
+  const w = nearWeek();
+  const evening = mk(E.esther, w.start, '17:00', '22:00');
+  const morning = mk(E.esther, w.start, '08:00', '12:00');
+  await post('/schedule/publish-week', { w: w.start });
+
+  const cookie = await signIn(PIN.esther);
+  const eve = await (await fetch(`${BASE}/portal/schedule?svc=dinner&d=${w.start}`, { headers: { cookie } })).text();
+  assert.match(eve, /5p – 10p/, 'the Evening shift is there');
+  assert.doesNotMatch(eve, /8a – 12p/, 'the Day one is not');
+  assert.match(eve, /Evening Service/, 'and the page names what you are looking at');
+  assert.match(eve, /ps-svc-back/, 'with a way back to the cards');
+
+  const day = await (await fetch(`${BASE}/portal/schedule?svc=cafe&d=${w.start}`, { headers: { cookie } })).text();
+  assert.match(day, /8a – 12p/);
+  assert.doesNotMatch(day, /5p – 10p/);
+  assert.ok(evening.id && morning.id);
+});
+
+test('an employee cannot look at a schedule they are not on', async () => {
+  // The picker only offers theirs, but the picker is not the gate — a typed
+  // ?svc= has to be ignored, and it lands them back on the cards rather than
+  // on somebody else's week.
+  const kev = db.prepare('SELECT id FROM employees WHERE name = ?').get('Kevin Pub');
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(kev.id);
+  db.prepare("INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')").run(kev.id);
+  db.prepare('UPDATE employees SET svc_set = 1 WHERE id = ?').run(kev.id);
+  try {
+    const cookie = await signIn(PIN.kevin);
+    const html = await (await fetch(BASE + '/portal/schedule?svc=dinner', { headers: { cookie } })).text();
+    assert.doesNotMatch(html, /Evening Service/, 'the schedule he is not on is not rendered');
+  } finally {
+    db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(kev.id);
+    db.prepare('UPDATE employees SET svc_set = 0 WHERE id = ?').run(kev.id);
   }
 });
