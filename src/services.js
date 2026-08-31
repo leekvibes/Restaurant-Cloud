@@ -215,6 +215,71 @@ try {
   }
 } catch { /* older engine */ }
 
+/**
+ * WORK HOURS — per day, per time clock.
+ *
+ * When this clock opens for punching, and when it closes people out. A row per
+ * weekday because a bar's Friday is not its Monday, and one pair of times for
+ * the week is the wrong pair on at least one day.
+ *
+ * NOT the business-date cutoff, which is a different question and stays where
+ * it is: the cutoff answers "which DAY does 1am belong to" and is read in forty
+ * places across payroll, sales, cash and the services page. These answer "is
+ * this clock open right now". Both exist; neither is the other.
+ *
+ * NULL means unset, and unset means no limit for that day — the safe direction,
+ * so a clock nobody has configured behaves exactly as it does today.
+ */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS service_hours (
+    service_slug TEXT    NOT NULL,
+    weekday      INTEGER NOT NULL,   -- 0 = Sunday, matching Date#getDay
+    open_min     INTEGER,            -- clock-in available from, minutes past midnight
+    close_min    INTEGER,            -- auto clock out at
+    UNIQUE(service_slug, weekday)
+  );
+`);
+
+const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** All seven days for one clock, always seven rows, unset ones included. */
+function hoursFor(slug) {
+  let rows = [];
+  try {
+    rows = db.prepare('SELECT weekday, open_min, close_min FROM service_hours WHERE service_slug = ?').all(slug);
+  } catch { rows = []; }
+  const by = new Map(rows.map((r) => [r.weekday, r]));
+  return DAY_LETTERS.map((letter, d) => ({
+    weekday: d, letter, name: DAY_NAMES[d],
+    openMin: by.has(d) ? by.get(d).open_min : null,
+    closeMin: by.has(d) ? by.get(d).close_min : null,
+  }));
+}
+
+/** One day, for the clock-in check. */
+function hoursOn(slug, weekday) {
+  return hoursFor(slug)[weekday] || { openMin: null, closeMin: null };
+}
+
+const asMin = (v) => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim());
+  if (!m) return null;
+  const h = Number(m[1]); const mi = Number(m[2]);
+  if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return null;
+  return h * 60 + mi;
+};
+
+function setHours(slug, weekday, openMin, closeMin) {
+  const o = openMin == null ? null : Math.max(0, Math.min(1439, Math.round(openMin)));
+  const c = closeMin == null ? null : Math.max(0, Math.min(1439, Math.round(closeMin)));
+  db.prepare(`INSERT INTO service_hours (service_slug, weekday, open_min, close_min)
+              VALUES (?, ?, ?, ?)
+              ON CONFLICT(service_slug, weekday)
+              DO UPDATE SET open_min = excluded.open_min, close_min = excluded.close_min`)
+    .run(slug, weekday, o, c);
+}
+
 const LIMITS = ['off', 'scheduled', 'early'];
 
 function limitOf(slug) {
@@ -356,6 +421,7 @@ function employeesFor(slug) {
 }
 
 module.exports = {
-  BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, LIMITS, limitOf, setLimit, bySlug, nameOf, isActive, create, rename, archive, unarchive,
+  BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, LIMITS, limitOf, setLimit,
+  DAY_LETTERS, DAY_NAMES, hoursFor, hoursOn, setHours, asMin, bySlug, nameOf, isActive, create, rename, archive, unarchive,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };

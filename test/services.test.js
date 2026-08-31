@@ -262,3 +262,47 @@ test('a schedule made without picking anybody starts empty, not full', () => {
   assert.deepStrictEqual(SVC.employeesFor('catering'), []);
   SVC.archive('catering');
 });
+
+// --- work hours, per day, per clock -------------------------------------------
+
+test('work hours are seven days per clock, and unset means no limit', () => {
+  const week = SVC.hoursFor('cafe');
+  assert.strictEqual(week.length, 7, 'always seven rows, set or not');
+  assert.deepStrictEqual(week.map((d) => d.letter), ['S', 'M', 'T', 'W', 'T', 'F', 'S']);
+  assert.ok(week.every((d) => d.openMin === null && d.closeMin === null),
+    'nothing is set until somebody sets it — a clock nobody configured behaves as it always did');
+});
+
+test('a day can open and close, including across midnight', () => {
+  // A bar's Friday runs 4pm to 2am. The close being SMALLER than the open is
+  // what says "past midnight", and it has to be storable.
+  SVC.setHours('cafe', 5, SVC.asMin('16:00'), SVC.asMin('02:00'));
+  const fri = SVC.hoursOn('cafe', 5);
+  assert.strictEqual(fri.openMin, 16 * 60);
+  assert.strictEqual(fri.closeMin, 2 * 60);
+  assert.ok(fri.closeMin < fri.openMin, 'which is how a night that ends tomorrow is stored');
+
+  // And one day's hours are one day's — Saturday is untouched.
+  assert.strictEqual(SVC.hoursOn('cafe', 6).openMin, null);
+});
+
+test('work hours belong to ONE clock', () => {
+  assert.strictEqual(SVC.hoursOn('dinner', 5).openMin, null,
+    'setting the cafe Friday did not set the dinner Friday');
+});
+
+test('a blank time clears that day rather than being ignored', () => {
+  // The input IS the state: what is on screen when you press save is what you
+  // get. A blank that quietly kept the old value would be unremovable.
+  SVC.setHours('cafe', 5, null, null);
+  assert.strictEqual(SVC.hoursOn('cafe', 5).openMin, null);
+  assert.strictEqual(SVC.hoursOn('cafe', 5).closeMin, null);
+});
+
+test('a time that is not a time is refused rather than stored as something else', () => {
+  assert.strictEqual(SVC.asMin('nonsense'), null);
+  assert.strictEqual(SVC.asMin('25:00'), null, 'no 25th hour');
+  assert.strictEqual(SVC.asMin('12:60'), null, 'no 60th minute');
+  assert.strictEqual(SVC.asMin(''), null);
+  assert.strictEqual(SVC.asMin('9:30'), 570, 'and a real one parses');
+});

@@ -7613,6 +7613,35 @@ app.post('/portal/clock/in', (req, res) => {
       `You are not set up for ${SERVICES.nameOf(daypart)} — ask your manager.`));
   }
 
+  // WORK HOURS, if this clock has any for today. Blank means no limit, which
+  // is what every day starts as — a clock nobody has configured behaves
+  // exactly as it did before this existed.
+  {
+    const cfg0 = TC.settings();
+    const bday = TC.businessDateOf(TC.nowUtc(), cfg0.cutoffHour);
+    // The day of the BUSINESS date, not the wall clock: at 1am on a Saturday
+    // the bar is still working Friday, and Friday's hours are the ones that
+    // should apply.
+    const wd = new Date(`${bday}T00:00:00Z`).getUTCDay();
+    const wh = SERVICES.hoursOn(daypart, wd);
+    if (wh.openMin != null) {
+      const now = TC.toDate(TC.nowUtc());
+      const local = new Date(now.toLocaleString('en-US', { timeZone: process.env.TZ || 'America/New_York' }));
+      const mins = local.getHours() * 60 + local.getMinutes();
+      // A close BEFORE the open means the clock runs past midnight — 4pm to
+      // 2am. Anything from the open onwards, or before the close, is inside it.
+      const close = wh.closeMin;
+      const inside = close == null ? mins >= wh.openMin
+        : (close > wh.openMin ? (mins >= wh.openMin && mins <= close)
+          : (mins >= wh.openMin || mins <= close));
+      if (!inside) {
+        return back('err=' + encodeURIComponent(
+          `${SERVICES.nameOf(daypart)} takes clock-ins from ${hhmmFace(wh.openMin)}${
+            close == null ? '' : ` to ${hhmmFace(close)}`} today.`));
+      }
+    }
+  }
+
   // CLOCK-IN LIMITATION, if this schedule has one. Off everywhere by default.
   //
   // The SCHEDULE is being read to decide whether a punch may start — which is
@@ -19400,6 +19429,13 @@ const avatarHue = (n) => {
   return `hsl(${h} 62% 46%)`;
 };
 
+// 16:00 -> 4:00pm, for anything a person reads rather than an input parses.
+const hhmmFace = (min) => {
+  const h = Math.floor(min / 60); const m = min % 60;
+  const ap = h >= 12 ? 'pm' : 'am'; const h12 = h % 12 || 12;
+  return `${h12}${m ? ':' + String(m).padStart(2, '0') : ''}${ap}`;
+};
+const hhmmOf = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
 // The app's icon set has no copy, no trash and nothing for unpublish, so these
 // four are drawn here rather than approximated with a document or a list that
@@ -20352,10 +20388,16 @@ app.get('/schedule', (req, res) => {
           <label class="fld">Ends<input type="time" name="end" id="sb-end" required></label>
         </div>
         <p class="sb-hint">An end at or before the start runs past midnight and lands on the next day.</p>
+        ${/* Defaults to the board you are ON, not a guess from the start time.
+             You opened the Day board and drew a shift on it, so it is a Day
+             shift — that is a better answer than a clock boundary, and it is
+             what let the "dinner starts at" setting go. On the all-schedules
+             view there is no board to inherit from, so it is asked. */''}
         <label class="fld wide">Service
-          <select name="daypart" id="sb-daypart">
-            <option value="">Decide from the start time</option>
-            ${SCH.DAYPARTS.map((d) => `<option value="${d}">${esc(dp(d))}</option>`).join('')}
+          <select name="daypart" id="sb-daypart"${svc && svc !== 'all' ? '' : ' required'}>
+            ${svc && svc !== 'all' ? '' : '<option value="">Choose&hellip;</option>'}
+            ${SERVICES.all().map((sv) => `<option value="${esc(sv.slug)}"${
+    svc === sv.slug ? ' selected' : ''}>${esc(sv.name)}</option>`).join('')}
           </select></label>
         <div class="sb-f2">
           <label class="fld">Planned break (minutes)
@@ -21942,9 +21984,11 @@ app.get('/timeclock/settings', (req, res) => {
         ${row('The trading day starts at',
           `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
           'Work before this hour counts as the night before, so an overnight shift stays on one day.')}
-        ${row('Dinner service starts at',
-          `<select name="dinner" ${w2 ? '' : 'disabled'}>${Array.from({ length: 24 }, (_, h) => `<option value="${h}"${h === c.dinnerFrom ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
-          'Only used to suggest the service at clock-in. Staff always confirm it.')}
+        ${/* "Dinner service starts at" was here. It guessed a service from a
+             clock boundary, and nothing needs the guess any more: clock-in
+             always asks, and the schedule drawer takes the service from the
+             board it was opened on. Work hours below are the per-clock times
+             that actually matter. */''}
         ${row('Flag a shift left open past',
           `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === c.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
           'Almost always a missed clock-out rather than a very long day.')}
@@ -21966,6 +22010,29 @@ app.get('/timeclock/settings', (req, res) => {
              number for both is the wrong number for one of them. Off for every
              existing schedule, because switching it on can stop a real person
              starting a real shift. */''}
+        ${/* WORK HOURS, per day, per clock. A row per weekday because a bar's
+             Friday is not its Monday, and one pair of times for the week is the
+             wrong pair on at least one day. Blank means no limit that day,
+             which is the safe direction — a clock nobody has configured behaves
+             exactly as it does now. */''}
+        ${SERVICES.withClock().map((sv) => `<div class="tcs-row tcs-row--wh">
+          <div class="tcs-l"><b>Work hours<i class="tcs-for">${esc(sv.name)}</i></b>
+            <i>When this clock opens for punching, and when it closes people out. Leave a day blank for no limit that day.</i></div>
+          <div class="tcs-c wh">
+            ${SERVICES.hoursFor(sv.slug).map((d) => `<div class="wh-r">
+              <span class="wh-d" title="${esc(d.name)}" aria-hidden="true">${d.letter}</span>
+              <span class="wh-sr">${esc(d.name)}</span>
+              <label class="wh-f"><span>Clock in available from</span>
+                <input type="time" name="wh_${esc(sv.slug)}_${d.weekday}_o"
+                  value="${d.openMin == null ? '' : hhmmOf(d.openMin)}" ${w2 ? '' : 'disabled'}
+                  aria-label="${esc(d.name)} — clock in available from"></label>
+              <label class="wh-f"><span>Auto clock out at</span>
+                <input type="time" name="wh_${esc(sv.slug)}_${d.weekday}_c"
+                  value="${d.closeMin == null ? '' : hhmmOf(d.closeMin)}" ${w2 ? '' : 'disabled'}
+                  aria-label="${esc(d.name)} — auto clock out at"></label>
+            </div>`).join('')}
+          </div>
+        </div>`).join('')}
         ${SERVICES.withClock().map((sv) => {
     const L = SERVICES.limitOf(sv.slug);
     return row(`Clock in limitation<i class="tcs-for">${esc(sv.name)}</i>`,
@@ -22006,7 +22073,10 @@ app.get('/timeclock/settings', (req, res) => {
 app.post('/timeclock/settings', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   TC.saveSettings({
-    cutoffHour: req.body.cutoff, dinnerFrom: req.body.dinner, longShift: req.body.long,
+    // dinnerFrom is no longer on the form. Passed through unchanged so
+    // saveSettings does not clamp it back to a default the scheduler would
+    // then read — nothing sets it any more, and nothing should reset it either.
+    cutoffHour: req.body.cutoff, dinnerFrom: TC.settings().dinnerFrom, longShift: req.body.long,
     breaksPaid: req.body.breaks_paid === '1',
     pinForFix: req.body.pin_fix === '1',
     alertsOn: req.body.alerts === '1',
@@ -22020,6 +22090,14 @@ app.post('/timeclock/settings', (req, res) => {
     const on = req.body[`cl_on_${sv.slug}`] === '1';
     const mode = on ? (req.body[`cl_mode_${sv.slug}`] === 'early' ? 'early' : 'scheduled') : 'off';
     SERVICES.setLimit(sv.slug, mode, req.body[`cl_min_${sv.slug}`]);
+    // Work hours, seven days each. A blank field clears that day rather than
+    // keeping the old value — the input IS the state, so what is on screen when
+    // you press save is what you get.
+    for (let d = 0; d < 7; d++) {
+      SERVICES.setHours(sv.slug, d,
+        SERVICES.asMin(req.body[`wh_${sv.slug}_${d}_o`]),
+        SERVICES.asMin(req.body[`wh_${sv.slug}_${d}_c`]));
+    }
   }
   res.redirect('/timeclock/settings?msg=' + encodeURIComponent('Saved.'));
 });

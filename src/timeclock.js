@@ -1951,10 +1951,35 @@ function autoCloseStale(now = nowUtc()) {
   const open = q.allActive.all().filter((e) => e.status === 'active');
   const done = [];
   for (const e of open) {
-    if (minutesBetween(e.clock_in_at, now) < limit * 60) continue;
-    // Stored the way every other stamp is stored: 'YYYY-MM-DD HH:MM:SS' in UTC.
-    const out = new Date(toDate(e.clock_in_at).getTime() + limit * 3600 * 1000)
-      .toISOString().slice(0, 19).replace('T', ' ');
+    // A clock with a CLOSING TIME for the day this punch belongs to closes at
+    // that time. It is a more honest figure than "after N hours" — the bar
+    // shuts at 2am whoever came on when — and the hours limit stays as the
+    // backstop for days nobody has configured.
+    let out = null;
+    try {
+      const wd = new Date(`${e.business_date}T00:00:00Z`).getUTCDay();
+      const wh = require('./services').hoursOn(e.daypart, wd);
+      if (wh.closeMin != null) {
+        const inAt = toDate(e.clock_in_at);
+        const local = new Date(inAt.toLocaleString('en-US', { timeZone: process.env.TZ || 'America/New_York' }));
+        const closeAt = new Date(local);
+        closeAt.setHours(Math.floor(wh.closeMin / 60), wh.closeMin % 60, 0, 0);
+        // A close that lands before the punch started belongs to the NEXT day:
+        // the clock shuts at 2am and they came on at 6pm.
+        if (closeAt.getTime() <= local.getTime()) closeAt.setDate(closeAt.getDate() + 1);
+        const at = new Date(inAt.getTime() + (closeAt.getTime() - local.getTime()));
+        if (at.getTime() <= toDate(now).getTime()) {
+          out = at.toISOString().slice(0, 19).replace('T', ' ');
+        }
+      }
+    } catch { /* no services table, or an unknown daypart — fall through */ }
+
+    if (!out) {
+      if (minutesBetween(e.clock_in_at, now) < limit * 60) continue;
+      // Stored the way every other stamp is stored: 'YYYY-MM-DD HH:MM:SS' UTC.
+      out = new Date(toDate(e.clock_in_at).getTime() + limit * 3600 * 1000)
+        .toISOString().slice(0, 19).replace('T', ' ');
+    }
     try {
       const raw = minutesBetween(e.clock_in_at, out);
       const { paid, unpaid } = breakTotals(e.id);
