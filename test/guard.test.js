@@ -14,6 +14,19 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+// Schedule membership is explicit now: a person is on a schedule because a row
+// says so, and there is no fallback. Employees created straight in SQL — as
+// these fixtures do — therefore start on nothing and cannot clock in, exactly
+// like a real employee added outside the app would. The app's own create route
+// puts a new hire on every schedule; this is that, for fixtures.
+function onAllSchedules() {
+  try {
+    db.exec(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+             SELECT e.id, s.slug FROM employees e, services s`);
+  } catch { /* services not seeded in this database */ }
+}
+
+
 const PORT = 3997;                     // unique across the suite
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -63,9 +76,15 @@ test.before(async () => {
   }
   db = new Database(DB);
   const ins = db.prepare("INSERT INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)");
+  onAllSchedules();
   ins.run(A, 'Guarded One', '4242');
   ins.run(B, 'Guarded Two', '5353');
+  onAllSchedules();
 });
+
+// Fixtures are also created outside before-blocks and inside tests, so this
+// runs again before each one rather than only at the start.
+test.beforeEach(() => onAllSchedules());
 
 test.after(() => {
   if (child) child.kill();

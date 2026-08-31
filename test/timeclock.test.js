@@ -55,6 +55,9 @@ const text = async (p, headers = {}) => (await fetch(BASE + svcd(p), { headers }
 
 /** PIN in, portal cookie out — the same door staff use. */
 async function signIn(pin) {
+  // Every fixture reaches the clock through here, whenever it was created —
+  // in a before-block, in outer scope, or three lines up inside a test.
+  onAllSchedules();
   const res = await post('/tips/start', { pin });
   assert.strictEqual(res.status, 302, `PIN ${pin} is accepted`);
   return (res.headers.get('set-cookie') || '').split(';')[0];
@@ -100,7 +103,12 @@ test.before(async () => {
   const D0 = require('../src/dates');
   require('../src/periods').setSetting('period_anchor',
     D0.addDays(D0.isoDate(D0.startOfToday()), -4));
+  onAllSchedules();
 });
+
+// Fixtures are also created outside before-blocks and inside tests, so this
+// runs again before each one rather than only at the start.
+test.beforeEach(() => onAllSchedules());
 
 test.after(() => { if (child) child.kill(); try { db.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
 
@@ -629,6 +637,19 @@ test('an approved correction carries all the way through to the shift hours', ()
 // ===========================================================================
 const P = require('../src/periods');
 const T2 = require('../src/timeclock');
+
+// Schedule membership is explicit now: a person is on a schedule because a row
+// says so, and there is no fallback. Employees created straight in SQL — as
+// these fixtures do — therefore start on nothing and cannot clock in, exactly
+// like a real employee added outside the app would. The app's own create route
+// puts a new hire on every schedule; this is that, for fixtures.
+function onAllSchedules() {
+  try {
+    db.exec(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+             SELECT e.id, s.slug FROM employees e, services s`);
+  } catch { /* services not seeded in this database */ }
+}
+
 const sheetOf = (empId, start) => db.prepare('SELECT * FROM timesheets WHERE employee_id = ? AND period_start = ?').get(empId, start);
 /** Submit the way the form does: carrying the totals the page displayed. */
 // `pin` is accepted and ignored — the route no longer asks for one, and the
@@ -1338,6 +1359,7 @@ test('the timesheet badge is quiet during a normal shift and speaks when it shou
   // A person with nothing else outstanding, so the only thing that could raise
   // a badge is the shift they are standing in.
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (95,'Badge Tester','server','3555',1500,1)").run();
+  onAllSchedules();
   const cookie = await signIn('3555');
   await post('/portal/clock/in', { daypart: 'cafe' }, { cookie });
   const on = await text('/portal/clock', { cookie });
@@ -1364,6 +1386,7 @@ test('my requests gathers every kind of fix, with the answer', async () => {
 
 test('my requests says so plainly when there is nothing', async () => {
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (96,'No Requests','server','3666',1500,1)").run();
+  onAllSchedules();
   const cookie = await signIn('3666');
   const html = await text('/portal/requests', { cookie });
   assert.match(html, /Nothing to show/, 'an intentional empty state');
@@ -1479,6 +1502,7 @@ test('a period still being worked cannot be signed off', async () => {
 
 test('a finished period offers submission from the menu and the page', async () => {
   db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (97,'Period Tester','server','3777',1500,1)").run();
+  onAllSchedules();
   const per = curPeriod();
   seedInPeriod(97, 2, '09:00', '17:00');
   const cookie = await signIn('3777');

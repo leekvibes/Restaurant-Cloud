@@ -9177,11 +9177,15 @@ app.post('/employees', (req, res) => {
       // host logs, paired with the name of the person it belongs to.
       `${clash.name} already uses that PIN. Give ${name.trim()} a different one — staff sign in to the tips page with their PIN, so it has to be unique.`));
   }
-  q.addEmployee.run({
+  const made = q.addEmployee.run({
     name: name.trim(), role, email: (email || '').trim() || null,
     pin: (pin || '').trim() || null, hourly_rate_cents: toCents(rate), pos_id: (pos_id || '').trim() || null,
     pay_type: pay_type === 'salary' ? 'salary' : 'hourly', salary_cents: toCents(req.body.salary),
   });
+  // On every schedule to begin with, so somebody hired on a Tuesday can clock
+  // in on the Tuesday — and so their checkboxes say what is actually true.
+  // Their manager unticks what does not apply.
+  try { SERVICES.addToAll(Number(made.lastInsertRowid)); } catch { /* schedules not seeded yet */ }
   res.redirect('/employees?msg=' + encodeURIComponent(`${name} added.`));
 });
 
@@ -9448,15 +9452,71 @@ const svcBack = (req, res, msg, err) => {
   res.redirect(`${safe}?msg=${encodeURIComponent(msg)}${err ? '&err=1' : ''}`);
 };
 
+app.get('/services/new', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const back = /^\/[A-Za-z0-9/_-]*$/.test(String(req.query.back || '')) ? String(req.query.back) : '/schedule';
+  const word = back.startsWith('/timeclock') ? 'time clock' : 'schedule';
+  const staff = q.allEmployees.all();
+  res.send(layout(`New ${word}`, `
+    ${flash(req)}
+    <div class="bs-page">
+      <a class="bs-back" href="${esc(back)}">&larr; Back</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">New ${esc(word)}</h1>
+        <p class="bs-subline">Name it, then choose who is on it. Only the people you pick appear on
+          it &mdash; everybody else is untouched, and you can add them later from their staff page.</p>
+      </div></div>
+      <form method="post" action="/services" class="bs-panel svc-new">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="back" value="${esc(back)}">
+        <label class="svc-new-name">Name
+          <input name="name" required maxlength="40" placeholder="Brunch, Private events, Late night"
+            autocomplete="off" autofocus></label>
+
+        <div class="svc-new-who">
+          <div class="svc-new-kick">
+            <b>Who is on it</b>
+            ${/* Nothing preselected. A new schedule that arrives with the whole
+                 roster ticked has to be emptied before it is any use, which is
+                 the wrong way round — and it makes it far too easy to create
+                 one that quietly puts everybody on everything. */''}
+            <label class="svc-new-all"><input type="checkbox" id="svc-all"> Select everyone</label>
+          </div>
+          <div class="svc-picks">
+            ${staff.map((e) => `<label class="svc-pick">
+              <input type="checkbox" name="member" value="${e.id}">
+              <span>${esc(e.name)}<i>${esc(e.role || '')}</i></span></label>`).join('')}
+          </div>
+        </div>
+
+        <button class="bs-btn" type="submit">Create ${esc(word)}</button>
+      </form>
+    </div>
+    <script>
+      (function () {
+        var all = document.getElementById('svc-all');
+        if (!all) return;
+        all.addEventListener('change', function () {
+          var b = document.querySelectorAll('input[name="member"]');
+          for (var i = 0; i < b.length; i++) b[i].checked = all.checked;
+        });
+      })();
+    </script>`));
+});
+
 app.post('/services', (req, res) => {
   if (!canWrite(req)) return res.status(403).send('Read-only');
   const name = String(req.body.name || '').trim();
+  const raw = req.body.member;
+  const members = (raw == null ? [] : (Array.isArray(raw) ? raw : [raw])).map(Number).filter(Boolean);
   try {
     // The key is derived from the name rather than asked for. It is an
     // internal handle nobody should have to think about, and one somebody
     // typed by hand is one somebody can typo into a service that never matches.
-    const sv = SERVICES.create({ slug: name, name });
-    svcBack(req, res, `${sv.name} added.`);
+    const sv = SERVICES.create({ slug: name, name, members });
+    svcBack(req, res, members.length
+      ? `${sv.name} added, with ${members.length} ${members.length === 1 ? 'person' : 'people'} on it.`
+      : `${sv.name} added. Nobody is on it yet — add people from their staff page.`);
   } catch (e) { svcBack(req, res, e.message, true); }
 });
 
@@ -18972,13 +19032,9 @@ function serviceCards(req, base, opts = {}) {
           </div>
         </section>`;
   }).join('')}
-        ${w ? `<form class="bs-panel svc-card svc-card--new" method="post" action="/services"
-          onsubmit="var n=prompt('Name the new ' + '${esc(backWord.replace(/s$/, '').toLowerCase())}'); if(!n){return false;} this.querySelector('[name=name]').value=n;">
-          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-          <input type="hidden" name="name" value="">
-          <input type="hidden" name="back" value="${esc(base)}">
-          <button type="submit" class="svc-card-add">+ Add a ${esc(backWord.replace(/s$/, '').toLowerCase())}</button>
-        </form>` : ''}
+        ${w ? `<a class="bs-panel svc-card svc-card--new svc-card-add"
+          href="/services/new?back=${encodeURIComponent(base)}"
+          >+ Add a ${esc(backWord.replace(/s$/, '').toLowerCase())}</a>` : ''}
       </div>
     </div>`);
 }
@@ -19082,10 +19138,15 @@ app.get('/schedule', (req, res) => {
   };
   const totals = SCH.weekTotals(shifts, rateFor);
 
-  // Everybody active, plus anybody holding a shift this week even if they have
-  // since been deactivated — a row that vanishes is a plan nobody can find to
-  // cancel. Scheduled first, unscheduled after, so placing a shift stays fast.
-  const active = q.allEmployees.all();
+  // The people on THIS schedule, plus anybody holding a shift this week even
+  // if they are not on it any more — a row that vanishes is a plan nobody can
+  // find to cancel. Scheduled first, unscheduled after, so placing a shift
+  // stays fast.
+  //
+  // On the all-schedules view it is everybody, because that view is not one
+  // schedule and filtering it to the union would be the same thing anyway.
+  const onSvc = svc && svc !== 'all' ? new Set(SERVICES.employeesFor(svc)) : null;
+  const active = q.allEmployees.all().filter((e) => !onSvc || onSvc.has(e.id));
   const byId = new Map(active.map((e) => [e.id, e]));
   for (const s of shifts) {
     if (s.employee_id != null && !byId.has(s.employee_id)) {

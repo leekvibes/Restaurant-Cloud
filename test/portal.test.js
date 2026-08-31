@@ -57,6 +57,9 @@ const form = async (p, body, headers = {}) => fetch(BASE + p, {
 
 /** PIN in, portal cookie out — the same door staff use. */
 async function signIn(pin) {
+  // Every fixture reaches the clock through here, whenever it was created —
+  // in a before-block, in outer scope, or three lines up inside a test.
+  onAllSchedules();
   const res = await form('/tips/start', { pin });
   assert.strictEqual(res.status, 302, `PIN ${pin} is accepted`);
   const cookie = (res.headers.get('set-cookie') || '').split(';')[0];
@@ -105,6 +108,7 @@ test.before(async () => {
 
   const w = new Database(DB);
   const emp = w.prepare('INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES (?,?,?,1,?)');
+  onAllSchedules();
   emp.run('Bella Reyes', 'server', 900, '1111');
   emp.run('Marco Diaz', 'kitchen', 1800, '2222');
   emp.run('Ana Ortiz', 'barista', 1500, '3333');
@@ -139,7 +143,12 @@ test.before(async () => {
     try { await fetch(`${BASE}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
   db = new Database(DB);
+  onAllSchedules();
 });
+
+// Fixtures are also created outside before-blocks and inside tests, so this
+// runs again before each one rather than only at the start.
+test.beforeEach(() => onAllSchedules());
 
 test.after(() => { if (child) child.kill(); if (db) db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
@@ -1006,6 +1015,7 @@ test('overriding a duplicate-invoice warning files it and notifies nobody', asyn
 
 test('a brand-new user starts clean — no backlog, only what arrives after them', async () => {
   db.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Fresh Newbie','server',900,1,'9090')").run();
+  onAllSchedules();
   await form('/staff-portal/special', { name: 'Zzq Before-you-arrived special', price: '20.00' });
   const cookie = await signIn('9090');
   const first = await (await asStaff('/portal', cookie)).text();
@@ -1157,6 +1167,7 @@ test('somebody who worked none of the period is not asked to submit one', async 
   const P2 = require('../src/periods');
   const per = P2.recentPeriods(2)[1];
   const idle = db.prepare("INSERT INTO employees (name, role, pin, hourly_rate_cents, active) VALUES ('Idle Hands','server','7742',1500,1)").run().lastInsertRowid;
+  onAllSchedules();
   assert.strictEqual(db.prepare(
     'SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND business_date BETWEEN ? AND ?')
     .get(idle, per.start, per.end).n, 0, 'they worked nothing');
@@ -1272,7 +1283,9 @@ test('the legacy receipt URL shows no money taken from the URL', async () => {
 function seedBigHistory() {
   const w = new Database(DB);
   w.prepare("INSERT OR IGNORE INTO employees (id, name, role, hourly_rate_cents, active, pin) VALUES (900,'Archive Amy','server',1500,1,'9001')").run();
+  onAllSchedules();
   w.prepare("INSERT OR IGNORE INTO employees (id, name, role, hourly_rate_cents, active, pin) VALUES (901,'Other Owen','server',1500,1,'9002')").run();
+  onAllSchedules();
   const mkShift = w.prepare("INSERT INTO shifts (date, daypart, status, created_at) VALUES (?,?,'emailed',datetime('now'))");
   const mkWork = w.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,?)');
   const D = require('../src/dates');
@@ -1468,6 +1481,7 @@ function seedMoneyPeriod() {
   const per = P2.recentPeriods(2)[1];
   const w = new Database(DB);
   w.prepare("INSERT OR IGNORE INTO employees (id, name, role, hourly_rate_cents, active, pin) VALUES (910,'Cents Carla','server',1733,1,'9101')").run();
+  onAllSchedules();
   const mk = w.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status, created_at) VALUES (?,?,'emailed',datetime('now'))");
   const find = w.prepare('SELECT id FROM shifts WHERE date = ? AND daypart = ?');
   const work = w.prepare(`INSERT INTO work (shift_id, employee_id, role, hours)
@@ -1910,6 +1924,19 @@ test('an employee stock report never reaches the Home board', async () => {
 
 const crypto = require('node:crypto');
 
+// Schedule membership is explicit now: a person is on a schedule because a row
+// says so, and there is no fallback. Employees created straight in SQL — as
+// these fixtures do — therefore start on nothing and cannot clock in, exactly
+// like a real employee added outside the app would. The app's own create route
+// puts a new hire on every schedule; this is that, for fixtures.
+function onAllSchedules() {
+  try {
+    db.exec(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+             SELECT e.id, s.slug FROM employees e, services s`);
+  } catch { /* services not seeded in this database */ }
+}
+
+
 /** A validly signed portal cookie with an expiry in the past. */
 const agedCookie = (empId, ageMs) => {
   const exp = Date.now() - ageMs;
@@ -2022,16 +2049,16 @@ test('the notifications panel explains itself on a phone that cannot subscribe',
  */
 test('somebody can only clock into a service they are on, checked on the POST', async () => {
   const marco = db.prepare('SELECT id FROM employees WHERE name = ?').get('Marco Diaz');
-  // Day Service only — the reported problem, in the form it was reported.
-  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
-  db.prepare(`INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')`).run(marco.id);
-  // svc_set is what separates "narrowed to Day" from "nobody has looked yet".
-  // Without it he reads as a new hire and is on everything, which is exactly
-  // the distinction this test exists to prove works.
-  db.prepare('UPDATE employees SET svc_set = 1 WHERE id = ?').run(marco.id);
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(marco.id);
 
+  // Signed in FIRST, then narrowed. This file's signIn puts every fixture on
+  // every schedule — that is what lets employees created in SQL clock in at
+  // all — so narrowing before it would simply be undone.
   const cookie = await signIn('2222');
+
+  // Day Service only: the reported problem, in the form it was reported.
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
+  db.prepare(`INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')`).run(marco.id);
   const before = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(marco.id).n;
 
   const bad = await form('/portal/clock/in', { position: 'kitchen', daypart: 'dinner' }, { cookie });
@@ -2054,13 +2081,11 @@ test('somebody can only clock into a service they are on, checked on the POST', 
 
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(marco.id);
   db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
-  db.prepare('UPDATE employees SET svc_set = 0 WHERE id = ?').run(marco.id);
 });
 
-test('somebody nobody has set up yet can still clock into anything', async () => {
-  // "Nobody has decided" is not "decided: none". Without that distinction a
-  // new hire cannot clock in on their first shift, and every existing employee
-  // would have come off every schedule the day this deployed.
+test('somebody on every schedule can clock into any of them', async () => {
+  // The ordinary case, kept because the refusal above would also "pass" if the
+  // gate refused everybody.
   const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
   db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);

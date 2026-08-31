@@ -22,22 +22,21 @@
  *   2. MEMBERSHIP. Which services a person works, relationally, so somebody
  *      can be on one, both, or a third we add later.
  *
- * UNTICKED MEANS NOWHERE — once somebody has been set up. That is the owner's
- * rule, and it is what makes the checkboxes mean anything: take a person off
- * Evening and they are off Evening, on the board and at the clock.
+ * MEMBERSHIP IS EXPLICIT. A schedule shows the people who were put on it, and
+ * nobody else. There is no fallback, no "not set up yet means everywhere" —
+ * the checkbox on the staff page and the row in this table are the same fact,
+ * so what a manager sees ticked is exactly who appears on that board.
  *
- * But "nobody has decided yet" is a different fact from "decided: none", and
- * conflating them is how a new hire ends up unable to clock in anywhere on
- * their first shift while their manager wonders what is broken. So the two are
- * stored apart: `employees.svc_set` records that a human has been through this
- * form, and until they have, the person is on every schedule.
+ * An earlier version had a fallback for people nobody had touched, to stop a
+ * roster emptying itself on deploy. That made the checkboxes lie: every box
+ * read unticked while every person showed on every board. The fallback is gone
+ * and the rows are written instead — by backfill() for everyone who already
+ * existed, and by the create flows for everyone after:
  *
- * The result reads the way somebody would expect it to:
- *   new employee, never touched  -> on every schedule, can work
- *   ticked Day only              -> Day only
- *   ticked nothing at all        -> nowhere, deliberately
- *   NEW SCHEDULE                 -> starts empty of the already-set-up; they
- *                                   appear as unticked boxes to be added
+ *   NEW EMPLOYEE  -> put on every schedule, then narrowed. They can work their
+ *                    first shift, and their boxes say so.
+ *   NEW SCHEDULE  -> starts with whoever was picked while creating it, and
+ *                    nobody else. Their boxes say that too.
  */
 
 const { db } = require('./db');
@@ -74,6 +73,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS employee_services_by_emp
     ON employee_services (employee_id) WHERE active = 1;
+
+  -- One row, one job: remembering that the one-time backfill has run. Its own
+  -- table rather than the shared settings one, which is created by timeclock.js
+  -- and therefore absent from any database that has not loaded it — a
+  -- dependency this module has no reason to have, and one that made backfill()
+  -- throw in a test that required nothing but src/db.
+  CREATE TABLE IF NOT EXISTS service_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `);
 
 /**
@@ -115,7 +124,7 @@ function nameOf(slug) {
 /** Is this a service anybody can be scheduled or clocked into right now? */
 const isActive = (slug) => all().some((s) => s.slug === slug);
 
-function create({ slug, name, sort, startsMin, endsMin }) {
+function create({ slug, name, sort, startsMin, endsMin, members }) {
   const key = String(slug || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
   if (!key) throw new Error('A service needs a short internal key.');
   if (!String(name || '').trim()) throw new Error('A service needs a name.');
@@ -125,6 +134,14 @@ function create({ slug, name, sort, startsMin, endsMin }) {
               VALUES (?, ?, ?, 1, ?, ?)`)
     .run(key, String(name).trim(), Number.isFinite(sort) ? sort : next,
       Number.isFinite(startsMin) ? startsMin : null, Number.isFinite(endsMin) ? endsMin : null);
+  // Whoever was picked while creating it, and nobody else. A schedule that
+  // arrived with the whole roster on it would have to be emptied before it was
+  // any use, which is the wrong way round.
+  if (Array.isArray(members) && members.length) {
+    const ins = db.prepare(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+                            VALUES (?, ?)`);
+    db.transaction(() => { for (const m of members) ins.run(Number(m), key); })();
+  }
   return bySlug(key);
 }
 
@@ -150,20 +167,14 @@ function unarchive(slug) {
 
 // --- who works what ---------------------------------------------------------
 
-// Marks that somebody has actually been through the Services form. Without it
-// there is no way to tell "decided: none" from "nobody has looked yet", and
-// those two have to behave differently — see the note at the top.
+// svc_set is kept as a column so an existing database does not have to be
+// rewritten, but nothing reads it any more: membership is the rows now.
 try {
   const cols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
   if (!cols.includes('svc_set')) {
     db.exec('ALTER TABLE employees ADD COLUMN svc_set INTEGER NOT NULL DEFAULT 0');
   }
-} catch { /* older engine; forEmployee falls back to every schedule */ }
-
-const qSet = db.prepare('SELECT COALESCE(svc_set, 0) v FROM employees WHERE id = ?');
-function wasSetUp(employeeId) {
-  try { const r = qSet.get(employeeId); return !!(r && r.v); } catch { return false; }
-}
+} catch { /* older engine */ }
 
 const qMine = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ? AND active = 1');
 
@@ -175,16 +186,14 @@ const qMine = db.prepare('SELECT service_slug FROM employee_services WHERE emplo
  */
 function forEmployee(employeeId) {
   if (!employeeId) return [];
-  // Never set up: on everything, so a new hire can work their first shift.
-  if (!wasSetUp(employeeId)) return all().map((x) => x.slug);
   let rows = [];
   try { rows = qMine.all(employeeId).map((r) => r.service_slug); } catch { rows = []; }
   const live = new Set(all().map((s) => s.slug));
   return rows.filter((r) => live.has(r));
 }
 
-/** Has a human been through this person's Services form? */
-const isAssigned = (employeeId) => wasSetUp(employeeId);
+/** Is this person on any schedule at all? */
+const isAssigned = (employeeId) => forEmployee(employeeId).length > 0;
 
 /**
  * THE GATE. Server-side, and the only thing any route should ask.
@@ -217,14 +226,50 @@ function setForEmployee(employeeId, slugs) {
 }
 
 /**
- * No migration is needed, and that is the point of svc_set.
+ * Put every existing employee on every existing schedule, once.
  *
- * Every existing employee has svc_set = 0, so they are on every schedule until
- * somebody says otherwise — nothing empties itself on deploy, and no rows had
- * to be written to make that true. Kept as a named no-op because "why is there
- * no backfill" is a fair question to ask of a change like this.
+ * Real rows, not a fallback. With membership explicit there is nothing to fall
+ * back to, so the roster that was already working has to be written down or it
+ * disappears from every board on deploy. Runs only into an empty table: after
+ * anybody has been deliberately narrowed, re-running it would undo that.
  */
-function backfill() { return { added: 0, skipped: true }; }
+function backfill() {
+  // Guarded on a FLAG, not on the table being empty. "Empty" is the wrong
+  // question: a single stray row — one person added by hand, one left by a
+  // test — makes the table non-empty and strands everybody else off every
+  // board with no error anywhere. Seen exactly that on the dev database.
+  //
+  // The flag also says what happened, which "the table has rows in it" never
+  // could: it separates "already run" from "somebody has been narrowed".
+  const done = !!db.prepare("SELECT value FROM service_meta WHERE key = 'backfilled'").get();
+  if (done) return { added: 0, skipped: true };
+
+  const slugs = all().map((x) => x.slug);
+  const ins = db.prepare(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+                          VALUES (?, ?)`);
+  let added = 0;
+  db.transaction(() => {
+    for (const e of db.prepare('SELECT id FROM employees WHERE active = 1').all()) {
+      for (const sl of slugs) added += ins.run(e.id, sl).changes;
+    }
+    db.prepare(`INSERT INTO service_meta (key, value) VALUES ('backfilled', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1'`).run();
+  })();
+  return { added, skipped: false };
+}
+
+/**
+ * A new employee joins every schedule. Their manager unticks what does not
+ * apply — which is quicker than ticking what does, and means somebody hired on
+ * a Tuesday can clock in on the Tuesday.
+ */
+function addToAll(employeeId) {
+  const ins = db.prepare(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+                          VALUES (?, ?)`);
+  let n = 0;
+  db.transaction(() => { for (const sv of all()) n += ins.run(employeeId, sv.slug).changes; })();
+  return n;
+}
 
 /**
  * Everybody on a schedule: those added to it, plus anybody nobody has set up
@@ -232,19 +277,13 @@ function backfill() { return { added: 0, skipped: true }; }
  * rather than being invisible on the day they start.
  */
 function employeesFor(slug) {
-  const added = db.prepare(`SELECT es.employee_id FROM employee_services es
+  return db.prepare(`SELECT es.employee_id FROM employee_services es
                      JOIN employees e ON e.id = es.employee_id
                      WHERE es.service_slug = ? AND es.active = 1 AND e.active = 1`)
     .all(slug).map((r) => r.employee_id);
-  let untouched = [];
-  try {
-    untouched = db.prepare(`SELECT id FROM employees
-      WHERE active = 1 AND COALESCE(svc_set, 0) = 0`).all().map((r) => r.id);
-  } catch { untouched = []; }
-  return [...new Set([...added, ...untouched])];
 }
 
 module.exports = {
-  BUILT_IN, seed, backfill, all, bySlug, nameOf, isActive, create, rename, archive, unarchive,
+  BUILT_IN, seed, backfill, addToAll, all, bySlug, nameOf, isActive, create, rename, archive, unarchive,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };

@@ -56,6 +56,9 @@ const svcd = (p) => (/^\/timeclock(\?|$)/.test(p) && !/[?&]svc=/.test(p)
 const text = async (p, headers = {}) => (await fetch(BASE + svcd(p), { headers })).text();
 
 async function signIn(pin) {
+  // Every fixture reaches the clock through here, whenever it was created —
+  // in a before-block, in outer scope, or three lines up inside a test.
+  onAllSchedules();
   const res = await post('/tips/start', { pin });
   assert.strictEqual(res.status, 302, `PIN ${pin} is accepted`);
   return (res.headers.get('set-cookie') || '').split(';')[0];
@@ -89,8 +92,14 @@ test.before(async () => {
   db = new Database(DB);
   const ins = db.prepare(
     'INSERT INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,?,?,?,1)');
+    onAllSchedules();
   for (const [k, id] of Object.entries(E)) ins.run(id, `Case ${k}`, 'server', PIN(id), 1500);
+  onAllSchedules();
 });
+
+// Fixtures are also created outside before-blocks and inside tests, so this
+// runs again before each one rather than only at the start.
+test.beforeEach(() => onAllSchedules());
 
 test.after(() => { if (child) child.kill(); try { db.close(); } catch {} fs.rmSync(dir, { recursive: true, force: true }); });
 
@@ -818,6 +827,19 @@ test('an approved timesheet freezes the punches underneath it', async () => {
 // reproduced against a running server before it was fixed.
 
 const P2 = require('../src/periods');
+
+// Schedule membership is explicit now: a person is on a schedule because a row
+// says so, and there is no fallback. Employees created straight in SQL — as
+// these fixtures do — therefore start on nothing and cannot clock in, exactly
+// like a real employee added outside the app would. The app's own create route
+// puts a new hire on every schedule; this is that, for fixtures.
+function onAllSchedules() {
+  try {
+    db.exec(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+             SELECT e.id, s.slug FROM employees e, services s`);
+  } catch { /* services not seeded in this database */ }
+}
+
 const freeze = (empId, day, status = 'approved') => {
   const per = P2.periodFor(day);
   db.prepare(`INSERT INTO timesheets (employee_id, period_start, period_end, status)

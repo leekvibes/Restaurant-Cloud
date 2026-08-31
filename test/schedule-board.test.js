@@ -2140,3 +2140,45 @@ test('renaming a service changes every screen and no stored value', async () => 
     await post('/services/cafe/rename', { name: 'Day Service', back: '/schedule' });
   }
 });
+
+test('a board lists the people on THAT schedule, and nobody else', async () => {
+  // The rule the whole feature rests on: what is ticked on a staff page and
+  // who appears on a board are one fact. It used to be two — everybody with no
+  // rows showed everywhere while every box read unticked — and that is the
+  // thing this asserts cannot come back.
+  const SVC = require('../src/services');
+  const before = SVC.forEmployee(E.server);
+  try {
+    // A week nothing else in this file has touched, so the only reason anybody
+    // is on the board is membership — a week where they hold a shift keeps
+    // them visible on purpose, and would hide what is being asserted.
+    const empty = SCH.weekWindowFor(dates.addDays(today(), 500)).start;
+    SVC.setForEmployee(E.server, ['cafe']);
+    const day = await raw(`/schedule?w=${empty}&svc=cafe`);
+    const eve = await raw(`/schedule?w=${empty}&svc=dinner`);
+    const nameOf = db.prepare('SELECT name FROM employees WHERE id = ?').get(E.server).name;
+    // The BOARD ROWS, not the whole page: the drawer, the Issues panel and the
+    // embedded data all mention people too, and a bare includes() on the
+    // document cannot tell "listed on this board" from "mentioned somewhere".
+    const rowsOf = (html) => (html.match(/<div class="sb-emp[^"]*">[\s\S]*?<\/div>/g) || []).join('');
+    assert.ok(rowsOf(day).includes(nameOf), 'they are on the schedule they were put on');
+    assert.ok(!rowsOf(eve).includes(nameOf), 'and not on the one they were not');
+
+    // Taken off both: on no board at all. Unticked means nowhere.
+    SVC.setForEmployee(E.server, []);
+    assert.ok(!rowsOf(await raw(`/schedule?w=${empty}&svc=cafe`)).includes(nameOf), 'off Day too');
+    assert.ok(!rowsOf(await raw(`/schedule?w=${empty}&svc=dinner`)).includes(nameOf));
+
+    // Except where they already hold a shift — a row that vanishes is a plan
+    // nobody can find to cancel.
+    const day2 = dates.addDays(today(), 502);
+    const s = SCH.create({ employeeId: E.server, position: 'server',
+      startsAt: `${day2} 09:00`, endsAt: `${day2} 14:00` });
+    const wk = SCH.weekWindowFor(day2).start;
+    assert.ok(rowsOf(await raw(`/schedule?w=${wk}&svc=cafe`)).includes(nameOf),
+      'somebody holding a shift stays visible even once they are off the schedule');
+    SCH.cancel(s.id);
+  } finally {
+    SVC.setForEmployee(E.server, before);
+  }
+});
