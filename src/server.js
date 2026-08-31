@@ -9243,7 +9243,7 @@ function wageWhenFields(employeeId, role, opts = {}) {
  * and none of them should have to learn about dates. A change that starts in
  * the future does not move them yet — it is not what the person earns today.
  */
-function applyWageChange(employeeId, role, cents, body, actor) {
+function applyWageChange(employeeId, role, cents, body, actor, service) {
   const today = isoDate(startOfToday());
   const mode = ['today', 'date', 'all'].includes(body.wage_from) ? body.wage_from : 'today';
   const asked = MX.isDate(body.wage_date) ? body.wage_date : today;
@@ -9259,6 +9259,7 @@ function applyWageChange(employeeId, role, cents, body, actor) {
   };
   WAGES.setWage(employeeId, role || null, cents, from, {
     by: actor || null,
+    service: service || null,
     note: WORD[mode],
   });
 
@@ -9278,9 +9279,37 @@ app.get('/employees/:id/edit', (req, res) => {
   const roles = [...allRoles(), 'manager'];
   const val = (v) => esc(v == null ? '' : v);
   const payRoles = allRoles();
-  const roleRows = q.rolesForEmployee.all(e.id).map((r) => `
-    <tr><td>${r.role}</td><td class="num">${money(r.wage_cents)}/h</td>
-      <td><form method="post" action="/employees/${e.id}/roles/delete"><input type="hidden" name="role" value="${r.role}"><button class="link-danger">remove</button></form></td></tr>`).join('');
+  // What this person actually earns, per role and per schedule — the general
+  // wage from employee_roles, plus any schedule-specific rate in force today.
+  // Two sources because they answer different questions: employee_roles is
+  // "their rate for this job", wage_history is "except at Evening, where".
+  const today0 = isoDate(startOfToday());
+  const svcWages = WAGES.currentFor(e.id, today0).filter((r) => r.service_slug && r.role);
+  const roleRows = q.rolesForEmployee.all(e.id).map((r) => {
+    const overrides = svcWages.filter((x) => x.role === r.role);
+    return `
+    <tr><td>${r.role}</td><td>${SERVICES.all().length > 1 ? '<span class="muted">Every schedule</span>' : ''}</td>
+      <td class="num">${money(r.wage_cents)}/h</td>
+      <td><form method="post" action="/employees/${e.id}/roles/delete"><input type="hidden" name="role" value="${r.role}"><button class="link-danger">remove</button></form></td></tr>
+    ${overrides.map((o) => `<tr class="wg-ov">
+      <td class="muted">${esc(o.role)}</td>
+      <td><b>${esc(SERVICES.nameOf(o.service_slug))}</b></td>
+      <td class="num"><b>${money(o.wage_cents)}/h</b></td>
+      <td><form method="post" action="/employees/${e.id}/roles/delete">
+        <input type="hidden" name="role" value="${esc(o.role)}">
+        <input type="hidden" name="svc" value="${esc(o.service_slug)}">
+        <button class="link-danger">remove</button></form></td></tr>`).join('')}`;
+  }).join('');
+  // A schedule rate for a role they hold no general wage for still has to show,
+  // or it is money being paid that this page does not mention.
+  const orphanSvc = svcWages.filter((o) => !q.rolesForEmployee.all(e.id).some((r) => r.role === o.role));
+  const roleRowsAll = roleRows + orphanSvc.map((o) => `<tr class="wg-ov">
+      <td>${esc(o.role)}</td><td><b>${esc(SERVICES.nameOf(o.service_slug))}</b></td>
+      <td class="num"><b>${money(o.wage_cents)}/h</b></td>
+      <td><form method="post" action="/employees/${e.id}/roles/delete">
+        <input type="hidden" name="role" value="${esc(o.role)}">
+        <input type="hidden" name="svc" value="${esc(o.service_slug)}">
+        <button class="link-danger">remove</button></form></td></tr>`).join('');
   // What this wage has been, and since when. Without it a dated change is
   // invisible after the fact: the page would show one number and give no way
   // to tell whether last month was priced at it.
@@ -9328,13 +9357,17 @@ app.get('/employees/:id/edit', (req, res) => {
     </form>
 
     <h2>Roles &amp; wages</h2>
-    <p class="sub">Add each role this person works and the wage for it. On a shift, the wage for the role they worked applies automatically — no need to type it each time. (Salaried staff don't need wages here.)</p>
+    <p class="sub">Add each role this person works and the wage for it. On a shift, the wage for the role they worked applies automatically &mdash; no need to type it each time. If they earn a different rate on one schedule, add it for that schedule and it wins there; every other schedule keeps the general rate. (Salaried staff don't need wages here.)</p>
     <div class="table-wrap"><table class="table">
-      <thead><tr><th>Role</th><th class="num">Wage</th><th></th></tr></thead>
-      <tbody>${roleRows || '<tr><td colspan="3" class="muted">None yet — falls back to the default wage above.</td></tr>'}</tbody>
+      <thead><tr><th>Role</th><th>Schedule</th><th class="num">Wage</th><th></th></tr></thead>
+      <tbody>${roleRowsAll || '<tr><td colspan="4" class="muted">None yet — falls back to the default wage above.</td></tr>'}</tbody>
     </table></div>
     <form method="post" action="/employees/${e.id}/roles" class="card form grid">
       <label>Role <select name="role">${payRoles.map((r) => `<option value="${r}">${r}</option>`).join('')}</select></label>
+      ${SERVICES.all().length > 1 ? `<label>Schedule <select name="svc">
+        <option value="">Every schedule</option>
+        ${SERVICES.all().map((sv) => `<option value="${esc(sv.slug)}">${esc(sv.name)} only</option>`).join('')}
+      </select></label>` : ''}
       <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="0.00" required></label>
       ${/* Counted for the person rather than the role: the role is chosen in
            the select beside this and the count would have to change with it.
@@ -9463,17 +9496,37 @@ app.post('/employees/:id/roles', (req, res) => {
   const id = Number(req.params.id);
   const cents = toCents(req.body.wage);
   const role = req.body.role;
-  const wage = cents > 0 ? applyWageChange(id, role, cents, req.body, tcActor(req)) : null;
-  // A wage starting in the future is history, not the current rate for the
-  // role — writing it here would be the retroactive change all over again,
-  // pointing the other way.
-  if (!wage || !wage.future) q.setRole.run({ employee_id: id, role, wage_cents: cents });
-  res.redirect(`/employees/${id}/edit?msg=` + encodeURIComponent(`Role & wage saved.${wageNote(wage)}`));
+  // Blank means every schedule, which is what a role wage has always meant.
+  const svc = SERVICES.isActive(req.body.svc) ? req.body.svc : null;
+  const wage = cents > 0
+    ? applyWageChange(id, role, cents, req.body, tcActor(req), svc) : null;
+
+  // employee_roles is the GENERAL rate for a role and has no schedule column,
+  // so a schedule-specific wage lives only in the dated history — which is
+  // where the resolver looks first anyway. Writing it here as well would make
+  // the Evening rate look like the rate everywhere.
+  //
+  // And a wage starting in the future is history, not the current rate: writing
+  // it now would be the retroactive change all over again, pointing forwards.
+  if (!svc && (!wage || !wage.future)) q.setRole.run({ employee_id: id, role, wage_cents: cents });
+
+  const where = svc ? ` for ${SERVICES.nameOf(svc)}` : '';
+  res.redirect(`/employees/${id}/edit?msg=`
+    + encodeURIComponent(`${posName(role)} wage saved${where}.${wageNote(wage)}`));
 });
 
 app.post('/employees/:id/roles/delete', (req, res) => {
-  q.deleteRole.run(Number(req.params.id), req.body.role);
-  res.redirect(`/employees/${req.params.id}/edit?msg=` + encodeURIComponent('Role removed.'));
+  const id = Number(req.params.id);
+  const svc = SERVICES.isActive(req.body.svc) ? req.body.svc : null;
+  if (svc) {
+    // Only the schedule-specific rate goes. The role and its general wage stay,
+    // and from now on that schedule is paid the general rate like the others.
+    WAGES.dropServiceWage(id, req.body.role, svc);
+    return res.redirect(`/employees/${id}/edit?msg=`
+      + encodeURIComponent(`${SERVICES.nameOf(svc)} rate removed — ${posName(req.body.role)} is back on the general wage there.`));
+  }
+  q.deleteRole.run(id, req.body.role);
+  res.redirect(`/employees/${id}/edit?msg=` + encodeURIComponent('Role removed.'));
 });
 
 app.post('/employees/:id/deactivate', (req, res) => {
@@ -19020,7 +19073,9 @@ app.get('/schedule', (req, res) => {
     // starts next Monday makes next week cost more and leaves last week alone,
     // which is the whole point of dating a wage — and it is also why a manager
     // can see what a promotion will cost before it takes effect.
-    const dated = WAGES.wageOn(sh.employee_id, sh.position, sh.business_date);
+    // Priced against the day AND the schedule the shift is planned for, so a
+    // week of Evening shifts costs the Evening rate before anybody works it.
+    const dated = WAGES.wageOn(sh.employee_id, sh.position, sh.business_date, sh.daypart);
     if (dated > 0) return { cents: dated, salaried: false };
     const rw = roleWages.get(`${sh.employee_id}|${sh.position}`);
     return { cents: (rw > 0 ? rw : (e.hourly_rate_cents || 0)), salaried: false };

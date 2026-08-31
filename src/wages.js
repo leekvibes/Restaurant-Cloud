@@ -59,14 +59,41 @@ db.exec(`
     ON wage_history (employee_id, effective_from);
 `);
 
-// One wage per person per position per DAY. A second change on the same day is
-// a correction of the first, not a second raise — without this the resolver
-// would have to break a tie between two rows that are equally in force, and
+/**
+ * A wage can also be specific to ONE SCHEDULE.
+ *
+ * Somebody can serve at Day for one rate and at Evening for another, which the
+ * app could not say before: a wage was (person, role) and nothing else, so six
+ * people already working the same role in both services were all paid one rate
+ * whichever service they worked.
+ *
+ * NULL means "any schedule", which is what every existing row is — so adding
+ * this column changed no wage anywhere. A row naming a schedule outranks one
+ * that does not, on the same specificity principle the role already follows.
+ *
+ * It lives here rather than on employee_roles because that table's primary key
+ * is (employee_id, role) and SQLite cannot alter a primary key — widening it
+ * means rebuilding the table every payroll figure is read through, which is not
+ * a thing to do for a feature that can be added beside it.
+ */
+try {
+  const cols = db.prepare('PRAGMA table_info(wage_history)').all().map((c) => c.name);
+  if (!cols.includes('service_slug')) {
+    db.exec('ALTER TABLE wage_history ADD COLUMN service_slug TEXT');
+  }
+} catch { /* table is created above; a failure here means an older engine */ }
+
+// One wage per person per position per SCHEDULE per DAY. A second change on the
+// same day is a correction of the first, not a second raise — without this the
+// resolver would have to break a tie between two rows equally in force, and
 // "whichever was inserted last" is not a rule anybody could predict.
 db.exec(`
-  CREATE UNIQUE INDEX IF NOT EXISTS wage_history_one_per_day
-    ON wage_history (employee_id, IFNULL(role, ''), effective_from);
+  CREATE UNIQUE INDEX IF NOT EXISTS wage_history_one_per_day_svc
+    ON wage_history (employee_id, IFNULL(role, ''), IFNULL(service_slug, ''), effective_from);
 `);
+// The old index keyed without the schedule, so it would refuse a Day rate and
+// an Evening rate for the same role on the same day — exactly what this is for.
+try { db.exec('DROP INDEX IF EXISTS wage_history_one_per_day'); } catch { /* never existed */ }
 
 /**
  * Write today's wages into history as having always applied.
@@ -115,13 +142,27 @@ const stmtOn = db.prepare(`
   SELECT wage_cents FROM wage_history
    WHERE employee_id = @employee_id
      AND (role = @role OR role IS NULL)
+     AND (service_slug = @svc OR service_slug IS NULL)
      AND effective_from <= @on
-   ORDER BY (role IS NULL) ASC, effective_from DESC
+   ORDER BY (role IS NULL) ASC, (service_slug IS NULL) ASC, effective_from DESC
    LIMIT 1`);
 
-function wageOn(employeeId, role, onDate) {
+/**
+ * The wage in force for one person, in one position, on one schedule, on a date.
+ *
+ * MOST SPECIFIC WINS, then most recent — and the order of those two matters.
+ * A rate set for "server at Evening" beats one set for "server anywhere",
+ * however old it is, because the more specific row is a statement about
+ * exactly this situation and the general one is a fallback. Reversing them
+ * would mean a routine raise to the general rate silently overrode a
+ * deliberate Evening rate, which is the kind of wrong nobody notices until a
+ * payslip.
+ */
+function wageOn(employeeId, role, onDate, service) {
   if (!employeeId || !onDate) return 0;
-  const row = stmtOn.get({ employee_id: employeeId, role: role || null, on: onDate });
+  const row = stmtOn.get({
+    employee_id: employeeId, role: role || null, svc: service || null, on: onDate,
+  });
   return row ? row.wage_cents : 0;
 }
 
@@ -134,12 +175,13 @@ function wageOn(employeeId, role, onDate) {
  *
  * test/engine.test.js pins this against wageOn() so the two cannot drift.
  */
-const wageOnSql = (dateExpr) => `(
+const wageOnSql = (dateExpr, svcExpr) => `(
   SELECT wh.wage_cents FROM wage_history wh
    WHERE wh.employee_id = w.employee_id
      AND (wh.role = w.role OR wh.role IS NULL)
+     AND (wh.service_slug = ${svcExpr || 'NULL'} OR wh.service_slug IS NULL)
      AND wh.effective_from <= ${dateExpr}
-   ORDER BY (wh.role IS NULL) ASC, wh.effective_from DESC
+   ORDER BY (wh.role IS NULL) ASC, (wh.service_slug IS NULL) ASC, wh.effective_from DESC
    LIMIT 1)`;
 
 /**
@@ -150,9 +192,9 @@ const wageOnSql = (dateExpr) => `(
  * current wage moves with it) or on some future Monday (so it does not, yet).
  */
 const insWage = db.prepare(`INSERT INTO wage_history
-  (employee_id, role, wage_cents, effective_from, created_by, note)
-  VALUES (@employee_id, @role, @wage_cents, @effective_from, @created_by, @note)
-  ON CONFLICT (employee_id, IFNULL(role, ''), effective_from)
+  (employee_id, role, service_slug, wage_cents, effective_from, created_by, note)
+  VALUES (@employee_id, @role, @service_slug, @wage_cents, @effective_from, @created_by, @note)
+  ON CONFLICT (employee_id, IFNULL(role, ''), IFNULL(service_slug, ''), effective_from)
   DO UPDATE SET wage_cents = excluded.wage_cents,
                 created_by = excluded.created_by,
                 note       = excluded.note`);
@@ -164,6 +206,9 @@ function setWage(employeeId, role, wageCents, effectiveFrom, opts = {}) {
   insWage.run({
     employee_id: employeeId,
     role: role || null,
+    // NULL means every schedule, which is what a wage meant before schedules
+    // could carry their own.
+    service_slug: opts.service || null,
     wage_cents: Math.max(0, Math.round(Number(wageCents) || 0)),
     effective_from: effectiveFrom,
     created_by: opts.by || null,
@@ -174,7 +219,38 @@ function setWage(employeeId, role, wageCents, effectiveFrom, opts = {}) {
 /** Every dated change for one person, newest first — for showing the history. */
 function historyFor(employeeId) {
   return db.prepare(`SELECT * FROM wage_history WHERE employee_id = ?
-    ORDER BY effective_from DESC, IFNULL(role, '') ASC`).all(employeeId);
+    ORDER BY effective_from DESC, IFNULL(role, '') ASC, IFNULL(service_slug, '') ASC`).all(employeeId);
+}
+
+/**
+ * What somebody earns right now, per role and schedule — for showing a table
+ * of what is actually in force rather than a list of changes.
+ */
+function currentFor(employeeId, onDate) {
+  const rows = db.prepare(`SELECT role, service_slug, wage_cents, effective_from
+    FROM wage_history WHERE employee_id = ? AND effective_from <= ?
+    ORDER BY effective_from DESC`).all(employeeId, onDate);
+  const seen = new Map();
+  for (const r of rows) {
+    const k = `${r.role || ''}|${r.service_slug || ''}`;
+    if (!seen.has(k)) seen.set(k, r);      // rows are newest-first, so the first wins
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Remove a schedule-specific rate, leaving the general one alone.
+ *
+ * History is not rewritten: shifts already worked keep whatever they were
+ * priced at, and only shifts from here on fall back to the general wage. That
+ * is the same rule every other wage change follows.
+ */
+function dropServiceWage(employeeId, role, service) {
+  if (!service) throw new Error('That would remove the general wage, not a schedule rate.');
+  return db.prepare(`DELETE FROM wage_history
+    WHERE employee_id = ? AND IFNULL(role, '') = ? AND service_slug = ?
+      AND effective_from >= ?`)
+    .run(employeeId, role || '', service, EPOCH).changes;
 }
 
 /**
@@ -218,5 +294,5 @@ function countAffected(employeeId, role, fromDate, toDate) {
 // on file, which is exactly what it did before this module existed.
 
 module.exports = {
-  EPOCH, seedFromCurrent, wageOn, wageOnSql, setWage, historyFor, restamp, countAffected,
+  EPOCH, seedFromCurrent, wageOn, wageOnSql, setWage, historyFor, currentFor, dropServiceWage, restamp, countAffected,
 };

@@ -456,9 +456,11 @@ test('a shift shows the hours and the rate it was worked at', async () => {
   // first updated: a wage for "Marco Diaz" landed on employee 2 of data.db.
   const marco = db.prepare('SELECT id FROM employees WHERE name = ?').get('Marco Diaz');
   db.prepare('UPDATE employees SET hourly_rate_cents = 1650 WHERE id = ?').run(marco.id);
-  db.prepare(`INSERT INTO wage_history (employee_id, role, wage_cents, effective_from, created_by)
-              VALUES (?, NULL, 1650, '2000-01-01', 'test')
-              ON CONFLICT (employee_id, IFNULL(role, ''), effective_from)
+  // The conflict target has to name the index that exists: a wage is keyed by
+  // schedule as well now, so it is (employee, role, service, date).
+  db.prepare(`INSERT INTO wage_history (employee_id, role, service_slug, wage_cents, effective_from, created_by)
+              VALUES (?, NULL, NULL, 1650, '2000-01-01', 'test')
+              ON CONFLICT (employee_id, IFNULL(role, ''), IFNULL(service_slug, ''), effective_from)
               DO UPDATE SET wage_cents = excluded.wage_cents`).run(marco.id);
   const html = await shiftPage(await signIn('2222'), 'Marco Diaz');
   assert.match(html, /8 hrs/, 'the hours they worked');

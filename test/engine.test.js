@@ -465,7 +465,9 @@ test('a wage set for a role beats the default when that role is worked', () => {
       LEFT JOIN employee_roles er ON er.employee_id = e.id AND er.role = 'busser'
       JOIN (SELECT 0 AS hourly_rate_cents, e2.id AS employee_id, 'busser' AS role
               FROM employees e2) w ON w.employee_id = e.id
-      JOIN (SELECT MAX(date) AS date FROM shifts) sh
+      ${/* daypart too: a wage can now be specific to one schedule, so the
+             fragment reads sh.daypart as well as sh.date. */''}
+      JOIN (SELECT MAX(date) AS date, 'cafe' AS daypart FROM shifts) sh
      WHERE er.wage_cents > 0 AND er.wage_cents <> e.hourly_rate_cents LIMIT 1`).get();
   if (!row) return; // nobody has a distinct second-role wage on file
   assert.strictEqual(row.rate, row.role_rate, 'pays the rate for the role worked');

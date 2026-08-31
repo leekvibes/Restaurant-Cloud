@@ -34,7 +34,7 @@ const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
  * (employees) and `er` (employee_roles, LEFT JOINed on employee_id + role).
  */
 const WAGE_RATE_SQL =
-  `COALESCE(NULLIF(w.hourly_rate_cents, 0), ${require('./wages').wageOnSql('sh.date')},`
+  `COALESCE(NULLIF(w.hourly_rate_cents, 0), ${require('./wages').wageOnSql('sh.date', 'sh.daypart')},`
   + ' NULLIF(er.wage_cents, 0), e.hourly_rate_cents, 0)';
 
 /** Sales (food+coffee+alcohol) and labor (wages) for a date range, in cents. */

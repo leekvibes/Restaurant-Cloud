@@ -203,3 +203,100 @@ test('an unrecognised or missing choice falls back to "from today"', () => {
   assert.match(fn, /mode === 'all'\) \{[\s\S]*?restamp/,
     'and nothing but "all" rewrites a recorded rate');
 });
+
+// --- the same role, two schedules, two wages ---------------------------------
+//
+// Somebody can serve at Day for one rate and at Evening for another. Before
+// this a wage was (person, role) and nothing else, so six people already
+// working the same role in both services were paid one rate whichever they
+// worked. These are the tests that stop that being true again.
+
+// Their own person: the tests above have already given COOK a wage timeline,
+// and a rate set in 2026-01 would be outranked by one of theirs from 2026-04
+// for reasons that have nothing to do with schedules.
+let TWO;
+test.before(() => {
+  TWO = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active, pin)
+    VALUES ('Wage Twoway', 'kitchen', 1500, 1, '7705')`).run().lastInsertRowid);
+});
+
+test('a schedule rate beats the general one, on that schedule only', () => {
+  W.setWage(TWO, 'kitchen', 1800, '2026-01-01');                        // everywhere
+  W.setWage(TWO, 'kitchen', 2400, '2026-01-01', { service: 'dinner' }); // Evening only
+
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-06-01', 'dinner'), 2400, 'Evening pays the Evening rate');
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-06-01', 'cafe'), 1800, 'Day keeps the general rate');
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-06-01', null), 1800,
+    'and asked without a schedule, the general rate is the honest answer');
+});
+
+test('SPECIFIC BEATS RECENT, and that order is the whole safety of this', () => {
+  // A raise to the general rate must not silently override a deliberate
+  // Evening rate. If recency won, every routine raise would quietly wipe out
+  // the schedule rates somebody set on purpose, and the only symptom would be
+  // a payslip weeks later.
+  W.setWage(TWO, 'kitchen', 2000, '2026-08-01');   // general, LATER than the Evening one
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-09-01', 'dinner'), 2400,
+    'the older Evening rate still wins on Evening');
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-09-01', 'cafe'), 2000,
+    'while Day picks up the new general rate');
+});
+
+test('a schedule rate can itself be raised, and only that schedule moves', () => {
+  W.setWage(TWO, 'kitchen', 2600, '2026-10-01', { service: 'dinner' });
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-09-30', 'dinner'), 2400, 'before it starts');
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-10-02', 'dinner'), 2600, 'after');
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-10-02', 'cafe'), 2000, 'Day is untouched');
+});
+
+test('payroll prices a Day shift and an Evening shift differently, on one day', () => {
+  // The end of the chain, through shiftInputs — which is what payroll and the
+  // tip-out both read. Two shifts, same person, same role, same date.
+  const day = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES ('2026-11-05', 'cafe', 'emailed', datetime('now'))`).run().lastInsertRowid);
+  const eve = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES ('2026-11-05', 'dinner', 'emailed', datetime('now'))`).run().lastInsertRowid);
+  const work = db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
+                           VALUES (?, ?, 'kitchen', 5, 0)`);
+  work.run(day, TWO);
+  work.run(eve, TWO);
+
+  const rateOn = (id) => {
+    const inp = shiftInputs(id);
+    return [...inp.servers, ...inp.support].find((p) => p.employeeId === TWO).hourlyRate;
+  };
+  assert.strictEqual(rateOn(day), 20, 'the Day shift is priced at the general rate');
+  assert.strictEqual(rateOn(eve), 26, 'the Evening shift at the Evening rate');
+
+  // And the SQL resolver has to agree, or two screens disagree about one
+  // person's pay for the same afternoon.
+  const q = db.prepare(`SELECT ${WAGE_RATE_SQL} AS cents
+      FROM work w JOIN employees e ON e.id = w.employee_id
+      JOIN shifts sh ON sh.id = w.shift_id
+      LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+     WHERE w.shift_id = ? AND w.employee_id = ?`);
+  assert.strictEqual(q.get(day, TWO).cents, 2000, 'Day, in SQL');
+  assert.strictEqual(q.get(eve, TWO).cents, 2600, 'Evening, in SQL');
+});
+
+test('removing a schedule rate falls back, and rewrites no history', () => {
+  const before = db.prepare('SELECT COUNT(*) n FROM work WHERE employee_id = ?').get(TWO).n;
+  W.dropServiceWage(TWO, 'kitchen', 'dinner');
+  assert.strictEqual(W.wageOn(TWO, 'kitchen', '2026-11-05', 'dinner'), 2000,
+    'Evening is back on the general rate');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM work WHERE employee_id = ?').get(TWO).n,
+    before, 'and not one worked shift was touched');
+  assert.throws(() => W.dropServiceWage(TWO, 'kitchen', null), /general wage/,
+    'it refuses to be used to delete the general wage by accident');
+});
+
+test('currentFor says what somebody earns now, per role and schedule', () => {
+  W.setWage(TWO, 'kitchen', 2600, '2026-10-01', { service: 'dinner' });
+  const now = W.currentFor(TWO, '2026-12-01');
+  const eve = now.find((r) => r.role === 'kitchen' && r.service_slug === 'dinner');
+  const gen = now.find((r) => r.role === 'kitchen' && !r.service_slug);
+  assert.strictEqual(eve.wage_cents, 2600, 'the Evening rate in force');
+  assert.strictEqual(gen.wage_cents, 2000, 'and the general one beside it');
+  // Only the latest of each, not every change ever made.
+  assert.strictEqual(now.filter((r) => r.role === 'kitchen' && r.service_slug === 'dinner').length, 1);
+});

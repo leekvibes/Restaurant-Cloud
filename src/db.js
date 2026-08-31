@@ -444,6 +444,7 @@ const w = {
     // a loop on the page that closes every service.
     `SELECT w.role, w.hours, w.employee_id, w.hours_source,
             w.hourly_rate_cents AS shift_rate_cents, sh.date AS worked_on,
+            sh.daypart AS worked_svc,
             e.name, e.email, e.hourly_rate_cents AS default_rate_cents, e.pay_type
      FROM work w JOIN employees e ON e.id = w.employee_id
      JOIN shifts sh ON sh.id = w.shift_id WHERE w.shift_id = ?`
@@ -521,8 +522,10 @@ function shiftInputs(shiftId) {
       if (row.shift_rate_cents > 0) {
         rateCents = row.shift_rate_cents;
       } else {
+        // The SHIFT's schedule, never today's or a guess: somebody paid more at
+        // Evening must be paid that for an Evening shift and not for a Day one.
         const dated = row.worked_on
-          ? require('./wages').wageOn(row.employee_id, row.role, row.worked_on) : 0;
+          ? require('./wages').wageOn(row.employee_id, row.role, row.worked_on, row.worked_svc) : 0;
         if (dated > 0) {
           rateCents = dated;
         } else {
