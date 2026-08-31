@@ -306,3 +306,57 @@ test('a time that is not a time is refused rather than stored as something else'
   assert.strictEqual(SVC.asMin(''), null);
   assert.strictEqual(SVC.asMin('9:30'), 570, 'and a real one parses');
 });
+
+// --- every clock keeps its own settings ---------------------------------------
+
+test('editing one clock does not change another', () => {
+  // The complaint that prompted this: open the settings for Day, change them,
+  // open Evening, and Evening had the same values. They were one shared set.
+  const app = { breaksPaid: false, longShift: 16, pinForFix: true, alertsOn: true,
+    autoOut: false, autoOutHours: 13 };
+  SVC.seedSettings(app);
+
+  SVC.setSettingsFor('cafe', { ...app, longShift: 8, breaksPaid: true, autoOut: true, autoOutHours: 9 });
+
+  const day = SVC.settingsFor('cafe', app);
+  const eve = SVC.settingsFor('dinner', app);
+  assert.strictEqual(day.longShift, 8);
+  assert.strictEqual(day.breaksPaid, true);
+  assert.strictEqual(day.autoOutHours, 9);
+  assert.strictEqual(eve.longShift, 16, 'Evening kept its own');
+  assert.strictEqual(eve.breaksPaid, false);
+  assert.strictEqual(eve.autoOutHours, 13);
+
+  SVC.setSettingsFor('cafe', app);              // put it back for later tests
+});
+
+test('a clock with nothing set falls back to the app-wide value', () => {
+  // Which is what makes the migration safe: a clock nobody has configured
+  // behaves exactly as it did before it had settings of its own.
+  SVC.create({ slug: 'fresh', name: 'Fresh Clock' });
+  const app = { breaksPaid: true, longShift: 11, pinForFix: false, alertsOn: false,
+    autoOut: true, autoOutHours: 7 };
+  const got = SVC.settingsFor('fresh', app);
+  assert.deepStrictEqual(got, app, 'every value falls through');
+  SVC.archive('fresh');
+});
+
+test('the trading-day cutoff is NOT one of them', () => {
+  // It decides which DAY 1am belongs to and is read across payroll, sales,
+  // cash and the services page. Two clocks disagreeing about it would file one
+  // night under two different dates.
+  const keys = SVC.CLOCK_SETTINGS.map(([, k]) => k);
+  assert.ok(!keys.includes('cutoffHour'), 'the date boundary stays app-wide');
+  assert.deepStrictEqual(keys.sort(),
+    ['alertsOn', 'autoOut', 'autoOutHours', 'breaksPaid', 'longShift', 'pinForFix']);
+});
+
+test('an out-of-range value is clamped rather than stored', () => {
+  const app = { breaksPaid: false, longShift: 16, pinForFix: true, alertsOn: true,
+    autoOut: false, autoOutHours: 13 };
+  SVC.setSettingsFor('cafe', { ...app, longShift: 99, autoOutHours: 1 });
+  const got = SVC.settingsFor('cafe', app);
+  assert.strictEqual(got.longShift, 16, 'a nonsense threshold falls back to the default');
+  assert.strictEqual(got.autoOutHours, 13, 'and an auto clock-out under four hours does too');
+  SVC.setSettingsFor('cafe', app);
+});

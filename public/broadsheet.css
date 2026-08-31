@@ -4879,9 +4879,14 @@ body.sb-iss-open .sb-iss { transform: translateX(0); visibility: visible; }
   /* A narrow column between Date and Position for the delete, added rather than
      squeezed into an existing one — a control that shares a cell with a value
      is a control somebody hits by accident. */
-  grid-template-columns: minmax(96px,1fr) 58px minmax(120px,1.3fr) minmax(88px,.9fr) minmax(88px,.9fr)
+  /* Service is its own column now, between Position and Start. It used to be
+     printed inside the position cell and so could not be corrected — somebody
+     who clocked into the wrong service had to have the punch deleted and
+     redone. Eleven columns, and the minimum widens to match. */
+  grid-template-columns: minmax(96px,1fr) 58px minmax(110px,1.1fr) minmax(104px,1fr)
+                         minmax(88px,.9fr) minmax(88px,.9fr)
                          minmax(70px,.7fr) minmax(70px,.7fr) minmax(70px,.7fr) minmax(64px,.6fr) minmax(56px,.6fr);
-  align-items: center; gap: 4px; min-width: 778px;
+  align-items: center; gap: 4px; min-width: 890px;
 }
 .tsg-h {
   padding: 9px 14px; border-bottom: 1.5px solid var(--rule-heavy);

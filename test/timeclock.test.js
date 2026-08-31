@@ -1196,11 +1196,14 @@ test('a quiet clock raises nothing', () => {
     'an empty period is not news');
 });
 
-test('settings save and take effect', async () => {
-  await post('/timeclock/settings', { cutoff: '5', dinner: '17', long: '12', breaks_paid: '1', pin_out: '1', alerts: '1' });
+test('settings save and take effect, per clock', async () => {
+  // Every setting here belongs to ONE time clock now, except the trading day.
+  // Editing Day used to change Evening too, which is not what having two time
+  // clocks means to anybody who has just made two of them.
+  await post('/timeclock/settings', { svc: 'cafe', cutoff: '5', long: '12', breaks_paid: '1', pin_out: '1', alerts: '1' });
   const T = require('../src/timeclock');
-  const c = T.settings();
-  assert.strictEqual(c.cutoffHour, 5);
+  const c = { ...T.settings(), ...T.settingsOn('cafe') };
+  assert.strictEqual(T.settings().cutoffHour, 5, 'the trading day is app-wide and did move');
   // dinnerFrom is no longer on the form and no longer settable. It guessed a
   // service from a clock boundary; clock-in always asks now, and the schedule
   // drawer takes its service from the board it was opened on. The stored value
@@ -1210,9 +1213,14 @@ test('settings save and take effect', async () => {
   assert.strictEqual(c.breaksPaid, true, 'breaks now default to paid');
   assert.strictEqual(c.requireService, undefined,
     'there is no require-service setting any more — the service is always asked');
+  // The OTHER clock is untouched, which is the whole point.
+  const other = T.settingsOn('dinner');
+  assert.notStrictEqual(other.longShift, 12, 'Evening did not follow Day');
+  assert.strictEqual(other.breaksPaid, false, 'nor did its breaks');
+
   // Put it back so later assertions read the documented defaults.
-  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_out: '1', pin_fix: '1', alerts: '1' });
-  assert.strictEqual(T.settings().breaksPaid, false);
+  await post('/timeclock/settings', { svc: 'cafe', cutoff: '4', long: '16', pin_out: '1', pin_fix: '1', alerts: '1' });
+  assert.strictEqual(T.settingsOn('cafe').breaksPaid, false);
 });
 
 test('settings are refused for a view-only account', () => {

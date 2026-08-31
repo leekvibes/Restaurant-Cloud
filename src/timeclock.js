@@ -421,6 +421,25 @@ const DEFAULTS = {
   tc_auto_out_hours: '13',
 };
 const setting = (k) => { const r = sq.get.get(k); return r === undefined ? DEFAULTS[k] : r.value; };
+/**
+ * The settings that apply to ONE clock.
+ *
+ * Everything below is per-clock now except the business-date cutoff, which is
+ * app-wide by necessity: it decides which DAY 1am belongs to, and two clocks
+ * disagreeing about that would file one night under two dates.
+ *
+ * Falls back to the app-wide value for anything a clock has not set, and to
+ * the app-wide set entirely if the services module is not available — a
+ * database that has never loaded it still answers.
+ */
+function settingsOn(slug) {
+  const base = settings();
+  if (!slug) return base;
+  try {
+    return { ...base, ...require('./services').settingsFor(slug, base) };
+  } catch { return base; }
+}
+
 const settings = () => ({
   cutoffHour: Number(setting('tc_day_cutoff')) || 0,
   dinnerFrom: Number(setting('tc_dinner_from')) || 16,
@@ -728,7 +747,11 @@ const countShiftPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE 
  */
 function clockedMinutesOn(shiftId, employeeId) {
   if (!shiftId || !employeeId) return null;
-  const longMin = (Number(setting('tc_long_shift')) || 16) * 60;
+  // The clock this shift belongs to sets its own implausible-length bar. A
+  // fourteen-hour punch is routine on one service and a missed clock-out on
+  // another, and one number for both is wrong for at least one of them.
+  const sh = db.prepare('SELECT daypart FROM shifts WHERE id = ?').get(shiftId);
+  const longMin = (Number(settingsOn(sh && sh.daypart).longShift) || 16) * 60;
   return sumForShift.get({ shift_id: shiftId, employee_id: employeeId, long_min: longMin }).payable_min;
 }
 
@@ -1951,13 +1974,15 @@ if (backfilled.done) {
  *     derived the same way an ordinary clock-out derives them
  */
 function autoCloseStale(now = nowUtc()) {
-  const cfg = settings();
-  if (!cfg.autoOut) return { closed: 0, entries: [] };
-  const limit = Math.max(4, Number(cfg.autoOutHours) || 13);
-
   const open = q.allActive.all().filter((e) => e.status === 'active');
   const done = [];
   for (const e of open) {
+    // PER CLOCK. Auto clock-out being on for the Day service says nothing about
+    // Evening, and the hour it fires at is that clock's own — a bar and a café
+    // have no reason to share either.
+    const cfg = settingsOn(e.daypart);
+    if (!cfg.autoOut) continue;
+    const limit = Math.max(4, Number(cfg.autoOutHours) || 13);
     // A clock with a CLOSING TIME for the day this punch belongs to closes at
     // that time. It is a more honest figure than "after N hours" — the bar
     // shuts at 2am whoever came on when — and the hours limit stays as the
@@ -2020,7 +2045,7 @@ const autoClosedFor = db.prepare(`SELECT * FROM time_entries
 module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
   fingerprintOf, approvalBlockers, approvalBlockersSplit, approvalStale, transferStateOf, TRANSFER_LABEL,
-  q, settings, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
+  q, settings, settingsOn, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
   clockFace, stamp, dayLabel, hm, toHours, breakTotals, breaksOn, recompute, elapsedMinutes,
   payableSoFar, logEvent,
   localInputToUtc, utcToLocalInput,

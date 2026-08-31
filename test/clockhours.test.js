@@ -536,14 +536,18 @@ test('a difference is only called an override when somebody actually typed one',
   assert.match(typed, /Override/, 'a typed one is');
 });
 
-test('the long-shift threshold on the page is the one in settings', async () => {
+test('the long-shift threshold is the one set on THAT clock', async () => {
+  // It belongs to a clock now. A fourteen-hour punch is routine on one service
+  // and a missed clock-out on another, and one number for both is wrong for at
+  // least one of them.
   const before = await text('/timeclock');
   assert.doesNotMatch(before, /past 16h/, 'nothing is hardcoded to 16 once a setting exists');
-  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '10', pin_fix: '1', require_service: '1', alerts: '1' });
+  await post('/timeclock/settings', { svc: 'cafe', cutoff: '4', long: '10', pin_fix: '1', alerts: '1' });
   const T = require('../src/timeclock');
-  assert.strictEqual(T.settings().longShift, 10, 'the setting took');
+  assert.strictEqual(T.settingsOn('cafe').longShift, 10, 'the setting took on the clock it was set on');
+  assert.notStrictEqual(T.settingsOn('dinner').longShift, 10, 'and nowhere else');
   // Restore, so later assertions read the documented defaults.
-  await post('/timeclock/settings', { cutoff: '4', dinner: '16', long: '16', pin_fix: '1', require_service: '1', alerts: '1' });
+  await post('/timeclock/settings', { svc: 'cafe', cutoff: '4', long: '16', pin_fix: '1', alerts: '1' });
 });
 
 test('an absurd date range is shortened rather than served', async () => {

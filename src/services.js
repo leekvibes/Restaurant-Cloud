@@ -188,6 +188,107 @@ try {
   }
 } catch { /* older engine */ }
 
+/**
+ * EVERY CLOCK ITS OWN SETTINGS.
+ *
+ * Breaks, the long-shift flag, auto clock-out and the rest used to be one value
+ * shared by every clock, so editing them on Day changed them on Evening too —
+ * which is not what "a separate time clock" means to anybody who has just made
+ * two of them.
+ *
+ * Each column is NULLABLE and NULL means "not set here, use the app-wide
+ * value". seedSettings() then copies the app-wide values in ONCE, so every
+ * clock starts life behaving exactly as it did the day before and diverges
+ * only when somebody edits one of them.
+ *
+ * The business-date cutoff is deliberately NOT here. It answers "which DAY does
+ * 1am belong to" and is read in thirty-three places across payroll, sales, cash
+ * and the services page. Two clocks disagreeing about it would file one night
+ * under two different dates.
+ */
+const CLOCK_SETTINGS = [
+  ['break_paid', 'breaksPaid', 'flag'],
+  ['long_shift', 'longShift', 'num'],
+  ['pin_fix', 'pinForFix', 'flag'],
+  ['alerts', 'alertsOn', 'flag'],
+  ['auto_out', 'autoOut', 'flag'],
+  ['auto_out_hours', 'autoOutHours', 'num'],
+];
+
+try {
+  const cols = db.prepare('PRAGMA table_info(services)').all().map((c) => c.name);
+  for (const [col] of CLOCK_SETTINGS) {
+    if (!cols.includes(col)) db.exec(`ALTER TABLE services ADD COLUMN ${col} INTEGER`);
+  }
+} catch { /* older engine */ }
+
+/**
+ * Copy the app-wide values onto every clock, once.
+ *
+ * Called at boot after the time clock's own defaults exist. Runs only where a
+ * clock has nothing set, so a clock somebody has already configured is never
+ * overwritten by a later boot.
+ */
+function seedSettings(appWide) {
+  if (!appWide) return { seeded: 0 };
+  let seeded = 0;
+  const upd = db.prepare(`UPDATE services SET break_paid = @break_paid, long_shift = @long_shift,
+    pin_fix = @pin_fix, alerts = @alerts, auto_out = @auto_out, auto_out_hours = @auto_out_hours
+    WHERE slug = @slug AND break_paid IS NULL AND long_shift IS NULL`);
+  db.transaction(() => {
+    for (const sv of all({ includeArchived: true })) {
+      seeded += upd.run({
+        slug: sv.slug,
+        break_paid: appWide.breaksPaid ? 1 : 0,
+        long_shift: Number(appWide.longShift) || 16,
+        pin_fix: appWide.pinForFix ? 1 : 0,
+        alerts: appWide.alertsOn ? 1 : 0,
+        auto_out: appWide.autoOut ? 1 : 0,
+        auto_out_hours: Number(appWide.autoOutHours) || 13,
+      }).changes;
+    }
+  })();
+  return { seeded };
+}
+
+/**
+ * One clock's settings, falling back to the app-wide value for anything unset.
+ *
+ * `appWide` is passed in rather than read here, because reading it would mean
+ * this module requiring timeclock.js, which requires this one.
+ */
+function settingsFor(slug, appWide = {}) {
+  const sv = bySlug(slug) || {};
+  const out = {};
+  for (const [col, key, kind] of CLOCK_SETTINGS) {
+    const v = sv[col];
+    if (v == null) out[key] = appWide[key];
+    else out[key] = kind === 'flag' ? v === 1 : Number(v);
+  }
+  return out;
+}
+
+/** Save one clock's settings. Values are clamped the way the app-wide ones are. */
+function setSettingsFor(slug, v) {
+  const clamp = (x, lo, hi, d) => {
+    const n = Math.round(Number(x));
+    return Number.isFinite(n) && n >= lo && n <= hi ? n : d;
+  };
+  db.prepare(`UPDATE services SET break_paid = @break_paid, long_shift = @long_shift,
+    pin_fix = @pin_fix, alerts = @alerts, auto_out = @auto_out, auto_out_hours = @auto_out_hours
+    WHERE slug = @slug`).run({
+    slug,
+    break_paid: v.breaksPaid ? 1 : 0,
+    long_shift: clamp(v.longShift, 4, 24, 16),
+    pin_fix: v.pinForFix ? 1 : 0,
+    alerts: v.alertsOn ? 1 : 0,
+    auto_out: v.autoOut ? 1 : 0,
+    // Floored at 4 hours: anything shorter closes real shifts in progress, and
+    // this exists to catch a punch nobody came back to.
+    auto_out_hours: clamp(v.autoOutHours, 4, 24, 13),
+  });
+}
+
 /** Schedules that carry their own time clock. */
 const withClock = () => all().filter((x) => x.has_clock !== 0);
 
@@ -422,6 +523,7 @@ function employeesFor(slug) {
 
 module.exports = {
   BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, LIMITS, limitOf, setLimit,
-  DAY_LETTERS, DAY_NAMES, hoursFor, hoursOn, setHours, asMin, bySlug, nameOf, isActive, create, rename, archive, unarchive,
+  DAY_LETTERS, DAY_NAMES, hoursFor, hoursOn, setHours, asMin, bySlug,
+  CLOCK_SETTINGS, seedSettings, settingsFor, setSettingsFor, nameOf, isActive, create, rename, archive, unarchive,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };

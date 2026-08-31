@@ -19344,6 +19344,34 @@ function tcFrozen(res, employeeId, businessDate, backTo) {
  * `entry` may be omitted where there is nothing to check the state of yet — the
  * add-a-punch form, the settings page. Pass it everywhere else.
  */
+/**
+ * Move a punch onto the shift for the service it now names.
+ *
+ * The service on a punch and the shift it hangs off have to agree — the punch
+ * is what the clock knows and the shift is what the Services page and the
+ * tip-out read. Correcting one without the other leaves somebody's hours
+ * sitting on a service they were never on.
+ *
+ * Written once and shared, because it was living inside the approved-correction
+ * path only: the inline editor on the timesheet changed the daypart and left
+ * the punch hanging off the old shift, so correcting a service on screen did
+ * nothing to the Services page at all.
+ *
+ * Find-or-create through the same door every other path uses, so moving a
+ * service can never mint a second shift for it.
+ */
+function relinkEntry(entry) {
+  if (!entry || !entry.daypart) return;
+  const bdate = TC.businessDateOf(entry.clock_in_at, TC.settings().cutoffHour);
+  s.getOrIgnore.run(bdate, entry.daypart);
+  const sh = s.findShift.get(bdate, entry.daypart);
+  if (!sh) return;
+  policyForShift(sh);
+  w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: entry.employee_id, role: entry.position });
+  TC.q.setShift.run({ id: entry.id, shift_id: sh.id });
+  db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, entry.id);
+}
+
 function tcCanEdit(req, res, entry) {
   if (!canWrite()) {
     res.status(403).send(layout('Not allowed',
@@ -22002,15 +22030,31 @@ app.get('/timeclock/settings', (req, res) => {
   const w2 = canWrite();
   const row = (label, control, hint) => `<div class="tcs-row"><div class="tcs-l"><b>${label}</b>${hint ? `<i>${hint}</i>` : ''}</div><div class="tcs-c">${control}</div></div>`;
   const check = (name, on, label) => `<label class="tcs-check"><input type="checkbox" name="${name}" value="1"${on ? ' checked' : ''}${w2 ? '' : ' disabled'}><span>${label}</span></label>`;
+  // ONE CLOCK AT A TIME. Every setting below the trading day belongs to the
+  // clock named in the tabs — editing Day says nothing about Evening, which is
+  // what having two time clocks is supposed to mean.
+  const clocks = SERVICES.withClock();
+  const pick = clocks.some((x) => x.slug === req.query.svc) ? req.query.svc
+    : (clocks[0] ? clocks[0].slug : '');
+  const cs = pick ? TC.settingsOn(pick) : c;
+
   res.send(layout('Time clock settings', `
     ${flash(req)}
     <div class="bs-page tcm-page">
       <a class="bs-back" href="/timeclock">← Time clock</a>
       <div class="bs-head"><div class="bs-headwrap">
         <h1 class="bs-headline">Time clock settings</h1>
-        <p class="bs-subline">How the clock behaves for everyone. Changing these does not alter time already recorded.</p>
+        <p class="bs-subline">Each time clock keeps its own settings. Changing these never alters time already recorded.</p>
       </div></div>
+
+      ${clocks.length > 1 ? `<nav class="rst-tabs tcs-tabs" aria-label="Time clock">
+        ${clocks.map((sv) => `<a class="rst-tab${pick === sv.slug ? ' on' : ''}"
+          href="/timeclock/settings?svc=${encodeURIComponent(sv.slug)}"${
+  pick === sv.slug ? ' aria-current="page"' : ''}>${esc(sv.name)}</a>`).join('')}
+      </nav>` : ''}
+
       <form method="post" action="/timeclock/settings" class="bs-panel tcs">
+        <input type="hidden" name="svc" value="${esc(pick)}">
         ${row('The trading day starts at',
           `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
           'Work before this hour counts as the night before, so an overnight shift stays on one day.')}
@@ -22020,7 +22064,7 @@ app.get('/timeclock/settings', (req, res) => {
              board it was opened on. Work hours below are the per-clock times
              that actually matter. */''}
         ${row('Flag a shift left open past',
-          `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === c.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
+          `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === cs.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
           'Almost always a missed clock-out rather than a very long day.')}
         ${/* Auto clock-out, laid out like the reference the owner sent: a
               checkbox that turns it on, and the hours beside it. Off until he
@@ -22032,7 +22076,7 @@ app.get('/timeclock/settings', (req, res) => {
             <span>Clock people out automatically</span>
           </label>
           <span class="tcs-auto-n"><input type="number" name="auto_out_hours" min="4" max="24" step="1"
-            value="${c.autoOutHours}" ${w2 ? '' : 'disabled'} aria-label="Hours before an open punch is closed"> Hours</span>`,
+            value="${cs.autoOutHours}" ${w2 ? '' : 'disabled'} aria-label="Hours before an open punch is closed"> Hours</span>`,
           'Anyone still on the clock this long is clocked out at that mark, and the entry is flagged '
           + 'wherever it appears so you can correct it. It writes a time nobody punched, so it stays off until you want it.')}
         ${/* Per time clock, not global. A cafe that opens on the dot and a
@@ -22083,7 +22127,7 @@ app.get('/timeclock/settings', (req, res) => {
       'Somebody with no shift on this schedule that day cannot clock into it at all. '
       + 'Leave it off and anybody assigned to the schedule can clock in whenever they arrive.');
   }).join('')}
-        ${row('Breaks', check('breaks_paid', c.breaksPaid, 'Count breaks as paid by default'),
+        ${row('Breaks', check('breaks_paid', cs.breaksPaid, 'Count breaks as paid by default'),
           'Either way a manager can change any single break.')}
         ${/* No clock-out switch. It used to be here, off by default, and it was
               the wrong thing to offer: a PIN at clock-out confirms nothing the
@@ -22091,9 +22135,9 @@ app.get('/timeclock/settings', (req, res) => {
               stood between somebody and the end of their shift. Corrections
               still ask, because a correction is a claim about a time that has
               already passed rather than a thing happening now. */''}
-        ${row('Ask for the PIN', check('pin_fix', c.pinForFix, 'when asking for a correction'),
+        ${row('Ask for the PIN', check('pin_fix', cs.pinForFix, 'when asking for a correction'),
           'Clocking in and out never asks — they are already signed in. Editing or adding a shift always does.')}
-        ${row('Dashboard', check('alerts', c.alertsOn, 'Show time-clock items that need attention'),
+        ${row('Dashboard', check('alerts', cs.alertsOn, 'Show time-clock items that need attention'),
           'Only things somebody has to act on ever appear.')}
         ${w2 ? '<button class="bs-btn" type="submit">Save settings</button>' : '<p class="inc-hint">Your account is view-only.</p>'}
       </form>
@@ -22102,34 +22146,62 @@ app.get('/timeclock/settings', (req, res) => {
 
 app.post('/timeclock/settings', (req, res) => {
   if (!tcCanEdit(req, res)) return;
+  const svc = SERVICES.withClock().some((x) => x.slug === req.body.svc) ? req.body.svc : '';
+
+  // THE TRADING DAY IS THE ONLY APP-WIDE ONE LEFT. It decides which day 1am
+  // belongs to and is read in thirty-three places across payroll, sales, cash
+  // and the services page; two clocks disagreeing about it would file one
+  // night under two different dates. Everything else belongs to one clock.
+  const now = TC.settings();
   TC.saveSettings({
-    // dinnerFrom is no longer on the form. Passed through unchanged so
-    // saveSettings does not clamp it back to a default the scheduler would
-    // then read — nothing sets it any more, and nothing should reset it either.
-    cutoffHour: req.body.cutoff, dinnerFrom: TC.settings().dinnerFrom, longShift: req.body.long,
-    breaksPaid: req.body.breaks_paid === '1',
-    pinForFix: req.body.pin_fix === '1',
-    alertsOn: req.body.alerts === '1',
-    autoOut: req.body.auto_out === '1',
-    autoOutHours: req.body.auto_out_hours,
+    cutoffHour: req.body.cutoff,
+    // Untouched: dinnerFrom is off the form entirely, and these five now live
+    // on the clock. Passing the current values keeps saveSettings from
+    // clamping them back to defaults that nothing reads any more.
+    dinnerFrom: now.dinnerFrom,
+    longShift: now.longShift,
+    breaksPaid: now.breaksPaid,
+    pinForFix: now.pinForFix,
+    alertsOn: now.alertsOn,
+    autoOut: now.autoOut,
+    autoOutHours: now.autoOutHours,
   });
+
+  if (svc) {
+    SERVICES.setSettingsFor(svc, {
+      longShift: req.body.long,
+      breaksPaid: req.body.breaks_paid === '1',
+      pinForFix: req.body.pin_fix === '1',
+      alertsOn: req.body.alerts === '1',
+      autoOut: req.body.auto_out === '1',
+      autoOutHours: req.body.auto_out_hours,
+    });
+  }
   // Per-schedule clock-in limits. Unchecked means off, whatever the radios say
   // — the radios are the shape of the limit, the checkbox is whether there is
   // one at all.
   for (const sv of SERVICES.withClock()) {
+    if (sv.slug !== svc) continue;
     const on = req.body[`cl_on_${sv.slug}`] === '1';
     const mode = on ? (req.body[`cl_mode_${sv.slug}`] === 'early' ? 'early' : 'scheduled') : 'off';
     SERVICES.setLimit(sv.slug, mode, req.body[`cl_min_${sv.slug}`]);
     // Work hours, seven days each. A blank field clears that day rather than
     // keeping the old value — the input IS the state, so what is on screen when
     // you press save is what you get.
+    // Only the clock whose form this is. The page shows one at a time, so the
+    // others' fields are simply absent — writing them would clear every day on
+    // every other clock the moment somebody saved.
+    if (sv.slug !== svc) continue;
     for (let d = 0; d < 7; d++) {
       SERVICES.setHours(sv.slug, d,
         SERVICES.asMin(req.body[`wh_${sv.slug}_${d}_o`]),
         SERVICES.asMin(req.body[`wh_${sv.slug}_${d}_c`]));
     }
   }
-  res.redirect('/timeclock/settings?msg=' + encodeURIComponent('Saved.'));
+  // Back to the clock you were editing, not to the first one — landing on a
+  // different clock's settings after saving reads as though nothing saved.
+  res.redirect(`/timeclock/settings?${svc ? `svc=${encodeURIComponent(svc)}&` : ''}msg=`
+    + encodeURIComponent(`Saved${svc ? ` — ${SERVICES.nameOf(svc)}` : ''}.`));
 });
 
 /** Add a punch a manager is entering on someone's behalf. */
@@ -22313,16 +22385,7 @@ function decideCorrection(c, decision, actor, note) {
         validDayparts: DAYPARTS,
         // Re-link through the one find-or-create every path uses, so moving a
         // service can never mint a second shift for it.
-        relink: (entry) => {
-          if (!entry.daypart) return;
-          const bdate = TC.businessDateOf(entry.clock_in_at, TC.settings().cutoffHour);
-          s.getOrIgnore.run(bdate, entry.daypart);
-          const sh = s.findShift.get(bdate, entry.daypart);
-          policyForShift(sh);
-          w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: entry.employee_id, role: entry.position });
-          TC.q.setShift.run({ id: entry.id, shift_id: sh.id });
-          db.prepare('UPDATE time_entries SET business_date = ? WHERE id = ?').run(bdate, entry.id);
-        },
+        relink: relinkEntry,
         // A shift nobody clocked, made real. Deliberately the SAME six steps a
         // manager typing one in by hand takes — find-or-create the service,
         // apply its policy, put the person on it, then through TC.createEntry
@@ -23162,8 +23225,15 @@ app.post('/timeclock/:id/cell', express.json(), (req, res) => {
       TC.logEvent('entry', e.id, 'position_corrected', actor, { before: e.position, after: value });
       summary = 'position';
     } else if (field === 'daypart') {
-      if (!DAYPARTS.includes(value)) return res.status(400).json({ error: 'That is not a service.' });
+      // Checked against the services that exist, not a hardcoded pair — a
+      // third service would have been refused here.
+      if (!SERVICES.isActive(value)) return res.status(400).json({ error: 'That is not a service.' });
       TC.editEntryChecked(e, { in: e.clock_in_at, out: e.clock_out_at, daypart: value, position: e.position, by: actor });
+      // ONTO THE RIGHT SHIFT. Without this the punch said Evening while still
+      // hanging off the Day shift, so the Services page kept their hours on the
+      // service they were never on — which is the whole reason for correcting
+      // it. The old shift is re-synced below and loses those hours.
+      relinkEntry(TC.q.byId.get(e.id));
       TC.logEvent('entry', e.id, 'service_corrected', actor, { before: e.daypart || 'none', after: value });
       summary = 'service';
     } else if (field === 'break_start' || field === 'break_end') {
@@ -24445,7 +24515,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
             })();
             </script>
             <div class="tsg-h" role="row">
-              <span>Date</span><span></span><span>Position</span><span>Start</span><span>End</span>
+              <span>Date</span><span></span><span>Position</span><span>Service</span><span>Start</span><span>End</span>
               <span>Breaks</span><span>Total</span><span>Regular</span><span>OT</span><span></span>
             </div>
             ${(() => {
@@ -24503,7 +24573,14 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                     data-what="${esc(TC.dayLabel(d.date))} · ${esc(posName(e.position))}"
                     aria-label="Delete this shift on ${esc(TC.dayLabel(d.date))}">Delete</button>`
                     : '<span class="tsg-del ro" aria-hidden="true"></span>'}
-                  ${cell(e.id, 'position', posName(e.position) + (e.daypart ? ' · ' + dp(e.daypart) : ''), e.position)}
+                  ${cell(e.id, 'position', posName(e.position), e.position)}
+                  ${/* THE SERVICE, on its own. It used to be printed next to
+                       the position and could not be corrected — somebody who
+                       clocked into the wrong one had to be deleted and redone.
+                       Changing it moves the punch to the other service's shift
+                       AND re-syncs the one it left, so their hours come off the
+                       service they were never on. */''}
+                  ${cell(e.id, 'daypart', e.daypart ? dp(e.daypart) : '—', e.daypart || '')}
                   ${cell(e.id, 'in', TC.clockFace(e.clock_in_at), hhmm(e.clock_in_at))}
                   ${/* A punch that crosses midnight gets a moon. The bar runs
                        past 1am and an end time reading 2:07a beside a start of
@@ -24540,7 +24617,8 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               // somebody finally said when it happened.
               const typedRows = (d) => d.extra.map((x) => `<div class="tsg-r tsg-nop">
                 <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
-                <span class="tsr-c ro">${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}</span>
+                <span class="tsr-c ro">${esc(posName(x.role))}</span>
+                <span class="tsr-c ro">${x.daypart ? esc(dp(x.daypart)) : '—'}</span>
                 ${newCell(d.date, 'in', 'set start')}
                 ${newCell(d.date, 'out', 'set end')}
                 <span class="tsr-c ro">—</span>
@@ -25787,6 +25865,10 @@ try {
   // off every board at the moment it deployed.
   const bf = SERVICES.backfill();
   if (bf.added) console.log(`  Services: put ${bf.added} existing staff memberships in place.`);
+  // Every clock gets its own copy of the app-wide settings, once. Each one then
+  // behaves exactly as it did the day before and diverges only when edited.
+  const ss = SERVICES.seedSettings(TC.settings());
+  if (ss.seeded) console.log(`  Services: gave ${ss.seeded} time clock(s) their own settings.`);
 } catch (e) {
   console.error('  Services seed skipped:', e.message);
 }
