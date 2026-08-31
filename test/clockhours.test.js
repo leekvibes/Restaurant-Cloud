@@ -47,7 +47,13 @@ const post = async (p, body, headers = {}) => fetch(BASE + p, {
   headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
   body: new URLSearchParams({ ...body, _csrf: await __token((headers || {}).cookie) }).toString(),
 });
-const text = async (p, headers = {}) => (await fetch(BASE + p, { headers })).text();
+// /timeclock now shows a service picker first, and choosing one opens the same
+// page scoped to it. These tests are about the CLOCK, so the helper asks for
+// every service and they assert what they always did. The picker has its own
+// tests; without them this line would be hiding a screen from the suite.
+const svcd = (p) => (/^\/timeclock(\?|$)/.test(p) && !/[?&]svc=/.test(p)
+  ? p + (p.includes('?') ? '&' : '?') + 'svc=all' : p);
+const text = async (p, headers = {}) => (await fetch(BASE + svcd(p), { headers })).text();
 
 async function signIn(pin) {
   const res = await post('/tips/start', { pin });

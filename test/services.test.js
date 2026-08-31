@@ -132,3 +132,52 @@ test('creating a service refuses a blank name or a duplicate key', () => {
   assert.throws(() => SVC.create({ slug: '', name: 'X' }), /short internal key/);
   assert.throws(() => SVC.create({ slug: 'cafe', name: 'Another' }), /already a service/);
 });
+
+// --- payroll, split by service ------------------------------------------------
+
+test('payroll can be read per service, and the hours add back up', () => {
+  const R = require('../src/reports');
+  const mkShift = (date, daypart) => Number(db.prepare(
+    'INSERT INTO shifts (date, daypart, status, created_at) VALUES (?, ?, ?, datetime(\'now\'))')
+    .run(date, daypart, 'emailed').lastInsertRowid);
+  const day = mkShift('2027-02-01', 'cafe');
+  const eve = mkShift('2027-02-01', 'dinner');
+  const work = db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
+                           VALUES (?, ?, 'server', ?, 2000)`);
+  work.run(day, ALICE, 6);
+  work.run(eve, ALICE, 4);
+
+  const all = R.aggregatePayroll('2027-02-01', '2027-02-01');
+  const d = R.aggregatePayroll('2027-02-01', '2027-02-01', { service: 'cafe' });
+  const e = R.aggregatePayroll('2027-02-01', '2027-02-01', { service: 'dinner' });
+  const hrs = (x) => x.rows.reduce((a, p) => a + (p.hours || 0), 0);
+
+  assert.strictEqual(all.shiftCount, 2);
+  assert.strictEqual(d.shiftCount, 1, 'one Day shift');
+  assert.strictEqual(e.shiftCount, 1, 'one Evening shift');
+  assert.strictEqual(hrs(d), 6, 'Day hours');
+  assert.strictEqual(hrs(e), 4, 'Evening hours');
+  assert.strictEqual(hrs(d) + hrs(e), hrs(all), 'and the two halves are the whole');
+});
+
+test('a service view is never the one you run payroll from, because of overtime', () => {
+  // Overtime is a property of somebody's WEEK, not of a service. Split the week
+  // by service and each half can fall under the weekly threshold that the whole
+  // crosses — so the premium disappears and per-service wages sum to LESS than
+  // the real figure. Measured on the live dev data at the time this was
+  // written: hours matched exactly and wages were $268.60 short, all of it
+  // overtime premium.
+  //
+  // This is why Overall is the default, why it is what the run is done from,
+  // and why the scoped view says so on the page rather than leaving somebody
+  // to discover it at the end of a pay period.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'reports.js'), 'utf8');
+  assert.match(src, /OVERTIME IS NOT SPLIT, and cannot be/,
+    'the reason is recorded where the filter is');
+
+  const page = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(page, /overtime is weekly across every service, so run payroll from Overall/,
+    'and said on the page, not only in a comment');
+  assert.match(page, /const paySvc = SERVICES\.isActive\(req\.query\.svc\) \? req\.query\.svc : 'all'/,
+    'Overall is the default — a scoped view is never what somebody lands on');
+});

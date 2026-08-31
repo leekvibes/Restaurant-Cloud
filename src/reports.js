@@ -106,8 +106,18 @@ function aggregateCosts(from, to) {
  *   cashHome     = cash the server already took home (for reference)
  *   tipsEarned   = total net tips the person actually earned
  */
-function aggregatePayroll(from, to) {
-  const shifts = s.shiftsInRange.all(from, to);
+function aggregatePayroll(from, to, opts = {}) {
+  // Optionally one service only. A filter on the shifts this already reads —
+  // hours, wages and tips all hang off a shift, so scoping here scopes all
+  // three at once and none of them can disagree about which service they are.
+  //
+  // OVERTIME IS NOT SPLIT, and cannot be: it is a property of somebody's whole
+  // week, not of a service. A per-service view therefore reports that service's
+  // hours and money, and the caller keeps overtime on the unscoped view. Adding
+  // two services' OT together would overstate it, and splitting one week's OT
+  // between them would be an invention.
+  const svc = opts.service && opts.service !== 'all' ? opts.service : null;
+  const shifts = s.shiftsInRange.all(from, to).filter((sh) => !svc || sh.daypart === svc);
   const people = new Map(); // employeeId -> record
 
   // Email travels with the record so callers can mail a period summary without

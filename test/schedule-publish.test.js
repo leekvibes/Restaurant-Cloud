@@ -687,7 +687,13 @@ test('Everyone shows published coworkers, and still no drafts or private fields'
   assert.doesNotMatch(html, /6a – 10a/, 'but only what was published');
   assert.doesNotMatch(html, /SECRET/, 'no notes');
   assert.doesNotMatch(html, /Planned break/, 'and no coworker break detail');
-  assert.doesNotMatch(html, /cafe|dinner/i, 'no service');
+  // No service on a COWORKER'S CARD. The page itself now carries service pills
+  // for anybody who works more than one, so a blanket search for the word
+  // catches this employee's own navigation rather than a leak. Scoped to the
+  // cards, which is what the rule was ever about.
+  const cards = (html.match(/<a class="ps-k[\s\S]*?<\/a>/g) || []).join('');
+  assert.ok(cards.length, 'there are coworker cards to check');
+  assert.doesNotMatch(cards, /cafe|dinner/i, 'no service on a coworker card');
   assert.ok(draft.id && unpublished.id);
 });
 

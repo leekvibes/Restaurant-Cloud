@@ -1687,3 +1687,17 @@ body.bare {
   font-size: 15px; font-weight: 650; cursor: pointer; }
 .myav-cancel { border: 1px solid var(--pt-line); background: none; color: var(--pt-ink); }
 .myav-confirm { border: 0; background: var(--pt-blue); color: #fff; }
+
+/* --- service pills on the portal schedule -----------------------------------
+   Only rendered for somebody who works more than one service. Scrolls
+   sideways rather than wrapping, so three or four services never push the
+   day strip down the screen on a phone. */
+.ps-svc { display: flex; gap: 8px; margin: 10px 0 0; padding-bottom: 2px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.ps-svc::-webkit-scrollbar { display: none; }
+.ps-svc-p { flex: none; padding: 8px 15px; border: 1px solid var(--pt-rule, #d8d2c4);
+  border-radius: 999px; background: var(--pt-panel, #fff);
+  font-size: 13.5px; font-weight: 600; color: var(--pt-muted, #6b6559);
+  text-decoration: none; white-space: nowrap; min-height: 36px;
+  display: inline-flex; align-items: center; }
+.ps-svc-p.on { background: var(--pt-ink, #1c1a17); border-color: var(--pt-ink, #1c1a17); color: #fff; }

@@ -5735,8 +5735,8 @@ input[type="date"], input[type="time"], input[type="search"], select {
    The screen in front of Schedule and Time Clock. Cards rather than a list,
    because on a phone a card is a target and a list row is a guess. */
 .svc-cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-.svc-card { position: relative; padding: 18px 18px 14px; border: 1px solid var(--rule);
-  border-radius: 14px; background: var(--panel); }
+/* The frame comes from .bs-panel; this only sets the padding the cards want. */
+.svc-card { position: relative; padding: 18px 18px 14px; }
 .svc-card-h { margin: 0 0 12px; font-size: 19px; font-weight: 680; letter-spacing: -.015em;
   color: var(--headline); }
 .svc-card-facts { display: flex; gap: 22px; margin: 0 0 16px; }
@@ -5762,7 +5762,7 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .svc-card-menu button:hover { background: var(--paper); }
 .svc-card-menu .svc-danger { color: var(--danger, #a3341f); }
 .svc-card--new { display: flex; align-items: center; justify-content: center;
-  border-style: dashed; background: none; }
+  border-style: dashed; background: none; box-shadow: none; }
 .svc-card-add { border: 0; background: none; font: inherit; font-size: 14px; font-weight: 600;
   color: var(--muted); cursor: pointer; padding: 20px; }
 .svc-card-add:hover { color: var(--ink); }
@@ -5774,3 +5774,14 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sb-svc a { font-size: 12.5px; color: var(--muted); text-decoration: none; }
 .sb-svc a:hover { color: var(--ink); text-decoration: underline; }
 .sb-svc-all { margin-left: auto; }
+
+/* --- Overall / per-service on payroll --------------------------------------
+   Overall is the default and the one you run payroll from; the others are for
+   reading the split. The note is part of the control rather than a footnote,
+   because "why is overtime missing" is the question a scoped view invites. */
+.pay-svc { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+.pay-svc-p { padding: 6px 14px; border: 1px solid var(--rule); border-radius: 999px;
+  background: var(--panel); font-size: 13px; font-weight: 600; color: var(--muted);
+  text-decoration: none; white-space: nowrap; }
+.pay-svc-p.on { background: var(--ink); border-color: var(--ink); color: var(--panel); }
+.pay-svc-note { flex: 1 1 260px; font-size: 11.5px; color: var(--muted); }

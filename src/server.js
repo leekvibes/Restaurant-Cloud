@@ -6083,7 +6083,16 @@ app.get('/portal/schedule', (req, res) => {
   const picked = MX.isDate(req.query.d) && req.query.d >= from && req.query.d <= to
     ? req.query.d : today;
 
-  const rows = view === 'avail' ? [] : sbPortalRows(view, emp.id, from, to);
+  // Service pills, but only for somebody who actually works more than one.
+  // Making a one-service employee choose between one thing is a screen that
+  // teaches nothing, so they never see it.
+  const mySvcs = SERVICES.forEmployee(emp.id);
+  const pills = mySvcs.length > 1 ? SERVICES.all().filter((x) => mySvcs.includes(x.slug)) : [];
+  const pick = pills.length && pills.some((x) => x.slug === req.query.svc) ? req.query.svc : '';
+  const allRows = view === 'avail' ? [] : sbPortalRows(view, emp.id, from, to);
+  // A published shift they can see is filtered by the pill; with no pill
+  // chosen they see all of theirs, which is what the page has always shown.
+  const rows = pick ? allRows.filter((r) => r.daypart === pick) : allRows;
   const names = new Map(q.allEmployees.all().map((e) => [e.id, e.name]));
 
   const byDay = new Map();
@@ -6301,6 +6310,18 @@ app.get('/portal/schedule', (req, res) => {
             ${arrow(7, 'Later week', '&rarr;')}
           </div>
           <nav class="ps-strip" aria-label="Days">${strip}</nav>`}
+        ${/* Service pills, and only for somebody who works more than one. A
+              chooser between one option is a screen that teaches nothing, so a
+              Day-only employee never sees this and their schedule opens the way
+              it always did. */''}
+        ${pills.length ? `<nav class="ps-svc" aria-label="Service">
+          <a class="ps-svc-p${pick ? '' : ' on'}" href="/portal/schedule?v=${esc(view)}${
+            picked ? `&d=${esc(picked)}` : ''}"${pick ? '' : ' aria-current="true"'}>All</a>
+          ${pills.map((sv) => `<a class="ps-svc-p${pick === sv.slug ? ' on' : ''}"
+            href="/portal/schedule?v=${esc(view)}&svc=${encodeURIComponent(sv.slug)}${
+              picked ? `&d=${esc(picked)}` : ''}"${pick === sv.slug ? ' aria-current="true"' : ''}
+            >${esc(sv.name)}</a>`).join('')}
+        </nav>` : ''}
       </div>
 
       ${view === 'avail' ? `
@@ -9876,7 +9897,11 @@ app.get('/payroll', (req, res) => {
   const justEnded = recentPeriods(2)[1];
   const from = req.query.from || cur.start;
   const to = req.query.to || cur.end;
-  const { rows, totals, shiftCount, midDate, ot } = aggregatePayroll(from, to);
+  // Overall by default — this page is what you pay, and what you pay is not
+  // per service. A service view is for reading the split, never for running it.
+  const paySvc = SERVICES.isActive(req.query.svc) ? req.query.svc : 'all';
+  const { rows, totals, shiftCount, midDate, ot } = aggregatePayroll(from, to,
+    { service: paySvc === 'all' ? null : paySvc });
 
   // =========================================================================
   // BROADSHEET — the payroll run
@@ -9965,6 +9990,21 @@ app.get('/payroll', (req, res) => {
       </div>
 
       ${periodBar(from, to)}
+
+      ${/* Overall / Day / Evening. Overall is the default and is what you pay:
+            a per-service view is for reading the split, never for running the
+            run. Overtime is deliberately not shown on a scoped view — it is a
+            property of somebody's whole week, so splitting it between services
+            would be an invention and adding two services' OT would overstate
+            it. Said on the page rather than left to be discovered. */''}
+      ${SERVICES.all().length > 1 ? `<nav class="pay-svc" aria-label="Service">
+        <a class="pay-svc-p${paySvc === 'all' ? ' on' : ''}" href="/payroll?from=${from}&to=${to}"${
+          paySvc === 'all' ? ' aria-current="true"' : ''}>Overall</a>
+        ${SERVICES.all().map((sv) => `<a class="pay-svc-p${paySvc === sv.slug ? ' on' : ''}"
+          href="/payroll?from=${from}&to=${to}&svc=${encodeURIComponent(sv.slug)}"${
+            paySvc === sv.slug ? ' aria-current="true"' : ''}>${esc(sv.name)}</a>`).join('')}
+        ${paySvc === 'all' ? '' : `<span class="pay-svc-note">${esc(SERVICES.nameOf(paySvc))} only &mdash; overtime is weekly across every service, so run payroll from Overall.</span>`}
+      </nav>` : ''}
 
       ${canWrite() ? `
       <details class="bs-x" id="ot-rules"${req.query.ot ? ' open' : ''}>
@@ -18789,7 +18829,13 @@ function serviceCards(req, base, opts = {}) {
       <div class="svc-cards">
         ${list.map((sv) => {
     const n = opts.countOf ? opts.countOf(sv.slug) : null;
-    return `<article class="svc-card">
+    // bs-panel, not a lookalike: the design-system test requires every framed
+    // page to use the house panel, and it was right to — a card that merely
+    // resembles one drifts from it the next time the panel changes.
+    // <section>, because that is the element the panel is defined on and what
+    // the design-system test looks for — a panel class on a different tag is
+    // the same drift in a different disguise.
+    return `<section class="bs-panel svc-card">
           <h2 class="svc-card-h">${esc(sv.name)}</h2>
           <dl class="svc-card-facts">
             <div><dt>People</dt><dd>${SERVICES.employeesFor(sv.slug).length}</dd></div>
@@ -18817,9 +18863,9 @@ function serviceCards(req, base, opts = {}) {
               </div>
             </details>` : ''}
           </div>
-        </article>`;
+        </section>`;
   }).join('')}
-        ${w ? `<form class="svc-card svc-card--new" method="post" action="/services"
+        ${w ? `<form class="bs-panel svc-card svc-card--new" method="post" action="/services"
           onsubmit="var n=prompt('Name the new service'); if(!n){return false;} this.querySelector('[name=name]').value=n;">
           <input type="hidden" name="_csrf" value="${csrfFor(req)}">
           <input type="hidden" name="name" value="">
@@ -20621,6 +20667,20 @@ app.get('/timeclock', (req, res) => {
   if (!navAllowed('/timeclock')) {
     return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   }
+  // Choose the service first, exactly as Schedule does. This page already had
+  // a service filter — `fSvc` below — so the picker sets it rather than adding
+  // a second way to say the same thing.
+  const tcSvc = svcParam(req);
+  if (!tcSvc) {
+    const cfg0 = TC.settings();
+    const d0 = TC.businessDateOf(TC.nowUtc(), cfg0.cutoffHour);
+    return res.send(serviceCards(req, '/timeclock', {
+      title: 'Time clock',
+      sub: 'Pick a service. Punches, timesheets and corrections are the same tools, scoped to it.',
+      countLabel: 'On now',
+      countOf: (slug) => TC.q.allActive.all().filter((e) => e.daypart === slug).length,
+    }));
+  }
   const cfg = TC.settings();
   // The cutoff-hour business date, never the calendar one, or a bartender who
   // clocked in at 6pm falls off this page the moment the clock passes midnight.
@@ -20634,7 +20694,9 @@ app.get('/timeclock', (req, res) => {
   const to = MX.isDate(req.query.to) ? req.query.to : today;
   const isToday = from === today && to === today;
   const fEmp = String(req.query.emp || '');
-  const fSvc = DAYPARTS.includes(req.query.svc) ? req.query.svc : '';
+  // 'all' is the deliberate "show me everything" answer and means no filter,
+  // the same word it means on the schedule board.
+  const fSvc = tcSvc === 'all' ? '' : (DAYPARTS.includes(tcSvc) ? tcSvc : '');
   const fPos = String(req.query.pos || '');
   const fStatus = String(req.query.st || '');
 
