@@ -3946,9 +3946,16 @@ test('the timesheet row offers a delete, between the date and the position', asy
 
 test('the delete reuses the punch route rather than opening a second way in', async () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  assert.match(src, /f\.action = '\/timeclock\/' \+ id \+ '\/delete'/,
-    'it posts to the existing route, so the freeze check, the audit line and the '
-    + 'hours resync are the ones already written');
+  // Still the existing punch route — now chosen between two, because two
+  // kinds of row can be deleted. A row backed by a PUNCH posts here; a row
+  // whose hours were typed on the Services page has no punch to delete and
+  // posts to the work route instead. Both are real deletes with their own
+  // guards; neither is a second way into the other.
+  assert.match(src, /: '\/timeclock\/' \+ id \+ '\/delete'/,
+    'a punch still posts to the existing route, so the freeze check, the audit line '
+    + 'and the hours resync are the ones already written');
+  assert.match(src, /'\/timeclock\/work\/' \+ workShift \+ '\/delete'/,
+    'and typed hours post to the one that removes them from the service');
   // That route's guards, restated here so removing one is a failing test.
   const at = src.indexOf("app.post('/timeclock/:id/delete'");
   const route = src.slice(at, at + 1400);

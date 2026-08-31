@@ -1531,3 +1531,66 @@ test('the ordinary sync still defers to a figure a manager typed', () => {
     'the ordinary write still refuses to overwrite a typed figure');
   assert.match(src, /forceClockHours/, 'and the override is a separate statement');
 });
+
+test('a day whose hours were TYPED can be deleted too', async () => {
+  // Two rows in three on a real timesheet came from the Services page rather
+  // than from a punch, and those rows had no Delete button at all — which is
+  // what "delete does nothing" turned out to mean. They were also a column
+  // short, so every one of them sat misaligned against the header.
+  const sh = db.prepare("SELECT id, date FROM shifts WHERE status <> 'emailed' LIMIT 1").get();
+  db.prepare('DELETE FROM time_entries WHERE shift_id = ? AND employee_id = ?').run(sh.id, E.both);
+  db.prepare(`INSERT OR REPLACE INTO work (shift_id, employee_id, role, hours, hourly_rate_cents,
+    hours_source, hours_set_by) VALUES (?, ?, 'server', 5, 0, 'manager', 'test')`).run(sh.id, E.both);
+  try {
+    const page = await text(`/payroll/timesheets/${E.both}`);
+    assert.match(page, /data-wdel=/, 'the typed row carries a delete');
+
+    const res = await post(`/timeclock/work/${sh.id}/delete`,
+      { employee_id: String(E.both), back: `/payroll/timesheets/${E.both}` });
+    assert.strictEqual(res.status, 302);
+    const gone = db.prepare('SELECT COUNT(*) n FROM work WHERE shift_id = ? AND employee_id = ?')
+      .get(sh.id, E.both).n;
+    assert.strictEqual(gone, 0, 'and it takes them off that service');
+  } finally {
+    db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?').run(sh.id, E.both);
+  }
+});
+
+test('a row that HAS a punch is sent to the punch delete instead', async () => {
+  // The two deletes mean different things and must not be interchangeable:
+  // removing a work row under a live punch would leave the punch orphaned and
+  // the hours would come straight back on the next sync.
+  const sh = db.prepare("SELECT id, date FROM shifts WHERE status <> 'emailed' LIMIT 1").get();
+  const e = Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, 'cafe', 'server', ?, ?, 'complete', 'wdtest', 120, 120)`)
+    .run(E.both, sh.id, sh.date, `${sh.date} 15:00:00`, `${sh.date} 17:00:00`).lastInsertRowid);
+  try {
+    const res = await post(`/timeclock/work/${sh.id}/delete`, { employee_id: String(E.both) });
+    assert.strictEqual(res.status, 302);
+    assert.match(decodeURIComponent(res.headers.get('location') || ''), /delete the punch instead/i,
+      'it refuses and says which delete to use');
+    assert.ok(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE id = ?').get(e).n,
+      'and the punch is untouched');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(e);
+    db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?').run(sh.id, E.both);
+  }
+});
+
+test('every timesheet row has the same number of cells as the header', async () => {
+  // The typed rows were a column short and the empty ones were two short, so
+  // they rendered skewed against the header — the delete column simply was not
+  // there. A grid is only readable if every row agrees with it.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const header = /<div class="tsg-h" role="row">([\s\S]*?)<\/div>/.exec(src)[1];
+  const cols = (header.match(/<span>/g) || []).length;
+  assert.strictEqual(cols, 11, 'the header defines eleven columns');
+  for (const name of ['typedRows', 'emptyRow']) {
+    const at = src.indexOf(`const ${name} = `);
+    const body = src.slice(at, src.indexOf('</div>`', at));
+    const cells = (body.match(/<span|<b class|<button type="button" class="tsg-del"/g) || []).length;
+    assert.ok(cells >= cols - 1, `${name} renders a cell per column (${cells} of ${cols})`);
+  }
+});

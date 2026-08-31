@@ -19797,9 +19797,18 @@ function svcParam(req) {
   const want = String(req.query.svc || '');
   if (want === 'all') return 'all';
   if (want && SERVICES.isActive(want)) return want;
-  const list = SERVICES.all();
-  // One service is not a choice, so it is never asked for.
-  return list.length === 1 ? list[0].slug : null;
+  // THE ADMIN PICKER ALWAYS SHOWS, even with one schedule.
+  //
+  // It used to skip straight in when there was only one, on the reasoning that
+  // a choice between one thing is not a choice. But this screen is not only a
+  // chooser — it is where schedules are made, renamed and archived. Archiving
+  // one down to a single schedule therefore left no way to create another, and
+  // no way back to the management view at all. Reported exactly that way.
+  //
+  // The EMPLOYEE picker still skips: the portal is only ever choosing, never
+  // managing, so a card page for one schedule there costs a tap and teaches
+  // nothing.
+  return null;
 }
 
 app.get('/schedule', (req, res) => {
@@ -23465,6 +23474,57 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
  * re-derived without it in the same transaction. What survives is the event —
  * the entry is gone but the fact that it existed, and who removed it, is not.
  */
+/**
+ * Take somebody off a service, from their timesheet.
+ *
+ * The other Delete removes a PUNCH. This removes hours that were typed on the
+ * Services page and never had a punch behind them — two rows in three on a
+ * real timesheet — and those rows had no Delete at all, which is what "delete
+ * does nothing" turned out to mean.
+ *
+ * It removes the work row, which is exactly what taking somebody off a service
+ * means. The punch table is untouched because there is no punch; the tip-out
+ * re-splits on whoever is left, against the policy version that service was
+ * closed under.
+ */
+app.post('/timeclock/work/:shiftId/delete', (req, res) => {
+  const shiftId = Number(req.params.shiftId);
+  const empId = Number(req.body.employee_id);
+  const sh = s.shiftById.get(shiftId);
+  const emp = q.employee.get(empId);
+  if (!sh || !emp) return res.status(404).end();
+  if (!canWrite()) return res.status(403).send('Read-only');
+  if (!punchReadable()) return res.status(403).send('Not your area');
+
+  const back = (m, err) => res.redirect(punchBack(req, `/payroll/timesheets/${empId}`, m, err));
+
+  // A day on a signed timesheet is refused here as everywhere else: the fix is
+  // to reopen the sheet, not to remove hours from underneath a signature.
+  const st = TC.sheetCovering(empId, sh.date);
+  if (st.frozen) {
+    return back(`That day is on a timesheet that was already ${st.sheet.status}. Reopen it on Timesheets first.`);
+  }
+  // And a punch means this is not one of these rows at all.
+  if (TC.punchesOnShift(shiftId).has(empId)) {
+    return back('That day has a punch behind it — delete the punch instead.');
+  }
+
+  const row = db.prepare('SELECT hours, role FROM work WHERE shift_id = ? AND employee_id = ?')
+    .get(shiftId, empId);
+  if (!row) return back('They were already off that service.');
+
+  const actor = tcActor(req);
+  db.transaction(() => {
+    TC.logEvent('shift', shiftId, 'work_removed', actor, {
+      before: `${esc(emp.name)} · ${row.hours}h · ${row.role || ''}`,
+      reason: 'removed from the timesheet',
+    });
+    db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?').run(shiftId, empId);
+    db.prepare('DELETE FROM server_sales WHERE shift_id = ? AND employee_id = ?').run(shiftId, empId);
+  })();
+  return back(`${emp.name} taken off ${dp(sh.daypart)} on ${TC.dayLabel(sh.date)} — ${row.hours}h removed.`);
+});
+
 app.post('/timeclock/:id/delete', (req, res) => {
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
@@ -24459,6 +24519,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 aria-labelledby="tsx-h" aria-describedby="tsx-b">
                 <input type="hidden" name="_csrf" value="${csrfFor(req)}">
                 <input type="hidden" name="back" value="">
+                <input type="hidden" name="employee_id" value="">
                 <h2 id="tsx-h">Delete this shift?</h2>
                 <p id="tsx-b">This removes the punch and takes its hours back off the
                   service. It cannot be undone.</p>
@@ -24482,8 +24543,12 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               function skipping() {
                 try { return window.localStorage.getItem(KEY) === '1'; } catch (e) { return false; }
               }
-              function aim(id) {
-                f.action = '/timeclock/' + id + '/delete';
+              function aim(id, workShift, empId) {
+                f.action = workShift
+                  ? '/timeclock/work/' + workShift + '/delete'
+                  : '/timeclock/' + id + '/delete';
+                var e = f.querySelector('[name="employee_id"]');
+                if (e) e.value = workShift ? (empId || '') : '';
                 f.querySelector('[name="back"]').value = location.pathname + location.search;
               }
               function close() {
@@ -24491,9 +24556,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 if (opener && opener.focus) opener.focus();
               }
               document.addEventListener('click', function (ev) {
-                var b = ev.target.closest ? ev.target.closest('[data-del]') : null;
+                // Two kinds of row, two kinds of delete. [data-del] removes a
+                // PUNCH; [data-wdel] removes hours typed on the Services page,
+                // which never had a punch behind them. Same dialog, because to
+                // the person clicking it they are the same act.
+                var b = ev.target.closest ? ev.target.closest('[data-del], [data-wdel]') : null;
                 if (b) {
-                  aim(b.getAttribute('data-del'));
+                  aim(b.getAttribute('data-del'), b.getAttribute('data-wdel'), b.getAttribute('data-emp'));
                   if (skipping()) { f.submit(); return; }
                   opener = b;
                   var w = box.querySelector('[data-tsx-what]');
@@ -24617,6 +24686,19 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               // somebody finally said when it happened.
               const typedRows = (d) => d.extra.map((x) => `<div class="tsg-r tsg-nop">
                 <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                ${/* THE DELETE COLUMN, which this row did not have at all — so
+                     two rows in three on a timesheet had no Delete, and every
+                     one of them was also a column short and therefore
+                     misaligned against the header. Reported as "delete does
+                     nothing", which is exactly right: there was nothing there.
+                     These rows are hours typed on the Services page rather
+                     than a punch, so removing one takes the person off that
+                     service. */''}
+                ${editable && x.shift_id ? `<button type="button" class="tsg-del" data-wdel="${x.shift_id}"
+                  data-emp="${emp.id}"
+                  data-what="${esc(TC.dayLabel(d.date))} · ${esc(posName(x.role))}${x.daypart ? ' · ' + esc(dp(x.daypart)) : ''}"
+                  aria-label="Take ${esc(emp.name)} off this service">Delete</button>`
+    : '<span class="tsg-del ro" aria-hidden="true"></span>'}
                 <span class="tsr-c ro">${esc(posName(x.role))}</span>
                 <span class="tsr-c ro">${x.daypart ? esc(dp(x.daypart)) : '—'}</span>
                 ${newCell(d.date, 'in', 'set start')}
@@ -24628,8 +24710,12 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 <span class="tsg-f"><i class="tcm-tag">typed on the shift</i></span>
               </div>`).join('');
 
+              // Eleven cells, matching the header — this was two short, so a day
+              // with nothing on it sat skewed against every other row.
               const emptyRow = (iso) => `<div class="tsg-r tsg-empty">
                 <span class="tsg-d">${esc(TC.dayLabel(iso))}</span>
+                <span class="tsg-del ro" aria-hidden="true"></span>
+                <span class="tsr-c ro">—</span>
                 <span class="tsr-c ro">—</span>
                 ${newCell(iso, 'in', 'set start')}
                 <span class="tsr-c ro">—</span>
