@@ -1720,8 +1720,11 @@ app.get('/shifts', (req, res) => {
     <div class="bs-filter">
       <span class="bs-filter-l">Filter:</span>
       <button class="bs-fchip on" data-f="all" data-v="">All ${rows.length}</button>
-      <button class="bs-fchip" data-f="service" data-v="cafe">Café</button>
-      <button class="bs-fchip" data-f="service" data-v="dinner">Dinner</button>
+      ${/* One chip per service, from the list, rather than a hardcoded pair —
+           the two that existed were still called Café and Dinner after they
+           were renamed, and a third service had no chip at all. */''}
+      ${SERVICES.all().map((sv) => `<button class="bs-fchip" data-f="service"
+        data-v="${esc(sv.slug)}">${esc(sv.name)}</button>`).join('')}
       <button class="bs-fchip" data-f="status" data-v="open">Open</button>
       <button class="bs-fchip" data-f="status" data-v="review">Needs review</button>
       <button class="bs-fchip" data-f="status" data-v="ready">Ready</button>
@@ -4714,16 +4717,16 @@ function tipsWorkspace(emp, opts = {}) {
       title: shiftTitle(r),
     });
   }
-  // Today's services they are not on yet. Never any other date — a shift
-  // somebody is not on and did not work is not something to offer them.
-  for (const sh of todaySharedQ.all(today)) {
-    if (seen.has(sh.id)) continue;
-    choices.push({
-      id: sh.id, date: sh.date, daypart: sh.daypart, role: null,
-      filed: false, current: false, recorded: false, today: true,
-      title: shiftTitle(sh),
-    });
-  }
+  // Today's other open services used to be offered here, as a fallback for
+  // somebody with no punch. They are not offered any more.
+  //
+  // TIPS FOLLOW THE CLOCK. A service is only a choice if this person actually
+  // punched into it — that is what makes "which service, which day" a fact
+  // rather than a selection. It also fixes the double: somebody who has
+  // clocked into Day and not yet into Evening sees only Day, and the Evening
+  // card appears the moment they clock in for it, not before. Offering a
+  // service they had not worked was an invitation to file a night's money
+  // against the wrong one.
 
   const byRecency = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
   const byService = (a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0)
@@ -4732,8 +4735,10 @@ function tipsWorkspace(emp, opts = {}) {
   // A service they were actually on outranks a service that merely exists. If
   // the café is open and they worked dinner, the café is not a choice they
   // should be asked to rule out — offering it invites the wrong answer.
-  const recordedToday = allToday.filter((c) => c.recorded);
-  const todayChoices = recordedToday.length ? recordedToday : allToday;
+  // Only what they actually clocked into. No fallback: a service nobody
+  // punched into is not a shift they worked, and offering it is how tips end
+  // up on the wrong night.
+  const todayChoices = allToday.filter((c) => c.recorded);
   const pastChoices = choices.filter((c) => !c.today).sort(byRecency);
 
   // An explicit choice always wins — it is how somebody reaches a past shift
@@ -4937,8 +4942,15 @@ function tipsWorkspacePage(model, opts = {}) {
         : `
     <div class="st-sec">
       <h2 class="st-h">Which shift</h2>
-      <p class="st-sub">Nothing is open today to report against.</p>
-      <a class="st-alt" href="/portal/tips?pick=1">Choose another shift</a>
+      ${/* The message changed with the rule. It used to say nothing was OPEN,
+           which was about the services existing; the answer now is about
+           whether this person worked one. Somebody on a double who has not yet
+           clocked into their second service lands here, and the sentence has
+           to tell them what to do about it. */''}
+      <p class="st-sub">No services worked to submit for.</p>
+      <p class="st-sub st-sub--q">Clock in for a service and it will appear here. If you worked one
+        without clocking in, you can still report it below.</p>
+      <a class="st-alt" href="/portal/tips?pick=1">Report a shift not listed</a>
     </div>`;
 
   // --- filing position ------------------------------------------------------

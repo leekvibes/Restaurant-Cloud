@@ -1755,3 +1755,4 @@ body.bare {
   .pt-toast { transition: none; }
   .pt-toast--in { opacity: 1; transform: none; }
 }
+.st-sub--q { margin-top: 6px; font-size: 13px; opacity: .85; }

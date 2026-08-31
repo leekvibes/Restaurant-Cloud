@@ -2301,3 +2301,21 @@ test('a toast raised without a page load can actually be read', async () => {
   assert.ok(/\.pt-toast \{\s*\n\s*background: #0f172a; color: #fff;/.test(css),
     'and the base toast a literal ground and text colour');
 });
+
+test('tips follow the CLOCK — a service nobody punched into is not offered', async () => {
+  // The rule that fixes the double. Somebody who has clocked into Day and not
+  // yet into Evening sees only Day; the Evening card appears the moment they
+  // clock in for it, and not before.
+  //
+  // What this replaces: today's other OPEN services used to be offered as a
+  // fallback to anybody with no punch. That let a night's money be filed
+  // against a service the person never worked, which is the whole class of
+  // mistake this change exists to stop.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /const todayChoices = allToday\.filter\(\(c\) => c\.recorded\)/,
+    'only services with a punch or a work row are choices');
+  assert.doesNotMatch(src, /recordedToday\.length \? recordedToday : allToday/,
+    'and there is no fallback to services they did not work');
+  assert.match(src, /No services worked to submit for/,
+    'with a message that says so rather than one about services being open');
+});

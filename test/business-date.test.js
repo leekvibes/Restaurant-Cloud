@@ -103,8 +103,12 @@ test('Services calls tonight\'s shift Open, not finished', async () => {
     // row prints it as "<service> · <status>" lowercased. On the calendar date
     // this fell through to "ready to send" — the page telling a manager the
     // night was over while people were still working it.
-    assert.match(html, /Dinner · open/, 'the running service reads as open');
-    assert.doesNotMatch(html, /Dinner · ready to send/, 'and not as finished');
+    // Asserted on the STATUS, not the service's name. Services are named by
+    // the owner now — "Dinner" is "Evening Service" unless they renamed it
+    // again — and this test is about a running service reading as open, not
+    // about what it is called.
+    assert.match(html, /· open/, 'the running service reads as open');
+    assert.doesNotMatch(html, /· ready to send/, 'and not as finished');
   } finally {
     db.prepare('DELETE FROM shifts WHERE id = ?').run(id);
   }

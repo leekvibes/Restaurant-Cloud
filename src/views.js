@@ -54,7 +54,27 @@ const accentVars = (hex) => `--ac:${hex};--ac-soft:${hex}14;--ac-soft2:${hex}24`
 
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
 const money = (c) => fmt(c);
-const dp = (d) => (d === 'cafe' ? 'Café' : 'Dinner');
+/**
+ * The name of a service, as the owner named it.
+ *
+ * It used to be a hardcoded pair — cafe → Café, anything else → Dinner — which
+ * meant renaming Day Service and Evening Service in the admin changed nothing
+ * the staff actually read: the portal still said Café and Dinner, and a third
+ * service would have been called "Dinner" too.
+ *
+ * Required lazily. views.js is loaded by almost everything, and services.js
+ * reads the database — requiring it at the top would drag a database open into
+ * modules that only wanted a layout helper. Falls back to the old pair, so a
+ * caller in a database with no services table still renders a word.
+ */
+const dp = (d) => {
+  if (!d) return '';
+  try {
+    const name = require('./services').nameOf(d);
+    if (name && name !== d) return name;
+  } catch { /* no services table here — fall through to the old pair */ }
+  return d === 'cafe' ? 'Café' : 'Dinner';
+};
 
 // Set by server.js so the nav can be drawn for whoever is signed in, without
 // threading a user object through every layout() call site.
