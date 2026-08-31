@@ -7208,9 +7208,12 @@ function clockPage(req, who, opts = {}) {
       <p class="tcc-note">Ask your manager to add your position, then you can clock in.</p>`);
   } else {
     const one = allowed.length === 1;
-    // The services this person works. No assignment means every service, so
-    // this is the full list until somebody is deliberately narrowed.
-    const mySvcs = SERVICES.forEmployee(emp.id);
+    // The schedules this person works that have a clock of their own. If they
+    // came in through a card, that IS the answer — picking the card was the
+    // choosing, and asking again on the next screen would be asking twice.
+    const clockable = SERVICES.forEmployee(emp.id)
+      .filter((sl) => SERVICES.withClock().some((x) => x.slug === sl));
+    const mySvcs = opts.svc && clockable.includes(opts.svc) ? [opts.svc] : clockable;
     // THE SERVICE IS ALWAYS ASKED, AND NEVER PRE-ANSWERED.
     //
     // This used to arrive with an answer already in the box, guessed from the
@@ -7228,6 +7231,12 @@ function clockPage(req, who, opts = {}) {
     // One position is still not a choice. The service always is.
     card = shell('off', 'Clocked out', `
       <div class="tcc-cap">${esc(new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }))}</div>
+      ${/* Only when they came through the picker — somebody with one clock has
+           nothing to go back to and no ambiguity to resolve. */''}
+      ${opts.svc && clockable.length > 1 ? `<div class="tcc-svc">
+        <a class="tcc-svc-back" href="/portal/clock">&larr; Time clocks</a>
+        <b>${esc(SERVICES.nameOf(opts.svc))}</b>
+      </div>` : ''}
       <form method="post" action="/portal/clock/in" class="tcc-form">
         ${one
           ? `<input type="hidden" name="position" value="${esc(allowed[0])}">`
@@ -7427,6 +7436,54 @@ function clockPage(req, who, opts = {}) {
     </script>`);
 }
 
+/**
+ * Which time clock — the first thing somebody on more than one sees.
+ *
+ * The mirror of the schedule picker, and scoped by two things rather than one:
+ * the schedules a manager put them on, AND which of those actually have a
+ * clock. A schedule with no clock of its own is not a place anybody punches in,
+ * so it is not offered here even to somebody who is on it.
+ *
+ * Never shown to somebody already clocked in. They are on a punch — the answer
+ * to "which clock" is the one they are standing in, and making them pick again
+ * would be asking a question that is already decided.
+ */
+function portalClockPicker(req, emp, slugs) {
+  const mine = SERVICES.all().filter((x) => slugs.includes(x.slug));
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  // What they are scheduled for today on each, so a card answers "am I meant
+  // to be on this one" before it is opened.
+  const mineToday = sbPortalRows('me', emp.id, today, today);
+  return portalPage('Time clock', `
+    ${/* The same header every portal sub-page wears. This screen replaces the
+         clock page rather than sitting in front of it, so it has to carry the
+         way back that page carried — there is a test that walks every one of
+         them and fails if any is missing it. */''}
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Time clock')}
+    <div class="pt-body ps">
+      <div class="ps-head">
+        <h1 class="pt-title">Time clock</h1>
+        <p class="pt-sub">Which one are you clocking into?</p>
+      </div>
+      <div class="psp-cards">
+        ${mine.map((sv) => {
+    const on = mineToday.filter((r) => r.daypart === sv.slug);
+    const next = on[0];
+    return `<a class="psp-card" href="/portal/clock?svc=${encodeURIComponent(sv.slug)}">
+          <b class="psp-name">${esc(sv.name)}</b>
+          <span class="psp-next">${next
+      ? `You are on today, ${esc(sbTimeFull(next.starts_at))}`
+      : 'Nothing scheduled for you today'}</span>
+          <span class="psp-count">${on.length
+        ? `${on.length} shift${on.length === 1 ? '' : 's'} today`
+        : 'You can still clock in'}</span>
+          <span class="psp-go" aria-hidden="true">&rsaquo;</span>
+        </a>`;
+  }).join('')}
+      </div>
+    </div>`);
+}
+
 app.get('/portal/clock', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -7439,7 +7496,19 @@ app.get('/portal/clock', (req, res) => {
     const e = TC.q.byId.get(Number(req.query.done));
     if (e && e.employee_id === who.emp.id && e.clock_out_at) doneEntry = e;
   }
-  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok, doneEntry }));
+
+  // WHICH CLOCK. Their schedules, narrowed to the ones that have a clock of
+  // their own — a schedule nobody punches into is not somewhere to punch in.
+  const clockable = SERVICES.forEmployee(who.emp.id)
+    .filter((sl) => SERVICES.withClock().some((x) => x.slug === sl));
+  const picked = clockable.includes(String(req.query.svc)) ? String(req.query.svc) : '';
+  // Not while they are on a punch, and not on the receipt screen: both are
+  // about a shift that already has its answer.
+  const onClock = !!TC.q.active.get(who.emp.id);
+  if (!picked && !onClock && !doneEntry && clockable.length > 1) {
+    return res.send(portalClockPicker(req, who.emp, clockable));
+  }
+  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok, doneEntry, svc: picked }));
 });
 
 /**

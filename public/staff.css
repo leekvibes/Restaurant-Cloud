@@ -1723,3 +1723,10 @@ body.bare {
 .ps-svc-bar b { font-size: 14px; font-weight: 700; color: var(--pt-ink, #1c1a17); }
 .ps-svc-back { font-size: 13.5px; color: var(--pt-muted, #6b6559); text-decoration: none;
   min-height: 36px; display: inline-flex; align-items: center; }
+
+/* Which time clock you picked, and the way back. Only rendered for somebody
+   who had a choice to make. */
+.tcc-svc { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; }
+.tcc-svc b { font-size: 14px; font-weight: 700; color: var(--pt-ink, #1c1a17); }
+.tcc-svc-back { font-size: 13.5px; color: var(--pt-muted, #6b6559); text-decoration: none;
+  min-height: 36px; display: inline-flex; align-items: center; }

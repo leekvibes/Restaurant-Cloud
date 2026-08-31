@@ -1973,7 +1973,7 @@ test('the grace is only for somebody on the clock, and only for one shift', asyn
   const cookie = await signIn('7402');
   await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
 
-  const reaches = async (c) => (await fetch(BASE + '/portal/clock',
+  const reaches = async (c) => (await fetch(BASE + '/portal/clock?svc=cafe',
     { redirect: 'manual', headers: { cookie: c } })).status === 200;
 
   assert.ok(await reaches(agedCookie(on, 7 * 3600e3)),
@@ -2096,4 +2096,89 @@ test('somebody on every schedule can clock into any of them', async () => {
   assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND status = 'active'")
     .get(bella.id).n, 1, 'unassigned means every service, not none');
   db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(bella.id);
+});
+
+// ===========================================================================
+// Which time clock — the portal picker.
+//
+// Every other clock fetch in this file names a service, so without these the
+// screen would be invisible to the suite.
+// ===========================================================================
+
+test('somebody on two clocks picks one before clocking in', async () => {
+  const cookie = await signIn('1111');
+  const html = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+  assert.match(html, /psp-card/, 'cards, not a clock');
+  assert.match(html, /Day Service/);
+  assert.match(html, /Evening Service/);
+  assert.ok(!/name="daypart"/.test(html), 'and nothing decided for them yet');
+});
+
+test('a schedule with no time clock is not offered as one', async () => {
+  // The whole point of the flag. Somebody can be ON a schedule that nobody
+  // punches into — it is not a place to clock in, so it is not a card here.
+  // Written through THIS file's own handle. The server here is a separate
+  // process and this one never sets DB_PATH, so requiring src/services would
+  // open the default database and switch the clock off in whatever the
+  // developer is working on. That has now happened three times in this
+  // codebase; the rule is simple — in this file, talk to `db`.
+  db.prepare("UPDATE services SET has_clock = 0 WHERE slug = 'dinner'").run();
+  try {
+    const cookie = await signIn('1111');
+    // One clock left, so there is nothing to pick between: straight in.
+    const html = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+    assert.ok(!/psp-card/.test(html), 'no picker for a single clock');
+    assert.doesNotMatch(html, /Evening Service/, 'and the clockless schedule is not offered');
+  } finally {
+    db.prepare("UPDATE services SET has_clock = 1 WHERE slug = 'dinner'").run();
+  }
+});
+
+test('somebody on ONE clock goes straight in and is never asked', async () => {
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  const cookie = await signIn('1111');           // grants membership on both
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
+  db.prepare("INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')").run(bella.id);
+  try {
+    const html = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+    assert.ok(!/psp-card/.test(html), 'no picker');
+    assert.match(html, /name="daypart" value="cafe"/, 'their one clock travels with them');
+    assert.ok(!/tcc-svc-back/.test(html), 'and nothing to go back to');
+  } finally {
+    db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
+  }
+});
+
+test('the picker never stands between somebody and clocking OUT', async () => {
+  // On a punch, "which clock" is already answered — it is the one they are
+  // standing in. Making them pick again to end a shift would be the worst
+  // possible moment to ask a question with a known answer.
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  const cookie = await signIn('1111');
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);
+  await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+  try {
+    const html = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+    assert.ok(!/psp-card/.test(html), 'straight to the punch they are on');
+    assert.match(html, /Clock out|clock\/out/, 'with the way to end it');
+  } finally {
+    db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(bella.id);
+  }
+});
+
+test('a clock they are not on cannot be reached by typing it', async () => {
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  const cookie = await signIn('1111');
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
+  db.prepare("INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')").run(bella.id);
+  try {
+    const html = await (await fetch(BASE + '/portal/clock?svc=dinner', { headers: { cookie } })).text();
+    assert.ok(!/name="daypart" value="dinner"/.test(html),
+      'the typed service is ignored, not honoured');
+    // And the POST is what actually stops them, which is asserted elsewhere.
+    const res = await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+    assert.match(decodeURIComponent(res.headers.get('location') || ''), /not set up for/i);
+  } finally {
+    db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
+  }
 });

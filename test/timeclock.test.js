@@ -51,7 +51,12 @@ const get = (p, headers = {}) => fetch(BASE + p, { headers, redirect: 'manual' }
 // tests; without them this line would be hiding a screen from the suite.
 const svcd = (p) => (/^\/timeclock(\?|$)/.test(p) && !/[?&]svc=/.test(p)
   ? p + (p.includes('?') ? '&' : '?') + 'svc=all' : p);
-const text = async (p, headers = {}) => (await fetch(BASE + svcd(p), { headers })).text();
+// /portal/clock now asks WHICH clock first for anybody on more than one —
+// which is every fixture, since they are put on every schedule. These tests
+// are about the clock itself, so they name one; the picker has its own tests.
+const clockd = (p) => (/^\/portal\/clock(\?|$)/.test(p) && !/[?&]svc=/.test(p)
+  ? p + (p.includes('?') ? '&' : '?') + 'svc=cafe' : p);
+const text = async (p, headers = {}) => (await fetch(BASE + clockd(svcd(p)), { headers })).text();
 
 /** PIN in, portal cookie out — the same door staff use. */
 async function signIn(pin) {
@@ -2630,13 +2635,28 @@ test('2B: clocked out — one position is not a question, the service always is'
   assert.ok(!/<select name="position"/.test(html), 'one position is not a question');
   assert.match(html, /name="position" value="server"/, 'it travels as a hidden field');
 
-  assert.match(html, /<select name="daypart" required>/, 'the service is ALWAYS asked');
-  assert.ok(!/<input type="hidden" name="daypart"/.test(html),
-    'and never travels as a hidden field — that was the bug');
-  assert.match(html, /<option value="">Choose/, 'it starts on a placeholder that cannot be submitted');
+  // THE GUARANTEE, restated for the flow that exists now.
+  //
+  // The service is still never GUESSED. What changed is where the person says
+  // it: somebody on more than one clock now picks a card first, and that tap
+  // IS the choosing — asking again on the next screen would be asking twice.
+  // This request named ?svc=cafe, which is what tapping a card does, so the
+  // answer travels as a hidden field because it has already been given.
+  //
+  // What must never come back is a service the SYSTEM decided. The test below
+  // this one covers that from the other side: the server refuses a clock-in
+  // that names no service, so nothing can arrive by default.
+  assert.match(html, /name="daypart" value="cafe"/,
+    'the service they picked on the card travels with them');
   assert.ok(!/<option value="(cafe|dinner)" selected/.test(html),
-    'and nothing is pre-selected, so there is nothing to tap past');
+    'and nothing is ever pre-selected in a list — that was the original bug');
   assert.match(html, />Clock in</, 'one primary action');
+
+  // And with no card named, somebody on more than one clock is asked which —
+  // they are not dropped onto one of them.
+  const unpicked = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+  assert.match(unpicked, /psp-card/, 'the picker, not a guess');
+  assert.ok(!/name="daypart" value="/.test(unpicked), 'and no service decided for them');
 });
 
 test('2B: the clock refuses a clock-in with no service, server-side', async () => {

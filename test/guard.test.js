@@ -201,7 +201,7 @@ test('every form a browser is served carries a token', async () => {
   // the injector did, so the injector was handed a Buffer, skipped it, and
   // served tokenless forms to everyone while curl — which does not ask for
   // gzip — showed a page that looked perfect.
-  const html = await (await fetch(BASE + '/portal/clock',
+  const html = await (await fetch(BASE + '/portal/clock?svc=cafe',
     { headers: { cookie, 'accept-encoding': 'gzip' } })).text();
   // Not a count — counting two things with two regexes measures the regexes.
   // Walk the form tags the injector walks, and require the token to be the very
@@ -232,12 +232,12 @@ test('a session that renews itself does not invalidate the page it just drew', a
   let cookie = await signedIn();
   const tokenIn = (html) => (html.match(/name="_csrf" value="([a-f0-9]{32})"/) || [])[1];
 
-  const first = await (await fetch(BASE + '/portal/clock', { headers: { cookie } })).text();
+  const first = await (await fetch(BASE + '/portal/clock?svc=cafe', { headers: { cookie } })).text();
   const inRes = await send('/portal/clock/in',
     { daypart: 'dinner', position: 'server', _csrf: tokenIn(first) }, { cookie, origin: BASE });
   assert.notStrictEqual(inRes.status, 403, 'clocking in goes through');
 
-  const page = await fetch(BASE + '/portal/clock', { headers: { cookie } });
+  const page = await fetch(BASE + '/portal/clock?svc=cafe', { headers: { cookie } });
   const token = tokenIn(await page.text());
   const renewed = (page.headers.get('set-cookie') || '').split(';')[0];
   assert.ok(renewed, 'loading the clock page while on the clock renews the session — that is the point');
@@ -377,7 +377,7 @@ test('a session that has expired is refused, whatever the browser still holds', 
   // Move the expiry into the past. The signature no longer matches, which is
   // the point — you cannot extend your own session by editing it either.
   const stale = `${name}=${id}.${Date.now() - 1000}.${sig}`;
-  const res = await fetch(BASE + '/portal/clock', { headers: { cookie: stale }, redirect: 'manual' });
+  const res = await fetch(BASE + '/portal/clock?svc=cafe', { headers: { cookie: stale }, redirect: 'manual' });
   assert.strictEqual(res.status, 302, 'sent back to the PIN screen');
 });
 
@@ -397,7 +397,7 @@ test('an expired session never closes a punch', async () => {
   const [name, value] = cookie.split('=');
   const [id, , sig] = value.split('.');
   const dead = `${name}=${id}.${Date.now() - 1000}.${sig}`;
-  await fetch(BASE + '/portal/clock', { headers: { cookie: dead }, redirect: 'manual' });
+  await fetch(BASE + '/portal/clock?svc=cafe', { headers: { cookie: dead }, redirect: 'manual' });
   await fetch(BASE + '/portal', { headers: { cookie: dead }, redirect: 'manual' });
   await send('/portal/clock/out', { _csrf: token }, { cookie: dead, origin: BASE });
 
