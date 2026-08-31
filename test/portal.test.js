@@ -2274,3 +2274,30 @@ test('a limited clock still lets somebody in during their published shift', asyn
     db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(sid);
   }
 });
+
+test('a toast raised without a page load can actually be read', async () => {
+  // It could not. Every portal colour is a custom property declared on .pt, so
+  // a toast appended to document.body inherited none of them —
+  // background: var(--pt-red) resolved to nothing and the white text landed on
+  // a white page. Invisible, and reported as such.
+  //
+  // Two fixes, because a message whose entire job is to be read should not have
+  // one point of failure: it is appended inside .pt, AND the colours have
+  // literal fallbacks so it stays legible even if it ever ends up outside
+  // again. This test pins both.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const fn = /function ptToast\(([\s\S]*?)\n        \}/.exec(src);
+  assert.ok(fn, 'the toast helper is there');
+  assert.match(fn[1], /document\.querySelector\('\.pt'\) \|\| document\.body/,
+    'it appends inside .pt, where the portal colours live');
+
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  // Asserted as plain strings. Two attempts at this with constructed regexes
+  // both failed against a stylesheet that was correct — the test was the buggy
+  // part, twice. What matters is simple enough to say simply: a toast that
+  // reports a refusal has a colour that does not depend on inheriting anything.
+  assert.ok(css.includes('.pt-toast.bad { background: #b3261e; }'),
+    'the refusal toast has a literal red, not only a token');
+  assert.ok(/\.pt-toast \{\s*\n\s*background: #0f172a; color: #fff;/.test(css),
+    'and the base toast a literal ground and text colour');
+});

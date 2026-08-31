@@ -1737,7 +1737,18 @@ body.bare {
    belongs at the top where the eye already is — next to the thing that would
    not go. */
 .pt-toasts--top { top: calc(12px + env(safe-area-inset-top)); bottom: auto; }
-.pt-toast { transition: opacity .22s ease, transform .22s ease; }
+/* Literal fallbacks, not only tokens, and in ONE block with the transition so
+   there is a single .pt-toast rule to read rather than two that have to be
+   found in the right order. A message whose entire job is to be read must not
+   depend on inheriting a custom property to have a colour: appended outside
+   .pt it inherited none, background: var(--pt-red) resolved to nothing, and
+   white text landed on a white page. */
+.pt-toast {
+  background: #0f172a; color: #fff;
+  transition: opacity .22s ease, transform .22s ease;
+}
+.pt-toast.bad { background: #b3261e; }
+.pt-toast.ok { background: #1f7a4d; }
 .pt-toast--in { opacity: 0; transform: translateY(-10px); }
 .pt-toast--out { opacity: 0; transform: translateY(-10px); }
 @media (prefers-reduced-motion: reduce) {

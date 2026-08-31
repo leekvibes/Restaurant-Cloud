@@ -7462,7 +7462,13 @@ function clockPage(req, who, opts = {}) {
           if (!box) {
             box = document.createElement('div');
             box.className = 'pt-toasts pt-toasts--top';
-            document.body.appendChild(box);
+            // INSIDE .pt, never on the body. Every portal colour is a custom
+            // property declared on .pt, so a toast appended as a sibling
+            // inherits none of them: background: var(--pt-red) resolves to
+            // nothing and white text lands on a white page. Which is exactly
+            // what it did — unreadable, and reported as such. The same trap
+            // the tab bar hit, written down in this file and stepped on again.
+            (document.querySelector('.pt') || document.body).appendChild(box);
           }
           var t = document.createElement('div');
           t.className = 'pt-toast ' + (kind || 'bad') + ' pt-toast--in';
