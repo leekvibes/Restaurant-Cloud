@@ -6039,3 +6039,27 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .epr-clear { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 0;
   font-size: 12px; color: var(--danger, #a3341f); cursor: pointer; }
 .epr-clear input { margin-top: 2px; }
+
+/* Which time clock the page is scoped to, and the way back to the cards. */
+.tcm-scope { display: inline-block; margin-left: 8px; padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--rule); background: var(--paper);
+  font-size: 12.5px; font-weight: 600; color: var(--muted); vertical-align: middle; }
+.tcm-back { margin: -6px 0 10px; }
+.tcm-back a { font-size: 12.5px; color: var(--muted); text-decoration: none; }
+.tcm-back a:hover { color: var(--ink); text-decoration: underline; }
+
+/* --- clock-in limitation, per time clock ------------------------------------ */
+.tcs-for { display: block; font-style: normal; font-size: 11.5px; font-weight: 600;
+  color: var(--muted); margin-top: 2px; }
+.cl-set { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.cl-on { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-size: 13.5px; }
+.cl-on input { width: 18px; height: 18px; flex: none; }
+.cl-opts { display: flex; flex-direction: column; gap: 7px; padding-left: 27px; }
+/* Dimmed until the limit is switched on: the radios describe a rule that does
+   not exist yet, and reading them as live is how somebody sets one by accident. */
+.cl-set:has(.cl-on input:not(:checked)) .cl-opts { opacity: .45; pointer-events: none; }
+.cl-o { display: inline-flex; align-items: center; gap: 9px; cursor: pointer;
+  font-size: 13.5px; color: var(--body); }
+.cl-o input[type="radio"] { width: 16px; height: 16px; flex: none; }
+.cl-n { width: 62px; padding: 3px 7px; text-align: center; font: inherit; font-size: 13px;
+  border: 1px solid var(--rule); border-radius: 7px; background: var(--panel); color: var(--ink); }

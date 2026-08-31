@@ -191,6 +191,49 @@ try {
 /** Schedules that carry their own time clock. */
 const withClock = () => all().filter((x) => x.has_clock !== 0);
 
+/**
+ * WHEN somebody may clock into this schedule.
+ *
+ * Off by default and off for every existing schedule, because switching it on
+ * can stop a real person starting a real shift. Three states:
+ *
+ *   off        anybody assigned to the schedule may clock in, any time
+ *   scheduled  only while they have a shift on this schedule
+ *   early      as above, plus N minutes before it starts
+ *
+ * Stored on the schedule rather than globally: a café that opens on the dot and
+ * a dinner service people drift into are different rules, and one number for
+ * both is the wrong number for one of them.
+ */
+try {
+  const cols = db.prepare('PRAGMA table_info(services)').all().map((c) => c.name);
+  if (!cols.includes('clock_limit')) {
+    db.exec("ALTER TABLE services ADD COLUMN clock_limit TEXT NOT NULL DEFAULT 'off'");
+  }
+  if (!cols.includes('clock_early_min')) {
+    db.exec('ALTER TABLE services ADD COLUMN clock_early_min INTEGER NOT NULL DEFAULT 5');
+  }
+} catch { /* older engine */ }
+
+const LIMITS = ['off', 'scheduled', 'early'];
+
+function limitOf(slug) {
+  const sv = bySlug(slug);
+  if (!sv) return { mode: 'off', earlyMin: 5 };
+  return {
+    mode: LIMITS.includes(sv.clock_limit) ? sv.clock_limit : 'off',
+    // Clamped on read as well as on write: a value that arrived by some other
+    // route must not become a negative window nobody can clock into.
+    earlyMin: Math.max(0, Math.min(240, Number(sv.clock_early_min) || 0)),
+  };
+}
+
+function setLimit(slug, mode, earlyMin) {
+  const m = LIMITS.includes(mode) ? mode : 'off';
+  const n = Math.max(0, Math.min(240, Math.round(Number(earlyMin))|| 0));
+  db.prepare('UPDATE services SET clock_limit = ?, clock_early_min = ? WHERE slug = ?').run(m, n, slug);
+}
+
 /** Connect or disconnect a schedule's clock, later, without recreating it. */
 function setClock(slug, on) {
   db.prepare('UPDATE services SET has_clock = ? WHERE slug = ?').run(on ? 1 : 0, slug);
@@ -313,6 +356,6 @@ function employeesFor(slug) {
 }
 
 module.exports = {
-  BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, bySlug, nameOf, isActive, create, rename, archive, unarchive,
+  BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, LIMITS, limitOf, setLimit, bySlug, nameOf, isActive, create, rename, archive, unarchive,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };

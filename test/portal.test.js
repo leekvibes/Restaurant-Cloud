@@ -2182,3 +2182,95 @@ test('a clock they are not on cannot be reached by typing it', async () => {
     db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
   }
 });
+
+// ===========================================================================
+// Clock-in limitation — per time clock, off by default.
+//
+// This is the one place a SCHEDULE is allowed to affect the CLOCK, and only
+// ever to refuse. It writes nothing and invents no punch: a shift on the board
+// still means nothing happened until somebody punches in.
+// ===========================================================================
+
+test('with no limit set, anybody assigned can clock in whenever they arrive', async () => {
+  // The default, and it has to stay the default: switching this on can stop a
+  // real person starting a real shift, so it is never on by accident.
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  const cookie = await signIn('1111');
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);
+  const res = await form('/portal/clock/in', { position: 'server', daypart: 'cafe' }, { cookie });
+  assert.strictEqual(res.status, 302);
+  assert.doesNotMatch(decodeURIComponent(res.headers.get('location') || ''), /not scheduled|too early/i);
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND status = 'active'")
+    .get(bella.id).n, 1, 'they clocked in');
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(bella.id);
+});
+
+test('with the limit on, somebody with no shift today is refused — and told why', async () => {
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  db.prepare("UPDATE services SET clock_limit = 'scheduled' WHERE slug = 'cafe'").run();
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);
+  try {
+    const cookie = await signIn('1111');
+    const before = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(bella.id).n;
+    const res = await form('/portal/clock/in', { position: 'server', daypart: 'cafe' }, { cookie });
+    assert.strictEqual(res.status, 302);
+    assert.match(decodeURIComponent(res.headers.get('location') || ''), /not scheduled/i,
+      'it names the reason rather than just failing');
+    assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(bella.id).n,
+      before, 'and NOTHING was written');
+  } finally {
+    db.prepare("UPDATE services SET clock_limit = 'off' WHERE slug = 'cafe'").run();
+  }
+});
+
+test('the limit belongs to ONE time clock, not to all of them', async () => {
+  // A cafe that opens on the dot and a dinner service people drift into are
+  // different rules. Limiting one must not limit the other.
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  db.prepare("UPDATE services SET clock_limit = 'scheduled' WHERE slug = 'cafe'").run();
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);
+  try {
+    const cookie = await signIn('1111');
+    const res = await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+    assert.doesNotMatch(decodeURIComponent(res.headers.get('location') || ''), /not scheduled/i,
+      'the unlimited clock still lets them in');
+    assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND status = 'active'")
+      .get(bella.id).n, 1);
+  } finally {
+    db.prepare("UPDATE services SET clock_limit = 'off' WHERE slug = 'cafe'").run();
+    db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(bella.id);
+  }
+});
+
+test('a limited clock still lets somebody in during their published shift', async () => {
+  // The half that matters most: a limit that refuses everybody is not a limit,
+  // it is an outage.
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  const D = require('../src/dates');
+  const today = D.isoDate(new Date());
+  db.prepare("UPDATE services SET clock_limit = 'scheduled' WHERE slug = 'cafe'").run();
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);
+  // A shift that is running right now: an hour either side of this moment.
+  const iso = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
+  const sid = Number(db.prepare(`INSERT INTO scheduled_shifts
+    (employee_id, position, business_date, starts_at, ends_at, daypart, status)
+    VALUES (?, 'server', ?, ?, ?, 'cafe', 'published')`)
+    .run(bella.id, today, iso(new Date(Date.now() - 3600e3)), iso(new Date(Date.now() + 3600e3))).lastInsertRowid);
+  db.prepare(`INSERT INTO published_schedule
+    (scheduled_shift_id, employee_id, position, business_date, starts_at, ends_at, daypart)
+    VALUES (?, ?, 'server', ?, ?, ?, 'cafe')`)
+    .run(sid, bella.id, today, iso(new Date(Date.now() - 3600e3)), iso(new Date(Date.now() + 3600e3)));
+  try {
+    const cookie = await signIn('1111');
+    const res = await form('/portal/clock/in', { position: 'server', daypart: 'cafe' }, { cookie });
+    assert.doesNotMatch(decodeURIComponent(res.headers.get('location') || ''), /not scheduled|too early/i,
+      'inside their shift, they are let in');
+    assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND status = 'active'")
+      .get(bella.id).n, 1);
+  } finally {
+    db.prepare("UPDATE services SET clock_limit = 'off' WHERE slug = 'cafe'").run();
+    db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(bella.id);
+    db.prepare('DELETE FROM published_schedule WHERE scheduled_shift_id = ?').run(sid);
+    db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(sid);
+  }
+});

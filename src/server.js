@@ -7549,6 +7549,39 @@ app.post('/portal/clock/in', (req, res) => {
       `You are not set up for ${SERVICES.nameOf(daypart)} — ask your manager.`));
   }
 
+  // CLOCK-IN LIMITATION, if this schedule has one. Off everywhere by default.
+  //
+  // The SCHEDULE is being read to decide whether a punch may start — which is
+  // the one place a plan is allowed to affect the clock, and only ever to
+  // refuse. It writes nothing, invents no punch, and never implies attendance:
+  // a shift on the board still means nothing happened until somebody punches.
+  const limit = SERVICES.limitOf(daypart);
+  if (limit.mode !== 'off') {
+    const nowMs = TC.toDate(TC.nowUtc()).getTime();
+    const graceMs = (limit.mode === 'early' ? limit.earlyMin : 0) * 60000;
+    const bday = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+    const mine = SCH.publishedFor(emp.id, { from: addDays(bday, -1), to: addDays(bday, 1) })
+      .filter((sh) => sh.daypart === daypart);
+    const open = mine.find((sh) => {
+      const st = TC.toDate(sh.starts_at).getTime();
+      const en = TC.toDate(sh.ends_at).getTime();
+      return nowMs >= st - graceMs && nowMs <= en;
+    });
+    if (!open) {
+      // The next one that has not started, so the message says WHEN rather
+      // than only no — somebody standing at the kiosk needs to know whether to
+      // wait five minutes or find a manager.
+      const next = mine.map((sh) => sh.starts_at)
+        .filter((t) => TC.toDate(t).getTime() > nowMs)
+        .sort((a, b) => String(a).localeCompare(String(b)))[0];
+      return back('err=' + encodeURIComponent(mine.length
+        ? (next
+          ? `Too early — your ${SERVICES.nameOf(daypart)} shift starts at ${TC.clockFace(next)}.`
+          : `That is outside your ${SERVICES.nameOf(daypart)} shift today.`)
+        : `You are not scheduled on ${SERVICES.nameOf(daypart)} today — ask your manager.`));
+    }
+  }
+
   const cfg = TC.settings();
   const at = TC.nowUtc();                       // the server's clock, not the phone's
   const bdate = TC.businessDateOf(at, cfg.cutoffHour);
@@ -21497,10 +21530,21 @@ app.get('/timeclock', (req, res) => {
     <div class="bs-page tcm-page">
       <div class="bs-head">
         <div class="bs-headwrap">
-          <h1 class="bs-headline">Time clock</h1>
+          <h1 class="bs-headline">Time clock${tcSvc && tcSvc !== 'all'
+    ? ` <span class="tcm-scope">${esc(SERVICES.nameOf(tcSvc))}</span>` : ''}</h1>
           <p class="bs-subline">Who is on now, and which punches need fixing. Clocking out sets the hours on the shift, so there is nothing to type — unless you type over it, and then the clock leaves it alone.</p>
         </div>
+        <div class="bs-head-acts">
+          ${reqPill(pending.length + offWaiting())}
+          <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
+          <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
+          ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
+          <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
+        </div>
       </div>
+      ${SERVICES.all().length > 1 ? `<div class="tcm-back">
+        <a href="/timeclock">&larr; Time clocks</a>
+      </div>` : ''}
       ${tcTabs('/timeclock')}
       ${span.clamped ? `<div class="bs-notice"><span class="bs-notice-k">Shortened</span>
         <p>That range was wider than ${RANGE_MAX_DAYS} days, so this is the last ${RANGE_MAX_DAYS}
@@ -21568,18 +21612,12 @@ app.get('/timeclock', (req, res) => {
           </div></div>
         </details>
         <button class="bs-btn-sm" type="submit">Go</button>
-        ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
-        <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
-        <!-- Carries the filters, so the spreadsheet is what is on the screen. -->
-        <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
-        <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
-        ${/* Never absent. With nothing waiting it still reads "View requests",
-               so "are there any?" is a question you can go and answer rather
-               than infer from a panel that is not on the page. */''}
-        ${reqPill(pending.length + offWaiting())}
-        <!-- The Timesheets button used to sit here, unguarded, and 403'd for
-             anybody without the payroll area. The tab strip above carries that
-             link now, and filters it by what the account can actually open. -->
+        ${/* Settings, Reports, CSV and the requests pill used to sit here, in
+             the middle of a filter row, below the tabs. They are page actions
+             rather than filter actions, so they live in the header now — the
+             filter row is only the things that change what this table shows.
+             Download still carries the filters, so the spreadsheet is what is
+             on screen; it is rendered up there from the same `qs`. */''}
       </form>
       ${isToday ? '' : `<p class="tcl-range">Showing ${esc(span.from)} to ${esc(span.to)}.
         <a class="bs-act" href="/timeclock">Back to today</a></p>`}
@@ -21819,6 +21857,31 @@ app.get('/timeclock/settings', (req, res) => {
             value="${c.autoOutHours}" ${w2 ? '' : 'disabled'} aria-label="Hours before an open punch is closed"> Hours</span>`,
           'Anyone still on the clock this long is clocked out at that mark, and the entry is flagged '
           + 'wherever it appears so you can correct it. It writes a time nobody punched, so it stays off until you want it.')}
+        ${/* Per time clock, not global. A cafe that opens on the dot and a
+             dinner service people drift into are different rules, and one
+             number for both is the wrong number for one of them. Off for every
+             existing schedule, because switching it on can stop a real person
+             starting a real shift. */''}
+        ${SERVICES.withClock().map((sv) => {
+    const L = SERVICES.limitOf(sv.slug);
+    return row(`Clock in limitation<i class="tcs-for">${esc(sv.name)}</i>`,
+      `<div class="cl-set">
+        <label class="cl-on"><input type="checkbox" name="cl_on_${esc(sv.slug)}" value="1"${
+  L.mode === 'off' ? '' : ' checked'} ${w2 ? '' : 'disabled'}>
+          <span>Limit when people can clock in</span></label>
+        <div class="cl-opts">
+          <label class="cl-o"><input type="radio" name="cl_mode_${esc(sv.slug)}" value="scheduled"${
+  L.mode === 'early' ? '' : ' checked'} ${w2 ? '' : 'disabled'}>
+            <span>Only within their scheduled shifts</span></label>
+          <label class="cl-o"><input type="radio" name="cl_mode_${esc(sv.slug)}" value="early"${
+  L.mode === 'early' ? ' checked' : ''} ${w2 ? '' : 'disabled'}>
+            <span>Up to <input class="cl-n" type="number" name="cl_min_${esc(sv.slug)}" min="0" max="240"
+              value="${L.earlyMin}" ${w2 ? '' : 'disabled'} aria-label="Minutes before their shift"> minutes before their shift starts</span></label>
+        </div>
+      </div>`,
+      'Somebody with no shift on this schedule that day cannot clock into it at all. '
+      + 'Leave it off and anybody assigned to the schedule can clock in whenever they arrive.');
+  }).join('')}
         ${row('Breaks', check('breaks_paid', c.breaksPaid, 'Count breaks as paid by default'),
           'Either way a manager can change any single break.')}
         ${/* No clock-out switch. It used to be here, off by default, and it was
@@ -21846,6 +21909,14 @@ app.post('/timeclock/settings', (req, res) => {
     autoOut: req.body.auto_out === '1',
     autoOutHours: req.body.auto_out_hours,
   });
+  // Per-schedule clock-in limits. Unchecked means off, whatever the radios say
+  // — the radios are the shape of the limit, the checkbox is whether there is
+  // one at all.
+  for (const sv of SERVICES.withClock()) {
+    const on = req.body[`cl_on_${sv.slug}`] === '1';
+    const mode = on ? (req.body[`cl_mode_${sv.slug}`] === 'early' ? 'early' : 'scheduled') : 'off';
+    SERVICES.setLimit(sv.slug, mode, req.body[`cl_min_${sv.slug}`]);
+  }
   res.redirect('/timeclock/settings?msg=' + encodeURIComponent('Saved.'));
 });
 
@@ -23364,6 +23435,13 @@ app.get('/payroll/timesheets', (req, res) => {
         <div class="bs-headwrap">
           <h1 class="bs-headline">Timesheets</h1>
           <p class="bs-subline">What the clock recorded this period, and who has signed it off. These are the hours <a class="bs-act" href="/payroll">Payroll</a> runs on — the clock writes them onto each shift as people punch out, and anything typed over is marked.</p>
+        </div>
+        ${/* The same page actions the Today tab carries, in the same place, so
+             the two tabs of one screen do not put Settings in two different
+             corners. */''}
+        <div class="bs-head-acts">
+          <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
+          <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
         </div>
       </div>
       ${tcTabs('/payroll/timesheets')}
