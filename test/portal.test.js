@@ -2009,3 +2009,58 @@ test('the notifications panel explains itself on a phone that cannot subscribe',
   assert.match(script, /not set up on the server yet/, 'no keys on the server still says so');
   assert.match(script, /Blocked in your settings/, 'a denied permission still says so');
 });
+
+/**
+ * Service eligibility, asserted where it actually has to hold.
+ *
+ * The clock-in screen only offers services somebody works — but a select is
+ * not a gate. Anybody can post whatever they like, so the refusal is tested by
+ * posting a service this person is not on and checking the server says no and
+ * writes nothing.
+ */
+test('somebody can only clock into a service they are on, checked on the POST', async () => {
+  const marco = db.prepare('SELECT id FROM employees WHERE name = ?').get('Marco Diaz');
+  // Day Service only — the reported problem, in the form it was reported.
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
+  db.prepare(`INSERT INTO employee_services (employee_id, service_slug) VALUES (?, 'cafe')`).run(marco.id);
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(marco.id);
+
+  const cookie = await signIn('2222');
+  const before = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(marco.id).n;
+
+  const bad = await form('/portal/clock/in', { position: 'kitchen', daypart: 'dinner' }, { cookie });
+  assert.strictEqual(bad.status, 302, 'it redirects rather than erroring');
+  assert.match(decodeURIComponent(bad.headers.get('location') || ''), /not set up for/i,
+    'and says why, naming the service');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(marco.id).n,
+    before, 'NOTHING was written — the refusal is real, not cosmetic');
+
+  // The screen does not offer it either, but that is the convenience, not the
+  // protection. Asserted second, and separately, so the two never get confused.
+  const page = await (await asStaff('/portal/clock', cookie)).text();
+  assert.doesNotMatch(page, /value="dinner"/, 'and it is not offered on screen');
+
+  // The service they ARE on still works, or the gate has broken clocking in.
+  const good = await form('/portal/clock/in', { position: 'kitchen', daypart: 'cafe' }, { cookie });
+  assert.strictEqual(good.status, 302);
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND status = 'active'")
+    .get(marco.id).n, 1, 'Day Service went through');
+
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(marco.id);
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(marco.id);
+});
+
+test('with no services assigned, everybody can still clock into anything', async () => {
+  // The rule that keeps the day this ships uneventful. If absence meant "no
+  // services" the whole roster would be locked out by a deploy.
+  const bella = db.prepare('SELECT id FROM employees WHERE name = ?').get('Bella Reyes');
+  db.prepare('DELETE FROM employee_services WHERE employee_id = ?').run(bella.id);
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status IN ('active','on_break')").run(bella.id);
+  const cookie = await signIn('1111');
+  const res = await form('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+  assert.strictEqual(res.status, 302);
+  assert.doesNotMatch(decodeURIComponent(res.headers.get('location') || ''), /not set up for/i);
+  assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE employee_id = ? AND status = 'active'")
+    .get(bella.id).n, 1, 'unassigned means every service, not none');
+  db.prepare("DELETE FROM time_entries WHERE employee_id = ? AND status = 'active'").run(bella.id);
+});

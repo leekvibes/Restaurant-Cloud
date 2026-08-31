@@ -7152,6 +7152,9 @@ function clockPage(req, who, opts = {}) {
       <p class="tcc-note">Ask your manager to add your position, then you can clock in.</p>`);
   } else {
     const one = allowed.length === 1;
+    // The services this person works. No assignment means every service, so
+    // this is the full list until somebody is deliberately narrowed.
+    const mySvcs = SERVICES.forEmployee(emp.id);
     // THE SERVICE IS ALWAYS ASKED, AND NEVER PRE-ANSWERED.
     //
     // This used to arrive with an answer already in the box, guessed from the
@@ -7177,14 +7180,20 @@ function clockPage(req, who, opts = {}) {
                  <option value="">Choose…</option>
                  ${allowed.map((r) => `<option value="${esc(r)}">${esc(posName(r))}</option>`).join('')}
                </select></label>`}
-        <label class="tcc-field"><span>Service</span>
+        ${/* Only the services this person works, and if that is one service
+              there is nothing to ask — it goes as a hidden field and the
+              question disappears. The list is not the gate, though: the route
+              re-checks it, because hiding an option is not authorisation. */''}
+        ${mySvcs.length === 1
+          ? `<input type="hidden" name="daypart" value="${esc(mySvcs[0])}">`
+          : `<label class="tcc-field"><span>Service</span>
           <select name="daypart" required>
             ${/* Empty, and required. A placeholder that cannot be submitted is
                   the whole point — an option somebody has to move off is the
                   difference between choosing and tapping through. */''}
             <option value="">Choose&hellip;</option>
-            ${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}
-          </select></label>
+            ${mySvcs.map((d) => `<option value="${esc(d)}">${esc(SERVICES.nameOf(d))}</option>`).join('')}
+          </select></label>`}
         <button class="tc-btn tc-btn-go tc-btn-big" type="submit" data-once>Clock in</button>
       </form>
       ${one ? `<p class="tcc-note">${esc(posName(allowed[0]))}</p>` : ''}`);
@@ -7407,6 +7416,13 @@ app.post('/portal/clock/in', (req, res) => {
   if (!position) return back('err=' + encodeURIComponent('Choose the position you are working.'));
   const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
   if (!daypart) return back('err=' + encodeURIComponent('Choose which service you are working.'));
+  // THE GATE. Not the select on the previous screen — this. A POST naming a
+  // service somebody does not work has to be refused where it lands, or the
+  // restriction is decoration: anybody can send whatever they like.
+  if (!SERVICES.canWork(emp.id, daypart)) {
+    return back('err=' + encodeURIComponent(
+      `You are not set up for ${SERVICES.nameOf(daypart)} — ask your manager.`));
+  }
 
   const cfg = TC.settings();
   const at = TC.nowUtc();                       // the server's clock, not the phone's
@@ -9205,6 +9221,7 @@ app.get('/employees/:id/edit', (req, res) => {
   // invisible after the fact: the page would show one number and give no way
   // to tell whether last month was priced at it.
   const wageLog = WAGES.historyFor(e.id).filter((r) => r.effective_from !== WAGES.EPOCH);
+  const mine = SERVICES.forEmployee(e.id);
   const isSalary = e.pay_type === 'salary';
   const body = `
     ${flash(req)}
@@ -9224,6 +9241,26 @@ app.get('/employees/:id/edit', (req, res) => {
         <input type="checkbox" name="ot_eligible" value="1"${e.ot_exempt ? '' : ' checked'} style="width:18px;height:18px">
         Eligible for weekly overtime <span class="sub" style="font-weight:400">— uncheck for salaried or exempt staff. Only applies when weekly overtime is switched on in Payroll.</span></label>
       <button class="btn btn-primary" type="submit">Save changes</button>
+    </form>
+
+    ${/* Which services this person works. Absence is not a restriction — no
+         ticks means every service — so this is additive and nobody is locked
+         out the day it ships. Ticking every box is stored as no ticks for the
+         same reason: it means "everything", including services added later. */''}
+    <h2>Services</h2>
+    <p class="sub">Which services ${esc(e.name)} can be scheduled and clocked into. Leave all unticked for every service &mdash; that is also what ticking them all means, and it keeps them on anything you add later.</p>
+    <form method="post" action="/employees/${e.id}/services" class="card form">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      <div class="svc-picks">
+        ${SERVICES.all().map((sv) => `<label class="svc-pick">
+          <input type="checkbox" name="svc" value="${esc(sv.slug)}"${
+            mine.includes(sv.slug) && SERVICES.isAssigned(e.id) ? ' checked' : ''}>
+          <span>${esc(sv.name)}</span></label>`).join('')}
+      </div>
+      <p class="sub" style="margin:8px 0 0">${SERVICES.isAssigned(e.id)
+        ? `Currently limited to ${mine.map((x) => esc(SERVICES.nameOf(x))).join(' and ')}.`
+        : 'Currently on every service.'}</p>
+      <button class="btn" type="submit" style="margin-top:10px">Save services</button>
     </form>
 
     <h2>Roles &amp; wages</h2>
@@ -9293,6 +9330,21 @@ app.post('/employees/:id', (req, res) => {
   // when ticked, so an absent value means exempt.
   OT.setExempt(e.id, req.body.ot_eligible !== '1');
   res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.${wageNote(wage)}`));
+});
+
+app.post('/employees/:id/services', (req, res) => {
+  const id = Number(req.params.id);
+  const e = q.employee.get(id);
+  if (!e) return res.status(404).send('Not found');
+  // An array when several are ticked, a string when one is, absent when none.
+  const raw = req.body.svc;
+  const picked = raw == null ? [] : (Array.isArray(raw) ? raw : [raw]);
+  SERVICES.setForEmployee(id, picked);
+  const now = SERVICES.forEmployee(id);
+  const msg = SERVICES.isAssigned(id)
+    ? `${e.name} works ${now.map((x) => SERVICES.nameOf(x)).join(' and ')}.`
+    : `${e.name} works every service.`;
+  res.redirect(`/employees/${id}/edit?msg=` + encodeURIComponent(msg));
 });
 
 app.post('/employees/:id/roles', (req, res) => {

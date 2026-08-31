@@ -5722,3 +5722,11 @@ input[type="date"], input[type="time"], input[type="search"], select {
   cursor: help; vertical-align: middle; }
 .auto-out:focus-visible { outline: 2px solid var(--headline); outline-offset: 1px; }
 .tsg-auto .tsg-d, .tcl-auto .tcl-who { font-weight: 650; }
+
+/* --- which services somebody works ----------------------------------------- */
+.svc-picks { display: flex; flex-wrap: wrap; gap: 10px; }
+.svc-pick { display: inline-flex; align-items: center; gap: 9px; margin: 0;
+  padding: 9px 14px; border: 1px solid var(--rule); border-radius: 999px;
+  background: var(--panel); font-weight: 500; cursor: pointer; }
+.svc-pick input { width: 17px; height: 17px; flex: none; }
+.svc-pick:has(input:checked) { border-color: var(--ink); background: var(--paper); font-weight: 600; }
