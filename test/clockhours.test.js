@@ -1448,3 +1448,82 @@ test('a punch that crosses midnight is marked, and one that does not is not', as
     db.prepare('DELETE FROM time_entries WHERE id = ?').run(same);
   }
 });
+
+// --- a punch edit, and the service it belongs to --------------------------
+
+test('editing a punch on an ALREADY-SENT service asks before touching it', async () => {
+  // The clock and the service used to disagree in silence. A punch edit flows
+  // through to work.hours — which the Services page and the tip-out read —
+  // except on a service already emailed, where the hours it was sent with
+  // stand. That default is right; happening with nothing on screen was not.
+  const sh = db.prepare("SELECT id, date, daypart FROM shifts WHERE status = 'emailed' LIMIT 1").get();
+  if (!sh) return;                                   // no sent service in this fixture
+  const e = Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, ?, 'server', ?, ?, 'complete', 'asktest', 360, 360)`)
+    .run(E.both, sh.id, sh.date, sh.daypart, `${sh.date} 14:00:00`, `${sh.date} 20:00:00`).lastInsertRowid);
+  try {
+    const res = await fetch(`${BASE}/timeclock/${e}/cell`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ field: 'out', value: '18:00' }),
+    });
+    const j = await res.json();
+    assert.strictEqual(res.status, 200, 'the punch itself saves');
+    assert.ok(j.ask, 'and the answer carries a question');
+    assert.strictEqual(j.ask.kind, 'shift_sent');
+    assert.strictEqual(j.ask.can, true, 'which the manager can act on');
+    assert.match(j.ask.body, /already sent/i, 'saying why the service did not follow');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(e);
+  }
+});
+
+test('answering yes updates the service; answering no is simply not asking', async () => {
+  const sh = db.prepare("SELECT id, date, daypart FROM shifts WHERE status = 'emailed' LIMIT 1").get();
+  if (!sh) return;
+  const before = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?')
+    .get(sh.id, E.both);
+  const e = Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, ?, 'server', ?, ?, 'complete', 'asktest', 240, 240)`)
+    .run(E.both, sh.id, sh.date, sh.daypart, `${sh.date} 14:00:00`, `${sh.date} 18:00:00`).lastInsertRowid);
+  try {
+    // NO is the absence of the call, so the figure stands exactly as it was.
+    const still = db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?')
+      .get(sh.id, E.both);
+    assert.strictEqual(still ? still.hours : null, before ? before.hours : null,
+      'saying no changes nothing at all');
+
+    // YES writes the clocked hours over whatever was there — including a
+    // manager's or an imported figure, which the ordinary rule defers to. That
+    // deference is the point of the question.
+    const r = await fetch(`${BASE}/timeclock/${e}/sync-service`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.strictEqual(r.status, 200);
+    const after = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?')
+      .get(sh.id, E.both);
+    assert.strictEqual(after.hours, 4, 'the service now carries the corrected hours');
+    assert.strictEqual(after.hours_source, 'clock');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(e);
+    if (before) {
+      db.prepare('UPDATE work SET hours = ?, hours_source = ? WHERE shift_id = ? AND employee_id = ?')
+        .run(before.hours, before.hours_source, sh.id, E.both);
+    } else {
+      db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?').run(sh.id, E.both);
+    }
+  }
+});
+
+test('the ordinary sync still defers to a figure a manager typed', () => {
+  // The guard the force path steps around must still be there for everybody
+  // else, or it is not a guard. Only the deliberate answer overrides it.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'db.js'), 'utf8');
+  const normal = /setClockHours: db\.prepare\(([\s\S]*?)\n  \),/.exec(src)[1];
+  assert.match(normal, /WHERE work\.hours_source IS NULL OR work\.hours_source = 'clock'/,
+    'the ordinary write still refuses to overwrite a typed figure');
+  assert.match(src, /forceClockHours/, 'and the override is a separate statement');
+});

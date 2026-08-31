@@ -419,6 +419,30 @@ const w = {
        hours_set_at = excluded.hours_set_at
      WHERE work.hours_source IS NULL OR work.hours_source = 'clock'`
   ),
+  /**
+   * The same write, WITHOUT the "a manager's number outranks the clock" rule.
+   *
+   * Reachable from exactly one place: a manager answering "the service was
+   * already sent — update it too?" after correcting a punch. That answer is a
+   * deliberate instruction to replace whatever figure is on the service with
+   * the corrected clocked hours, which is the one case where the clock should
+   * win over a typed number.
+   *
+   * A separate statement rather than a flag on the one above, so the ordinary
+   * rule cannot be switched off by passing something wrong — there is simply
+   * no argument that makes setClockHours overwrite a manager's figure.
+   */
+  forceClockHours: db.prepare(
+    `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents,
+                       hours_source, hours_set_by, hours_set_at)
+     VALUES (@shift_id, @employee_id, @role, @hours, 0, 'clock', @by, datetime('now'))
+     ON CONFLICT(shift_id, employee_id) DO UPDATE SET
+       hours        = excluded.hours,
+       hours_source = 'clock',
+       hours_set_by = excluded.hours_set_by,
+       hours_set_at = excluded.hours_set_at`
+  ),
+
   // Same rule, but never creates a row: for when the last punch leaves a shift
   // and the hours it put there have to go with it.
   clearClockHours: db.prepare(

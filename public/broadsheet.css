@@ -6148,3 +6148,31 @@ input[type="date"], input[type="time"], input[type="search"], select {
    same thing in words for anybody it does not. */
 .ts-moon { display: inline-block; margin-left: 6px; font-size: 12px; line-height: 1;
   color: var(--muted); cursor: help; }
+
+/* Save / Cancel on an open cell. Editing somebody's hours takes a deliberate
+   act, and abandoning one leaves the figure exactly as it was — this used to
+   commit on blur, so tabbing past a cell wrote a punch nobody meant to touch. */
+.tsr-acts { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.tsr-ok, .tsr-no { padding: 3px 9px; border-radius: 7px; font: inherit; font-size: 11.5px;
+  font-weight: 600; cursor: pointer; white-space: nowrap; }
+.tsr-ok { border: 1px solid var(--ink); background: var(--ink); color: var(--panel); }
+.tsr-no { border: 1px solid var(--rule); background: var(--panel); color: var(--muted); }
+.tsr-ok:hover { filter: brightness(1.1); }
+.tsr-no:hover { border-color: var(--ink); color: var(--ink); }
+
+/* "The service was already sent — update it too?" A punch edit normally flows
+   through to the hours the Services page and the tip-out read; when it cannot,
+   this asks rather than letting the two quietly disagree. */
+.tsq { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; }
+.tsq-scrim { position: absolute; inset: 0; background: rgba(16, 20, 26, .42); }
+.tsq-box { position: relative; width: min(440px, calc(100vw - 32px)); padding: 22px 24px;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 14px;
+  outline: 1px solid rgba(0,0,0,.06); }
+.tsq-box h2 { margin: 0 0 8px; font-size: 17px; font-weight: 650; color: var(--headline); }
+.tsq-box p { margin: 0 0 18px; font-size: 13.5px; line-height: 1.5; color: var(--body); }
+.tsq-acts { display: flex; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+.tsq-yes, .tsq-no { padding: 9px 15px; border-radius: 9px; font: inherit; font-size: 13.5px;
+  font-weight: 600; cursor: pointer; }
+.tsq-yes { border: 1px solid var(--ink); background: var(--ink); color: var(--panel); }
+.tsq-no { border: 1px solid var(--rule); background: var(--panel); color: var(--ink); }
+.tsq-yes[disabled] { opacity: .6; cursor: default; }

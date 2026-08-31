@@ -19359,7 +19359,11 @@ function tcCanEdit(req, res, entry) {
     const st = sheetCovering(entry.employee_id, entry.business_date);
     if (st.frozen) {
       const who = st.sheet.approved_by ? ` by ${st.sheet.approved_by}` : '';
-      res.redirect(`/timeclock/${entry.id}?msg=` + encodeURIComponent(
+      // BACK WHERE THEY WERE, not off to the punch page. A refusal that lands
+      // you on a different screen reads as "the button did something odd" —
+      // and the row you tried to delete is still there when you navigate back,
+      // which reads as nothing happening at all. Reported exactly that way.
+      res.redirect(punchBack(req, `/timeclock/${entry.id}`,
         `That day is on a timesheet that was already ${st.sheet.status}${who}. Reopen it on Timesheets first — `
         + 'changing the hours underneath a signature would leave it describing figures nobody signed for.'));
       return false;
@@ -23052,6 +23056,48 @@ app.post('/timeclock/:id/edit', (req, res) => {
  *   error          — a sentence to show, from the same guards every other path
  *                    uses (overlap, breaks that would fall outside, and so on)
  */
+/**
+ * Carry a punch edit through to the service it belongs to.
+ *
+ * Only reachable by a manager answering the question the edit raised, and only
+ * for a service that was already SENT — a frozen timesheet is refused here as
+ * everywhere else, because the fix for that is to reopen the sheet, not to
+ * write underneath a signature.
+ *
+ * `force` is what tells syncShiftHours to write anyway. It exists for exactly
+ * this one caller: everywhere else, "the shift was emailed" must keep meaning
+ * "leave it alone", or the guard would be no guard at all.
+ */
+app.post('/timeclock/:id/sync-service', express.json(), (req, res) => {
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).json({ error: 'That punch no longer exists.' });
+  if (!canWrite()) return res.status(403).json({ error: 'Your account is view-only.' });
+  if (!punchReadable()) return res.status(403).json({ error: 'Correcting a punch needs the time clock or payroll.' });
+  if (!e.shift_id) return res.status(400).json({ error: 'That punch is not on a service.' });
+
+  const st = TC.sheetCovering(e.employee_id, e.business_date);
+  if (st.frozen) {
+    return res.status(409).json({
+      error: `That day is on a timesheet that was already ${st.sheet.status}. Reopen it on Timesheets first.`,
+    });
+  }
+
+  const actor = tcActor(req);
+  const out = TC.syncShiftHours(e.shift_id, e.employee_id, actor, { role: e.position, force: true });
+  if (!out.written) {
+    return res.status(409).json({ error: 'The service could not be updated. Nothing was changed.' });
+  }
+  // The tip-out is recomputed from the hours whenever the service is read, so
+  // there is nothing to recalculate here — writing the hours IS the change.
+  // The policy version the service was closed under is untouched, so a past
+  // tip-out is re-split on the corrected hours and not on today's rules.
+  TC.logEvent('shift', e.shift_id, 'hours_synced_after_edit', actor, {
+    after: `${out.hours}h`,
+    reason: 'a manager chose to update the service after correcting a punch',
+  });
+  return res.json({ ok: true, hours: out.hours });
+});
+
 app.post('/timeclock/:id/cell', express.json(), (req, res) => {
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).json({ error: 'That punch no longer exists.' });
@@ -23147,8 +23193,40 @@ app.post('/timeclock/:id/cell', express.json(), (req, res) => {
     if (moved.clock_out_at) TC.recompute(moved);
     const fresh = TC.q.byId.get(e.id);
     tcTouchTimesheet(e.id, actor, `a manager corrected the ${summary}`, [e.business_date]);
-    TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
+    const sync = TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
     if (e.shift_id && e.shift_id !== fresh.shift_id) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+
+    // THE SERVICE MIGHT NOT HAVE FOLLOWED.
+    //
+    // A punch edit normally flows straight through to work.hours, which is
+    // what the Services page and the tip-out read. Two cases hold it back: a
+    // service already emailed (the hours it was sent with stand) and a frozen
+    // timesheet (changing figures under a signature). Both are correct
+    // defaults — and both used to happen SILENTLY, so the clock said one thing
+    // and the service said another with nothing on screen about it.
+    //
+    // Now it asks. The answer is the manager's, because only they know whether
+    // the emailed figure or the corrected one is the true story.
+    if (sync && sync.written === false && (sync.reason === 'shift_sent' || sync.reason === 'sheet_frozen')) {
+      const sh = fresh.shift_id ? s.shiftById.get(fresh.shift_id) : null;
+      return res.json({
+        ok: true,
+        ask: {
+          kind: sync.reason,
+          entry: fresh.id,
+          shift: fresh.shift_id,
+          hours: sync.hours,
+          was: sh ? Number(qEnteredForEmp.get(e.employee_id, sh.date, sh.date).h || 0) : null,
+          title: sync.reason === 'shift_sent'
+            ? 'Update the service too?'
+            : 'That day is on a signed timesheet',
+          body: sync.reason === 'shift_sent'
+            ? `The punch is saved. Its service was already sent, so the Services page still shows the hours it was emailed with — updating it will change the tip-out for that service.`
+            : `The punch is saved. That day sits on a timesheet that was already signed off, so the Services page has not been changed.`,
+          can: sync.reason === 'shift_sent',
+        },
+      });
+    }
     return res.json({ ok: true });
   } catch (err) {
     if (err instanceof TC.ClockError) return res.status(400).json({ error: err.message });
@@ -23963,6 +24041,51 @@ const tsGridScript = () => `<script>
         open = null;
       }
 
+      /**
+       * "The service was already sent — update it too?"
+       *
+       * A punch edit normally flows through to the hours the Services page and
+       * the tip-out read. It is held back for a service already emailed, and
+       * for a day on a signed timesheet. Both are the right default and both
+       * used to happen silently, so the clock said one thing and the service
+       * said another with nothing on screen about it.
+       */
+      function askService(ask) {
+        var box = document.createElement('div');
+        box.className = 'tsq';
+        box.innerHTML = '<div class="tsq-scrim"></div><div class="tsq-box" role="alertdialog" aria-modal="true">'
+          + '<h2></h2><p></p><div class="tsq-acts"></div></div>';
+        box.querySelector('h2').textContent = ask.title;
+        box.querySelector('p').textContent = ask.body;
+        var acts = box.querySelector('.tsq-acts');
+
+        function go() { box.remove(); reload(); }
+        if (ask.can) {
+          var yes = document.createElement('button');
+          yes.className = 'tsq-yes'; yes.type = 'button';
+          yes.textContent = 'Yes — update the service';
+          yes.addEventListener('click', function () {
+            yes.disabled = true; yes.textContent = 'Updating…';
+            fetch('/timeclock/' + ask.entry + '/sync-service', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+            }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
+              .then(function (o) {
+                if (o.s !== 200) { say(o.j && o.j.error ? o.j.error : 'That did not update.'); }
+                go();
+              })
+              .catch(function () { say('That did not update — check your connection.'); go(); });
+          });
+          acts.appendChild(yes);
+        }
+        var no = document.createElement('button');
+        no.className = 'tsq-no'; no.type = 'button';
+        no.textContent = ask.can ? 'No — leave the service as it is' : 'Understood';
+        no.addEventListener('click', go);
+        acts.appendChild(no);
+        document.body.appendChild(box);
+        no.focus();
+      }
+
       function save(cellEl, value, reopen) {
         if (busy) return; busy = true; cellEl.classList.add('busy');
         var mk = cellEl.dataset.new === '1';
@@ -23975,7 +24098,14 @@ const tsGridScript = () => `<script>
         }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
           .then(function (out) {
             busy = false;
-            if (out.s === 200) { say(''); open = null; return reload(); }
+            if (out.s === 200) {
+              say(''); open = null;
+              // The punch saved, but its service may not have followed. Ask
+              // before reloading — the answer is the manager's, and the
+              // question disappears if the page moves first.
+              if (out.j && out.j.ask) return askService(out.j.ask);
+              return reload();
+            }
             // A signed period asks once, right here, rather than sending
             // somebody off to reopen it and come back to the cell they were in.
             if (out.s === 409 && out.j.needs_reopen) {
@@ -24024,6 +24154,23 @@ const tsGridScript = () => `<script>
         input.className = 'tsr-in';
         open = { el: c, text: text };
         c.textContent = ''; c.appendChild(input);
+
+        // A SAVE BUTTON, and clicking away throws the change away.
+        //
+        // This used to commit on BLUR, so tabbing past a cell — or tapping
+        // anywhere else on the page — wrote a punch nobody meant to change.
+        // An edit to somebody's hours should take a deliberate act, and
+        // abandoning one should leave the figure exactly as it was.
+        var acts = document.createElement('span');
+        acts.className = 'tsr-acts';
+        var ok = document.createElement('button');
+        ok.type = 'button'; ok.className = 'tsr-ok'; ok.textContent = 'Save';
+        ok.title = 'Save this change (Enter)';
+        var no = document.createElement('button');
+        no.type = 'button'; no.className = 'tsr-no'; no.textContent = 'Cancel';
+        no.title = 'Leave it as it was (Esc)';
+        acts.appendChild(ok); acts.appendChild(no);
+        c.appendChild(acts);
         input.focus();
 
         var done = false;
@@ -24033,12 +24180,26 @@ const tsGridScript = () => `<script>
           if (!v || v === c.dataset.v) return cancel();
           save(c, v, false);
         }
+        ok.addEventListener('mousedown', function (e2) { e2.preventDefault(); });
+        ok.addEventListener('click', function (e2) { e2.preventDefault(); e2.stopPropagation(); commit(); });
+        no.addEventListener('mousedown', function (e2) { e2.preventDefault(); });
+        no.addEventListener('click', function (e2) {
+          e2.preventDefault(); e2.stopPropagation(); done = true; cancel();
+        });
         input.addEventListener('keydown', function (e2) {
           if (e2.key === 'Enter') { e2.preventDefault(); commit(); }
           if (e2.key === 'Escape') { done = true; cancel(); }
         });
-        input.addEventListener('blur', commit);
-        if (field === 'position') input.addEventListener('change', commit);
+        // Clicking away DISCARDS. Deliberately not commit() — see above. The
+        // guard is for focus moving inside this cell, to Save or Cancel, which
+        // is not clicking away at all.
+        input.addEventListener('blur', function () {
+          setTimeout(function () {
+            if (done) return;
+            if (c.contains(document.activeElement)) return;
+            done = true; cancel();
+          }, 120);
+        });
       });
     })();
     </script>`;

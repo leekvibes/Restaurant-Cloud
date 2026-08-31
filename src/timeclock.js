@@ -833,7 +833,10 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
   // the numbers it had at the time. Nothing is snapshotted — every view
   // recomputes live — so rewriting one now would make the app quietly disagree
   // with mail already in people's inboxes. Hold, and leave a note saying so.
-  if (sh.status === 'emailed') {
+  // `force` is one caller: a manager answering "the service was already sent,
+  // update it anyway?" after correcting a punch. Everywhere else this must
+  // keep holding, or the guard is not a guard.
+  if (sh.status === 'emailed' && !opts.force) {
     logEvent('shift', shiftId, 'hours_held_sent', by, {
       after: `${hours}h clocked`,
       reason: 'shift already emailed — the hours it was sent with stand',
@@ -847,7 +850,11 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
     return { written: gone.changes > 0, hours: 0, ...r };
   }
 
-  const info = w.setClockHours.run({
+  // force uses the statement that does NOT defer to a manager's figure. It is
+  // reachable only from a manager answering "update the service too?", which
+  // is exactly an instruction to replace that figure with the clocked hours.
+  const stmt = opts.force ? w.forceClockHours : w.setClockHours;
+  const info = stmt.run({
     shift_id: shiftId, employee_id: employeeId,
     role: opts.role || r.a_position || 'server', hours, by,
   });
