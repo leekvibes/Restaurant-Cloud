@@ -1201,7 +1201,11 @@ test('settings save and take effect', async () => {
   const T = require('../src/timeclock');
   const c = T.settings();
   assert.strictEqual(c.cutoffHour, 5);
-  assert.strictEqual(c.dinnerFrom, 17);
+  // dinnerFrom is no longer on the form and no longer settable. It guessed a
+  // service from a clock boundary; clock-in always asks now, and the schedule
+  // drawer takes its service from the board it was opened on. The stored value
+  // is passed through on save rather than dropped, so it holds steady.
+  assert.strictEqual(c.dinnerFrom, 16, 'unchanged by a save that does not carry it');
   assert.strictEqual(c.longShift, 12);
   assert.strictEqual(c.breaksPaid, true, 'breaks now default to paid');
   assert.strictEqual(c.requireService, undefined,
