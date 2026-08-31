@@ -6063,3 +6063,14 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .cl-o input[type="radio"] { width: 16px; height: 16px; flex: none; }
 .cl-n { width: 62px; padding: 3px 7px; text-align: center; font: inherit; font-size: 13px;
   border: 1px solid var(--rule); border-radius: 7px; background: var(--panel); color: var(--ink); }
+
+/* The catch-all rate, and the positions that are actually leaning on it. */
+.epr-fall { margin-top: 4px; border: 1px solid var(--rule); border-radius: 11px; overflow: hidden; }
+.epr-fall-f { margin: 0; padding: 0 14px 14px; }
+.epr-rate--fall { margin: 0 -14px; padding-left: 14px; padding-right: 14px; background: var(--paper); }
+.epr-fall-n { width: 110px; padding: 6px 10px; text-align: right; font: inherit; font-size: 14px;
+  border: 1px solid var(--rule); border-radius: 9px; background: var(--panel); color: var(--ink); }
+.epr-gap { margin: 12px 0 0; padding: 11px 13px; border-radius: 10px; background: var(--paper);
+  font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.epr-gap b { color: var(--headline); }
+.epr-gap i { font-style: normal; }

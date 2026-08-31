@@ -194,3 +194,52 @@ test('deactivating still deletes nothing', async () => {
   await post(`/employees/${ANNA}/reactivate`, {});
   assert.strictEqual(emp(ANNA).active, 1, 'and they come back');
 });
+
+// --- the catch-all rate, moved out of Employment -----------------------------
+
+test('the catch-all rate lives with the other rates, not on Employment', async () => {
+  // It is not an employment attribute. It is what gets used when somebody
+  // works a position nobody set a rate for — on the live data that is 90% of
+  // all hours — so it belongs beside the position rates, and calling it
+  // "Default hourly wage" next to Pay type made it read as a rival wage level.
+  //
+  // Asserted on the rendered page rather than the source: what is served is
+  // what matters, and a regex over a template is one refactor from lying.
+  const employment = await text(`/employees/${ANNA}/edit?tab=employment`);
+  assert.doesNotMatch(employment, /Default hourly wage/, 'gone from Employment');
+  const visible = employment.match(/<input(?![^>]*type="hidden")[^>]*name="rate"/g) || [];
+  assert.strictEqual(visible.length, 0, 'no wage field on Employment any more');
+  assert.match(employment, /<input type="hidden" name="rate"/,
+    'but carried hidden, or saving Employment would blank it');
+
+  const pay = await text(`/employees/${ANNA}/edit?tab=pay`);
+  assert.match(pay, /Anything else they work/, 'and it is on Schedule & pay, named for what it does');
+  assert.match(pay, /class="epr-fall-n" name="rate"/, 'and editable there');
+});
+
+test('a position somebody actually works with no rate of its own is surfaced', async () => {
+  // An invisible fallback becomes a visible prompt. Without this, somebody can
+  // work sixty kitchen shifts on a catch-all and nothing ever says so.
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES ('2027-04-04', 'cafe', 'emailed', datetime('now'))`).run().lastInsertRowid);
+  db.prepare(`INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
+              VALUES (?, ?, 'barista', 6, 0)`).run(sh, ANNA);
+  try {
+    const html = await text(`/employees/${ANNA}/edit?tab=pay`);
+    assert.match(html, /No rate of its own/, 'the gap is named');
+    assert.match(html, /Barista/, 'and says which position');
+  } finally {
+    db.prepare('DELETE FROM work WHERE shift_id = ?').run(sh);
+    db.prepare('DELETE FROM shifts WHERE id = ?').run(sh);
+  }
+});
+
+test('saving the catch-all does not blank the rest of the record', () => {
+  // It posts to the same route as everything else, so it carries the fields it
+  // does not show — the same rule the two profile forms follow.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const fall = /class="epr-fall-f"([\s\S]*?)<\/form>/.exec(src)[1];
+  for (const f of ['name', 'role', 'email', 'pos_id', 'pay_type', 'ot_eligible']) {
+    assert.ok(fall.includes(`'${f}'`) || fall.includes(`name="${f}"`), `${f} travels with it`);
+  }
+});

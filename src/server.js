@@ -7420,18 +7420,67 @@ function clockPage(req, who, opts = {}) {
           }, 10 * 60 * 1000);
         }
         // A punch must not fire twice because a thumb bounced.
+        // ONE SUBMIT, but only once there IS one.
+        //
+        // This used to fire on CLICK. When the browser refused the submit —
+        // a required field left empty — the form never went anywhere, but the
+        // button had already disabled itself and said "Working…". The clock
+        // was dead until the app was closed and reopened, with nothing on
+        // screen saying why. The submit event only fires after validation
+        // passes, so a refused attempt now leaves the button alive.
         document.querySelectorAll('[data-once]').forEach(function (b) {
-          b.addEventListener('click', function () {
+          var f = b.form;
+          if (!f) return;
+          f.addEventListener('submit', function () {
             if (b.dataset.done) return;
             b.dataset.done = '1';
             setTimeout(function () { b.disabled = true; b.textContent = 'Working…'; }, 0);
           });
+          // And say what is missing, rather than nothing at all. The browser's
+          // own bubble is easy to miss on a phone and vanishes on scroll.
+          f.addEventListener('invalid', function (ev) {
+            ev.preventDefault();
+            var el = ev.target;
+            ptToast(el.name === 'position'
+              ? 'Choose the position you are working first.'
+              : (el.name === 'daypart' ? 'Choose which service you are clocking into.'
+                : 'Something on this screen still needs an answer.'));
+            if (el.focus) el.focus();
+          }, true);
         });
         // The toast says its piece and goes. The URL keeps the ?ok= so a
         // reload still tells the truth about what happened; only the pixels
         // are temporary.
         var toasts = document.querySelector('.pt-toasts');
         if (toasts) setTimeout(function () { toasts.remove(); }, 3600);
+
+        // Saying something without a page load. Used where the browser refuses
+        // a submit — there is no round trip to carry a message on, and a
+        // control that simply does nothing is the worst of the options.
+        function ptToast(msg, kind) {
+          var box = document.querySelector('.pt-toasts');
+          if (!box) {
+            box = document.createElement('div');
+            box.className = 'pt-toasts pt-toasts--top';
+            document.body.appendChild(box);
+          }
+          var t = document.createElement('div');
+          t.className = 'pt-toast ' + (kind || 'bad') + ' pt-toast--in';
+          t.setAttribute('role', 'alert');
+          t.textContent = msg;
+          box.appendChild(t);
+          // Two frames, so the browser has painted the start state before the
+          // class that animates away from it lands. One frame is not enough on
+          // a phone and the toast appears without its transition.
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () { t.classList.remove('pt-toast--in'); });
+          });
+          setTimeout(function () {
+            t.classList.add('pt-toast--out');
+            setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 260);
+          }, 3200);
+        }
+        window.ptToast = ptToast;
       })();
     </script>`);
 }
@@ -7532,7 +7581,16 @@ app.post('/portal/clock/in', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
   const { emp } = who;
-  const back = (p) => res.redirect('/portal/clock?' + p);
+  // KEEP THE SERVICE ON THE WAY BACK.
+  //
+  // Every refusal used to redirect to a bare /portal/clock, which for anybody
+  // on more than one clock is the PICKER — so a failed clock-in threw them back
+  // to choosing a service, and the message explaining why never got a screen to
+  // appear on. They picked again, failed again, and nothing ever said what was
+  // wrong. The service they chose travels with the error now.
+  const svcBackTo = SERVICES.isActive(req.body.daypart) ? req.body.daypart : '';
+  const back = (p) => res.redirect('/portal/clock?'
+    + (svcBackTo ? `svc=${encodeURIComponent(svcBackTo)}&` : '') + p);
   const allowed = clockPositionsFor(emp);
   if (!allowed.length) return back('err=' + encodeURIComponent('No position is assigned to you — ask your manager.'));
   if (TC.q.active.get(emp.id)) return back('ok=' + encodeURIComponent('You are already clocked in.'));
@@ -9547,8 +9605,47 @@ function eprPay(req, e, { w, payRoles, mine, today0 }) {
       ${roleRows.length || orphans.length
     ? roleRows.map((r) => posCard(r.role, r.wage_cents)).join('')
       + orphans.map((r) => posCard(r, null)).join('')
-    : `<p class="epr-none">No positions yet. Their default wage of ${
-      e.hourly_rate_cents ? money(e.hourly_rate_cents) + '/hr' : '&mdash;'} applies to anything they work.</p>`}
+    : '<p class="epr-none">No position rates yet — everything they work uses the catch-all below.</p>'}
+
+      ${/* THE CATCH-ALL, named for what it is.
+           It used to sit on Employment as "Default hourly wage", beside Pay
+           type and POS ID, which made it read as a competing wage level. It is
+           not: it is what gets used when somebody works a position nobody set a
+           rate for. On this data that is 90% of all hours, so it is doing most
+           of the work and belongs where the other rates are. */''}
+      ${e.pay_type === 'salary' ? '' : `<div class="epr-fall">
+        <form method="post" action="/employees/${e.id}" class="epr-fall-f">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          ${['name', 'role', 'email', 'pos_id', 'pay_type', 'salary'].map((n) => {
+    const v = { name: e.name, role: e.role, email: e.email, pos_id: e.pos_id, pay_type: e.pay_type,
+      salary: e.salary_cents ? (e.salary_cents / 100).toFixed(2) : '' }[n];
+    return v === '' || v == null ? '' : `<input type="hidden" name="${n}" value="${esc(v)}">`;
+  }).join('')}
+          <input type="hidden" name="ot_eligible" value="${e.ot_exempt ? '' : '1'}">
+          <div class="epr-rate epr-rate--fall">
+            <span>Anything else they work<i>Used when they work a position with no rate of its own</i></span>
+            ${w ? `<input class="epr-fall-n" name="rate" type="number" step="0.01" min="0"
+              value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}" placeholder="0.00">`
+    : `<b>${e.hourly_rate_cents ? money(e.hourly_rate_cents) : '<span class="muted">not set</span>'}<i>/hr</i></b>`}
+          </div>
+          ${w ? wageWhenFields(e.id, null, { idSuffix: 'fall' }) : ''}
+          ${w ? '<button class="bs-btn" type="submit">Save catch-all rate</button>' : ''}
+        </form>
+      </div>`}
+
+      ${/* Which positions they ACTUALLY work with no rate of their own. An
+           invisible fallback becomes a visible prompt: the manager can see that
+           Kevin has worked sixty kitchen shifts on a catch-all and go and set
+           the real rate. */''}
+      ${(() => {
+    const gaps = db.prepare(`SELECT w.role, COUNT(*) n FROM work w
+      LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+      WHERE w.employee_id = ? AND er.role IS NULL GROUP BY w.role ORDER BY n DESC`).all(e.id);
+    if (!gaps.length || e.pay_type === 'salary') return '';
+    return `<p class="epr-gap"><b>No rate of its own:</b> ${gaps.map((g) =>
+      `${esc(posName(g.role))} <i>(${g.n} shift${g.n === 1 ? '' : 's'})</i>`).join(', ')}.
+      Those shifts use the catch-all rate above. Add a rate for a position and it takes over from then on.</p>`;
+  })()}
 
       ${w ? `<details class="epr-add">
         <summary>+ Add a position or rate</summary>
@@ -9806,21 +9903,22 @@ app.get('/employees/:id/edit', (req, res) => {
           <input name="pos_id" value="${val(e.pos_id)}" placeholder="optional" ${w ? '' : 'disabled'}></div>
       </div>
 
-      <h2 class="epr-h epr-h--2">${isSalary ? 'Salary' : 'Default hourly wage'}</h2>
-      <p class="epr-hint">${isSalary
-    ? 'Salaried staff carry no hourly rate, and are left out of hourly wage cost.'
-    : 'What they earn when no position-specific rate applies. Set rates per position under Schedule &amp; pay.'}</p>
+      ${isSalary ? `<h2 class="epr-h epr-h--2">Salary</h2>
+      <p class="epr-hint">Salaried staff carry no hourly rate and are left out of hourly wage cost.</p>
       <div class="epr-rows">
-        ${isSalary ? `<div class="epr-row"><span>Salary<i>per pay period</i></span>
+        <div class="epr-row"><span>Salary<i>per pay period</i></span>
           <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" ${w ? '' : 'disabled'}></div>
-          <input type="hidden" name="rate" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}">`
-    : `<div class="epr-row"><span>Hourly wage</span>
-          <input name="rate" type="number" step="0.01" min="0" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}" ${w ? '' : 'disabled'}></div>
-          <input type="hidden" name="salary" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}">`}
       </div>
-      ${isSalary || !w ? '' : wageWhenFields(e.id, null, { idSuffix: 'def' })}
+      <input type="hidden" name="rate" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}">`
+    : `${/* The hourly rate moved to Schedule & pay, where the other rates are —
+             it is a catch-all rate, not an employment attribute, and sitting
+             beside Pay type and POS ID made it read as a competing wage level.
+             Carried here as a hidden field so saving this form does not blank
+             it. */''}
+      <input type="hidden" name="rate" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}">
+      <input type="hidden" name="salary" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}">`}
       ${w ? '<button class="bs-btn epr-save" type="submit">Save employment</button>' : ''}
-      <p class="epr-hint epr-hint--foot">Positions are managed under <a href="/positions">Positions</a>.</p>
+      <p class="epr-hint epr-hint--foot">Wages are under <a href="/employees/${e.id}/edit?tab=pay">Schedule &amp; pay</a>. Positions themselves are managed under <a href="/positions">Positions</a>.</p>
     </form>`;
 
   res.send(layout(e.name, `

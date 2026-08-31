@@ -1730,3 +1730,17 @@ body.bare {
 .tcc-svc b { font-size: 14px; font-weight: 700; color: var(--pt-ink, #1c1a17); }
 .tcc-svc-back { font-size: 13.5px; color: var(--pt-muted, #6b6559); text-decoration: none;
   min-height: 36px; display: inline-flex; align-items: center; }
+
+/* --- a toast that appears without a page load -------------------------------
+   The existing toasts sit above the tab bar because they follow an action that
+   reloaded the page. This one answers a control that REFUSED to act, so it
+   belongs at the top where the eye already is — next to the thing that would
+   not go. */
+.pt-toasts--top { top: calc(12px + env(safe-area-inset-top)); bottom: auto; }
+.pt-toast { transition: opacity .22s ease, transform .22s ease; }
+.pt-toast--in { opacity: 0; transform: translateY(-10px); }
+.pt-toast--out { opacity: 0; transform: translateY(-10px); }
+@media (prefers-reduced-motion: reduce) {
+  .pt-toast { transition: none; }
+  .pt-toast--in { opacity: 1; transform: none; }
+}
