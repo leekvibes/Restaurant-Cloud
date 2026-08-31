@@ -414,6 +414,11 @@ const DEFAULTS = {
   tc_pin_out: '0',
   tc_pin_fix: '1',           // and for a correction request
   tc_alerts: '1',            // surface time-clock items on the dashboard
+  // Auto clock-out. OFF by default and it must stay that way on an upgrade:
+  // switching it on writes a clock-out time nobody punched, and that is the
+  // owner's decision to make rather than something that arrives with a deploy.
+  tc_auto_out: '0',
+  tc_auto_out_hours: '13',
 };
 const setting = (k) => { const r = sq.get.get(k); return r === undefined ? DEFAULTS[k] : r.value; };
 const settings = () => ({
@@ -424,6 +429,8 @@ const settings = () => ({
   // No pinAtOut. Clocking out never asks for a PIN — see /portal/clock/out.
   pinForFix: setting('tc_pin_fix') === '1',
   alertsOn: setting('tc_alerts') === '1',
+  autoOut: setting('tc_auto_out') === '1',
+  autoOutHours: Number(setting('tc_auto_out_hours')) || 13,
 });
 const saveSettings = (v) => {
   const clamp = (x, lo, hi, d) => { const n = Math.round(Number(x)); return isFinite(n) && n >= lo && n <= hi ? n : d; };
@@ -434,6 +441,10 @@ const saveSettings = (v) => {
   sq.set.run({ key: 'tc_break_paid', value: flag(v.breaksPaid) });
   sq.set.run({ key: 'tc_pin_fix', value: flag(v.pinForFix) });
   sq.set.run({ key: 'tc_alerts', value: flag(v.alertsOn) });
+  sq.set.run({ key: 'tc_auto_out', value: flag(v.autoOut) });
+  // Floored at 4 hours. Anything shorter would close real shifts in progress,
+  // and the point of this is to catch a punch nobody came back to.
+  sq.set.run({ key: 'tc_auto_out_hours', value: String(clamp(v.autoOutHours, 4, 24, 13)) });
 };
 
 // --- time helpers ----------------------------------------------------------
@@ -849,6 +860,17 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
 //   active --start_break--> on_break --end_break--> active
 //   active --clock_out--> complete
 //   complete --correct--> complete (edited)
+// Auto clock-out leaves a mark on the entry it closed. Its own column rather
+// than a note or a `source` value: `source` records how an entry was CREATED
+// and this is about how it ENDED, and every screen that flags it needs to be
+// able to ask cheaply. A clock-out nobody punched must never be invisible.
+try {
+  const teCols = db.prepare('PRAGMA table_info(time_entries)').all().map((c) => c.name);
+  if (!teCols.includes('auto_closed')) {
+    db.exec('ALTER TABLE time_entries ADD COLUMN auto_closed INTEGER NOT NULL DEFAULT 0');
+  }
+} catch { /* the table is created above; a failure here means an older engine */ }
+
 const STATUSES = ['active', 'on_break', 'complete', 'missing_punch', 'correction_pending', 'locked'];
 const isOpen = (e) => e && (e.status === 'active' || e.status === 'on_break');
 
@@ -1903,6 +1925,66 @@ if (backfilled.done) {
     + (backfilled.held ? `; ${backfilled.held} left alone (already sent, or set by hand)` : ''));
 }
 
+/**
+ * Close punches nobody came back to.
+ *
+ * OFF unless the owner switches it on, and it writes a clock-out time that
+ * nobody punched. That is a real cost and it was raised before it was built:
+ * today an implausibly long punch pays nothing and is flagged, whereas this
+ * pays a made-up figure. The owner chose it knowing that, on the condition
+ * that the entry is marked loudly wherever it appears — which is what
+ * `auto_closed` is for, and why nothing here is silent.
+ *
+ * Rules that keep it honest:
+ *   - never touches an entry that is already closed
+ *   - never touches somebody on a break, who is demonstrably still here
+ *   - closes at exactly clock_in + the configured hours, not at "now", so the
+ *     figure does not depend on when the sweep happened to run
+ *   - recompute() does the arithmetic, so breaks and payable minutes are
+ *     derived the same way an ordinary clock-out derives them
+ */
+function autoCloseStale(now = nowUtc()) {
+  const cfg = settings();
+  if (!cfg.autoOut) return { closed: 0, entries: [] };
+  const limit = Math.max(4, Number(cfg.autoOutHours) || 13);
+
+  const open = q.allActive.all().filter((e) => e.status === 'active');
+  const done = [];
+  for (const e of open) {
+    if (minutesBetween(e.clock_in_at, now) < limit * 60) continue;
+    // Stored the way every other stamp is stored: 'YYYY-MM-DD HH:MM:SS' in UTC.
+    const out = new Date(toDate(e.clock_in_at).getTime() + limit * 3600 * 1000)
+      .toISOString().slice(0, 19).replace('T', ' ');
+    try {
+      const raw = minutesBetween(e.clock_in_at, out);
+      const { paid, unpaid } = breakTotals(e.id);
+      db.transaction(() => {
+        q.closeEntry.run({
+          id: e.id, out, raw, paid, unpaid, payable: Math.max(0, raw - unpaid), by: 'auto',
+        });
+        db.prepare('UPDATE time_entries SET auto_closed = 1 WHERE id = ?').run(e.id);
+      })();
+      // The punch is the hours: propagate to work.hours the same way a real
+      // clock-out does, or payroll silently keeps the pre-close figure.
+      syncShiftHours(e.shift_id, e.employee_id);
+      logEvent('entry', e.id, 'auto_clocked_out', 'auto', { reason: `Closed automatically after ${limit}h` });
+      done.push({ id: e.id, employee_id: e.employee_id, out, hours: limit });
+    } catch (err) {
+      // One bad entry must not stop the sweep for everybody else. It stays
+      // open and keeps showing up in the long-shift alert, which is the
+      // outcome that existed before this ran at all.
+      logEvent('entry', e.id, 'auto_clock_out_failed', 'auto', { reason: String((err && err.message) || err) });
+    }
+  }
+  return { closed: done.length, entries: done };
+}
+
+/** Entries closed by the sweep and not yet corrected — for the red markers. */
+const autoClosedOn = db.prepare(`SELECT * FROM time_entries
+  WHERE auto_closed = 1 AND business_date = ?`);
+const autoClosedFor = db.prepare(`SELECT * FROM time_entries
+  WHERE auto_closed = 1 AND employee_id = ? AND business_date = ?`);
+
 module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
   fingerprintOf, approvalBlockers, approvalBlockersSplit, approvalStale, transferStateOf, TRANSFER_LABEL,
@@ -1916,6 +1998,9 @@ module.exports = {
   sheetCovering, frozenFor, FROZEN_SHEET,
   syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,
+  autoCloseStale,
+  autoClosedOn: (date) => autoClosedOn.all(date),
+  autoClosedFor: (empId, date) => autoClosedFor.all(empId, date),
   gridPeople: (from, to) => gridPeopleQ.all(from, to).map((r) => r.employee_id),
   sheetPeople: (start) => sheetPeopleQ.all(start).map((r) => r.employee_id),
 };

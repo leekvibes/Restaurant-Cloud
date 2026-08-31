@@ -5698,3 +5698,27 @@ input[type="date"], input[type="time"], input[type="search"], select {
 /* Rewriting what somebody was already paid at is the one destructive choice
    here, so it is the one that is coloured. */
 .wg-when .wg-opt--all b { color: var(--danger, #a3341f); }
+
+/* --- auto clock-out setting ------------------------------------------------
+   Laid out like the reference: the switch on the left, the number and its unit
+   held together on the right so "13" and "Hours" never wrap apart. */
+.tcs-auto { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; }
+.tcs-auto input { width: 18px; height: 18px; flex: none; }
+.tcs-auto-n { display: inline-flex; align-items: center; gap: 7px; margin-left: 14px;
+  font-size: 13px; color: var(--muted); white-space: nowrap; }
+.tcs-auto-n input { width: 74px; text-align: center; }
+
+/* --- auto clock-out marker -------------------------------------------------
+   The same red "!" on every screen an auto-closed entry appears on: the
+   timesheet, the live clock list, and the nightly close. The whole safety of
+   auto clock-out is that its punches cannot be mistaken for real ones, so this
+   is the one marker that is allowed to be loud. Focusable, because the
+   explanation lives in the title and a keyboard user has to be able to reach
+   it. */
+.auto-out { display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-right: 5px; flex: none;
+  border-radius: 50%; background: var(--danger, #a3341f); color: #fff;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 700; line-height: 1;
+  cursor: help; vertical-align: middle; }
+.auto-out:focus-visible { outline: 2px solid var(--headline); outline-offset: 1px; }
+.tsg-auto .tsg-d, .tcl-auto .tcl-who { font-weight: 650; }

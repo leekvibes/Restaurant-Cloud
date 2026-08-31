@@ -18,6 +18,7 @@ const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertT
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const WAGES = require('./wages');
+const SERVICES = require('./services');
 const OT = require('./overtime');
 const TC = require('./timeclock');
 // The planning domain. Requiring it here is what creates scheduled_shifts,
@@ -1951,6 +1952,13 @@ app.get('/shifts/:id', (req, res) => {
   const { warn, notes } = shiftWarnings(sh, inp, r);
   const staff = q.nonManagerList.all();
   const people = [...inp.servers, ...inp.support];
+  // Anybody on this service whose punch the sweep closed. Read once per page
+  // rather than per card, and marked on the nightly close too because that is
+  // where the hours are signed off — a made-up clock-out has to be visible at
+  // the moment somebody is deciding it is correct.
+  const autoOutIds = new Set(db.prepare(
+    'SELECT DISTINCT employee_id FROM time_entries WHERE shift_id = ? AND auto_closed = 1')
+    .all(sh.id).map((r) => r.employee_id));
 
   // --- per-person state -------------------------------------------------
   // What still needs doing for THIS person, so the fix is next to the card
@@ -2021,7 +2029,7 @@ app.get('/shifts/:id', (req, res) => {
       <div class="pcard-top">
         <span class="pavatar">${esc(initials(p.name))}</span>
         <div class="pcard-head">
-          <div class="pcard-name">${esc(p.name)}</div>
+          <div class="pcard-name">${esc(p.name)}${autoOutMark({ auto_closed: autoOutIds.has(p.employeeId) })}</div>
           <div class="pcard-role">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</div>
         </div>
         <span class="tstatus ${st.cls}">${esc(st.label)}</span>
@@ -18453,6 +18461,16 @@ const sbTime = (utc) => TC.clockFace(utc)
 const sbTimeFull = (utc) => TC.clockFace(utc)
   .replace(/\s*([AaPp])[Mm]\b/, (_, m) => m.toLowerCase());
 
+// A clock-out nobody punched. The same marker on every screen that shows the
+// entry, because the whole safety of auto clock-out is that it is impossible to
+// mistake for a real punch. Title, not a tooltip library: it has to survive on
+// a phone and in a screen reader.
+const autoOutMark = (e) => (e && e.auto_closed
+  ? `<span class="auto-out" role="img" tabindex="0"
+       title="Auto clocked out — nobody punched this time. Check it and correct if wrong."
+       aria-label="Auto clocked out. Nobody punched this time.">!</span>`
+  : '');
+
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
 // The app's icon set has no copy, no trash and nothing for unpublish, so these
 // four are drawn here rather than approximated with a document or a list that
@@ -20492,6 +20510,9 @@ app.get('/timeclock', (req, res) => {
     const br = e.status === 'on_break' ? TC.q.openBreak.get(e.id) : null;
     const issue = issueOf(e);
     const payable = TC.payableSoFar(e);
+    // No auto-out marker here: this list is people STILL on the clock, and an
+    // auto-closed entry is by definition no longer one of them. It shows on the
+    // day list, the timesheet and the nightly close instead.
     return `<div class="tcl-r${issue ? ' warn' : ''}">
       <span class="tcl-who"><span class="tcm-dot ${e.status === 'on_break' ? 'brk' : 'on'}"></span>
         <a href="/timeclock/${e.id}"><b>${esc(tcEmpName(e.employee_id))}</b></a>
@@ -20515,7 +20536,7 @@ app.get('/timeclock', (req, res) => {
     return `<a class="bs-lr tcm-row" href="/timeclock/${e.id}">
       <span class="tcm-when"><b>${esc(TC.dayLabel(e.business_date).replace(/^\w+, /, ''))}</b>
         <i>${e.daypart ? esc(dp(e.daypart)) : '—'}</i></span>
-      <span class="tcm-who"><b>${esc(tcEmpName(e.employee_id))}</b><i>${esc(tcPosName(e.position))}</i></span>
+      <span class="tcm-who">${autoOutMark(e)}<b>${esc(tcEmpName(e.employee_id))}</b><i>${esc(tcPosName(e.position))}</i></span>
       <span class="tcm-times">${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i class="tcm-open">open</i>'}
         ${bt.unpaid || bt.paid ? `<i>${TC.hm(bt.unpaid + bt.paid)} break</i>` : ''}</span>
       <span class="tcm-hrs">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</span>
@@ -20839,6 +20860,19 @@ app.get('/timeclock/settings', (req, res) => {
         ${row('Flag a shift left open past',
           `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === c.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
           'Almost always a missed clock-out rather than a very long day.')}
+        ${/* Auto clock-out, laid out like the reference the owner sent: a
+              checkbox that turns it on, and the hours beside it. Off until he
+              switches it on, deliberately — it writes a clock-out time nobody
+              punched, and that arriving with a deploy would be indefensible. */''}
+        ${row('Auto clock out',
+          `<label class="tcs-auto">
+            <input type="checkbox" name="auto_out" value="1"${c.autoOut ? ' checked' : ''} ${w2 ? '' : 'disabled'}>
+            <span>Clock people out automatically</span>
+          </label>
+          <span class="tcs-auto-n"><input type="number" name="auto_out_hours" min="4" max="24" step="1"
+            value="${c.autoOutHours}" ${w2 ? '' : 'disabled'} aria-label="Hours before an open punch is closed"> Hours</span>`,
+          'Anyone still on the clock this long is clocked out at that mark, and the entry is flagged '
+          + 'wherever it appears so you can correct it. It writes a time nobody punched, so it stays off until you want it.')}
         ${row('Breaks', check('breaks_paid', c.breaksPaid, 'Count breaks as paid by default'),
           'Either way a manager can change any single break.')}
         ${/* No clock-out switch. It used to be here, off by default, and it was
@@ -20863,6 +20897,8 @@ app.post('/timeclock/settings', (req, res) => {
     breaksPaid: req.body.breaks_paid === '1',
     pinForFix: req.body.pin_fix === '1',
     alertsOn: req.body.alerts === '1',
+    autoOut: req.body.auto_out === '1',
+    autoOutHours: req.body.auto_out_hours,
   });
   res.redirect('/timeclock/settings?msg=' + encodeURIComponent('Saved.'));
 });
@@ -22629,7 +22665,8 @@ app.get('/payroll/timesheets', (req, res) => {
 
       ${filtered.length ? `<div class="bs-lrows tcm-rows">
         ${filtered.map((r) => `<a class="bs-lr tcm-row ts-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
-          <span class="tcm-who"><b>${esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
+          <span class="tcm-who">${autoOutMark({ auto_closed: r.entries.some((x) => x.auto_closed) })}<b>${
+            esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
           <span class="tcm-times">${r.sheet.submitted_at ? `sent ${esc(TC.stamp(r.sheet.submitted_at))}` : 'not submitted'}${
             r.overridden && Math.abs(r.variance) >= 0.01 ? ` · <i class="${r.variance > 0 ? 'tcm-var-up' : 'tcm-var-dn'}">${r.variance > 0 ? '+' : ''}${r.variance}h vs entered</i>` : ''}</span>
@@ -23014,8 +23051,9 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 const bt = TC.breaksOn(e);
                 const iss = v.issues.filter((i2) => i2.entryId === e.id);
                 const corr = v.corrections.filter((c) => c.time_entry_id === e.id).length;
-                return `<div class="tsg-r${iss.some((i2) => i2.blocking) ? ' warn' : ''}" id="e-${e.id}" data-entry="${e.id}">
-                  <span class="tsg-d">${esc(TC.dayLabel(d.date))}</span>
+                return `<div class="tsg-r${iss.some((i2) => i2.blocking) ? ' warn' : ''}${
+                  e.auto_closed ? ' tsg-auto' : ''}" id="e-${e.id}" data-entry="${e.id}">
+                  <span class="tsg-d">${esc(TC.dayLabel(d.date))}${autoOutMark(e)}</span>
                   ${/* Removing a shift outright, from the page a manager is
                         already looking at when they find one that should not be
                         there. It posts to the SAME delete route the punch page
@@ -24237,6 +24275,21 @@ function runStaffSweep() {
 // restart it simply runs again at boot, and adminNotifyOnce makes that a no-op
 // for anything already announced.
 let lastSweepDay = null;
+/**
+ * Auto clock-out runs HOURLY, not once a day.
+ *
+ * A punch passes the limit at whatever hour it passes it, and the daily sweep
+ * returns early unless the date has changed — so hanging this off that would
+ * leave somebody clocked in until the following morning, which is the exact
+ * thing it exists to prevent. Cheap when switched off: one settings read.
+ */
+function maybeAutoClose() {
+  try {
+    const out = TC.autoCloseStale();
+    if (out.closed) console.log(`  Auto clock-out: closed ${out.closed} open punch(es).`);
+  } catch (e) { console.error('[auto-out]', e && e.message); }
+}
+
 function maybeRunDailySweep() {
   try {
     const day = isoDate(startOfToday());
@@ -24283,6 +24336,13 @@ app.use((err, req, res, _next) => {                        // eslint-disable-lin
 // into whatever database the importer happened to open, which is how three
 // test files ended up seeding the developer's own data.db.
 try {
+  const sv = SERVICES.seed();
+  if (sv.seeded) console.log(`  Services: seeded ${sv.seeded} (Day Service, Evening Service).`);
+} catch (e) {
+  console.error('  Services seed skipped:', e.message);
+}
+
+try {
   const w = WAGES.seedFromCurrent();
   if (w.seeded) console.log(`  Wage history: seeded ${w.seeded} wages as effective since the beginning.`);
 } catch (e) {
@@ -24305,6 +24365,8 @@ app.listen(PORT, () => {
   if (process.env.ZWIN_SKIP_BACKFILL !== '1') {
     setTimeout(maybeRunDailySweep, 8000);
     setInterval(maybeRunDailySweep, 60 * 60 * 1000);
+    setTimeout(maybeAutoClose, 12000);
+    setInterval(maybeAutoClose, 60 * 60 * 1000);
   }
   // A test hook: run the sweep once, synchronously, at boot. Lets a test seed
   // the conditions and assert the alerts without waiting on the timer (which is
