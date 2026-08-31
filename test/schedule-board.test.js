@@ -33,7 +33,17 @@ async function token() {
   if (!__csrf) __csrf = (await (await fetch(`${BASE}/csrf`)).text()).trim();
   return __csrf;
 }
-const text = async (p) => (await fetch(BASE + p)).text();
+// The board now lives behind a service picker: /schedule with no ?svc= shows
+// the cards, and choosing one opens the same board scoped to it. These tests
+// are about the BOARD, so the helper names a service and they go on testing
+// what they were written to test. The picker itself is covered separately, in
+// "the service picker" tests at the end of schedule-board.test.js — without
+// those this helper would be hiding a whole screen from the suite.
+// The unscoped fetch, for the tests that are ABOUT the picker.
+const raw = async (p) => (await fetch(BASE + p)).text();
+const svcd = (p) => (/^\/schedule(\?|$)/.test(p) && !/[?&]svc=/.test(p)
+  ? p + (p.includes('?') ? '&' : '?') + 'svc=all' : p);
+const text = async (p) => (await fetch(BASE + svcd(p))).text();
 const status = async (p) => (await fetch(BASE + p, { redirect: 'manual' })).status;
 const post = async (p, body) => fetch(BASE + p, {
   method: 'POST', redirect: 'manual',
@@ -2061,4 +2071,72 @@ test('the grid scrolls, and everything you navigate by holds still', () => {
   assert.match(block, /\.sb-dh \{ z-index:5; \}/, 'headers outrank the names column');
   assert.match(block, /\.sb-corner \{ position:sticky; top:0; left:0; z-index:6; \}/,
     'and the corner outranks both — it is the one cell holding against two axes');
+});
+
+// ===========================================================================
+// The service picker.
+//
+// /schedule shows cards before it shows a board. Every other test in this file
+// goes through a helper that names a service, so without these the whole
+// screen would be invisible to the suite — the helper would be hiding it.
+// ===========================================================================
+
+test('/schedule offers the services before it offers a board', async () => {
+  const html = await raw('/schedule');
+  assert.match(html, /svc-card/, 'the cards render');
+  assert.match(html, /Day Service/, 'named as the owner named them');
+  assert.match(html, /Evening Service/);
+  assert.doesNotMatch(html, /class="sb-grid"/, 'and the board is not rendered yet');
+});
+
+test('choosing a service opens the same board, scoped to it', async () => {
+  const day = dates.addDays(today(), 705);
+  const cafe = SCH.create({ employeeId: E.barista, position: 'barista',
+    startsAt: `${day} 09:00`, endsAt: `${day} 14:00` });
+  const dinner = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 17:00`, endsAt: `${day} 22:00` });
+  assert.strictEqual(SCH.byId(cafe.id).daypart, 'cafe', 'the fixture is what it claims');
+  assert.strictEqual(SCH.byId(dinner.id).daypart, 'dinner');
+
+  const w = SCH.weekWindowFor(day).start;
+  const cafeBoard = await raw(`/schedule?w=${w}&svc=cafe`);
+  assert.match(cafeBoard, /class="sb-grid"/, 'it is the board, not the cards');
+  assert.match(cafeBoard, new RegExp(`data-edit="${cafe.id}"`), 'the Day shift is on it');
+  assert.doesNotMatch(cafeBoard, new RegExp(`data-edit="${dinner.id}"`), 'the Evening one is not');
+
+  const eveBoard = await raw(`/schedule?w=${w}&svc=dinner`);
+  assert.match(eveBoard, new RegExp(`data-edit="${dinner.id}"`));
+  assert.doesNotMatch(eveBoard, new RegExp(`data-edit="${cafe.id}"`));
+
+  // And the deliberate escape hatch, which is what the rest of this file uses.
+  const both = await raw(`/schedule?w=${w}&svc=all`);
+  assert.match(both, new RegExp(`data-edit="${cafe.id}"`));
+  assert.match(both, new RegExp(`data-edit="${dinner.id}"`), 'all means all');
+});
+
+test('a scoped board says which service it is, and offers the way back', async () => {
+  const html = await raw('/schedule?svc=cafe');
+  assert.match(html, /sb-svc-back/, 'there is a way back to the cards');
+  assert.match(html, /href="\/schedule"/, 'and it goes to the picker');
+  assert.match(html, /Day Service/, 'and it names what you are looking at');
+});
+
+test('an unknown service falls back to the picker rather than an empty board', async () => {
+  // A stale bookmark or a typed URL must not render a board scoped to nothing,
+  // which would look like a week where everybody vanished.
+  const html = await raw('/schedule?svc=nonsense');
+  assert.match(html, /svc-card/, 'it shows the cards instead');
+  assert.doesNotMatch(html, /class="sb-grid"/);
+});
+
+test('renaming a service changes every screen and no stored value', async () => {
+  const before = db.prepare("SELECT COUNT(*) n FROM scheduled_shifts WHERE daypart = 'cafe'").get().n;
+  await post('/services/cafe/rename', { name: 'Daytime', back: '/schedule' });
+  try {
+    assert.match(await raw('/schedule'), /Daytime/, 'the cards use the new name');
+    assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM scheduled_shifts WHERE daypart = 'cafe'").get().n,
+      before, 'and not one shift moved — the slug is what everything keys on');
+  } finally {
+    await post('/services/cafe/rename', { name: 'Day Service', back: '/schedule' });
+  }
 });

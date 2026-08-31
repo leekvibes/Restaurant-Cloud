@@ -268,7 +268,7 @@ test('planned wages on the schedule board need Payroll, not just Schedule', asyn
   const rosterOnly = await mk('paysched@test.local', ['schedule']);
   const both = await mk('paysched2@test.local', ['schedule', 'payroll']);
 
-  const r1 = await as(rosterOnly, '/schedule');
+  const r1 = await as(rosterOnly, '/schedule?svc=all');
   assert.strictEqual(r1.status, 200, 'the board still opens for a shift lead');
   const h1 = await r1.text();
   assert.doesNotMatch(h1, /sb-pay/, 'but carries no per-person wage figure');
@@ -276,7 +276,7 @@ test('planned wages on the schedule board need Payroll, not just Schedule', asyn
   // The board itself is intact — this is a withheld column, not a broken page.
   assert.match(h1, /sb-sum-c/, 'the summary bar is still there');
 
-  const r2 = await as(both, '/schedule');
+  const r2 = await as(both, '/schedule?svc=all');
   assert.strictEqual(r2.status, 200);
   const h2 = await r2.text();
   assert.match(h2, /Planned wages/, 'payroll authority sees the week total');

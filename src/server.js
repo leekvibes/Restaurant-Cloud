@@ -9332,6 +9332,48 @@ app.post('/employees/:id', (req, res) => {
   res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.${wageNote(wage)}`));
 });
 
+// --- managing the services themselves ---------------------------------------
+//
+// Renaming is free: the slug never moves, so no history is touched and no
+// query changes meaning. Archiving is the only removal there is — a service
+// names shifts, policy versions and every tip-out settled under it, and
+// deleting the row would leave a past service unnameable.
+
+const svcBack = (req, res, msg, err) => {
+  const b = String(req.body.back || '/schedule');
+  const safe = /^\/[A-Za-z0-9/_-]*$/.test(b) ? b : '/schedule';
+  res.redirect(`${safe}?msg=${encodeURIComponent(msg)}${err ? '&err=1' : ''}`);
+};
+
+app.post('/services', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const name = String(req.body.name || '').trim();
+  try {
+    // The key is derived from the name rather than asked for. It is an
+    // internal handle nobody should have to think about, and one somebody
+    // typed by hand is one somebody can typo into a service that never matches.
+    const sv = SERVICES.create({ slug: name, name });
+    svcBack(req, res, `${sv.name} added.`);
+  } catch (e) { svcBack(req, res, e.message, true); }
+});
+
+app.post('/services/:slug/rename', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  try {
+    SERVICES.rename(req.params.slug, req.body.name);
+    svcBack(req, res, `Renamed to ${SERVICES.nameOf(req.params.slug)}.`);
+  } catch (e) { svcBack(req, res, e.message, true); }
+});
+
+app.post('/services/:slug/archive', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const was = SERVICES.nameOf(req.params.slug);
+  try {
+    SERVICES.archive(req.params.slug);
+    svcBack(req, res, `${was} archived. Its history is untouched.`);
+  } catch (e) { svcBack(req, res, e.message, true); }
+});
+
 app.post('/employees/:id/services', (req, res) => {
   const id = Number(req.params.id);
   const e = q.employee.get(id);
@@ -18721,12 +18763,109 @@ function sbForm(body) {
   };
 }
 
+/**
+ * The service picker that sits in front of Schedule and Time Clock.
+ *
+ * The owner asked for Connecteam's organisation: click Schedule, choose "Day
+ * Service" or "Evening Service", and land in the same tool scoped to it. This
+ * is that screen — and it is a VIEW, not a second engine. Everything behind it
+ * is the same board and the same clock, filtered by the service each card
+ * names, so there is no possibility of two systems disagreeing about which
+ * service a shift belongs to.
+ *
+ * Skipped entirely when there is only one service. A chooser with one option
+ * teaches nothing and costs a tap.
+ */
+function serviceCards(req, base, opts = {}) {
+  const list = SERVICES.all();
+  const w = canWrite(req);
+  return layout(opts.title || 'Choose a service', `
+    ${flash(req)}
+    <div class="bs-page">
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">${esc(opts.title || 'Choose a service')}</h1>
+        <p class="bs-subline">${esc(opts.sub || '')}</p>
+      </div></div>
+      <div class="svc-cards">
+        ${list.map((sv) => {
+    const n = opts.countOf ? opts.countOf(sv.slug) : null;
+    return `<article class="svc-card">
+          <h2 class="svc-card-h">${esc(sv.name)}</h2>
+          <dl class="svc-card-facts">
+            <div><dt>People</dt><dd>${SERVICES.employeesFor(sv.slug).length}</dd></div>
+            ${n == null ? '' : `<div><dt>${esc(opts.countLabel || 'This week')}</dt><dd>${n}</dd></div>`}
+          </dl>
+          <div class="svc-card-acts">
+            <a class="bs-btn svc-card-go" href="${base}?svc=${encodeURIComponent(sv.slug)}">Open</a>
+            ${w ? `<details class="svc-card-more">
+              <summary aria-label="More for ${esc(sv.name)}">&hellip;</summary>
+              <div class="svc-card-menu">
+                <form method="post" action="/services/${encodeURIComponent(sv.slug)}/rename"
+                  onsubmit="var n=prompt('Name this service', '${esc(sv.name).replace(/'/g, "\\'")}');
+                            if(!n){return false;} this.querySelector('[name=name]').value=n;">
+                  <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                  <input type="hidden" name="name" value="">
+                  <input type="hidden" name="back" value="${esc(base)}">
+                  <button type="submit">Edit name</button>
+                </form>
+                <form method="post" action="/services/${encodeURIComponent(sv.slug)}/archive"
+                  onsubmit="return confirm('Archive ${esc(sv.name).replace(/'/g, "\\'")}? Its history stays exactly as it is — it just stops being offered for new work.');">
+                  <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                  <input type="hidden" name="back" value="${esc(base)}">
+                  <button type="submit" class="svc-danger">Archive</button>
+                </form>
+              </div>
+            </details>` : ''}
+          </div>
+        </article>`;
+  }).join('')}
+        ${w ? `<form class="svc-card svc-card--new" method="post" action="/services"
+          onsubmit="var n=prompt('Name the new service'); if(!n){return false;} this.querySelector('[name=name]').value=n;">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="name" value="">
+          <input type="hidden" name="back" value="${esc(base)}">
+          <button type="submit" class="svc-card-add">+ Add a service</button>
+        </form>` : ''}
+      </div>
+    </div>`);
+}
+
+/**
+ * What a scoped page should show:
+ *   a slug   — that service only
+ *   'all'    — every service on one board, deliberately asked for
+ *   null     — nothing chosen yet, so show the cards
+ *
+ * 'all' is a real answer, not a test affordance: a manager sometimes wants the
+ * whole week across both services in one grid, and without it the only way to
+ * see that would be to open each in turn and hold the two in their head.
+ */
+function svcParam(req) {
+  const want = String(req.query.svc || '');
+  if (want === 'all') return 'all';
+  if (want && SERVICES.isActive(want)) return want;
+  const list = SERVICES.all();
+  // One service is not a choice, so it is never asked for.
+  return list.length === 1 ? list[0].slug : null;
+}
+
 app.get('/schedule', (req, res) => {
   if (!navAllowed('/schedule')) {
     return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   }
   const { today, week } = sbWeek(req);
   const thisWeek = SCH.weekWindowFor(today);
+  // Choose the service first. The board that follows is the same board — the
+  // scope is a filter on the shifts it already reads, not a second scheduler.
+  const svc = svcParam(req);
+  if (!svc && req.query.v !== 'today') {
+    return res.send(serviceCards(req, '/schedule', {
+      title: 'Schedule', sub: 'Pick a service to plan. Each one has its own week, its own people and its own tip-out.',
+      countLabel: 'Shifts this week',
+      countOf: (slug) => SCH.inRange(thisWeek.start, thisWeek.end)
+        .filter((x) => x.daypart === slug && x.status !== 'cancelled').length,
+    }));
+  }
   // Phase 6. Governs employee-stated availability ONLY: time off is
   // unconditional, because an absence a manager personally approved must keep
   // warning them whatever this is set to.
@@ -18737,7 +18876,10 @@ app.get('/schedule', (req, res) => {
   const days = [];
   for (let d = week.start; d <= week.end; d = addDays(d, 1)) days.push(d);
 
-  const shifts = SCH.inRange(week.start, week.end);
+  // Scoped here, once, so every count, total, cell and Issue on the page is
+  // this service's — rather than each of them remembering to filter.
+  const shifts = SCH.inRange(week.start, week.end)
+    .filter((x) => !svc || svc === 'all' || x.daypart === svc);
 
   // PLANNED WAGE COST. Not payroll, and deliberately not pretending to be: the
   // clock is what somebody gets paid, this is what the plan would cost if the
@@ -19161,6 +19303,11 @@ app.get('/schedule', (req, res) => {
 
     <div class="sb">
       <div class="sb-frame">
+        ${SERVICES.all().length > 1 ? `<div class="sb-svc">
+          <a class="sb-svc-back" href="/schedule">&larr; Services</a>
+          <b>${esc(svc === 'all' ? 'All services' : SERVICES.nameOf(svc))}</b>
+          ${svc === 'all' ? '' : '<a class="sb-svc-all" href="/schedule?svc=all">See all services</a>'}
+        </div>` : ''}
         <div class="sb-bar">
           <nav class="sb-nav" aria-label="Week">
             <a class="sb-btn" href="/schedule?w=${addDays(week.start, -7)}" aria-label="Earlier week">&larr;</a>

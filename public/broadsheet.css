@@ -5730,3 +5730,47 @@ input[type="date"], input[type="time"], input[type="search"], select {
   background: var(--panel); font-weight: 500; cursor: pointer; }
 .svc-pick input { width: 17px; height: 17px; flex: none; }
 .svc-pick:has(input:checked) { border-color: var(--ink); background: var(--paper); font-weight: 600; }
+
+/* --- choosing a service ----------------------------------------------------
+   The screen in front of Schedule and Time Clock. Cards rather than a list,
+   because on a phone a card is a target and a list row is a guess. */
+.svc-cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.svc-card { position: relative; padding: 18px 18px 14px; border: 1px solid var(--rule);
+  border-radius: 14px; background: var(--panel); }
+.svc-card-h { margin: 0 0 12px; font-size: 19px; font-weight: 680; letter-spacing: -.015em;
+  color: var(--headline); }
+.svc-card-facts { display: flex; gap: 22px; margin: 0 0 16px; }
+.svc-card-facts div { margin: 0; }
+.svc-card-facts dt { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.svc-card-facts dd { margin: 2px 0 0; font-size: 19px; font-weight: 650; color: var(--headline);
+  font-variant-numeric: tabular-nums; }
+.svc-card-acts { display: flex; align-items: center; gap: 8px; }
+.svc-card-go { flex: 1; justify-content: center; }
+.svc-card-more { position: relative; }
+.svc-card-more summary { display: flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border: 1px solid var(--rule); border-radius: 10px;
+  cursor: pointer; list-style: none; color: var(--muted); font-size: 17px; line-height: 1; }
+.svc-card-more summary::-webkit-details-marker { display: none; }
+.svc-card-more[open] summary { border-color: var(--ink); color: var(--ink); }
+.svc-card-menu { position: absolute; right: 0; top: 44px; z-index: 20; min-width: 176px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 12px;
+  /* .bs * kills box-shadow in this shell, so the lift is a second border. */
+  outline: 1px solid rgba(0,0,0,.06); }
+.svc-card-menu form { margin: 0; }
+.svc-card-menu button { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px;
+  background: none; font: inherit; font-size: 13.5px; color: var(--headline); text-align: left; cursor: pointer; }
+.svc-card-menu button:hover { background: var(--paper); }
+.svc-card-menu .svc-danger { color: var(--danger, #a3341f); }
+.svc-card--new { display: flex; align-items: center; justify-content: center;
+  border-style: dashed; background: none; }
+.svc-card-add { border: 0; background: none; font: inherit; font-size: 14px; font-weight: 600;
+  color: var(--muted); cursor: pointer; padding: 20px; }
+.svc-card-add:hover { color: var(--ink); }
+
+/* Which service the board is scoped to, and the way back to the cards. */
+.sb-svc { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--rule); background: var(--paper); }
+.sb-svc b { font-size: 13.5px; font-weight: 650; color: var(--headline); }
+.sb-svc a { font-size: 12.5px; color: var(--muted); text-decoration: none; }
+.sb-svc a:hover { color: var(--ink); text-decoration: underline; }
+.sb-svc-all { margin-left: auto; }

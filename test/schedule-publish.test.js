@@ -30,7 +30,12 @@ process.env.DB_PATH = DB;
 process.env.TZ = process.env.TZ || 'America/New_York';
 let child; let Database; let db; let SCH; let TC; let dates;
 
-const text = async (p, headers = {}) => (await fetch(BASE + p, { headers })).text();
+// /schedule now shows a service picker first; these tests are about
+// publishing, so the helper asks for every service and they assert what they
+// always did. The picker has its own tests in schedule-board.test.js.
+const svcd = (p) => (/^\/schedule(\?|$)/.test(p) && !/[?&]svc=/.test(p)
+  ? p + (p.includes('?') ? '&' : '?') + 'svc=all' : p);
+const text = async (p, headers = {}) => (await fetch(BASE + svcd(p), { headers })).text();
 const status = async (p, headers = {}) => (await fetch(BASE + p, { headers, redirect: 'manual' })).status;
 const post = async (p, body, headers = {}) => fetch(BASE + p, {
   method: 'POST', redirect: 'manual',
