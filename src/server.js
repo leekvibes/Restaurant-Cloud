@@ -9147,62 +9147,159 @@ app.post('/tips', (req, res) => {
 // Staff management
 // ---------------------------------------------------------------------------
 app.get('/employees', (req, res) => {
-  const staff = q.allEmployees.all();
-  const initials = (n) => n.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
-  const rows = staff.map((e) => {
-    const extraRoles = q.rolesForEmployee.all(e.id).length;
-    const wage = e.pay_type === 'salary' ? '<span class="pill">salary</span>'
-      : e.hourly_rate_cents ? money(e.hourly_rate_cents) + '/h' : '<span class="muted">—</span>';
-    return `<tr>
-      <td><div class="person"><span class="avatar">${initials(e.name)}</span><span>${esc(e.name)}</span></div></td>
-      <td><span class="pill pill-blue">${e.role}</span>${extraRoles ? ` <span class="sub">+${extraRoles}</span>` : ''}</td>
-      <td class="num">${wage}</td>
-      <td>${esc(e.email) || '<span class="muted">—</span>'}</td>
-      <td>${e.pin ? '••••' : '<span class="muted">—</span>'}</td>
-      <td><a href="/employees/${e.id}/edit">edit</a></td></tr>`;
-  }).join('');
-  const roles = [...allRoles(), 'manager'];
-  const counts = staff.reduce((a, e) => { a[e.role] = (a[e.role] || 0) + 1; return a; }, {});
-  // The PIN is now how staff sign in to the tips page, so no PIN = locked out.
-  const noPin = staff.filter((e) => e.role !== 'manager' && !e.pin).map((e) => e.name);
-  // Duplicates can predate the uniqueness guard (or arrive by import), and a
-  // shared PIN blocks BOTH people from signing in — worth catching here rather
-  // than when someone can't log their tips at close.
+  // Everybody, including the deactivated — this is the only screen that wants
+  // them, and until now there was nowhere in the app to find somebody who had
+  // been deactivated, let alone bring them back.
+  const staff = q.everyEmployee.all();
+  const w = canWrite(req);
+
+  // Three views of one roster, counted in the tab so the number is the label.
+  const isMgr = (e) => e.role === 'manager';
+  const groups = {
+    active: staff.filter((e) => e.active && !isMgr(e)),
+    managers: staff.filter((e) => e.active && isMgr(e)),
+    inactive: staff.filter((e) => !e.active),
+  };
+  const tab = ['active', 'managers', 'inactive'].includes(req.query.tab) ? req.query.tab : 'active';
+  const shown = groups[tab];
+
+  // The PIN is an access credential, so the roster reports its STATE and never
+  // its digits. A duplicate locks both people out of the portal, which is the
+  // one that has to shout.
   const byPin = {};
   for (const e of staff) {
-    if (!e.pin || e.role === 'manager') continue;
+    if (!e.pin || isMgr(e) || !e.active) continue;
     (byPin[e.pin] = byPin[e.pin] || []).push(e.name);
   }
-  const dupes = Object.values(byPin).filter((names) => names.length > 1);
-  const pinWarn = [
-    dupes.length ? `<b>Same PIN:</b> ${dupes.map((n) => esc(n.join(' and '))).join('; ')}. Neither can sign in until each has their own — give one of them a different PIN.` : '',
-    noPin.length ? `<b>No PIN yet:</b> ${esc(noPin.join(', '))}. They sign in to the tips page with their PIN, so they can't log tips until you give them one.` : '',
-  ].filter(Boolean);
-  const pinBanner = pinWarn.length
-    ? `<div class="flash flash-warn"><div><ul>${pinWarn.map((w) => `<li>${w}</li>`).join('')}</ul></div></div>`
-    : '';
+  const access = (e) => {
+    if (isMgr(e)) return { k: 'na', t: '—', why: 'Managers do not use the staff portal.' };
+    if (!e.pin) return { k: 'bad', t: 'No PIN', why: `${e.name} cannot sign in to the portal until they have one.` };
+    if ((byPin[e.pin] || []).length > 1) {
+      return { k: 'bad', t: 'PIN clash', why: `Shared with ${esc(byPin[e.pin].filter((n) => n !== e.name).join(', '))} — neither can sign in.` };
+    }
+    return { k: 'ok', t: 'Can sign in', why: 'PIN set.' };
+  };
+
+  const rows = shown.map((e) => {
+    const held = q.rolesForEmployee.all(e.id).map((r) => posName(r.role));
+    const jobs = [...new Set([posName(e.role), ...held])].filter(Boolean);
+    const svcs = SERVICES.forEmployee(e.id);
+    const a = access(e);
+    const pay = e.pay_type === 'salary' ? '<span class="rst-pill">Salary</span>'
+      : e.hourly_rate_cents ? `${money(e.hourly_rate_cents)}<i>/hr</i>` : '<span class="muted">—</span>';
+    return `<tr class="rst-r" tabindex="0" data-href="/employees/${e.id}/edit"
+      aria-label="Open ${esc(e.name)}">
+      <td class="rst-who">
+        <span class="pl-av" style="--pl-c:${avatarHue(e.name)}">${esc(initialsOf(e.name))}</span>
+        <span class="rst-nm"><b>${esc(e.name)}</b>${e.email ? `<i>${esc(e.email)}</i>` : ''}</span>
+      </td>
+      <td>${jobs.length
+    ? `<span class="rst-pill rst-pill--job">${esc(jobs[0])}</span>${jobs.length > 1
+      ? `<span class="rst-more" title="${esc(jobs.slice(1).join(', '))}">+${jobs.length - 1}</span>` : ''}`
+    : '<span class="muted">—</span>'}</td>
+      <td>${svcs.length
+    ? svcs.map((sl) => `<span class="rst-pill">${esc(SERVICES.nameOf(sl))}</span>`).join('')
+    : '<span class="rst-pill rst-pill--warn">No schedule</span>'}</td>
+      <td class="num rst-pay">${pay}</td>
+      <td><span class="rst-acc rst-acc--${a.k}" title="${esc(a.why)}">${esc(a.t)}</span></td>
+      <td>${e.active ? '<span class="rst-dot rst-dot--on"></span>Active'
+    : '<span class="rst-dot"></span><span class="muted">Inactive</span>'}</td>
+      <td class="rst-act">${w && !e.active
+    ? `<form method="post" action="/employees/${e.id}/reactivate" style="margin:0"
+        onsubmit="return confirm('Bring ${esc(e.name).replace(/'/g, "\\'")} back to active staff? Their upcoming published shifts come back with them.')">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <button class="rst-back" type="submit">Reactivate</button></form>`
+    : (w ? `<a class="rst-go" href="/employees/${e.id}/edit"
+        aria-label="Open ${esc(e.name)}">&rsaquo;</a>` : '')}</td>
+    </tr>`;
+  }).join('');
+
+  const tabLink = (k, label) => `<a class="rst-tab${tab === k ? ' on' : ''}"
+    href="/employees?tab=${k}"${tab === k ? ' aria-current="page"' : ''}
+    >${label} <span>${groups[k].length}</span></a>`;
+
+  const empty = {
+    active: 'Nobody on the team yet. Add your first below.',
+    managers: 'No managers yet.',
+    inactive: 'Nobody has been deactivated.',
+  }[tab];
+
+  const roles = [...allRoles(), 'manager'];
   const body = `
     ${flash(req)}
-    <div class="page-head"><div><h1>Staff</h1><p class="sub">${staff.length} on the team · ${counts.server || 0} servers · open anyone to set roles &amp; wages.</p></div>
-      <a class="btn btn-primary" href="#add">＋ Add staff</a></div>
-    ${pinBanner}
-    ${staff.length > 8 ? '<div class="toolbar"><div class="search"><input type="search" id="mod-search" placeholder="Search staff…" oninput="modFilter()"></div></div>' : ''}
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Name</th><th>Role</th><th class="num">Wage</th><th>Email</th><th>PIN</th><th></th></tr></thead>
-      <tbody id="mod-body">${rows || '<tr><td colspan="6" class="muted">No staff yet — add your first below.</td></tr>'}</tbody></table></div>
-    <h2 id="add">Add staff</h2>
-    <form method="post" action="/employees" class="card form grid">
-      <label>Name <input name="name" required></label>
-      <label>Main role <select name="role">${roles.map((r) => `<option value="${r}">${r}</option>`).join('')}</select></label>
-      <label>Email <input name="email" type="email" placeholder="for daily summary"></label>
-      <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="servers only"></label>
-      <label>Pay type <select name="pay_type"><option value="hourly">Hourly</option><option value="salary">Salary</option></select></label>
-      <label>Hourly wage <input name="rate" type="number" step="0.01" min="0" placeholder="0.00"></label>
-      <label>Benugin ID <input name="pos_id" placeholder="optional"></label>
-      <button class="btn btn-primary" type="submit">Add</button>
-    </form>
-    <p class="sub">Add the person first, then open them to set <b>multiple roles &amp; wages</b> (e.g. server $11, busser $13) or mark them salaried.</p>
-    <script>function modFilter(){var q=(document.getElementById('mod-search').value||'').toLowerCase();document.querySelectorAll('#mod-body tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().indexOf(q)!==-1?'':'none';});}</script>`;
+    <div class="bs-page">
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">Staff</h1>
+        <p class="bs-subline">${groups.active.length} on the team${
+  groups.managers.length ? ` &middot; ${groups.managers.length} manager${groups.managers.length === 1 ? '' : 's'}` : ''}${
+  groups.inactive.length ? ` &middot; ${groups.inactive.length} inactive` : ''}</p>
+      </div>
+      <div class="bs-head-acts">
+        <a class="bs-btn-sm" href="/positions">Positions</a>
+        ${w ? '<a class="bs-btn" href="#add">+ Add employee</a>' : ''}
+      </div></div>
+
+      <div class="bs-panel rst">
+        <nav class="rst-tabs" aria-label="Roster">
+          ${tabLink('active', 'Active')}${tabLink('managers', 'Managers')}${tabLink('inactive', 'Inactive')}
+        </nav>
+        <div class="rst-bar">
+          <div class="rst-search">
+            <input type="search" id="rst-q" placeholder="Search staff&hellip;" aria-label="Search staff"
+              oninput="rstFilter()">
+          </div>
+        </div>
+        <div class="rst-wrap">
+          <table class="rst-t">
+            <thead><tr><th>Employee</th><th>Position</th><th>Schedules</th>
+              <th class="num">Pay</th><th>Portal access</th><th>Status</th><th></th></tr></thead>
+            <tbody id="rst-body">${rows || `<tr><td colspan="7" class="rst-empty">${esc(empty)}</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+
+      ${w ? `<h2 id="add" class="rst-h2">Add employee</h2>
+      <p class="sub">The essentials only &mdash; positions, extra wages and schedules are set on their profile afterwards.</p>
+      <form method="post" action="/employees" class="bs-panel rst-add">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <div class="rst-add-g">
+          <label>Name <input name="name" required autocomplete="off"></label>
+          <label>Primary position <select name="role">${roles.map((r) => `<option value="${r}">${posName(r)}</option>`).join('')}</select></label>
+          <label>Email <input name="email" type="email" placeholder="for their pay summary"></label>
+          <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="for the staff portal"></label>
+          <label>Pay type <select name="pay_type"><option value="hourly">Hourly</option><option value="salary">Salary</option></select></label>
+          <label>Hourly wage <input name="rate" type="number" step="0.01" min="0" placeholder="0.00"></label>
+        </div>
+        <button class="bs-btn" type="submit">Create employee</button>
+      </form>` : ''}
+    </div>
+    <script>
+      function rstFilter() {
+        var q = (document.getElementById('rst-q').value || '').toLowerCase();
+        var rows = document.querySelectorAll('#rst-body tr');
+        for (var i = 0; i < rows.length; i++) {
+          rows[i].style.display = rows[i].textContent.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+        }
+      }
+      // The whole row opens the profile. The link inside it still works on its
+      // own, and a keyboard gets there by tabbing to the row and pressing enter
+      // — a row you can only reach with a mouse is a row half the people using
+      // this cannot reach at all.
+      (function () {
+        var b = document.getElementById('rst-body');
+        if (!b) return;
+        b.addEventListener('click', function (ev) {
+          if (ev.target.closest('a')) return;
+          var r = ev.target.closest('[data-href]');
+          if (r) location.href = r.getAttribute('data-href');
+        });
+        b.addEventListener('keydown', function (ev) {
+          if (ev.key !== 'Enter') return;
+          var r = ev.target.closest && ev.target.closest('[data-href]');
+          if (r) location.href = r.getAttribute('data-href');
+        });
+      })();
+    </script>`;
   res.send(layout('Staff', body));
 });
 
@@ -9346,131 +9443,398 @@ function applyWageChange(employeeId, role, cents, body, actor, service) {
   return { from, future, restamped, mode };
 }
 
+/**
+ * Schedule & pay — the operationally important tab.
+ *
+ * Two questions, in the order somebody asks them: WHERE can this person be put
+ * (which schedules), and WHAT do they earn there (positions, and any rate that
+ * belongs to one schedule).
+ *
+ * Wages are grouped BENEATH their position rather than listed as sibling rows,
+ * because "server, every schedule, $15" and "server, Evening, $19" are one fact
+ * about one job, and a flat table makes them look like two unrelated jobs.
+ */
+function eprPay(req, e, { w, payRoles, mine, today0 }) {
+  const svcWages = WAGES.currentFor(e.id, today0).filter((r) => r.service_slug && r.role);
+  const roleRows = q.rolesForEmployee.all(e.id);
+  const known = new Set(roleRows.map((r) => r.role));
+  // A schedule rate for a position with no general wage still has to show, or
+  // it is money being paid that this page does not mention.
+  const orphans = [...new Set(svcWages.filter((o) => !known.has(o.role)).map((o) => o.role))];
+
+  const posCard = (role, general) => {
+    const overrides = svcWages.filter((o) => o.role === role);
+    return `<article class="epr-pos">
+      <header class="epr-pos-h">
+        <b>${esc(posName(role))}</b>
+        ${w ? `<form method="post" action="/employees/${e.id}/roles/delete" style="margin:0"
+          onsubmit="return confirm('Remove ${esc(posName(role)).replace(/'/g, "\\'")} from ${esc(e.name).replace(/'/g, "\\'")}?\\n\\nShifts they already worked keep the rate they were paid at — nothing is repriced.')">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="role" value="${esc(role)}">
+          <button class="epr-x" type="submit">Remove position</button></form>` : ''}
+      </header>
+      <div class="epr-rate">
+        <span>Base rate<i>All schedules</i></span>
+        <b>${general == null ? '<span class="muted">not set</span>' : money(general)}<i>/hr</i></b>
+      </div>
+      ${overrides.map((o) => `<div class="epr-rate epr-rate--ov">
+        <span>${esc(SERVICES.nameOf(o.service_slug))}<i>Overrides the base rate here</i></span>
+        <b>${money(o.wage_cents)}<i>/hr</i></b>
+        ${w ? `<form method="post" action="/employees/${e.id}/roles/delete" style="margin:0"
+          onsubmit="return confirm('Remove the ${esc(SERVICES.nameOf(o.service_slug)).replace(/'/g, "\\'")} rate for ${esc(posName(role)).replace(/'/g, "\\'")}?\\n\\nThat schedule goes back to the base rate. The position and its base rate stay, and no worked shift is repriced.')">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="role" value="${esc(role)}">
+          <input type="hidden" name="svc" value="${esc(o.service_slug)}">
+          <button class="epr-x" type="submit">Remove</button></form>` : ''}
+      </div>`).join('')}
+    </article>`;
+  };
+
+  return `
+    <section class="epr-card">
+      <h2 class="epr-h">Assigned schedules</h2>
+      <p class="epr-hint">Where ${esc(e.name)} can be scheduled and clocked in. Unticking one takes them off that board and stops them clocking into it.</p>
+      <form method="post" action="/employees/${e.id}/services">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <div class="svc-picks">
+          ${SERVICES.all().map((sv) => `<label class="svc-pick">
+            <input type="checkbox" name="svc" value="${esc(sv.slug)}"${mine.includes(sv.slug) ? ' checked' : ''} ${w ? '' : 'disabled'}>
+            <span>${esc(sv.name)}</span></label>`).join('')}
+        </div>
+        <p class="epr-status">${mine.length
+    ? `On ${mine.map((x) => esc(SERVICES.nameOf(x))).join(' and ')}.`
+    : '<b class="epr-warn">On no schedule — they cannot be scheduled or clock in anywhere.</b>'}</p>
+        ${w ? '<button class="bs-btn" type="submit">Save schedules</button>' : ''}
+      </form>
+    </section>
+
+    <section class="epr-card">
+      <h2 class="epr-h">Positions &amp; pay</h2>
+      <p class="epr-hint">A rate for each position. If they earn differently on one schedule, add a rate for that schedule and it wins there &mdash; every other schedule keeps the base rate.</p>
+      ${roleRows.length || orphans.length
+    ? roleRows.map((r) => posCard(r.role, r.wage_cents)).join('')
+      + orphans.map((r) => posCard(r, null)).join('')
+    : `<p class="epr-none">No positions yet. Their default wage of ${
+      e.hourly_rate_cents ? money(e.hourly_rate_cents) + '/hr' : '&mdash;'} applies to anything they work.</p>`}
+
+      ${w ? `<details class="epr-add">
+        <summary>+ Add a position or rate</summary>
+        <form method="post" action="/employees/${e.id}/roles">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <div class="epr-rows">
+            <div class="epr-row"><span>Position</span>
+              <select name="role">${payRoles.map((r) => `<option value="${r}">${posName(r)}</option>`).join('')}</select></div>
+            ${SERVICES.all().length > 1 ? `<div class="epr-row"><span>Applies to</span>
+              <select name="svc"><option value="">Every schedule &mdash; the base rate</option>
+                ${SERVICES.all().map((sv) => `<option value="${esc(sv.slug)}">${esc(sv.name)} only</option>`).join('')}
+              </select></div>` : ''}
+            <div class="epr-row"><span>Hourly rate</span>
+              <input name="wage" type="number" step="0.01" min="0" placeholder="0.00" required></div>
+          </div>
+          ${wageWhenFields(e.id, null, { idSuffix: 'role' })}
+          <button class="bs-btn" type="submit">Save rate</button>
+        </form>
+      </details>` : ''}
+    </section>`;
+}
+
+/** Time — this person's punches, read from the clock. Nothing is computed here. */
+function eprTime(req, e) {
+  const cfg = TC.settings();
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const from = addDays(today, -27);
+  const active = TC.q.active.get(e.id);
+  const rows = db.prepare(`SELECT * FROM time_entries WHERE employee_id = ?
+    AND business_date >= ? ORDER BY clock_in_at DESC LIMIT 40`).all(e.id, from);
+  const payable = rows.reduce((a, r) => a + (r.payable_minutes || 0), 0);
+  return `
+    <section class="epr-card">
+      <h2 class="epr-h">Time</h2>
+      <p class="epr-hint">What the clock recorded. The schedule is a plan and never appears here.</p>
+      <div class="epr-stats">
+        <div><span>Right now</span><b>${active
+    ? (active.status === 'on_break' ? 'On a break' : 'On the clock') : 'Clocked out'}</b></div>
+        <div><span>Last 28 days</span><b>${TC.hm(payable)}</b></div>
+        <div><span>Punches</span><b>${rows.length}</b></div>
+      </div>
+      ${rows.length ? `<div class="epr-tw"><table class="rst-t">
+        <thead><tr><th>Day</th><th>Schedule</th><th>Position</th><th>In</th><th>Out</th><th class="num">Payable</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td>${esc(TC.dayLabel(r.business_date))}${r.auto_closed ? autoOutMark(r) : ''}</td>
+          <td>${r.daypart ? esc(SERVICES.nameOf(r.daypart)) : '<span class="muted">—</span>'}</td>
+          <td>${esc(posName(r.position))}</td>
+          <td>${esc(TC.clockFace(r.clock_in_at))}</td>
+          <td>${r.clock_out_at ? esc(TC.clockFace(r.clock_out_at)) : '<i class="muted">open</i>'}</td>
+          <td class="num">${r.payable_minutes == null ? '—' : esc(TC.hm(r.payable_minutes))}</td>
+        </tr>`).join('')}</tbody></table></div>
+        <p class="epr-hint epr-hint--foot">The full timesheet, corrections and approvals live in
+          <a href="/payroll/timesheets/${e.id}">Timesheets</a>.</p>`
+    : '<p class="epr-none">No punches in the last 28 days.</p>'}
+    </section>`;
+}
+
+/**
+ * Payroll — the SAME figures the payroll page produces, filtered to one person.
+ * aggregatePayroll is called exactly as Payroll calls it; nothing is recomputed
+ * here, because a second answer to "what were they paid" is how two screens
+ * come to disagree.
+ */
+function eprPayroll(req, e) {
+  if (!navAllowed('/payroll')) {
+    return `<section class="epr-card"><h2 class="epr-h">Payroll</h2>
+      <p class="epr-none">Your account does not have Payroll.</p></section>`;
+  }
+  const periods = recentPeriods(6);
+  const rows = periods.map((p) => {
+    const out = aggregatePayroll(p.start, p.end);
+    const me = out.rows.find((r) => r.employeeId === e.id);
+    return { p, me };
+  }).filter((x) => x.me);
+  const sum = (k) => rows.reduce((a, x) => a + (x.me[k] || 0), 0);
+  return `
+    <section class="epr-card">
+      <h2 class="epr-h">Payroll</h2>
+      <p class="epr-hint">The same figures as the Payroll page, for ${esc(e.name)} only.</p>
+      ${rows.length ? `<div class="epr-stats">
+        <div><span>Hours</span><b>${sum('hours').toFixed(2)}</b></div>
+        <div><span>Wages</span><b>${money(sum('wage'))}</b></div>
+        <div><span>Tips</span><b>${money(sum('tipsEarned'))}</b></div>
+        <div><span>Take-home</span><b>${money(sum('takeHome'))}</b></div>
+      </div>
+      <div class="epr-tw"><table class="rst-t">
+        <thead><tr><th>Pay period</th><th class="num">Hours</th><th class="num">OT</th>
+          <th class="num">Wages</th><th class="num">Tips</th><th class="num">Take-home</th></tr></thead>
+        <tbody>${rows.map(({ p, me }) => `<tr class="rst-r" data-href="/payroll?from=${p.start}&to=${p.end}">
+          <td>${esc(labelFor(p))}</td>
+          <td class="num">${me.hours.toFixed(2)}</td>
+          <td class="num">${me.otHours ? me.otHours.toFixed(2) : '—'}</td>
+          <td class="num">${money(me.wage)}</td>
+          <td class="num">${money(me.tipsEarned)}</td>
+          <td class="num">${money(me.takeHome)}</td>
+        </tr>`).join('')}</tbody></table></div>
+      <p class="epr-hint epr-hint--foot">Totals over the last ${rows.length} pay period${rows.length === 1 ? '' : 's'}. Open one for the full breakdown.</p>`
+    : '<p class="epr-none">Nothing on payroll yet.</p>'}
+    </section>`;
+}
+
+/** Documents — the shell, with nothing behind it yet, and it says so. */
+function eprDocuments(req, e) {
+  return `
+    <section class="epr-card">
+      <h2 class="epr-h">Documents</h2>
+      <p class="epr-hint">Employee files, company documents to sign, and signed copies.</p>
+      <div class="epr-soon">
+        <b>Not built yet</b>
+        <p>This is where ${esc(e.name)}'s documents will live — files you upload, documents that
+          need a signature, and the signed copies with the date they were sent, seen and signed.</p>
+        <p class="epr-hint">Nothing is stored here today. The tab is here so the shape is settled before it is built.</p>
+      </div>
+    </section>`;
+}
+
+/**
+ * Activity — only what was actually recorded.
+ *
+ * Wage changes carry who, when and which option was chosen. Membership carries
+ * when somebody was added to a schedule. Nothing else is logged, so nothing
+ * else appears: an invented timeline is worse than a short one.
+ */
+function eprActivity(req, e) {
+  const items = [];
+  for (const r of WAGES.historyFor(e.id)) {
+    if (r.effective_from === WAGES.EPOCH) continue;      // the migration, not an act
+    items.push({
+      at: r.created_at || r.effective_from,
+      t: `${r.role ? posName(r.role) : 'Default'} rate set to ${money(r.wage_cents)}/hr${
+        r.service_slug ? ` for ${SERVICES.nameOf(r.service_slug)}` : ''}`,
+      d: `Effective ${r.effective_from}${r.note ? ` &middot; ${esc(r.note)}` : ''}`,
+      by: r.created_by || '',
+      future: r.effective_from > isoDate(startOfToday()),
+    });
+  }
+  try {
+    for (const r of db.prepare(`SELECT service_slug, created_at FROM employee_services
+      WHERE employee_id = ? ORDER BY created_at DESC`).all(e.id)) {
+      items.push({ at: r.created_at, t: `Added to ${SERVICES.nameOf(r.service_slug)}`, d: '', by: '' });
+    }
+  } catch { /* older database */ }
+  items.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
+  return `
+    <section class="epr-card">
+      <h2 class="epr-h">Activity</h2>
+      <p class="epr-hint">Employment changes that were recorded. Only what the app actually logs appears here.</p>
+      ${items.length ? `<ol class="epr-tl">
+        ${items.map((x) => `<li${x.future ? ' class="epr-tl--soon"' : ''}>
+          <span class="epr-tl-d">${esc(String(x.at).slice(0, 10))}</span>
+          <span class="epr-tl-b"><b>${x.t}${x.future ? ' <em>upcoming</em>' : ''}</b>
+            ${x.d ? `<i>${x.d}</i>` : ''}${x.by ? `<i>by ${esc(x.by)}</i>` : ''}</span>
+        </li>`).join('')}
+      </ol>` : '<p class="epr-none">Nothing recorded yet.</p>'}
+    </section>`;
+}
+
+const EPR_TABS = [
+  ['employment', 'Employment'],
+  ['pay', 'Schedule &amp; pay'],
+  ['time', 'Time'],
+  ['payroll', 'Payroll'],
+  ['documents', 'Documents'],
+  ['activity', 'Activity'],
+];
+
 app.get('/employees/:id/edit', (req, res) => {
   const e = q.employee.get(Number(req.params.id));
-  if (!e) return res.status(404).send(layout('Not found', '<h1>Staff member not found</h1>'));
-  const roles = [...allRoles(), 'manager'];
+  if (!e) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>Staff member not found</h1></div>'));
+  const w = canWrite(req);
   const val = (v) => esc(v == null ? '' : v);
+  const tab = EPR_TABS.some(([k]) => k === req.query.tab) ? req.query.tab : 'employment';
+
+  const roles = [...allRoles(), 'manager'];
   const payRoles = allRoles();
-  // What this person actually earns, per role and per schedule — the general
-  // wage from employee_roles, plus any schedule-specific rate in force today.
-  // Two sources because they answer different questions: employee_roles is
-  // "their rate for this job", wage_history is "except at Evening, where".
-  const today0 = isoDate(startOfToday());
-  const svcWages = WAGES.currentFor(e.id, today0).filter((r) => r.service_slug && r.role);
-  const roleRows = q.rolesForEmployee.all(e.id).map((r) => {
-    const overrides = svcWages.filter((x) => x.role === r.role);
-    return `
-    <tr><td>${r.role}</td><td>${SERVICES.all().length > 1 ? '<span class="muted">Every schedule</span>' : ''}</td>
-      <td class="num">${money(r.wage_cents)}/h</td>
-      <td><form method="post" action="/employees/${e.id}/roles/delete"><input type="hidden" name="role" value="${r.role}"><button class="link-danger">remove</button></form></td></tr>
-    ${overrides.map((o) => `<tr class="wg-ov">
-      <td class="muted">${esc(o.role)}</td>
-      <td><b>${esc(SERVICES.nameOf(o.service_slug))}</b></td>
-      <td class="num"><b>${money(o.wage_cents)}/h</b></td>
-      <td><form method="post" action="/employees/${e.id}/roles/delete">
-        <input type="hidden" name="role" value="${esc(o.role)}">
-        <input type="hidden" name="svc" value="${esc(o.service_slug)}">
-        <button class="link-danger">remove</button></form></td></tr>`).join('')}`;
-  }).join('');
-  // A schedule rate for a role they hold no general wage for still has to show,
-  // or it is money being paid that this page does not mention.
-  const orphanSvc = svcWages.filter((o) => !q.rolesForEmployee.all(e.id).some((r) => r.role === o.role));
-  const roleRowsAll = roleRows + orphanSvc.map((o) => `<tr class="wg-ov">
-      <td>${esc(o.role)}</td><td><b>${esc(SERVICES.nameOf(o.service_slug))}</b></td>
-      <td class="num"><b>${money(o.wage_cents)}/h</b></td>
-      <td><form method="post" action="/employees/${e.id}/roles/delete">
-        <input type="hidden" name="role" value="${esc(o.role)}">
-        <input type="hidden" name="svc" value="${esc(o.service_slug)}">
-        <button class="link-danger">remove</button></form></td></tr>`).join('');
-  // What this wage has been, and since when. Without it a dated change is
-  // invisible after the fact: the page would show one number and give no way
-  // to tell whether last month was priced at it.
-  const wageLog = WAGES.historyFor(e.id).filter((r) => r.effective_from !== WAGES.EPOCH);
-  const mine = SERVICES.forEmployee(e.id);
   const isSalary = e.pay_type === 'salary';
-  const body = `
-    ${flash(req)}
-    <a class="back" href="/employees">← Staff</a>
-    <h1>Edit ${esc(e.name)}</h1>
-    <form method="post" action="/employees/${e.id}" class="card form grid">
-      <label>Name <input name="name" value="${val(e.name)}" required></label>
-      <label>Main role <select name="role">${roles.map((r) => `<option value="${r}"${r === e.role ? ' selected' : ''}>${r}</option>`).join('')}</select></label>
-      <label>Email <input name="email" type="email" value="${val(e.email)}"></label>
-      <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" value="${val(e.pin)}"></label>
-      <label>Pay type <select name="pay_type"><option value="hourly"${isSalary ? '' : ' selected'}>Hourly</option><option value="salary"${isSalary ? ' selected' : ''}>Salary</option></select></label>
-      <label>Default hourly wage <input name="rate" type="number" step="0.01" min="0" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}"></label>
-      ${isSalary ? '' : `<div style="grid-column:1/-1">${wageWhenFields(e.id, null, { idSuffix: 'def' })}</div>`}
-      <label>Salary (if salaried) <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" placeholder="per pay period"></label>
-      <label>Benugin ID <input name="pos_id" value="${val(e.pos_id)}"></label>
-      <label class="emp-check" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:9px;font-weight:600">
-        <input type="checkbox" name="ot_eligible" value="1"${e.ot_exempt ? '' : ' checked'} style="width:18px;height:18px">
-        Eligible for weekly overtime <span class="sub" style="font-weight:400">— uncheck for salaried or exempt staff. Only applies when weekly overtime is switched on in Payroll.</span></label>
-      <button class="btn btn-primary" type="submit">Save changes</button>
-    </form>
+  const mine = SERVICES.forEmployee(e.id);
+  const today0 = isoDate(startOfToday());
 
-    ${/* Which services this person works. Absence is not a restriction — no
-         ticks means every service — so this is additive and nobody is locked
-         out the day it ships. Ticking every box is stored as no ticks for the
-         same reason: it means "everything", including services added later. */''}
-    <h2>Services</h2>
-    <p class="sub">Which services ${esc(e.name)} can be scheduled and clocked into. Leave all unticked for every service &mdash; that is also what ticking them all means, and it keeps them on anything you add later.</p>
-    <form method="post" action="/employees/${e.id}/services" class="card form">
+  // Each form carries the fields it does NOT show as hidden values, because
+  // the update route writes every column — a partial post would blank whatever
+  // it left out. Read fresh on every render, so they are never stale within a
+  // page. This is the same hazard the one long form already had, not a new one.
+  const hid = (names) => names.map((n) => {
+    const v = { name: e.name, role: e.role, email: e.email, pin: e.pin, pos_id: e.pos_id,
+      pay_type: e.pay_type,
+      rate: e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : '',
+      salary: e.salary_cents ? (e.salary_cents / 100).toFixed(2) : '',
+      ot_eligible: e.ot_exempt ? '' : '1' }[n];
+    return v === '' || v == null ? '' : `<input type="hidden" name="${n}" value="${val(v)}">`;
+  }).join('');
+
+  // --- what the header says about them ---------------------------------------
+  const held = q.rolesForEmployee.all(e.id).map((r) => posName(r.role));
+  const jobs = [...new Set([posName(e.role), ...held])].filter(Boolean);
+  const sub = [jobs.join(' &middot; '), mine.map((sl) => esc(SERVICES.nameOf(sl))).join(' &middot; ')]
+    .filter(Boolean).join(' &nbsp;·&nbsp; ');
+
+  // --- left column: who they are, and how they get in -------------------------
+  const pinState = e.role === 'manager'
+    ? { k: 'na', t: 'Managers do not use the staff portal' }
+    : !e.pin ? { k: 'bad', t: 'No PIN — they cannot sign in to the portal' }
+      : { k: 'ok', t: 'Can sign in to the staff portal' };
+
+  const side = `
+    <form method="post" action="/employees/${e.id}" class="epr-card">
       <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-      <div class="svc-picks">
-        ${SERVICES.all().map((sv) => `<label class="svc-pick">
-          <input type="checkbox" name="svc" value="${esc(sv.slug)}"${
-            mine.includes(sv.slug) && SERVICES.isAssigned(e.id) ? ' checked' : ''}>
-          <span>${esc(sv.name)}</span></label>`).join('')}
-      </div>
-      <p class="sub" style="margin:8px 0 0">${SERVICES.isAssigned(e.id)
-        ? `Currently limited to ${mine.map((x) => esc(SERVICES.nameOf(x))).join(' and ')}.`
-        : 'Currently on every service.'}</p>
-      <button class="btn" type="submit" style="margin-top:10px">Save services</button>
-    </form>
+      ${hid(['role', 'pos_id', 'pay_type', 'rate', 'salary', 'ot_eligible'])}
+      <h2 class="epr-h">Personal details</h2>
+      <label class="epr-f">Name <input name="name" value="${val(e.name)}" required ${w ? '' : 'disabled'}></label>
+      <label class="epr-f">Email <input name="email" type="email" value="${val(e.email)}"
+        placeholder="for their pay summary" ${w ? '' : 'disabled'}></label>
 
-    <h2>Roles &amp; wages</h2>
-    <p class="sub">Add each role this person works and the wage for it. On a shift, the wage for the role they worked applies automatically &mdash; no need to type it each time. If they earn a different rate on one schedule, add it for that schedule and it wins there; every other schedule keeps the general rate. (Salaried staff don't need wages here.)</p>
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Role</th><th>Schedule</th><th class="num">Wage</th><th></th></tr></thead>
-      <tbody>${roleRowsAll || '<tr><td colspan="4" class="muted">None yet — falls back to the default wage above.</td></tr>'}</tbody>
-    </table></div>
-    <form method="post" action="/employees/${e.id}/roles" class="card form grid">
-      <label>Role <select name="role">${payRoles.map((r) => `<option value="${r}">${r}</option>`).join('')}</select></label>
-      ${SERVICES.all().length > 1 ? `<label>Schedule <select name="svc">
-        <option value="">Every schedule</option>
-        ${SERVICES.all().map((sv) => `<option value="${esc(sv.slug)}">${esc(sv.name)} only</option>`).join('')}
-      </select></label>` : ''}
-      <label>Wage/hr <input name="wage" type="number" step="0.01" min="0" placeholder="0.00" required></label>
-      ${/* Counted for the person rather than the role: the role is chosen in
-           the select beside this and the count would have to change with it.
-           The route counts the ACTUAL role before it rewrites anything. */''}
-      <div style="grid-column:1/-1">${wageWhenFields(e.id, null, { idSuffix: 'role' })}</div>
-      <button class="btn" type="submit">Add role &amp; wage</button>
-    </form>
+      <h2 class="epr-h epr-h--2">Portal access</h2>
+      ${/* The PIN is a credential, not a payroll field. It is shown as a state
+           first and only editable deliberately — and the digits are never put
+           on screen for somebody standing behind the manager to read. */''}
+      <p class="epr-acc epr-acc--${pinState.k}">${esc(pinState.t)}</p>
+      <details class="epr-pin"${w ? '' : ' hidden'}>
+        <summary>${e.pin ? 'Change PIN' : 'Set a PIN'}</summary>
+        <label class="epr-f">4-digit PIN
+          <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
+            value="" placeholder="${e.pin ? 'leave blank to keep the current PIN' : '0000'}"></label>
+        <p class="epr-hint">They sign in to the staff portal with this. Four digits, and no two people can share one. Leave it blank to keep the one they have.</p>
+        ${e.pin ? `<label class="epr-clear"><input type="checkbox" name="pin_clear" value="1">
+          Remove their PIN &mdash; they will not be able to sign in to the portal</label>` : ''}
+      </details>
 
-    ${wageLog.length ? `<h2>Wage changes</h2>
-    <p class="sub">Every change, what was chosen when it was made, and when. Each shift is priced at the wage in force on the day it was worked, so a raise never restates what somebody was already paid. Wages set before this was recorded are not listed &mdash; they simply applied from the beginning.</p>
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Effective from</th><th>Role</th><th class="num">Wage</th>
-        <th>Option chosen</th><th>Changed</th><th>By</th></tr></thead>
-      <tbody>${wageLog.map((r) => `<tr>
-        <td>${esc(r.effective_from)}${r.effective_from > isoDate(startOfToday()) ? ' <span class="sub">(upcoming)</span>' : ''}</td>
-        <td>${r.role ? esc(r.role) : '<span class="muted">default</span>'}</td>
-        <td class="num">${money(r.wage_cents)}/h</td>
-        <td class="sub">${r.note ? esc(r.note) : '<span class="muted">&mdash;</span>'}</td>
-        ${/* When the change was MADE, which is a different fact from the day
-              it takes effect — a raise entered in March starting in June has
-              two dates and only one of them says who knew what, when. */''}
-        <td class="sub">${esc(r.created_at || '')}</td>
-        <td class="sub">${esc(r.created_by || '')}</td>
-      </tr>`).join('')}</tbody>
-    </table></div>` : ''}
-
-    <form method="post" action="/employees/${e.id}/deactivate" onsubmit="return confirm('Remove ${esc(e.name)} from active staff? Their past shifts stay intact.')" style="margin-top:18px">
-      <button class="link-danger">Deactivate this person</button>
+      ${w ? '<button class="bs-btn epr-save" type="submit">Save details</button>' : ''}
     </form>`;
-  res.send(layout('Edit staff', body));
+
+  // --- tab: employment --------------------------------------------------------
+  const tEmployment = `
+    <form method="post" action="/employees/${e.id}" class="epr-card">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      ${/* No hidden pin. It used to be carried so the update would not blank
+             it, which put the digits in the page source of every tab — the one
+             thing this redesign was told never to do. The route keeps the
+             existing PIN when none is submitted instead. */''}
+      ${hid(['name', 'email'])}
+      <h2 class="epr-h">Employment</h2>
+      <div class="epr-rows">
+        <div class="epr-row"><span>Primary position</span>
+          <select name="role" ${w ? '' : 'disabled'}>${roles.map((r) => `<option value="${r}"${r === e.role ? ' selected' : ''}>${posName(r)}</option>`).join('')}</select></div>
+        <div class="epr-row"><span>Pay type</span>
+          <select name="pay_type" ${w ? '' : 'disabled'}>
+            <option value="hourly"${isSalary ? '' : ' selected'}>Hourly</option>
+            <option value="salary"${isSalary ? ' selected' : ''}>Salary</option></select></div>
+        <div class="epr-row"><span>Overtime<i>Only applies when weekly overtime is on in Payroll</i></span>
+          <select name="ot_eligible" ${w ? '' : 'disabled'}>
+            <option value="1"${e.ot_exempt ? '' : ' selected'}>Eligible</option>
+            <option value=""${e.ot_exempt ? ' selected' : ''}>Exempt</option></select></div>
+        <div class="epr-row"><span>Benugin / POS ID</span>
+          <input name="pos_id" value="${val(e.pos_id)}" placeholder="optional" ${w ? '' : 'disabled'}></div>
+      </div>
+
+      <h2 class="epr-h epr-h--2">${isSalary ? 'Salary' : 'Default hourly wage'}</h2>
+      <p class="epr-hint">${isSalary
+    ? 'Salaried staff carry no hourly rate, and are left out of hourly wage cost.'
+    : 'What they earn when no position-specific rate applies. Set rates per position under Schedule &amp; pay.'}</p>
+      <div class="epr-rows">
+        ${isSalary ? `<div class="epr-row"><span>Salary<i>per pay period</i></span>
+          <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" ${w ? '' : 'disabled'}></div>
+          <input type="hidden" name="rate" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}">`
+    : `<div class="epr-row"><span>Hourly wage</span>
+          <input name="rate" type="number" step="0.01" min="0" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}" ${w ? '' : 'disabled'}></div>
+          <input type="hidden" name="salary" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}">`}
+      </div>
+      ${isSalary || !w ? '' : wageWhenFields(e.id, null, { idSuffix: 'def' })}
+      ${w ? '<button class="bs-btn epr-save" type="submit">Save employment</button>' : ''}
+      <p class="epr-hint epr-hint--foot">Positions are managed under <a href="/positions">Positions</a>.</p>
+    </form>`;
+
+  res.send(layout(e.name, `
+    ${flash(req)}
+    <div class="bs-page epr">
+      <a class="bs-back" href="/employees">&larr; Staff</a>
+
+      <header class="bs-panel epr-top">
+        <span class="epr-av" style="--pl-c:${avatarHue(e.name)}">${esc(initialsOf(e.name))}</span>
+        <div class="epr-id">
+          <h1>${esc(e.name)}</h1>
+          <p>${sub || '<span class="muted">No position yet</span>'}</p>
+        </div>
+        <span class="epr-state epr-state--${e.active ? 'on' : 'off'}">${e.active ? 'Active' : 'Inactive'}</span>
+        ${w ? `<details class="epr-opts">
+          <summary>Options</summary>
+          <div class="epr-opts-m">
+            ${e.active
+    ? `<form method="post" action="/employees/${e.id}/deactivate"
+                onsubmit="return confirm('Deactivate ${esc(e.name).replace(/'/g, "\\'")}?\\n\\nThey stop appearing as active staff and lose portal access.\\n\\nEvery shift, punch, tip and pay record they already have stays exactly as it is — nothing is deleted.')">
+                <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                <button type="submit" class="epr-danger">Deactivate employee</button></form>`
+    : `<form method="post" action="/employees/${e.id}/reactivate">
+                <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                <button type="submit">Reactivate employee</button></form>`}
+          </div>
+        </details>` : ''}
+      </header>
+
+      <div class="epr-cols">
+        <aside class="epr-side">${side}</aside>
+        <div class="epr-main">
+          <nav class="epr-tabs" aria-label="Employee">
+            ${EPR_TABS.map(([k, label]) => `<a class="epr-tab${tab === k ? ' on' : ''}"
+              href="/employees/${e.id}/edit?tab=${k}"${tab === k ? ' aria-current="page"' : ''}>${label}</a>`).join('')}
+          </nav>
+          <div class="epr-pane">
+            ${tab === 'employment' ? tEmployment : ''}
+            ${tab === 'pay' ? eprPay(req, e, { w, payRoles, mine, today0 }) : ''}
+            ${tab === 'time' ? eprTime(req, e) : ''}
+            ${tab === 'payroll' ? eprPayroll(req, e) : ''}
+            ${tab === 'documents' ? eprDocuments(req, e) : ''}
+            ${tab === 'activity' ? eprActivity(req, e) : ''}
+          </div>
+        </div>
+      </div>
+    </div>`));
 });
 
 app.post('/employees/:id', (req, res) => {
@@ -9495,9 +9859,17 @@ app.post('/employees/:id', (req, res) => {
 
   q.updateEmployee.run({
     id: e.id, name: name.trim(), role, email: (email || '').trim() || null,
+    // BLANK MEANS KEEP, not clear.
+    //
+    // It used to mean clear, and that was only safe because the form always
+    // rendered the real digits — so blank could only happen if somebody
+    // emptied the box on purpose. The digits are not rendered any more, so the
+    // old rule would wipe a PIN every time an unrelated tab was saved, locking
+    // that person out of the portal with nothing on screen to explain it.
+    // Removing one is its own deliberate tick now.
+    pin: req.body.pin_clear === '1' ? null : ((pin || '').trim() || e.pin || null),
     // A raise that starts next month is not what they earn now. Leaving the
     // current wage alone until then is what makes "from a date" mean anything.
-    pin: (pin || '').trim() || null,
     hourly_rate_cents: wage && wage.future ? (e.hourly_rate_cents || 0) : newRate,
     pos_id: (pos_id || '').trim() || null,
     pay_type: pay_type === 'salary' ? 'salary' : 'hourly', salary_cents: toCents(req.body.salary),

@@ -275,6 +275,12 @@ db.transaction(() => {
 // ---- Employees ----------------------------------------------------------
 const q = {
   allEmployees: db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY role, name'),
+  // ACTIVE AND INACTIVE. A separate statement rather than a change to the one
+  // above: nine modules read allEmployees and every one of them means "people
+  // who work here now" — widening it would put departed staff on the schedule
+  // board, in the tip-out and on the payroll page. Only the roster wants
+  // everybody, and only so somebody deactivated can be found and brought back.
+  everyEmployee: db.prepare('SELECT * FROM employees ORDER BY active DESC, role, name'),
   employee: db.prepare('SELECT * FROM employees WHERE id = ?'),
   serversList: db.prepare("SELECT * FROM employees WHERE active = 1 AND role = 'server' ORDER BY name"),
   addEmployee: db.prepare(
