@@ -19430,6 +19430,20 @@ const avatarHue = (n) => {
 };
 
 // 16:00 -> 4:00pm, for anything a person reads rather than an input parses.
+/**
+ * Did this punch finish on a later calendar day than it started?
+ *
+ * Local days, not UTC ones: a 6pm-to-2am shift is one calendar day apart where
+ * the person is standing, and comparing UTC dates would call a 7pm-to-11pm
+ * shift overnight for anybody west of Greenwich.
+ */
+function overnight(e) {
+  if (!e || !e.clock_in_at || !e.clock_out_at) return false;
+  const tz = process.env.TZ || 'America/New_York';
+  const day = (utc) => new Date(TC.toDate(utc).toLocaleString('en-US', { timeZone: tz })).toDateString();
+  return day(e.clock_in_at) !== day(e.clock_out_at);
+}
+
 const hhmmFace = (min) => {
   const h = Math.floor(min / 60); const m = min % 60;
   const ap = h >= 12 ? 'pm' : 'am'; const h12 = h % 12 || 12;
@@ -24023,6 +24037,9 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   if (!emp) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such employee</h1></div>'));
   const periods = recentPeriods(8);
   const period = periods.find((p) => p.start === req.query.p) || currentPeriod();
+  // Where this period sits in the list, so the header can step either side of
+  // it. recentPeriods is newest-first, so "older" is the HIGHER index.
+  const at2 = Math.max(0, periods.findIndex((p) => p.start === period.start));
   const v = tsDecision(emp, period);
   const events = v.sheet.id ? TC.q.eventsFor.all('timesheet', v.sheet.id) : [];
   const approvals = v.sheet.id ? TC.q.approvalsFor.all(v.sheet.id) : [];
@@ -24057,12 +24074,25 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   const stepTo = (x) => (x ? `/payroll/timesheets/${x.id}?p=${period.start}${keepQ}` : '#');
   const prev = at > 0 ? siblings[at - 1] : null;
   const next = at > -1 && at < siblings.length - 1 ? siblings[at + 1] : null;
-  const walker = siblings.length > 1 ? `<nav class="tsw">
-      <a class="tsx-arrow${prev ? '' : ' off'}" href="${stepTo(prev)}"
-         ${prev ? `title="${esc(prev.name)}"` : 'aria-disabled="true"'}>←</a>
+  // NAMES THE PERSON, not just a direction. A payroll review is a run through
+  // the list, and "←" tells you nothing about whether the next one is the
+  // person you were looking for.
+  const stepPerson = (who, dir) => (who
+    ? `<a class="tsw-p" href="${stepTo(who)}" title="${esc(who.name)}">
+        ${dir === 'prev' ? '<span class="tsw-x">&lsaquo;</span>' : ''}
+        <span class="tsw-av" style="--pl-c:${avatarHue(who.name)}">${esc(initialsOf(who.name))}</span>
+        <span class="tsw-n">${dir === 'prev' ? 'Previous' : 'Next'}</span>
+        ${dir === 'next' ? '<span class="tsw-x">&rsaquo;</span>' : ''}
+      </a>`
+    : `<span class="tsw-p is-off" aria-hidden="true">
+        ${dir === 'prev' ? '<span class="tsw-x">&lsaquo;</span>' : ''}
+        <span class="tsw-n">${dir === 'prev' ? 'Previous' : 'Next'}</span>
+        ${dir === 'next' ? '<span class="tsw-x">&rsaquo;</span>' : ''}
+      </span>`);
+  const walker = siblings.length > 1 ? `<nav class="tsw" aria-label="Move between people">
+      ${stepPerson(prev, 'prev')}
       <span class="tsw-at">${at > -1 ? at + 1 : '—'} of ${siblings.length}</span>
-      <a class="tsx-arrow${next ? '' : ' off'}" href="${stepTo(next)}"
-         ${next ? `title="${esc(next.name)}"` : 'aria-disabled="true"'}>→</a>
+      ${stepPerson(next, 'next')}
     </nav>` : '';
 
   // THE ONE VALID ACTION.
@@ -24104,18 +24134,45 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
            are the whole job — losing them at the bottom of a long timesheet is
            how a reviewer ends up scrolling back to remember whose hours these
            are. -->
+      ${walker ? `<div class="tsw-bar">${walker}</div>` : ''}
       <div class="ts-rhead">
-        <a class="bs-back" href="${backTo}">← Timesheets</a>
+        <a class="bs-back tsh-back" href="${backTo}">&larr;</a>
+        <span class="tsh-av" style="--pl-c:${avatarHue(emp.name)}">${esc(initialsOf(emp.name))}</span>
         <span class="ts-rh-name">${esc(emp.name)}</span>
-        <span class="ts-rh-per">${esc(labelFor(period))}</span>
+        ${/* The period, with a step either side of it. Reviewing somebody
+             usually means looking at the one before as well, and going back to
+             the grid to change period loses your place in the list. */''}
+        <nav class="tsh-per" aria-label="Pay period">
+          <a class="tsh-arrow${periods[at2 + 1] ? '' : ' off'}"
+            href="${periods[at2 + 1] ? `/payroll/timesheets/${emp.id}?p=${periods[at2 + 1].start}` : '#'}"
+            ${periods[at2 + 1] ? `title="${esc(labelFor(periods[at2 + 1]))}"` : 'aria-disabled="true"'}>&lsaquo;</a>
+          <b>${esc(labelFor(period))}</b>
+          <a class="tsh-arrow${at2 > 0 ? '' : ' off'}"
+            href="${at2 > 0 ? `/payroll/timesheets/${emp.id}?p=${periods[at2 - 1].start}` : '#'}"
+            ${at2 > 0 ? `title="${esc(labelFor(periods[at2 - 1]))}"` : 'aria-disabled="true"'}>&rsaquo;</a>
+        </nav>
         <span class="inc-st inc-st-${esc(raw.replace(/_/g, '-'))}">${esc(TC.SHEET_LABEL[raw] || raw)}</span>
         ${v.transferState !== 'not_ready' ? `<span class="inc-st inc-st-${esc(v.transferState.replace(/_/g, '-'))}">${esc(TC.TRANSFER_LABEL[v.transferState])}</span>` : ''}
         ${v.issues.filter((i) => i.blocking).length
           ? `<a class="ts-rh-iss" href="#issues">${v.issues.filter((i) => i.blocking).length} to fix</a>` : ''}
         <span class="ts-rh-act">
-          ${primary && canWrite() ? `<a class="bs-btn" href="#act-${primary}">${PRIMARY_LABEL[primary]}</a>` : ''}
-          ${walker}
+          ${primary && canWrite() ? `<a class="bs-btn bs-btn--go" href="#act-${primary}">${PRIMARY_LABEL[primary]}</a>` : ''}
         </span>
+      </div>
+
+      ${/* The totals, as a strip rather than buried in the side column. These
+           are the numbers somebody is here to check, and the arithmetic is
+           shown — regular plus overtime equals payable — so a figure that
+           looks wrong can be traced without opening anything. */''}
+      <div class="tsh-tot">
+        <div class="tsh-t"><b>${TC.hm(v.totals.regular ?? Math.max(0, v.totals.payable - (v.totals.overtime || 0)))}</b><span>Regular</span></div>
+        <span class="tsh-op">+</span>
+        <div class="tsh-t"><b>${TC.hm(v.totals.overtime || 0)}</b><span>Overtime</span></div>
+        <span class="tsh-op">=</span>
+        <div class="tsh-t tsh-t--sum"><b>${TC.hm(v.totals.payable || 0)}</b><span>Total paid hours</span></div>
+        <div class="tsh-t"><b>${v.entries.length + v.fromShifts.length}</b><span>Worked days</span></div>
+        <div class="tsh-t"><b>${TC.hm(v.totals.unpaidBreak || 0)}</b><span>Unpaid breaks</span></div>
+        <div class="tsh-t"><b>${TC.hm(v.totals.paidBreak || 0)}</b><span>Paid breaks</span></div>
       </div>
       <div class="inc-rec-head">
         <div class="inc-rec-title">
@@ -24224,9 +24281,11 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 otThreshold: v.otRule.threshold, periodStart: period.start, extra: v.fromShifts,
               });
               const editable = canWrite();
-              const cell = (id, field, shown, value, extra = '') => (editable
-                ? `<button type="button" class="tsr-c" data-e="${id}" data-f="${field}" data-v="${esc(value)}"${extra}>${esc(shown)}</button>`
-                : `<span class="tsr-c ro">${esc(shown)}</span>`);
+              // `after` is markup and is NOT escaped — it is ours, not input.
+              // Everything the user typed still goes through esc().
+              const cell = (id, field, shown, value, extra = '', after = '') => (editable
+                ? `<button type="button" class="tsr-c" data-e="${id}" data-f="${field}" data-v="${esc(value)}"${extra}>${esc(shown)}${after}</button>`
+                : `<span class="tsr-c ro">${esc(shown)}${after}</span>`);
               const newCell = (date, field, shown) => (editable
                 ? `<button type="button" class="tsr-c tsr-mk" data-new="1" data-emp="${emp.id}" data-date="${date}" data-f="${field}" data-v="">${shown}</button>`
                 : `<span class="tsr-c ro">${shown}</span>`);
@@ -24273,8 +24332,14 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                     : '<span class="tsg-del ro" aria-hidden="true"></span>'}
                   ${cell(e.id, 'position', posName(e.position) + (e.daypart ? ' · ' + dp(e.daypart) : ''), e.position)}
                   ${cell(e.id, 'in', TC.clockFace(e.clock_in_at), hhmm(e.clock_in_at))}
+                  ${/* A punch that crosses midnight gets a moon. The bar runs
+                       past 1am and an end time reading 2:07a beside a start of
+                       6:00p looks wrong until you know it is the NEXT day —
+                       so the row says so rather than leaving it to be worked
+                       out. The title says the same thing in words. */''}
                   ${e.clock_out_at
-                    ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at))
+                    ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at), '',
+                      overnight(e) ? '<i class="ts-moon" title="Finished the next day">&#9790;</i>' : '')
                     : cell(e.id, 'out', 'set end', hhmm(e.clock_in_at))}
                   ${brks.length
                     ? `<button type="button" class="tsr-c tsr-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`

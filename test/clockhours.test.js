@@ -1255,7 +1255,14 @@ test('the employee walker carries the period and stops at the ends', async () =>
   const first = await text(`/payroll/timesheets/${uniq[0]}?p=${per.start}`);
   assert.match(first, /class="tsw-at">1 of/, 'it says where you are');
   assert.match(first, new RegExp(`/payroll/timesheets/\\d+\\?p=${per.start}`), 'and the arrow keeps the period');
-  assert.match(first, /tsx-arrow off/, 'the arrow at the end is disabled, not wrapped');
+  // The step at the end is DISABLED, not wrapped round to the other end of the
+  // list — walking off the last person and landing on the first is how you
+  // review somebody twice and somebody else never.
+  assert.match(first, /class="tsw-p is-off"/, 'the step at the end is dead, not wrapped');
+  // And each step names who is next rather than only pointing. A payroll review
+  // is a run through a list, and an arrow alone does not say whose sheet it
+  // lands on.
+  assert.match(first, /class="tsw-av"/, 'the next person wears their initials');
 });
 
 test('the migration stamps existing hours as legacy and leaves never-set rows to the clock', () => {
@@ -1405,4 +1412,39 @@ test('a signed period asks once, then reopens and takes the edit', async () => {
   assert.notStrictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(e.id).clock_in_at,
     e.clock_in_at, 'and the edit landed');
   thaw(emp, day);
+});
+
+test('a punch that crosses midnight is marked, and one that does not is not', async () => {
+  // The bar runs past 1am. An end time reading 2:07a beside a start of 6:00p
+  // looks wrong until you know it is the NEXT day, so the row says so rather
+  // than leaving it to be worked out.
+  //
+  // LOCAL days, not UTC ones: comparing UTC dates would call a 7pm-to-11pm
+  // shift overnight for anybody west of Greenwich, which is everybody here.
+  const per = gridPeriod();
+  const sh = db.prepare('SELECT id FROM shifts LIMIT 1').get();
+  const mk = (inAt, outAt) => Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, 'dinner', 'server', ?, ?, 'complete', 'moontest', 240, 240)`)
+    .run(E.both, sh.id, per.start, inAt, outAt).lastInsertRowid);
+
+  // 10pm to 2am LOCAL, which is 02:00 to 06:00 UTC the following day.
+  const over = mk(`${per.start} 02:00:00`, `${per.start} 06:00:00`);
+  try {
+    const html = await text(`/payroll/timesheets/${E.both}?p=${per.start}`);
+    assert.match(html, /class="ts-moon"/, 'the overnight punch is marked');
+    assert.match(html, /title="Finished the next day"/, 'and says so in words too');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(over);
+  }
+
+  // A punch inside one local day carries no moon.
+  const same = mk(`${per.start} 15:00:00`, `${per.start} 20:00:00`);
+  try {
+    const html = await text(`/payroll/timesheets/${E.both}?p=${per.start}`);
+    assert.doesNotMatch(html, /class="ts-moon"/, 'a same-day punch is left alone');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(same);
+  }
 });
