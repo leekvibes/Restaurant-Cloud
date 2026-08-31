@@ -5801,3 +5801,41 @@ input[type="date"], input[type="time"], input[type="search"], select {
   font-weight: 400; }
 .svc-card-add { display: flex; align-items: center; justify-content: center;
   text-decoration: none; min-height: 118px; }
+
+/* --- picking people ---------------------------------------------------------
+   A list with a row each, not a field of identical chips. Picking eleven
+   people out of a wrapped row of pills means reading every one; a face, a
+   name and what they do is scannable, and this is the moment somebody is
+   deciding who belongs where. */
+.pl { border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; background: var(--panel); }
+.pl-row { display: flex; align-items: center; gap: 13px; margin: 0; padding: 11px 14px;
+  border-bottom: 1px solid var(--sb-hline, var(--rule)); cursor: pointer; font-weight: 400; }
+.pl-row:last-child { border-bottom: 0; }
+.pl-row:hover { background: var(--paper); }
+.pl-row input { position: absolute; opacity: 0; width: 0; height: 0; }
+/* The tick is drawn, so the row is the target rather than a 16px box. */
+.pl-tick { flex: none; width: 21px; height: 21px; border: 1.5px solid var(--rule);
+  border-radius: 6px; background: var(--panel); position: relative; }
+.pl-row input:checked + .pl-tick { background: var(--ink); border-color: var(--ink); }
+.pl-row input:checked + .pl-tick::after { content: ''; position: absolute; left: 6px; top: 2px;
+  width: 5px; height: 10px; border: solid var(--panel); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.pl-row input:focus-visible + .pl-tick { outline: 2px solid var(--headline); outline-offset: 2px; }
+.pl-av { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 50%; background: var(--pl-c, #666); color: #fff;
+  font-size: 12px; font-weight: 700; letter-spacing: .02em; }
+.pl-who { display: block; min-width: 0; }
+.pl-who b { display: block; font-size: 14.5px; font-weight: 600; color: var(--headline);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-who i { display: block; font-style: normal; font-size: 12px; color: var(--muted); margin-top: 1px; }
+.pl-off { margin-left: auto; flex: none; font-size: 11px; color: var(--muted);
+  border: 1px solid var(--rule); border-radius: 999px; padding: 2px 8px; }
+.svc-new-who { min-width: 0; }
+
+/* Schedules that exist but have no clock of their own. */
+.svc-conn { margin-top: 22px; padding: 16px 18px; border: 1px dashed var(--rule); border-radius: 12px; }
+.svc-conn > b { font-size: 13.5px; color: var(--headline); }
+.svc-conn .sub { margin: 4px 0 12px; }
+.svc-conn-r { display: flex; align-items: center; gap: 12px; margin: 0 0 8px; }
+.svc-conn-r span { font-size: 14px; font-weight: 600; color: var(--headline); }
+.svc-conn-r button { margin-left: auto; }
+.svc-clock legend { padding: 0 6px; font-size: 12px; font-weight: 650; color: var(--headline); }

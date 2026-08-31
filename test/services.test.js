@@ -217,3 +217,48 @@ test('a service view is never the one you run payroll from, because of overtime'
   assert.match(page, /const paySvc = SERVICES\.isActive\(req\.query\.svc\) \? req\.query\.svc : 'all'/,
     'Overall is the default — a scoped view is never what somebody lands on');
 });
+
+// --- creating one: who is on it, and whether it has a clock -------------------
+
+test('a new schedule takes exactly the people picked, and nobody else', () => {
+  const out = SVC.create({ slug: 'evt', name: 'Private events', members: [ALICE] });
+  assert.strictEqual(out.name, 'Private events');
+  assert.deepStrictEqual(SVC.employeesFor('evt'), [ALICE], 'the one person picked');
+  assert.ok(SVC.canWork(ALICE, 'evt'));
+  assert.ok(!SVC.canWork(BOB, 'evt'), 'and nobody who was not');
+  SVC.archive('evt');
+});
+
+test('a schedule can be made without a time clock, and given one later', () => {
+  // The clock is a flag on the schedule, not a second table. A time clock is
+  // already a service here — punches, timesheets and corrections are all keyed
+  // by daypart — so a separate table would be a second name for one thing, and
+  // the two would eventually disagree about which service a punch belonged to.
+  SVC.create({ slug: 'latenite', name: 'Late night', members: [BOB], withClock: false });
+  assert.ok(!SVC.withClock().some((x) => x.slug === 'latenite'), 'no clock card yet');
+  assert.ok(SVC.all().some((x) => x.slug === 'latenite'), 'but the schedule is there');
+
+  SVC.setClock('latenite', true);
+  assert.ok(SVC.withClock().some((x) => x.slug === 'latenite'), 'connected later');
+
+  // And disconnected again, without touching anybody's punches.
+  SVC.setClock('latenite', false);
+  assert.ok(!SVC.withClock().some((x) => x.slug === 'latenite'));
+  SVC.archive('latenite');
+});
+
+test('the schedules that always existed keep their clock', () => {
+  // has_clock defaults to 1 on an existing row. Café and dinner have always
+  // had a clock, and a migration that quietly switched it off would take the
+  // time clock away from a working restaurant.
+  const slugs = SVC.withClock().map((x) => x.slug);
+  assert.ok(slugs.includes('cafe') && slugs.includes('dinner'));
+});
+
+test('a schedule made without picking anybody starts empty, not full', () => {
+  // The wrong way round would be a schedule arriving with the whole roster on
+  // it, which has to be emptied before it is any use.
+  SVC.create({ slug: 'catering', name: 'Catering' });
+  assert.deepStrictEqual(SVC.employeesFor('catering'), []);
+  SVC.archive('catering');
+});

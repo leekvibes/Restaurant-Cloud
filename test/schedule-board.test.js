@@ -2182,3 +2182,44 @@ test('a board lists the people on THAT schedule, and nobody else', async () => {
     SVC.setForEmployee(E.server, before);
   }
 });
+
+test('the create screen lists people properly, and asks about a time clock', async () => {
+  // The picker used to be a wrapped field of identical pills, which meant
+  // reading every one of them to find eleven people. It is a row each now,
+  // with a face, a name and what they do.
+  const html = await raw('/services/new?back=/schedule');
+  assert.match(html, /class="pl-row"/, 'a row per person');
+  assert.match(html, /class="pl-av"/, 'with an avatar');
+  assert.match(html, /Select everyone/, 'and a way to take them all');
+
+  // Positions come from the roles they actually hold, not just their main one.
+  const multi = db.prepare('SELECT name FROM employees WHERE id = ?').get(E.multi).name;
+  const row = new RegExp(`<label class="pl-row">[\\s\\S]{0,400}?${multi}[\\s\\S]{0,200}?</label>`);
+  const m = row.exec(html);
+  assert.ok(m, 'the multi-role person is listed');
+  assert.match(m[0], /·/, 'and their several positions are shown together');
+
+  // The clock question, on the same page, defaulting to yes.
+  assert.match(html, /Give it a time clock\?/);
+  assert.match(html, /name="clock" value="1" checked/, 'yes is the default');
+  assert.match(html, /name="clock" value="0"/, 'and not-now is offered');
+  assert.match(html, /Connect one later/, 'saying it is reversible');
+});
+
+test('a schedule made without a clock is not offered as one, until it is connected', async () => {
+  const SVC = require('../src/services');
+  await post('/services', { name: 'Board Nightshift', clock: '0', back: '/schedule' });
+  try {
+    assert.ok(SVC.all().some((x) => x.name === 'Board Nightshift'), 'the schedule exists');
+    const clocks = await raw('/timeclock');
+    assert.doesNotMatch(clocks, /<h2 class="svc-card-h">Board Nightshift</, 'no clock card');
+    assert.match(clocks, /Connect a time clock/, 'but it is offered');
+
+    const slug = SVC.all().find((x) => x.name === 'Board Nightshift').slug;
+    await post(`/services/${slug}/clock`, { on: '1', back: '/timeclock' });
+    assert.match(await raw('/timeclock'), /<h2 class="svc-card-h">Board Nightshift</, 'connected');
+  } finally {
+    const sv = SVC.all().find((x) => x.name === 'Board Nightshift');
+    if (sv) SVC.archive(sv.slug);
+  }
+});

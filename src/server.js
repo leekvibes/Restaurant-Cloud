@@ -9482,12 +9482,41 @@ app.get('/services/new', (req, res) => {
                  one that quietly puts everybody on everything. */''}
             <label class="svc-new-all"><input type="checkbox" id="svc-all"> Select everyone</label>
           </div>
-          <div class="svc-picks">
-            ${staff.map((e) => `<label class="svc-pick">
+          ${/* A list, not a field of pills. Picking eleven people out of a
+               wrapped row of identical chips means reading every one of them;
+               a row each, with a face and what they do, is scannable — and it
+               is the one moment somebody is deciding who belongs where. */''}
+          <div class="pl">
+            ${staff.map((e) => {
+    const extra = q.rolesForEmployee.all(e.id).map((r) => posName(r.role));
+    const jobs = [...new Set([posName(e.role), ...extra])].filter(Boolean);
+    return `<label class="pl-row">
               <input type="checkbox" name="member" value="${e.id}">
-              <span>${esc(e.name)}<i>${esc(e.role || '')}</i></span></label>`).join('')}
+              <span class="pl-tick" aria-hidden="true"></span>
+              <span class="pl-av" style="--pl-c:${avatarHue(e.name)}">${esc(initialsOf(e.name))}</span>
+              <span class="pl-who">
+                <b>${esc(e.name)}</b>
+                <i>${jobs.length ? esc(jobs.join(' · ')) : '<span class="muted">no position yet</span>'}</i>
+              </span>
+              ${e.active ? '' : '<span class="pl-off">inactive</span>'}
+            </label>`;
+  }).join('')}
           </div>
         </div>
+
+        ${/* Asked here rather than on a second page: it is one decision with a
+             sensible default, and a whole screen to answer Yes would be a
+             screen most people tap through without reading. Reversible either
+             way, and the copy says so — nothing here is a one-way door. */''}
+        ${word === 'schedule' ? `<fieldset class="wg-when svc-clock">
+          <legend>Give it a time clock?</legend>
+          <label class="wg-opt"><input type="radio" name="clock" value="1" checked>
+            <span><b>Yes &mdash; its own time clock</b>
+              <i>It gets its own card on the Time clocks screen, and its punches and timesheets stay apart from the others.</i></span></label>
+          <label class="wg-opt"><input type="radio" name="clock" value="0">
+            <span><b>Not now</b>
+              <i>Connect one later from Time clocks. Nothing is lost either way.</i></span></label>
+        </fieldset>` : ''}
 
         <button class="bs-btn" type="submit">Create ${esc(word)}</button>
       </form>
@@ -9513,10 +9542,15 @@ app.post('/services', (req, res) => {
     // The key is derived from the name rather than asked for. It is an
     // internal handle nobody should have to think about, and one somebody
     // typed by hand is one somebody can typo into a service that never matches.
-    const sv = SERVICES.create({ slug: name, name, members });
-    svcBack(req, res, members.length
-      ? `${sv.name} added, with ${members.length} ${members.length === 1 ? 'person' : 'people'} on it.`
-      : `${sv.name} added. Nobody is on it yet — add people from their staff page.`);
+    // Absent means yes: the field is only rendered on the schedule flow, and a
+    // time clock is what somebody almost always wants.
+    const wantsClock = req.body.clock !== '0';
+    const sv = SERVICES.create({ slug: name, name, members, withClock: wantsClock });
+    const who = members.length
+      ? `with ${members.length} ${members.length === 1 ? 'person' : 'people'} on it`
+      : 'with nobody on it yet — add people from their staff page';
+    svcBack(req, res, `${sv.name} added, ${who}.`
+      + (wantsClock ? ' It has its own time clock.' : ' No time clock yet — connect one from Time clocks.'));
   } catch (e) { svcBack(req, res, e.message, true); }
 });
 
@@ -9525,6 +9559,17 @@ app.post('/services/:slug/rename', (req, res) => {
   try {
     SERVICES.rename(req.params.slug, req.body.name);
     svcBack(req, res, `Renamed to ${SERVICES.nameOf(req.params.slug)}.`);
+  } catch (e) { svcBack(req, res, e.message, true); }
+});
+
+app.post('/services/:slug/clock', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const on = req.body.on === '1';
+  try {
+    SERVICES.setClock(req.params.slug, on);
+    svcBack(req, res, on
+      ? `${SERVICES.nameOf(req.params.slug)} now has its own time clock.`
+      : `${SERVICES.nameOf(req.params.slug)} no longer has a separate time clock. Its punches are untouched.`);
   } catch (e) { svcBack(req, res, e.message, true); }
 });
 
@@ -18767,6 +18812,16 @@ const autoOutMark = (e) => (e && e.auto_closed
        aria-label="Auto clocked out. Nobody punched this time.">!</span>`
   : '');
 
+// One avatar, used wherever a person is listed. The colour is derived from the
+// name rather than stored, so the same person is the same colour on every
+// screen and a new hire needs no setup to have one.
+const initialsOf = (n) => String(n || '').trim().split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+const avatarHue = (n) => {
+  let h = 0;
+  for (let i = 0; i < String(n || '').length; i++) h = (h * 31 + String(n).charCodeAt(i)) % 360;
+  return `hsl(${h} 62% 46%)`;
+};
+
 const sbHours = (min) => (min ? TC.toHours(min) : 0);
 // The app's icon set has no copy, no trash and nothing for unpublish, so these
 // four are drawn here rather than approximated with a document or a list that
@@ -18979,12 +19034,17 @@ function sbForm(body) {
  * teaches nothing and costs a tap.
  */
 function serviceCards(req, base, opts = {}) {
+  // `only` narrows the cards — Time clocks shows the schedules that actually
+  // have a clock, and offers to connect the ones that do not rather than
+  // pretending they are not there.
+  const shown = opts.only ? SERVICES.all().filter((x) => opts.only.includes(x.slug)) : SERVICES.all();
+  const missing = opts.only ? SERVICES.all().filter((x) => !opts.only.includes(x.slug)) : [];
   // The word on screen is the thing the picker fronts — "Schedules" in front of
   // Schedule, "Time clocks" in front of Time Clock — never "Services". They are
   // the same rows underneath, but a back arrow that says Services when you came
   // from Schedule reads as a different part of the app.
   const backWord = opts.backWord || 'Schedules';
-  const list = SERVICES.all();
+  const list = shown;
   const w = canWrite(req);
   return layout(opts.title || 'Choose a service', `
     ${flash(req)}
@@ -19036,6 +19096,18 @@ function serviceCards(req, base, opts = {}) {
           href="/services/new?back=${encodeURIComponent(base)}"
           >+ Add a ${esc(backWord.replace(/s$/, '').toLowerCase())}</a>` : ''}
       </div>
+
+      ${missing.length && w ? `<div class="svc-conn">
+        <b>Without a time clock</b>
+        <p class="sub">These schedules exist but nobody clocks into them separately. Connect one and it gets its own card here.</p>
+        ${missing.map((sv) => `<form method="post" action="/services/${encodeURIComponent(sv.slug)}/clock" class="svc-conn-r">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="on" value="1">
+          <input type="hidden" name="back" value="${esc(base)}">
+          <span>${esc(sv.name)}</span>
+          <button class="bs-btn-sm" type="submit">Connect a time clock</button>
+        </form>`).join('')}
+      </div>` : ''}
     </div>`);
 }
 
@@ -20849,6 +20921,7 @@ app.get('/timeclock', (req, res) => {
       title: 'Time clocks', backWord: 'Time clocks',
       sub: 'Pick a time clock. Punches, timesheets and corrections are the same tools, scoped to it.',
       countLabel: 'On now',
+      only: SERVICES.withClock().map((x) => x.slug),
       countOf: (slug) => TC.q.allActive.all().filter((e) => e.daypart === slug).length,
     }));
   }

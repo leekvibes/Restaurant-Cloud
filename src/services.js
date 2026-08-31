@@ -74,6 +74,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS employee_services_by_emp
     ON employee_services (employee_id) WHERE active = 1;
 
+  -- A schedule's time clock is a FLAG on the schedule, not a second table.
+  -- A time clock is already a service here: punches, timesheets and
+  -- corrections are all keyed by daypart, so a separate time_clocks table
+  -- would be a second name for one thing, and the two would eventually
+  -- disagree about which service a punch belonged to. The flag only controls
+  -- whether the clock is offered separately -- its own card in the admin
+  -- picker, and later its own card on the portal before somebody clocks in.
+
   -- One row, one job: remembering that the one-time backfill has run. Its own
   -- table rather than the shared settings one, which is created by timeclock.js
   -- and therefore absent from any database that has not loaded it — a
@@ -124,16 +132,17 @@ function nameOf(slug) {
 /** Is this a service anybody can be scheduled or clocked into right now? */
 const isActive = (slug) => all().some((s) => s.slug === slug);
 
-function create({ slug, name, sort, startsMin, endsMin, members }) {
+function create({ slug, name, sort, startsMin, endsMin, members, withClock: wc }) {
   const key = String(slug || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
   if (!key) throw new Error('A service needs a short internal key.');
   if (!String(name || '').trim()) throw new Error('A service needs a name.');
   if (bySlug(key)) throw new Error(`There is already a service keyed "${key}".`);
   const next = (db.prepare('SELECT COALESCE(MAX(sort), 0) m FROM services').get().m || 0) + 1;
-  db.prepare(`INSERT INTO services (slug, name, sort, active, starts_min, ends_min)
-              VALUES (?, ?, ?, 1, ?, ?)`)
+  db.prepare(`INSERT INTO services (slug, name, sort, active, starts_min, ends_min, has_clock)
+              VALUES (?, ?, ?, 1, ?, ?, ?)`)
     .run(key, String(name).trim(), Number.isFinite(sort) ? sort : next,
-      Number.isFinite(startsMin) ? startsMin : null, Number.isFinite(endsMin) ? endsMin : null);
+      Number.isFinite(startsMin) ? startsMin : null, Number.isFinite(endsMin) ? endsMin : null,
+      wc === false ? 0 : 1);
   // Whoever was picked while creating it, and nobody else. A schedule that
   // arrived with the whole roster on it would have to be emptied before it was
   // any use, which is the wrong way round.
@@ -166,6 +175,26 @@ function unarchive(slug) {
 }
 
 // --- who works what ---------------------------------------------------------
+
+// Whether this schedule has a time clock of its own — that is, whether it is
+// offered as its own card in the Time clocks picker (and later on the portal,
+// before somebody clocks in). Existing schedules default to 1: café and dinner
+// have always had a clock, and a migration that quietly switched it off would
+// take the time clock away from a working restaurant.
+try {
+  const cols = db.prepare('PRAGMA table_info(services)').all().map((c) => c.name);
+  if (!cols.includes('has_clock')) {
+    db.exec('ALTER TABLE services ADD COLUMN has_clock INTEGER NOT NULL DEFAULT 1');
+  }
+} catch { /* older engine */ }
+
+/** Schedules that carry their own time clock. */
+const withClock = () => all().filter((x) => x.has_clock !== 0);
+
+/** Connect or disconnect a schedule's clock, later, without recreating it. */
+function setClock(slug, on) {
+  db.prepare('UPDATE services SET has_clock = ? WHERE slug = ?').run(on ? 1 : 0, slug);
+}
 
 // svc_set is kept as a column so an existing database does not have to be
 // rewritten, but nothing reads it any more: membership is the rows now.
@@ -284,6 +313,6 @@ function employeesFor(slug) {
 }
 
 module.exports = {
-  BUILT_IN, seed, backfill, addToAll, all, bySlug, nameOf, isActive, create, rename, archive, unarchive,
+  BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, bySlug, nameOf, isActive, create, rename, archive, unarchive,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };
