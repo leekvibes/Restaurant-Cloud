@@ -5780,6 +5780,25 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .sb-svc a:hover { color: var(--ink); text-decoration: underline; }
 .sb-svc-all { margin-left: auto; }
 
+/* The link between a schedule and its time clock. They are one service seen
+   from two pages, so this reads as moving between views of the same thing, not
+   as following a reference to something else — hence a quiet button rather
+   than a call to action sitting next to Publish. */
+.tcx-link { text-decoration: none; }
+.sb-svc .tcx-link { margin-left: 0; padding: 4px 10px; border: 1px solid var(--rule);
+  border-radius: 7px; color: var(--ink); background: var(--panel); }
+.sb-svc .tcx-link:hover { border-color: var(--ink); text-decoration: none; }
+.sb-svc-all + .tcx-link { margin-left: 0; }
+/* A schedule with its clock switched off. Amber, because it is a state to act
+   on rather than a way to somewhere — the only genuinely unconnected case
+   there is. */
+.tcx-off { border-color: var(--amber, #b45309) !important; color: var(--amber, #b45309) !important; }
+
+/* Which time clock the timesheets are scoped to. Same bar as the board's, so
+   the two screens name their scope the same way and in the same place. */
+.tsm-svc { margin: 0 0 12px; border: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+  border-radius: 9px; }
+
 /* --- Overall / per-service on payroll --------------------------------------
    Overall is the default and the one you run payroll from; the others are for
    reading the split. The note is part of the control rather than a footnote,
@@ -6153,6 +6172,15 @@ input[type="date"], input[type="time"], input[type="search"], select {
    same thing in words for anybody it does not. */
 .ts-moon { display: inline-block; margin-left: 6px; font-size: 12px; line-height: 1;
   color: var(--muted); cursor: help; }
+/* The long form, for a row with space for it: the moon AND the day the shift
+   actually ended on. "11:00 PM - 2:07 AM" reads like a mistake until something
+   says the end is tomorrow, and a reader should not have to work that out from
+   two times that appear to run backwards. The rule before it is the line that
+   carries the eye across the day boundary. */
+.ts-moon--long { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px;
+  padding-left: 8px; border-left: 1px solid var(--rule); font-style: normal; }
+.ts-moon--long em { font-style: normal; font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; color: var(--muted); white-space: nowrap; }
 
 /* Save / Cancel on an open cell. Editing somebody's hours takes a deliberate
    act, and abandoning one leaves the figure exactly as it was — this used to

@@ -1807,8 +1807,9 @@ module.exports = {
 // while the server is running. Bounded so a long-lived process cannot grow it
 // without limit; clearing is free because every entry is recomputable.
 // THE ZONE IS PART OF THE KEY, and that is not paranoia. timeclock.js reads the
-// zone as `const TZ = () => process.env.TZ || 'America/New_York'` — a FUNCTION,
-// evaluated per call, not a constant captured at load. So '2026-08-21 22:00' does
+// zone through TC.zone(), a FUNCTION over a stored setting — evaluated per call,
+// not a constant captured at load, and now changeable from Settings while the
+// server is up. So '2026-08-21 22:00' does
 // not name one instant; it names one instant PER ZONE, and a cache keyed on the
 // string alone would hand back a New York answer to a London question. Nothing in
 // production changes TZ today, but the whole point of a cache key is that it does
@@ -1818,7 +1819,7 @@ module.exports = {
 // '2026-11-01 01:30' is one key with one answer; the probe loop inside
 // localInputToUtc resolves the ambiguous hour the same way every time, so the
 // cache can only ever repeat a decision it did not make.
-const tzKey = () => process.env.TZ || 'America/New_York';
+const tzKey = () => TC.zone();
 const TZ_MEMO = new Map();
 function localToUtc(local) {
   const key = `${tzKey()}|${local}`;

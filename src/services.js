@@ -213,12 +213,18 @@ const CLOCK_SETTINGS = [
   ['alerts', 'alertsOn', 'flag'],
   ['auto_out', 'autoOut', 'flag'],
   ['auto_out_hours', 'autoOutHours', 'num'],
+  // The zone this clock's wall time is read in. TEXT, not a number, and left
+  // NULL until somebody sets it — NULL means "whatever the restaurant runs on",
+  // so a clock nobody has thought about follows the app and never drifts off on
+  // its own. A second location in another zone sets it here and its trading day
+  // starts and ends where its staff are standing, not where the server is.
+  ['tz', 'timezone', 'text'],
 ];
 
 try {
   const cols = db.prepare('PRAGMA table_info(services)').all().map((c) => c.name);
-  for (const [col] of CLOCK_SETTINGS) {
-    if (!cols.includes(col)) db.exec(`ALTER TABLE services ADD COLUMN ${col} INTEGER`);
+  for (const [col, , kind] of CLOCK_SETTINGS) {
+    if (!cols.includes(col)) db.exec(`ALTER TABLE services ADD COLUMN ${col} ${kind === 'text' ? 'TEXT' : 'INTEGER'}`);
   }
 } catch { /* older engine */ }
 
@@ -262,10 +268,28 @@ function settingsFor(slug, appWide = {}) {
   const out = {};
   for (const [col, key, kind] of CLOCK_SETTINGS) {
     const v = sv[col];
-    if (v == null) out[key] = appWide[key];
+    if (v == null || v === '') {
+      // Only if the caller actually has one. Writing `key: undefined` would
+      // make a clock that inherits everything look different from the app-wide
+      // object it is supposed to be identical to.
+      if (appWide[key] !== undefined) out[key] = appWide[key];
+    } else if (kind === 'text') out[key] = String(v);
     else out[key] = kind === 'flag' ? v === 1 : Number(v);
   }
   return out;
+}
+
+/**
+ * Is this a zone this machine can actually resolve?
+ *
+ * Asked before storing rather than at render time. A typo'd zone name does not
+ * fail where it is typed — it throws inside Intl on whichever page first
+ * formats a punch, which is a long way from the setting that caused it.
+ */
+function isZone(name) {
+  if (!name) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: String(name) }); return true; }
+  catch { return false; }
 }
 
 /** Save one clock's settings. Values are clamped the way the app-wide ones are. */
@@ -275,9 +299,16 @@ function setSettingsFor(slug, v) {
     return Number.isFinite(n) && n >= lo && n <= hi ? n : d;
   };
   db.prepare(`UPDATE services SET break_paid = @break_paid, long_shift = @long_shift,
-    pin_fix = @pin_fix, alerts = @alerts, auto_out = @auto_out, auto_out_hours = @auto_out_hours
+    pin_fix = @pin_fix, alerts = @alerts, auto_out = @auto_out, auto_out_hours = @auto_out_hours,
+    tz = @tz
     WHERE slug = @slug`).run({
     slug,
+    // Blank means "follow the restaurant", which is the default and the thing
+    // most clocks should stay on. Anything else is checked against the host's
+    // own zone table before it is stored: an unknown name would not throw here,
+    // it would throw later inside a date formatter, on whichever page happened
+    // to render a punch first.
+    tz: isZone(v.timezone) ? String(v.timezone) : null,
     break_paid: v.breaksPaid ? 1 : 0,
     long_shift: clamp(v.longShift, 4, 24, 16),
     pin_fix: v.pinForFix ? 1 : 0,
@@ -525,5 +556,6 @@ module.exports = {
   BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, LIMITS, limitOf, setLimit,
   DAY_LETTERS, DAY_NAMES, hoursFor, hoursOn, setHours, asMin, bySlug,
   CLOCK_SETTINGS, seedSettings, settingsFor, setSettingsFor, nameOf, isActive, create, rename, archive, unarchive,
+  isZone,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
 };

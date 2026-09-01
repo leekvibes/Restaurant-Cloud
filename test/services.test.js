@@ -348,7 +348,36 @@ test('the trading-day cutoff is NOT one of them', () => {
   const keys = SVC.CLOCK_SETTINGS.map(([, k]) => k);
   assert.ok(!keys.includes('cutoffHour'), 'the date boundary stays app-wide');
   assert.deepStrictEqual(keys.sort(),
-    ['alertsOn', 'autoOut', 'autoOutHours', 'breaksPaid', 'longShift', 'pinForFix']);
+    ['alertsOn', 'autoOut', 'autoOutHours', 'breaksPaid', 'longShift', 'pinForFix', 'timezone']);
+});
+
+test('timezone is per-clock, and the cutoff being app-wide is why that is safe', () => {
+  // These two look like the same decision and are not. The cutoff is an HOUR of
+  // whatever the local day is — "work before 4am belongs to yesterday" — so it
+  // means the same thing in every zone and can stay app-wide. The zone is WHERE
+  // that local day is measured, and a second location genuinely has a different
+  // one. Together they read as "every clock's trading day starts at 4am where
+  // its staff are standing", which is the rule a person would state.
+  //
+  // The default is the thing that keeps it safe: NULL, meaning follow the
+  // restaurant. A clock nobody has touched cannot drift onto its own calendar.
+  SVC.create({ slug: 'tzclock', name: 'TZ Clock' });
+  assert.strictEqual(SVC.settingsFor('tzclock', {}).timezone, undefined,
+    'a new clock has no zone of its own');
+  const app = { breaksPaid: true, longShift: 11, pinForFix: false, alertsOn: false,
+    autoOut: true, autoOutHours: 7, timezone: 'America/New_York' };
+  assert.strictEqual(SVC.settingsFor('tzclock', app).timezone, 'America/New_York',
+    'and inherits the restaurant zone until it is given one');
+
+  SVC.setSettingsFor('tzclock', { ...app, timezone: 'America/Los_Angeles' });
+  assert.strictEqual(SVC.settingsFor('tzclock', app).timezone, 'America/Los_Angeles');
+
+  // A zone this machine cannot resolve is refused at the door rather than
+  // stored to throw later inside a formatter on some unrelated page.
+  SVC.setSettingsFor('tzclock', { ...app, timezone: 'Mars/Olympus_Mons' });
+  assert.strictEqual(SVC.settingsFor('tzclock', app).timezone, 'America/New_York',
+    'a nonsense zone falls back to the restaurant, it does not persist');
+  SVC.archive('tzclock');
 });
 
 test('an out-of-range value is clamped rather than stored', () => {
