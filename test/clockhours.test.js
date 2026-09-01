@@ -1438,7 +1438,18 @@ test('a punch that crosses midnight is marked, and one that does not is not', as
   try {
     const html = await text(`/payroll/timesheets/${E.both}?p=${per.start}`);
     assert.match(html, /class="ts-moon"/, 'the overnight punch is marked');
-    assert.match(html, /title="Finished the next day"/, 'and says so in words too');
+    // And NAMES the day it ended on. "Finished the next day" told a reader the
+    // end was not today without telling them when it was; on a fortnight's
+    // grid, next-day-from-which-row is the whole question.
+    // The punch runs 02:00-06:00 UTC on per.start, which in New York is 10pm
+    // the evening BEFORE through 2am ON per.start — so per.start is the day it
+    // ended on, not the day after it.
+    const to = new Date(Date.parse(per.start + 'T12:00:00Z'))
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+      .replace(/^(\w+), /, '$1 ');
+    assert.match(html, /title="Clocked out the next day, /, 'and says so in words too');
+    assert.ok(html.includes(`Clocked out the next day, ${to}`),
+      `names the day it ended on — expected ${to}`);
   } finally {
     db.prepare('DELETE FROM time_entries WHERE id = ?').run(over);
   }
@@ -1620,4 +1631,78 @@ test('the service filter is built from the services that exist', async () => {
   assert.match(src, /const fSvc = tcSvc === 'all' \? '' : \(SERVICES\.isActive\(tcSvc\)/,
     'the scope is checked against the live services');
   assert.doesNotMatch(src, /DAYPARTS\.includes\(tcSvc\)/, 'and not against a fixed pair');
+});
+
+test('the timesheets ledger is scoped to the time clock you came from', async () => {
+  // The whole reported bug: pick Evening, see the right five people on Today,
+  // click Timesheets, and there is everybody from both services under one list.
+  // The scope was not lost in the query string — the tab bar never put it
+  // there, and the ledger had no idea services existed.
+  const SVC = require('../src/services');
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(E.both).map((r) => r.service_slug);
+  SVC.setForEmployee(E.both, ['cafe']);            // Day only
+  try {
+    const name = db.prepare('SELECT name FROM employees WHERE id = ?').get(E.both).name;
+    const per = gridPeriod();
+    const day = await text(`/payroll/timesheets?p=${per.start}&svc=cafe`);
+    const eve = await text(`/payroll/timesheets?p=${per.start}&svc=dinner`);
+    assert.ok(day.includes(name), 'they are on the Day clock');
+    assert.ok(!eve.includes(name), 'and not on the Evening one');
+    // And the everyone view is still reachable, or a scoped page would be a
+    // trap: no way back to the list that has all of payroll on it.
+    const all = await text(`/payroll/timesheets?p=${per.start}`);
+    assert.ok(all.includes(name), 'the unscoped ledger still shows everybody');
+  } finally {
+    SVC.setForEmployee(E.both, before);
+  }
+});
+
+test('somebody on the clock who has not punched is still on its timesheet', async () => {
+  // Because they belong to that clock. A name missing from a scoped list reads
+  // as "not on this clock", not as "worked nothing this fortnight", and the
+  // manager needs to see the person who never clocked in far more than the one
+  // who did. Unscoped, the ledger keeps its old rule — everybody still employed
+  // would otherwise arrive every period at 0.00 with nothing to do about it.
+  const SVC = require('../src/services');
+  const emp = db.prepare(`SELECT id, name FROM employees WHERE active = 1
+    AND id NOT IN (SELECT DISTINCT employee_id FROM time_entries) LIMIT 1`).get();
+  if (!emp) return;                                 // nothing to prove it with
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(emp.id).map((r) => r.service_slug);
+  SVC.setForEmployee(emp.id, ['dinner']);
+  try {
+    const per = gridPeriod();
+    const eve = await text(`/payroll/timesheets?p=${per.start}&svc=dinner`);
+    assert.ok(eve.includes(emp.name), 'a member with no punches is on the scoped list');
+    const all = await text(`/payroll/timesheets?p=${per.start}`);
+    assert.ok(!all.includes(`p-${emp.id}"`), 'and is not added to the unscoped one');
+  } finally {
+    SVC.setForEmployee(emp.id, before);
+  }
+});
+
+test('the tabs and the links keep the clock, and the picker is built from what exists', async () => {
+  // Every link on the page has to carry it. Any one of them dropping it puts
+  // you back on the everyone view without saying so, which is indistinguishable
+  // from the scope having done nothing.
+  const per = gridPeriod();
+  const html = await text(`/payroll/timesheets?p=${per.start}&svc=dinner`);
+  assert.match(html, /href="\/timeclock\?svc=dinner"/, 'the Today tab keeps the clock');
+  assert.match(html, /href="\/payroll\/timesheets\?svc=dinner"/, 'and so does Timesheets');
+  assert.ok(html.includes('svc=dinner'), 'and the row links carry it');
+  // Built from the services table, so a clock made next week appears on its own.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /SERVICES\.withClock\(\)\.map\(\(sv\) => `<option value="\$\{esc\(sv\.slug\)\}"/,
+    'the clock picker is generated, not a written-down list of two');
+});
+
+test('a board and its clock link to each other', async () => {
+  // They are one row in `services` seen from two pages. There is no second id
+  // to fall out of step, so the link is just the URL with the path swapped —
+  // which is the reason it cannot point at the wrong one.
+  const board = await text('/schedule?svc=dinner');
+  assert.match(board, /href="\/timeclock\?svc=dinner"/, 'the board offers its time clock');
+  const clock = await text('/timeclock?svc=dinner');
+  assert.match(clock, /href="\/schedule\?svc=dinner"/, 'and the clock offers its board');
 });

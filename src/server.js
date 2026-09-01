@@ -7638,7 +7638,7 @@ app.post('/portal/clock/in', (req, res) => {
     const wh = SERVICES.hoursOn(daypart, wd);
     if (wh.openMin != null) {
       const now = TC.toDate(TC.nowUtc());
-      const local = new Date(now.toLocaleString('en-US', { timeZone: process.env.TZ || 'America/New_York' }));
+      const local = new Date(now.toLocaleString('en-US', { timeZone: TC.zoneFor(daypart) }));
       const mins = local.getHours() * 60 + local.getMinutes();
       // A close BEFORE the open means the clock runs past midnight — 4pm to
       // 2am. Anything from the open onwards, or before the close, is inside it.
@@ -7689,7 +7689,11 @@ app.post('/portal/clock/in', (req, res) => {
 
   const cfg = TC.settings();
   const at = TC.nowUtc();                       // the server's clock, not the phone's
-  const bdate = TC.businessDateOf(at, cfg.cutoffHour);
+  // Dated in THIS clock's zone. A punch belongs to the trading day of the place
+  // it was made, so a second location an hour behind rolls over an hour later —
+  // and a clock with no zone of its own follows the restaurant, which is every
+  // clock until somebody says otherwise.
+  const bdate = TC.businessDateOf(at, cfg.cutoffHour, TC.zoneFor(daypart));
 
   try {
     db.transaction(() => {
@@ -19483,9 +19487,34 @@ const avatarHue = (n) => {
  */
 function overnight(e) {
   if (!e || !e.clock_in_at || !e.clock_out_at) return false;
-  const tz = process.env.TZ || 'America/New_York';
+  // The zone of the clock the punch was made on, not the server's and not the
+  // restaurant's — a second location an hour behind crosses midnight an hour
+  // later, and the moon has to appear on the row where that actually happened.
+  const tz = TC.zoneFor(e.daypart);
   const day = (utc) => new Date(TC.toDate(utc).toLocaleString('en-US', { timeZone: tz })).toDateString();
   return day(e.clock_in_at) !== day(e.clock_out_at);
+}
+
+/**
+ * The marker on a punch that finishes on the next day.
+ *
+ * A row reading "11:00 PM - 2:07 AM" is a shift that looks like it ran
+ * backwards until you work out that the end is tomorrow. Rather than leave that
+ * to be worked out, the row says so: a moon, and the day it actually ended on.
+ *
+ * `long` carries the date because a ledger row has space for it and answers
+ * "into which day?" outright; the short form is for a cell in a grid where
+ * there is only room for the moon, and the title carries the words.
+ */
+function overnightMark(e, long) {
+  if (!overnight(e)) return '';
+  const to = TC.businessDateOf(e.clock_out_at, 0, TC.zoneFor(e.daypart));
+  const day = TC.dayLabel(to).replace(/^(\w+), /, '$1 ');
+  const title = `Clocked out the next day, ${day}`;
+  return long
+    ? `<i class="ts-moon ts-moon--long" title="${esc(title)}"><span aria-hidden="true">&#9790;</span>`
+      + `<em>${esc(day)}</em></i>`
+    : `<i class="ts-moon" title="${esc(title)}" aria-label="${esc(title)}">&#9790;</i>`;
 }
 
 const hhmmFace = (min) => {
@@ -20277,6 +20306,10 @@ app.get('/schedule', (req, res) => {
           <a class="sb-svc-back" href="/schedule">&larr; Schedules</a>
           <b>${esc(svc === 'all' ? 'All services' : SERVICES.nameOf(svc))}</b>
           ${svc === 'all' ? '' : '<a class="sb-svc-all" href="/schedule?svc=all">See all services</a>'}
+          ${/* The other half of this service. Not a link between two things —
+               the board and the clock are one row in `services` seen from two
+               pages, so this is where you are with the path swapped. */''}
+          ${svc === 'all' ? '' : svcCrossLink(svc, 'timeclock')}
         </div>` : ''}
         <div class="sb-bar">
           <nav class="sb-nav" aria-label="Week">
@@ -21738,7 +21771,7 @@ app.get('/timeclock', (req, res) => {
       <span class="tcm-when"><b>${esc(TC.dayLabel(e.business_date).replace(/^\w+, /, ''))}</b>
         <i>${e.daypart ? esc(dp(e.daypart)) : '—'}</i></span>
       <span class="tcm-who">${autoOutMark(e)}<b>${esc(tcEmpName(e.employee_id))}</b><i>${esc(tcPosName(e.position))}</i></span>
-      <span class="tcm-times">${esc(TC.clockFace(e.clock_in_at))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at)) : '<i class="tcm-open">open</i>'}
+      <span class="tcm-times">${esc(TC.clockFace(e.clock_in_at, TC.zoneFor(e.daypart)))} – ${e.clock_out_at ? esc(TC.clockFace(e.clock_out_at, TC.zoneFor(e.daypart))) : '<i class="tcm-open">open</i>'}${overnightMark(e, true)}
         ${bt.unpaid || bt.paid ? `<i>${TC.hm(bt.unpaid + bt.paid)} break</i>` : ''}</span>
       <span class="tcm-hrs">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</span>
       <span class="tcm-tags">${TC.isOpen(e) ? '<i class="tcm-tag on">on</i>' : ''}${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}
@@ -21760,14 +21793,15 @@ app.get('/timeclock', (req, res) => {
           ${reqPill(pending.length + offWaiting())}
           <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
           <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
+          ${svcCrossLink(tcSvc === 'all' ? '' : tcSvc, 'schedule')}
           ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
-          <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
+          <a class="bs-btn-sm" href="/timeclock/settings${tcSvc && tcSvc !== 'all' ? '?svc=' + encodeURIComponent(tcSvc) : ''}">Settings</a>
         </div>
       </div>
       ${SERVICES.all().length > 1 ? `<div class="tcm-back">
         <a href="/timeclock">&larr; Time clocks</a>
       </div>` : ''}
-      ${tcTabs('/timeclock')}
+      ${tcTabs('/timeclock', tcSvc === 'all' ? '' : tcSvc)}
       ${span.clamped ? `<div class="bs-notice"><span class="bs-notice-k">Shortened</span>
         <p>That range was wider than ${RANGE_MAX_DAYS} days, so this is the last ${RANGE_MAX_DAYS}
         (${esc(span.from)} to ${esc(span.to)}). Building a year in one page holds up everything else
@@ -21795,7 +21829,7 @@ app.get('/timeclock', (req, res) => {
              the visible range would hide every one of them. -->
         ${openEnded.slice(0, 10).map((e) => `<a class="tcm-live-r" href="/timeclock/${e.id}">
           <span class="tcm-dot warn"></span><b>${esc(tcEmpName(e.employee_id))}</b>
-          <span>${esc(TC.dayLabel(e.business_date))} · in ${esc(TC.clockFace(e.clock_in_at))}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
+          <span>${esc(TC.dayLabel(e.business_date))} · in ${esc(TC.clockFace(e.clock_in_at, TC.zoneFor(e.daypart)))}${overnightMark(e, true)}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
           <i>no clock-out</i></a>`).join('')}
         ${openEnded.length > 10 ? `<p class="inc-hint">${openEnded.length - 10} more.</p>` : ''}
       </section>` : ''}
@@ -22052,9 +22086,35 @@ app.get('/timeclock/settings', (req, res) => {
   // clock named in the tabs — editing Day says nothing about Evening, which is
   // what having two time clocks is supposed to mean.
   const clocks = SERVICES.withClock();
+  // A short list, not the full IANA database. Nobody running a restaurant wants
+  // to scroll six hundred city names, and a zone typed by hand is a zone that
+  // can be wrong. Anything already stored that is not on this list is added to
+  // it below rather than silently swapped for Eastern.
+  const ZONES = [
+    ['America/New_York', 'Eastern Time'],
+    ['America/Chicago', 'Central Time'],
+    ['America/Denver', 'Mountain Time'],
+    ['America/Phoenix', 'Arizona (no daylight saving)'],
+    ['America/Los_Angeles', 'Pacific Time'],
+    ['America/Anchorage', 'Alaska Time'],
+    ['Pacific/Honolulu', 'Hawaii Time'],
+    ['America/Puerto_Rico', 'Atlantic Time'],
+  ];
+  const zoneName = (z) => (ZONES.find(([v]) => v === z) || [z, z])[1];
+  const zoneOpts = (sel, extra) => {
+    const list = ZONES.slice();
+    if (sel && !list.some(([v]) => v === sel)) list.push([sel, sel]);
+    return (extra ? `<option value=""${!sel ? ' selected' : ''}>${esc(extra)}</option>` : '')
+      + list.map(([v, lbl]) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(lbl)}</option>`).join('');
+  };
+
   const pick = clocks.some((x) => x.slug === req.query.svc) ? req.query.svc
     : (clocks[0] ? clocks[0].slug : '');
   const cs = pick ? TC.settingsOn(pick) : c;
+  // This clock's OWN zone — blank when it inherits. Read with an empty app
+  // object deliberately: settingsOn would fall back to the restaurant's and the
+  // picker could then never show "same as the restaurant".
+  const ownZone = pick ? (SERVICES.settingsFor(pick, {}).timezone || '') : '';
 
   res.send(layout('Time clock settings', `
     ${flash(req)}
@@ -22076,6 +22136,20 @@ app.get('/timeclock/settings', (req, res) => {
         ${row('The trading day starts at',
           `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
           'Work before this hour counts as the night before, so an overnight shift stays on one day.')}
+        ${/* THE RESTAURANT'S ZONE, app-wide, sitting with the trading day
+             because the two are one rule together: the day starts at this hour,
+             measured here. Every punch, schedule, report and staff phone reads
+             it. It was not a setting at all until now — it came off the host's
+             TZ variable, so the trading day quietly depended on how the server
+             happened to be configured rather than on where the restaurant is. */''}
+        ${row('Time zone',
+          `<select name="tz" ${w2 ? '' : 'disabled'}>${zoneOpts(c.timezone)}</select>`,
+          'Everything the owner and the staff see is shown in this zone — punches, schedules, '
+          + 'reports and the times on their phones.')}
+        ${clocks.length && pick ? row(`Time zone for ${esc(SERVICES.nameOf(pick))}`,
+          `<select name="svc_tz" ${w2 ? '' : 'disabled'}>${zoneOpts(ownZone, `Same as the restaurant (${zoneName(c.timezone)})`)}</select>`,
+          'Only for a time clock somewhere else. Left alone it follows the restaurant, so its '
+          + 'trading day starts and ends at the same moment as everything else.') : ''}
         ${/* "Dinner service starts at" was here. It guessed a service from a
              clock boundary, and nothing needs the guess any more: clock-in
              always asks, and the schedule drawer takes the service from the
@@ -22173,6 +22247,7 @@ app.post('/timeclock/settings', (req, res) => {
   const now = TC.settings();
   TC.saveSettings({
     cutoffHour: req.body.cutoff,
+    timezone: req.body.tz,
     // Untouched: dinnerFrom is off the form entirely, and these five now live
     // on the clock. Passing the current values keeps saveSettings from
     // clamping them back to defaults that nothing reads any more.
@@ -22193,6 +22268,9 @@ app.post('/timeclock/settings', (req, res) => {
       alertsOn: req.body.alerts === '1',
       autoOut: req.body.auto_out === '1',
       autoOutHours: req.body.auto_out_hours,
+      // Blank means "follow the restaurant" and is stored as NULL, which is
+      // what almost every clock should stay on.
+      timezone: req.body.svc_tz || '',
     });
   }
   // Per-schedule clock-in limits. Unchecked means off, whatever the radios say
@@ -22269,7 +22347,7 @@ app.post('/timeclock/new', (req, res) => {
   }
   if (outAt && outAt <= inAt) return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Clock-out must be after clock-in.'));
   const cfg = TC.settings();
-  const bdate = TC.businessDateOf(inAt, cfg.cutoffHour);
+  const bdate = TC.businessDateOf(inAt, cfg.cutoffHour, TC.zoneFor(daypart));
   // The freeze applies to the day this punch would LAND on, which is only
   // knowable here — tcCanEdit was called above with no entry, because there is
   // no entry yet. Adding five hours next to the eight on a signed sheet moves
@@ -23071,7 +23149,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
   // the cutoff moves it to another day and another pay period, so the day it is
   // going TO has to be free as well — otherwise the freeze is a wall you can
   // walk around by editing from the unfrozen side.
-  const toDate = TC.businessDateOf(inAt, TC.settings().cutoffHour);
+  const toDate = TC.businessDateOf(inAt, TC.settings().cutoffHour, TC.zoneFor(daypart));
   if (toDate !== e.business_date && tcFrozen(res, e.employee_id, toDate, `/timeclock/${e.id}`)) return;
   const actor = tcActor(req);
   const before = `${e.clock_in_at} → ${e.clock_out_at || 'open'} · ${e.position}${e.daypart ? '/' + e.daypart : ''}`;
@@ -23085,7 +23163,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
     TC.editEntryChecked(e, { in: inAt, out: outAt, daypart, position, by: actor });
     // The service or the day may have moved — re-link to the right shift, still
     // through the one find-or-create every path uses.
-    const bdate = TC.businessDateOf(inAt, TC.settings().cutoffHour);
+    const bdate = TC.businessDateOf(inAt, TC.settings().cutoffHour, TC.zoneFor(daypart));
     if (daypart) {
       s.getOrIgnore.run(bdate, daypart);
       const sh = s.findShift.get(bdate, daypart);
@@ -23665,12 +23743,50 @@ function clampRange(from, to, maxDays = RANGE_MAX_DAYS) {
   return { from: addDays(b, -maxDays), to: b, clamped: true, days: maxDays };
 }
 
-function tcTabs(active) {
+/**
+ * Today / Timesheets, KEEPING THE CLOCK YOU ARE STANDING IN.
+ *
+ * Both hrefs used to be bare. So picking Evening Service, seeing the right
+ * five people on Today and then clicking Timesheets landed on an unscoped page
+ * showing everybody from both services under one list — the scope was not lost
+ * in the query string, it was never put there. Reported exactly that way.
+ */
+/**
+ * The other half of a service.
+ *
+ * A schedule and its time clock are not two objects joined by anything — they
+ * are one row in `services` looked at from two pages, so this is the URL you
+ * are already on with the path swapped. Nothing can go out of sync because
+ * there is no second id to disagree.
+ *
+ * A schedule with its clock switched off has no other half, and says so rather
+ * than offering a link to a page that would send you back to the picker.
+ */
+function svcCrossLink(svc, to) {
+  if (!svc || !SERVICES.isActive(svc)) return '';
+  const name = SERVICES.nameOf(svc);
+  if (to === 'timeclock') {
+    const hasClock = SERVICES.withClock().some((x) => x.slug === svc);
+    if (!hasClock) {
+      return navAllowed('/timeclock/settings')
+        ? `<a class="bs-btn-sm tcx-link tcx-off" href="/timeclock/settings?svc=${encodeURIComponent(svc)}"
+             title="${esc(name)} has no time clock">No time clock — turn one on</a>`
+        : '';
+    }
+    return navAllowed('/timeclock')
+      ? `<a class="bs-btn-sm tcx-link" href="/timeclock?svc=${encodeURIComponent(svc)}">View time clock</a>` : '';
+  }
+  return navAllowed('/schedule')
+    ? `<a class="bs-btn-sm tcx-link" href="/schedule?svc=${encodeURIComponent(svc)}">View schedule</a>` : '';
+}
+
+function tcTabs(active, svc) {
+  const q = svc ? '?svc=' + encodeURIComponent(svc) : '';
   const links = [['/timeclock', 'Today'], ['/payroll/timesheets', 'Timesheets']]
     .filter(([href]) => navAllowed(href));
   if (links.length < 2) return '';
   return `<nav class="pa-tabs">${links.map(([href, label]) =>
-    `<a class="pa-tab${href === active ? ' on' : ''}" href="${href}">${label}</a>`).join('')}</nav>`;
+    `<a class="pa-tab${href === active ? ' on' : ''}" href="${href}${q}">${label}</a>`).join('')}</nav>`;
 }
 
 function payrollArea(res) {
@@ -23724,6 +23840,13 @@ app.get('/payroll/timesheets', (req, res) => {
   // Hours the shift sheets carry with no punch behind them — three months of
   // this restaurant's history predates the clock, and it was invisible here.
   const shiftOnly = TC.shiftOnlyByEmployee(period.start, period.end);
+  // THE CLOCK YOU CAME FROM, or every clock.
+  //
+  // Blank is the everyone view and stays reachable. A slug scopes the page to
+  // that time clock the same way /timeclock and /schedule already scope
+  // theirs — same helper, same meaning of "on this clock".
+  const svc = SERVICES.isActive(String(req.query.svc || '')) ? String(req.query.svc) : '';
+  const onSvc = svc ? new Set(SERVICES.employeesFor(svc)) : null;
   const staffIds = new Set([
     ...q.allEmployees.all().map((e) => e.id),
     ...TC.gridPeople(period.start, period.end),
@@ -23731,6 +23854,10 @@ app.get('/payroll/timesheets', (req, res) => {
     ...shiftOnly.keys(),
   ]);
   const staff = [...staffIds].map((id) => q.employee.get(id)).filter(Boolean)
+    // Membership decides who is on this clock — not who happened to punch. A
+    // person who worked a single evening covering for somebody is not on the
+    // evening clock, and the roster should not imply they are.
+    .filter((e) => !onSvc || onSvc.has(e.id))
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
   // One call for the whole roster, before the loop rather than inside it.
@@ -23740,7 +23867,12 @@ app.get('/payroll/timesheets', (req, res) => {
     const entries = TC.q.entriesInPeriod.all(emp.id, period.start, period.end);
     const corrections = TC.q.pendingForEmployee.all(emp.id).filter((c) => entries.some((e) => e.id === c.time_entry_id));
     const extra = shiftOnly.get(emp.id) || [];
-    if (!entries.length && !corrections.length && !extra.length) return null;
+    // Scoped, a member of this clock appears whether or not they punched — they
+    // belong to it, and a name missing from the list reads as "not on this
+    // clock" rather than "worked nothing this fortnight". Unscoped, the ledger
+    // keeps its old rule: everybody who is still employed would otherwise
+    // arrive at 0.00 every period with nothing to do about it.
+    if (!entries.length && !corrections.length && !extra.length && !onSvc) return null;
     // Not even a READ of sheetFor on a custom range: it looks a sheet up by
     // start date, so a range beginning on a real period start would return that
     // whole fortnight's record and speak for numbers it does not describe.
@@ -23779,15 +23911,21 @@ app.get('/payroll/timesheets', (req, res) => {
   const filtered = rows.filter((r) => (!fSheet || r.status === fSheet)
     && (!fTrans || r.transferState === fTrans)
     && (!fIssues || r.issues.some((i) => i.blocking) || r.blockers.length));
-  const filtering = !!(fSheet || fTrans || fIssues);
+  const filtering = !!(fSheet || fTrans || fIssues || svc);
   // Everything needed to come back to this exact view. Both row links carried
   // only ?p= before, so the detail page's carefully-built keepQ arrived empty
   // and the back link and the walker both silently dropped the filter.
   const rowQ = `?p=${encodeURIComponent(period.start)}`
     + (custom ? `&from=${encodeURIComponent(period.start)}&to=${encodeURIComponent(period.end)}` : '')
+    + (svc ? `&svc=${encodeURIComponent(svc)}` : '')
     + (fSheet ? `&st=${encodeURIComponent(fSheet)}` : '')
     + (fTrans ? `&tr=${encodeURIComponent(fTrans)}` : '')
     + (fIssues ? '&iss=1' : '');
+  // The same suffix for the page's own links — the period arrows, Today, the
+  // range form and the filter sheet. Any one of them dropping it puts you back
+  // on the everyone view without saying so, which is the bug this page had.
+  const svcQ = svc ? `&svc=${encodeURIComponent(svc)}` : '';
+  const svcHidden = svc ? `<input type="hidden" name="svc" value="${esc(svc)}">` : '';
 
   // --- hours by day ---------------------------------------------------------
   // The spine is every date in the period, built here rather than read from the
@@ -23865,15 +24003,25 @@ app.get('/payroll/timesheets', (req, res) => {
              the two tabs of one screen do not put Settings in two different
              corners. */''}
         <div class="bs-head-acts">
+          ${svcCrossLink(svc, 'schedule')}
           <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
-          <a class="bs-btn-sm" href="/timeclock/settings">Settings</a>
+          <a class="bs-btn-sm" href="/timeclock/settings${svc ? '?svc=' + encodeURIComponent(svc) : ''}">Settings</a>
         </div>
       </div>
-      ${tcTabs('/payroll/timesheets')}
+      ${/* WHICH CLOCK THIS IS, said out loud. A filtered list that looks like an
+           unfiltered one is how somebody concludes half their staff are missing
+           — the same bar carries the way back to everyone, so the scope is never
+           a thing you have to guess at or clear from a menu. */''}
+      ${svc ? `<div class="sb-svc tsm-svc">
+        <a class="sb-svc-back" href="/timeclock">&larr; Time clocks</a>
+        <b>${esc(SERVICES.nameOf(svc))}</b>
+        <a class="sb-svc-all" href="/payroll/timesheets?p=${encodeURIComponent(period.start)}">Everyone</a>
+      </div>` : ''}
+      ${tcTabs('/payroll/timesheets', svc)}
       ${custom ? `<div class="bs-notice"><span class="bs-notice-k">Read-only report</span>
         <p>${esc(period.start)} to ${esc(period.end)} is not one of your pay periods, so there is no timesheet
         to sign for it. Hours are shown; approval, payroll and overtime belong to a period and are not.
-        <a class="bs-act" href="/payroll/timesheets">Back to the current period</a></p></div>` : ''}
+        <a class="bs-act" href="/payroll/timesheets${svc ? '?svc=' + encodeURIComponent(svc) : ''}">Back to the current period</a></p></div>` : ''}
       <section class="bs-panel bs-strip">
         ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}${totalOt && !custom ? ` · ${TC.hm(totalOt)} OT` : ''}`)}
         ${custom ? `
@@ -23889,13 +24037,14 @@ app.get('/payroll/timesheets', (req, res) => {
 
       <nav class="tsm-per">
         <a class="tsx-arrow${pIdx + 1 < periods.length ? '' : ' off'}"
-           href="${pIdx + 1 < periods.length ? `/payroll/timesheets?p=${periods[pIdx + 1].start}` : '#'}" aria-label="Earlier period">←</a>
+           href="${pIdx + 1 < periods.length ? `/payroll/timesheets?p=${periods[pIdx + 1].start}${svcQ}` : '#'}" aria-label="Earlier period">←</a>
         <span class="tsm-range">${esc(labelFor(period))}</span>
         <a class="tsx-arrow${pIdx > 0 ? '' : ' off'}"
-           href="${pIdx > 0 ? `/payroll/timesheets?p=${periods[pIdx - 1].start}` : '#'}" aria-label="Later period">→</a>
-        <a class="tsx-today${pIdx === 0 && !custom ? ' on' : ''}" href="/payroll/timesheets">Today</a>
+           href="${pIdx > 0 ? `/payroll/timesheets?p=${periods[pIdx - 1].start}${svcQ}` : '#'}" aria-label="Later period">→</a>
+        <a class="tsx-today${pIdx === 0 && !custom ? ' on' : ''}" href="/payroll/timesheets${svc ? '?svc=' + encodeURIComponent(svc) : ''}">Today</a>
         ${custom ? '<span class="bs-fchip on">Custom</span>' : ''}
         <form class="tsm-range-f" method="get" action="/payroll/timesheets">
+          ${svcHidden}
           <input type="date" name="from" value="${esc(period.start)}" aria-label="From">
           <span>to</span>
           <input type="date" name="to" value="${esc(period.end)}" aria-label="To">
@@ -23919,6 +24068,15 @@ app.get('/payroll/timesheets', (req, res) => {
         <details class="fsheet"${filtering ? ' open' : ''}><summary class="fs-btn">Filter${filtering
           ? ` <b class="pa-badge">${filtered.length}</b>` : ''} <span class="fs-caret">▾</span></summary>
           <div class="fs-pop"><div class="fs-body">
+            ${/* THE CLOCK. Built from the services table, so a clock created
+                 next week appears here on its own — there is no list of them
+                 written down anywhere in this file to forget to update. Set
+                 for you when you arrive from a time clock, and changeable
+                 here, which is the only way back to the everyone view. */''}
+            ${SERVICES.withClock().length > 1 ? `<div class="fs-h">Time clock</div>
+            <select name="svc" class="bs-sel"><option value="">Everyone</option>
+              ${SERVICES.withClock().map((sv) => `<option value="${esc(sv.slug)}"${
+  sv.slug === svc ? ' selected' : ''}>${esc(sv.name)}</option>`).join('')}</select>` : svcHidden}
             <div class="fs-h">Where the timesheet stands</div>
             <select name="st" class="bs-sel"><option value="">Any</option>
               ${Object.entries(TC.SHEET_LABEL).map(([k, v]) =>
@@ -23930,7 +24088,7 @@ app.get('/payroll/timesheets', (req, res) => {
             <label class="fs-chk"><input type="checkbox" name="iss" value="1"${fIssues ? ' checked' : ''}>
               <span>Unresolved issues only</span></label>
             <button class="bs-btn-sm" type="submit">Apply</button>
-            ${filtering ? `<a class="bs-btn-sm" href="/payroll/timesheets?p=${period.start}">Clear</a>` : ''}
+            ${filtering ? `<a class="bs-btn-sm" href="/payroll/timesheets?p=${period.start}${svcQ}">Clear</a>` : ''}
           </div></div>
         </details>
         ${filtering ? `<span class="tsm-filtered">${filtered.length} of ${rows.length} shown</span>` : ''}
@@ -24464,20 +24622,28 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   // through the list rather than a trip back to the grid between every person.
   // Built from the same union the ledger uses, in the same order, or "next"
   // would mean something different on the two screens.
+  // Scoped the same way the ledger is, or the arrows walk out of the clock you
+  // were reviewing and "3 of 5" starts counting a list you are not looking at.
+  const dSvc = SERVICES.isActive(String(req.query.svc || '')) ? String(req.query.svc) : '';
+  const dOnSvc = dSvc ? new Set(SERVICES.employeesFor(dSvc)) : null;
   const siblingIds = [...new Set([
     ...q.allEmployees.all().map((x) => x.id),
     ...TC.gridPeople(period.start, period.end),
     ...TC.sheetPeople(period.start),
   ])];
   const siblings = siblingIds.map((id) => q.employee.get(id)).filter(Boolean)
-    .filter((x) => TC.q.entriesInPeriod.all(x.id, period.start, period.end).length
+    .filter((x) => !dOnSvc || dOnSvc.has(x.id))
+    // On a clock, membership is enough to be in the walk — the ledger lists a
+    // member with no punches, so the arrows have to reach them or the two
+    // screens disagree about who is in the list.
+    .filter((x) => dOnSvc || TC.q.entriesInPeriod.all(x.id, period.start, period.end).length
       || TC.sheetPeople(period.start).includes(x.id))
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   const at = siblings.findIndex((x) => x.id === emp.id);
   // Carry the filter as well as the period. Walking out of a filtered review
   // into an unfiltered one silently changes which people you are working
   // through, and the count beside the arrows would stop describing the list.
-  const keepQ = ['st', 'tr', 'iss'].filter((k) => req.query[k])
+  const keepQ = ['st', 'tr', 'iss', 'svc'].filter((k) => req.query[k])
     .map((k) => `&${k}=${encodeURIComponent(String(req.query[k]))}`).join('');
   const stepTo = (x) => (x ? `/payroll/timesheets/${x.id}?p=${period.start}${keepQ}` : '#');
   const prev = at > 0 ? siblings[at - 1] : null;
@@ -24823,7 +24989,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                        out. The title says the same thing in words. */''}
                   ${e.clock_out_at
                     ? cell(e.id, 'out', TC.clockFace(e.clock_out_at), hhmm(e.clock_out_at), '',
-                      overnight(e) ? '<i class="ts-moon" title="Finished the next day">&#9790;</i>' : '')
+                      overnightMark(e))
                     : cell(e.id, 'out', 'set end', hhmm(e.clock_in_at))}
                   ${brks.length
                     ? `<button type="button" class="tsr-c tsr-bk" data-brk="${e.id}">${esc(TC.hm(bt.unpaid + bt.paid))}</button>`

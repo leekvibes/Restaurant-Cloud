@@ -441,6 +441,15 @@ function settingsOn(slug) {
 }
 
 const settings = () => ({
+  // THE ZONE THE RESTAURANT RUNS ON. Eastern unless somebody says otherwise.
+  //
+  // This used to be read straight off process.env.TZ at nine separate places,
+  // which meant the trading day depended on how the host happened to be
+  // configured. On a box left at UTC, a Friday dinner service filed itself
+  // under Saturday from 8pm onward, and nothing on any screen said so. It is a
+  // setting now, seeded to Eastern, and the env var is only a fallback for a
+  // database that has not been written to yet.
+  timezone: setting('tc_timezone') || process.env.TZ || 'America/New_York',
   cutoffHour: Number(setting('tc_day_cutoff')) || 0,
   dinnerFrom: Number(setting('tc_dinner_from')) || 16,
   breaksPaid: setting('tc_break_paid') === '1',
@@ -454,6 +463,14 @@ const settings = () => ({
 const saveSettings = (v) => {
   const clamp = (x, lo, hi, d) => { const n = Math.round(Number(x)); return isFinite(n) && n >= lo && n <= hi ? n : d; };
   const flag = (x) => (x ? '1' : '0');
+  if (v.timezone !== undefined) {
+    // Validated, never trusted. An unknown zone name does not fail where it is
+    // typed; it throws inside a date formatter on whichever page renders a
+    // punch next, a long way from the setting that caused it.
+    let z = String(v.timezone || '').trim();
+    try { new Intl.DateTimeFormat('en-US', { timeZone: z }); } catch { z = ''; }
+    sq.set.run({ key: 'tc_timezone', value: z || 'America/New_York' });
+  }
   sq.set.run({ key: 'tc_day_cutoff', value: String(clamp(v.cutoffHour, 0, 12, 4)) });
   sq.set.run({ key: 'tc_dinner_from', value: String(clamp(v.dinnerFrom, 0, 23, 16)) });
   sq.set.run({ key: 'tc_long_shift', value: String(clamp(v.longShift, 4, 24, 16)) });
@@ -481,16 +498,16 @@ function minutesBetween(a, b) {
  * The trading day a moment belongs to. Local time, with an early-morning
  * cutoff so a shift that runs past midnight stays on the day it started.
  */
-function businessDateOf(utc, cutoffHour) {
+function businessDateOf(utc, cutoffHour, tz) {
   const d = toDate(utc) || new Date();
-  const local = new Date(d.toLocaleString('en-US', { timeZone: process.env.TZ || 'America/New_York' }));
+  const local = new Date(d.toLocaleString('en-US', { timeZone: tz || zone() }));
   const iso = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
   return local.getHours() < (cutoffHour || 0) ? addDays(iso, -1) : iso;
 }
 /** Which service a moment falls in — a suggestion the employee confirms. */
-const suggestDaypart = (utc, dinnerFrom) => {
+const suggestDaypart = (utc, dinnerFrom, tz) => {
   const d = toDate(utc) || new Date();
-  const local = new Date(d.toLocaleString('en-US', { timeZone: process.env.TZ || 'America/New_York' }));
+  const local = new Date(d.toLocaleString('en-US', { timeZone: tz || zone() }));
   return local.getHours() >= (dinnerFrom || 16) ? 'dinner' : 'cafe';
 };
 // Formatters built ONCE, not per call.
@@ -501,24 +518,52 @@ const suggestDaypart = (utc, dinnerFrom) => {
 // and ruinous on a ledger: rebuilding one shipped row builder over 7,300 entries
 // took 2.4 seconds this way and 125ms cached.
 //
-// process.env.TZ does not change while the server is up, so module scope is
-// safe. The || fallback matches every other timezone read in this file.
-// Named LOCAL_TZ, not TZ: there is already a TZ() below, used by the
-// wall-clock-to-UTC conversion, and it is a function rather than a string.
-const LOCAL_TZ = process.env.TZ || 'America/New_York';
-const FMT_TIME = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: LOCAL_TZ });
-const FMT_STAMP = new Intl.DateTimeFormat('en-US', {
-  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: LOCAL_TZ });
+// The zone is a setting now, so it can change while the server is up and the
+// formatters can no longer be built once at module scope. They are built once
+// PER ZONE instead and kept — the cost the original comment describes is real
+// (23µs a call against 1.4µs cached; one ledger of 7,300 rows went from 2.4s to
+// 125ms), and a restaurant has one zone, or two if it has two locations, so the
+// map never grows past a handful of entries.
+const FMT_CACHE = new Map();
+function fmt(kind, tz) {
+  const key = kind + '|' + tz;
+  let f = FMT_CACHE.get(key);
+  if (!f) {
+    const opts = kind === 'time'
+      ? { hour: 'numeric', minute: '2-digit' }
+      : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+    try { f = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: tz }); }
+    catch { f = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'America/New_York' }); }
+    FMT_CACHE.set(key, f);
+  }
+  return f;
+}
 const FMT_DAY = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 
+/** The zone the restaurant runs on. */
+const zone = () => settings().timezone;
+/**
+ * The zone ONE TIME CLOCK runs on, falling back to the restaurant's.
+ *
+ * A clock with no zone of its own is not a clock in UTC — it is a clock in the
+ * same place as everything else, which is what almost every clock is.
+ */
+function zoneFor(slug) {
+  if (!slug) return zone();
+  try {
+    const own = require('./services').settingsFor(slug, {}).timezone;
+    return own || zone();
+  } catch { return zone(); }
+}
+
 /** Local clock face for a stored stamp: "5:42 PM". */
-const clockFace = (utc) => (utc ? FMT_TIME.format(toDate(utc)) : '—');
+const clockFace = (utc, tz) => (utc ? fmt('time', tz || zone()).format(toDate(utc)) : '—');
 /**
  * A stored UTC stamp as local date and time: "Jul 28, 2:55 AM".
  * Audit rows have to read in the same timezone as the punches beside them, or
  * a manager comparing the two sees a four-hour gap that is not there.
  */
-const stamp = (utc) => (utc ? FMT_STAMP.format(toDate(utc)) : '—');
+const stamp = (utc, tz) => (utc ? fmt('stamp', tz || zone()).format(toDate(utc)) : '—');
 /**
  * A business date as "Mon, Jul 28". Formatted in UTC deliberately: a business
  * date is already a plain calendar day with no time in it, so re-interpreting
@@ -538,9 +583,9 @@ const toHours = (min) => (min == null ? null : Math.round((min / 60) * 100) / 10
 // A manager types local wall-clock time; the DB keeps UTC. These two are the
 // only place that conversion happens, so a correction cannot drift by an hour
 // because one screen forgot the timezone.
-const TZ = () => process.env.TZ || 'America/New_York';
+const TZ = () => zone();
 /** '2026-07-27T17:30' (local) → '2026-07-27 21:30:00' (UTC, as stored). */
-function localInputToUtc(v) {
+function localInputToUtc(v, tz) {
   const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
   if (!m) return null;
   const [, Y, Mo, D, H, Mi] = m.map(Number);
@@ -548,7 +593,7 @@ function localInputToUtc(v) {
   // by probe rather than by a fixed offset keeps it right across DST.
   let guess = Date.UTC(Y, Mo - 1, D, H, Mi);
   for (let i = 0; i < 3; i++) {
-    const shown = new Date(new Date(guess).toLocaleString('en-US', { timeZone: TZ() }));
+    const shown = new Date(new Date(guess).toLocaleString('en-US', { timeZone: tz || TZ() }));
     const want = new Date(Y, Mo - 1, D, H, Mi);
     const drift = want - shown;
     if (!drift) break;
@@ -559,10 +604,10 @@ function localInputToUtc(v) {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:00`;
 }
 /** Stored UTC → the value a datetime-local input wants, in local time. */
-function utcToLocalInput(utc) {
+function utcToLocalInput(utc, tz) {
   const d = toDate(utc);
   if (!d) return '';
-  const l = new Date(d.toLocaleString('en-US', { timeZone: TZ() }));
+  const l = new Date(d.toLocaleString('en-US', { timeZone: tz || TZ() }));
   const p = (n) => String(n).padStart(2, '0');
   return `${l.getFullYear()}-${p(l.getMonth() + 1)}-${p(l.getDate())}T${p(l.getHours())}:${p(l.getMinutes())}`;
 }
@@ -1993,7 +2038,7 @@ function autoCloseStale(now = nowUtc()) {
       const wh = require('./services').hoursOn(e.daypart, wd);
       if (wh.closeMin != null) {
         const inAt = toDate(e.clock_in_at);
-        const local = new Date(inAt.toLocaleString('en-US', { timeZone: process.env.TZ || 'America/New_York' }));
+        const local = new Date(inAt.toLocaleString('en-US', { timeZone: zoneFor(e.daypart) }));
         const closeAt = new Date(local);
         closeAt.setHours(Math.floor(wh.closeMin / 60), wh.closeMin % 60, 0, 0);
         // A close that lands before the punch started belongs to the NEXT day:
@@ -2046,6 +2091,7 @@ module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
   fingerprintOf, approvalBlockers, approvalBlockersSplit, approvalStale, transferStateOf, TRANSFER_LABEL,
   q, settings, settingsOn, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
+  zone, zoneFor,
   clockFace, stamp, dayLabel, hm, toHours, breakTotals, breaksOn, recompute, elapsedMinutes,
   payableSoFar, logEvent,
   localInputToUtc, utcToLocalInput,
