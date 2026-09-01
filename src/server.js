@@ -21627,7 +21627,10 @@ app.get('/timeclock', (req, res) => {
   const fEmp = String(req.query.emp || '');
   // 'all' is the deliberate "show me everything" answer and means no filter,
   // the same word it means on the schedule board.
-  const fSvc = tcSvc === 'all' ? '' : (DAYPARTS.includes(tcSvc) ? tcSvc : '');
+  // Against the services that EXIST, not the hardcoded pair — a service the
+  // owner made would have fallen through to no filter at all, which is how a
+  // scoped clock ends up showing everybody.
+  const fSvc = tcSvc === 'all' ? '' : (SERVICES.isActive(tcSvc) ? tcSvc : '');
   const fPos = String(req.query.pos || '');
   const fStatus = String(req.query.st || '');
 
@@ -21654,7 +21657,13 @@ app.get('/timeclock', (req, res) => {
   // narrowing to one person still showed the whole floor above the results.
   const live = onNow.filter(keep);
 
-  const staff = q.allEmployees.all();
+  // THE PEOPLE ON THIS CLOCK, not everybody.
+  //
+  // This was every active employee whatever the scope, so picking Day Service
+  // showed the whole roster — the punches were filtered and the people were
+  // not, which reads as the scope having done nothing.
+  const onSvc = fSvc ? new Set(SERVICES.employeesFor(fSvc)) : null;
+  const staff = q.allEmployees.all().filter((e) => !onSvc || onSvc.has(e.id));
   const usedPos = [...new Set(all.map((e) => e.position).filter(Boolean))];
   const qs = (over) => {
     const p = new URLSearchParams({ from, to, ...(fEmp && { emp: fEmp }), ...(fSvc && { svc: fSvc }),
@@ -21814,7 +21823,7 @@ app.get('/timeclock', (req, res) => {
               ${staff.map((s2) => `<option value="${s2.id}"${String(s2.id) === fEmp ? ' selected' : ''}>${esc(s2.name)}</option>`).join('')}</select>
             <div class="fs-h">Service</div>
             <select name="svc" class="bs-sel"><option value="">Any</option>
-              ${DAYPARTS.map((d) => `<option value="${d}"${d === fSvc ? ' selected' : ''}>${dp(d)}</option>`).join('')}</select>
+              ${SERVICES.all().map((sv) => `<option value="${esc(sv.slug)}"${sv.slug === fSvc ? ' selected' : ''}>${esc(sv.name)}</option>`).join('')}</select>
             <div class="fs-h">Position</div>
             <select name="pos" class="bs-sel"><option value="">Any</option>
               ${usedPos.map((p) => `<option value="${esc(p)}"${p === fPos ? ' selected' : ''}>${esc(tcPosName(p))}</option>`).join('')}</select>

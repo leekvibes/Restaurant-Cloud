@@ -1594,3 +1594,30 @@ test('every timesheet row has the same number of cells as the header', async () 
     assert.ok(cells >= cols - 1, `${name} renders a cell per column (${cells} of ${cols})`);
   }
 });
+
+test('a scoped time clock shows only the people on that clock', async () => {
+  // Picking Day Service filtered the PUNCHES and not the PEOPLE, so the whole
+  // roster still appeared and the scope read as having done nothing.
+  const SVC = require('../src/services');
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(E.both).map((r) => r.service_slug);
+  SVC.setForEmployee(E.both, ['cafe']);            // Day only
+  try {
+    const name = db.prepare('SELECT name FROM employees WHERE id = ?').get(E.both).name;
+    const day = await text('/timeclock?svc=cafe');
+    const eve = await text('/timeclock?svc=dinner');
+    assert.ok(day.includes(name), 'they are on the Day clock');
+    assert.ok(!eve.includes(name), 'and not on the Evening one');
+  } finally {
+    SVC.setForEmployee(E.both, before);
+  }
+});
+
+test('the service filter is built from the services that exist', async () => {
+  // It was the hardcoded pair, so a service the owner made fell through to no
+  // filter at all — which is the other half of a scoped clock showing everyone.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /const fSvc = tcSvc === 'all' \? '' : \(SERVICES\.isActive\(tcSvc\)/,
+    'the scope is checked against the live services');
+  assert.doesNotMatch(src, /DAYPARTS\.includes\(tcSvc\)/, 'and not against a fixed pair');
+});
