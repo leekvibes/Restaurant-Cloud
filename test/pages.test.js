@@ -1178,3 +1178,47 @@ test('the roster grid declares exactly as many columns as it renders cells', asy
   assert.strictEqual(rendered + 1, declared('\\.has-ot'),
     'and the overtime grid is exactly one column wider');
 });
+
+test('the timesheet script survives the region being replaced', () => {
+  // THE REASON DELETE "DID NOTHING", repeatedly, and why it worked every time
+  // it was tested: the dialog lives inside #tsg-root, and reload() replaces
+  // that whole region with an outerHTML write after every inline edit. A
+  // <script> inserted that way does not run, so the closure kept pointing at
+  // the ORIGINAL dialog — detached from the document. Setting its action and
+  // showing it did nothing visible, and the click handler (bound to document,
+  // so it survived) swallowed the click.
+  //
+  // Fresh page: worked. One edit later: dead, silently. A fresh-page test can
+  // never catch that, which is why this asserts the SHAPE instead.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const at = src.indexOf("var KEY = 'zwin_tsdel_skip'");
+  assert.ok(at > -1, 'the delete script is there');
+  const block = src.slice(at, at + 3000);
+
+  assert.match(block, /var dlg = function \(\) \{ return document\.getElementById\('tsx'\); \}/,
+    'the dialog is looked up when it is needed');
+  assert.match(block, /var form = function \(\) \{ return document\.getElementById\('tsx-f'\); \}/,
+    'and so is its form');
+  assert.doesNotMatch(block, /var box = document\.getElementById\('tsx'\);\n\s*var f =/,
+    'neither is captured once at load, which is what broke');
+  assert.match(block, /function fallback\(b\)/,
+    'and if the dialog is missing entirely the delete still happens');
+});
+
+test('a time cell takes what somebody would type, and a chooser commits on choosing', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  // The native time control is a desktop spinner: three fields you tab between,
+  // and typing "930" into it does nothing.
+  assert.match(src, /input\.placeholder = 'e\.g\. 9:30pm'/, 'the time cell is typed into');
+  assert.match(src, /function parseTime\(raw\)/, 'and what is typed is parsed');
+  assert.doesNotMatch(src, /input\.type = 'time'/, 'the spinner is gone');
+
+  // The service cell fell through to that same time input, so correcting a
+  // service showed a time picker.
+  assert.match(src, /field === 'daypart'\) \{[\s\S]{0,400}?pickFrom\('data-services'\)/,
+    'the service cell is a chooser built from the services that exist');
+  assert.match(src, /if \(input\.tagName === 'SELECT'\) input\.addEventListener\('change', commit\)/,
+    'and picking an option commits — this binding was written once and lost, '
+    + 'so the select changed and nothing saved');
+});

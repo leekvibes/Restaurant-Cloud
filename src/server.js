@@ -24152,6 +24152,45 @@ const tsGridScript = () => `<script>
       var root = document;
       var busy = false;
 
+      /**
+       * What somebody would actually type, turned into HH:MM.
+       *
+       * The native time control is a spinner on a desktop — three fields you
+       * tab between, and typing "930" into it does nothing at all. This takes
+       * 930, 9:30, 9.30, 9:30pm, 930 pm, 21:30 and 2130, and refuses anything
+       * it cannot read rather than guessing. Refusing is the point: a wrong
+       * guess writes a punch nobody meant.
+       */
+      function parseTime(raw) {
+        var t = String(raw || '').trim().toLowerCase().replace(/\\s+/g, '');
+        if (!t) return null;
+        var pm = /p\\.?m?\\.?$/.test(t), am = /a\\.?m?\\.?$/.test(t);
+        t = t.replace(/[ap]\\.?m?\\.?$/, '');
+        var h, m;
+        var colon = t.split(/[:.]/);
+        if (colon.length === 2) { h = Number(colon[0]); m = Number(colon[1]); }
+        else if (/^\\d{1,2}$/.test(t)) { h = Number(t); m = 0; }
+        else if (/^\\d{3}$/.test(t)) { h = Number(t.slice(0, 1)); m = Number(t.slice(1)); }
+        else if (/^\\d{4}$/.test(t)) { h = Number(t.slice(0, 2)); m = Number(t.slice(2)); }
+        else return null;
+        if (!isFinite(h) || !isFinite(m) || m < 0 || m > 59) return null;
+        if (pm && h < 12) h += 12;
+        if (am && h === 12) h = 0;
+        // 12-hour with no am/pm is ambiguous, so it is taken literally rather
+        // than guessed at — 9 means 09:00, and somebody who meant the evening
+        // writes 9pm or 21.
+        if (h < 0 || h > 23) return null;
+        return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+      }
+      /** 21:30 -> 9:30pm, for the box somebody is about to type into. */
+      function faceOf(v) {
+        var m = /^(\\d{1,2}):(\\d{2})$/.exec(String(v || ''));
+        if (!m) return '';
+        var h = Number(m[1]);
+        var ap = h >= 12 ? 'pm' : 'am';
+        var h12 = h % 12 || 12;
+        return h12 + ':' + m[2] + ap;
+      }
       function reload() {
         // In the sheet, ask the sheet to re-read itself — it knows which
         // employee and period it is showing. On the full page, re-read here.
@@ -24272,23 +24311,40 @@ const tsGridScript = () => `<script>
         if (!c || c.classList.contains('ro') || (open && c === open.el)) return;
         cancel();
         var field = c.dataset.f, text = c.textContent, input;
-        if (field === 'position') {
-          input = document.createElement('select');
-          // Read off the grid itself, because a script in the fragment could
-          // never have set a global.
+        var pickFrom = function (attr) {
           var sheetEl = c.closest('.tsg-sheet');
-          var list = []; try { list = JSON.parse(sheetEl.getAttribute('data-positions') || '[]'); } catch (e2) { list = []; }
+          var list = [];
+          try { list = JSON.parse(sheetEl.getAttribute(attr) || '[]'); } catch (e2) { list = []; }
+          var sel = document.createElement('select');
           list.forEach(function (p) {
             var o = document.createElement('option');
             o.value = p.slug; o.textContent = p.name; o.selected = p.slug === c.dataset.v;
-            input.appendChild(o);
+            sel.appendChild(o);
           });
+          return sel;
+        };
+        if (field === 'position') {
+          // Read off the grid itself, because a script in the fragment could
+          // never have set a global.
+          input = pickFrom('data-positions');
+        } else if (field === 'daypart') {
+          // A CHOOSER, not a clock. This cell fell through to the time input
+          // below, so correcting a service showed a time picker — unusable,
+          // and why the column looked broken. The list is the services that
+          // exist, so a new one appears here without touching this code.
+          input = pickFrom('data-services');
         } else {
-          // A native time control: the system wheel on a phone, typeable on a
-          // desktop, and shown AM/PM or 24-hour by the browser's own locale
-          // rather than by us guessing which one somebody reads.
+          // TYPE THE TIME. The native control is a spinner on a desktop: three
+          // separate fields you tab between, and typing "930" into it does
+          // nothing. This takes what somebody would actually write — 930, 9:30,
+          // 9:30pm, 2130 — and normalises it on the way out.
           input = document.createElement('input');
-          input.type = 'time'; input.value = c.dataset.v;
+          input.type = 'text';
+          input.inputMode = 'numeric';
+          input.autocomplete = 'off';
+          input.placeholder = 'e.g. 9:30pm';
+          input.value = faceOf(c.dataset.v);
+          input.setAttribute('data-time', '1');
         }
         input.className = 'tsr-in';
         open = { el: c, text: text };
@@ -24316,6 +24372,11 @@ const tsGridScript = () => `<script>
         function commit() {
           if (done) return; done = true;
           var v = input.value;
+          if (input.getAttribute('data-time')) {
+            var parsed = parseTime(v);
+            if (!parsed) { done = false; say('That time did not make sense — try 9:30pm or 21:30.'); input.focus(); return; }
+            v = parsed;
+          }
           if (!v || v === c.dataset.v) return cancel();
           save(c, v, false);
         }
@@ -24329,6 +24390,16 @@ const tsGridScript = () => `<script>
           if (e2.key === 'Enter') { e2.preventDefault(); commit(); }
           if (e2.key === 'Escape') { done = true; cancel(); }
         });
+        // A CHOOSER COMMITS ON CHOOSING. Picking an option IS the deliberate
+        // act — there is nothing to type and nothing to check afterwards, so
+        // making somebody pick and then press Save is one tap too many. Typed
+        // times still need Save, because a half-typed time is not an answer.
+        //
+        // This binding was written once and silently lost: the select changed,
+        // nothing committed, and correcting a service on screen did nothing at
+        // all while the same change through the route worked perfectly.
+        if (input.tagName === 'SELECT') input.addEventListener('change', commit);
+
         // Clicking away DISCARDS. Deliberately not commit() — see above. The
         // guard is for focus moving inside this cell, to Save or Cancel, which
         // is not clicking away at all.
@@ -24500,7 +24571,9 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
         </div>
       </div>
 
-      <section class="bs-panel tsg-sheet" data-positions="${esc(JSON.stringify(allRoles().map((r2) => ({ slug: r2, name: posName(r2) }))))}">
+      <section class="bs-panel tsg-sheet"
+        data-positions="${esc(JSON.stringify(allRoles().map((r2) => ({ slug: r2, name: posName(r2) }))))}"
+        data-services="${esc(JSON.stringify(SERVICES.all().map((sv) => ({ slug: sv.slug, name: sv.name }))))}">
             ${/* The review grid.
                   One row per punch, the columns a reviewer actually reconciles
                   against, and every editable value a button you click and type
@@ -24544,24 +24617,68 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
             </div>
             <script>
             (function () {
-              var box = document.getElementById('tsx');
-              var f = document.getElementById('tsx-f');
-              if (!box || !f) return;
+              // LOOKED UP EVERY TIME, never captured.
+              //
+              // This is why Delete "did nothing", repeatedly, and why it always
+              // worked when I tested it: the dialog lives inside #tsg-root, and
+              // reload() replaces that whole region with an outerHTML write
+              // after every inline edit. A <script> inserted that way does not
+              // run, so this closure kept pointing at the ORIGINAL dialog —
+              // now detached from the document. Setting .action on it and
+              // showing it did exactly nothing visible, and the click handler
+              // (bound to document, so it survived) swallowed the click.
+              //
+              // Fresh page: worked. One edit later: dead, silently. Which is
+              // precisely how it behaves for somebody actually using the page,
+              // and precisely what a fresh-page test never catches.
               var KEY = 'zwin_tsdel_skip';
+              var dlg = function () { return document.getElementById('tsx'); };
+              var form = function () { return document.getElementById('tsx-f'); };
               var opener = null;
               function skipping() {
                 try { return window.localStorage.getItem(KEY) === '1'; } catch (e) { return false; }
               }
+              /**
+               * The delete without the dialog.
+               *
+               * Only reached if the dialog is missing from the document. It
+               * still deletes, because a control that quietly does nothing is
+               * the failure this whole change is about — and a plain confirm
+               * is a worse experience than the dialog, not a worse outcome.
+               */
+              function fallback(b) {
+                var what = b.getAttribute('data-what') || 'this shift';
+                if (!confirm('Delete ' + what + '?\\n\\nThis cannot be undone.')) return;
+                var wd = b.getAttribute('data-wdel');
+                var g = document.createElement('form');
+                g.method = 'post';
+                g.action = wd ? '/timeclock/work/' + wd + '/delete'
+                  : '/timeclock/' + b.getAttribute('data-del') + '/delete';
+                // Built in script, so the token goes in by name — the stamper
+                // only sees forms that were in the served HTML.
+                [['_csrf', window.__csrf || ''], ['reason', 'Removed from the timesheet'],
+                  ['back', location.pathname + location.search],
+                  ['employee_id', wd ? (b.getAttribute('data-emp') || '') : '']].forEach(function (kv) {
+                  var i = document.createElement('input');
+                  i.type = 'hidden'; i.name = kv[0]; i.value = kv[1]; g.appendChild(i);
+                });
+                document.body.appendChild(g); g.submit();
+              }
               function aim(id, workShift, empId) {
+                var f = form();
+                if (!f) return null;
                 f.action = workShift
                   ? '/timeclock/work/' + workShift + '/delete'
                   : '/timeclock/' + id + '/delete';
                 var e = f.querySelector('[name="employee_id"]');
                 if (e) e.value = workShift ? (empId || '') : '';
-                f.querySelector('[name="back"]').value = location.pathname + location.search;
+                var b = f.querySelector('[name="back"]');
+                if (b) b.value = location.pathname + location.search;
+                return f;
               }
               function close() {
-                box.hidden = true; box.setAttribute('aria-hidden', 'true');
+                var box = dlg();
+                if (box) { box.hidden = true; box.setAttribute('aria-hidden', 'true'); }
                 if (opener && opener.focus) opener.focus();
               }
               document.addEventListener('click', function (ev) {
@@ -24571,7 +24688,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
                 // the person clicking it they are the same act.
                 var b = ev.target.closest ? ev.target.closest('[data-del], [data-wdel]') : null;
                 if (b) {
-                  aim(b.getAttribute('data-del'), b.getAttribute('data-wdel'), b.getAttribute('data-emp'));
+                  ev.preventDefault();
+                  var f = aim(b.getAttribute('data-del'), b.getAttribute('data-wdel'), b.getAttribute('data-emp'));
+                  var box = dlg();
+                  // No dialog in the document at all is not a reason to do
+                  // nothing — the delete still has to happen. Ask plainly and
+                  // post a form built here.
+                  if (!f || !box) { return fallback(b); }
                   if (skipping()) { f.submit(); return; }
                   opener = b;
                   var w = box.querySelector('[data-tsx-what]');
@@ -24586,7 +24709,8 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               document.addEventListener('keydown', function (ev) {
                 if (ev.key === 'Escape' && !box.hidden) { ev.preventDefault(); close(); }
               });
-              f.addEventListener('submit', function () {
+              document.addEventListener('submit', function (ev) {
+                if (!ev.target || ev.target.id !== 'tsx-f') return;
                 var s = document.getElementById('tsx-skip');
                 if (s && s.checked) { try { window.localStorage.setItem(KEY, '1'); } catch (e) { /* private mode */ } }
               });
