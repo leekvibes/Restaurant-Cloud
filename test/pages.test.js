@@ -1222,3 +1222,43 @@ test('a time cell takes what somebody would type, and a chooser commits on choos
     'and picking an option commits — this binding was written once and lost, '
     + 'so the select changed and nothing saved');
 });
+
+test('the timesheet sheet runs the scripts it is filled with', async () => {
+  // Clicking a name on Timesheets does not navigate — it fetches that person's
+  // sheet as a fragment and writes it into an overlay with innerHTML. And
+  // innerHTML does not execute <script>. So every handler the fragment brings
+  // with it — the delete dialog above all — was inert on the one path the page
+  // is actually used from: Delete did nothing at all, and a service dropdown
+  // changed and snapped straight back because nothing was listening to commit
+  // it. Opening the same sheet by URL worked perfectly, because there the
+  // markup arrives as a document and its scripts run. That difference is what
+  // hid this through three rounds of "fixed" — the full page was the only
+  // thing being tested, and it was the only thing that worked.
+  //
+  // Two halves, and the bug needs only one of them to come back:
+  //   1. the fragment must carry the delete script
+  //   2. the loader must re-execute what it injects
+  const d = new (require('better-sqlite3'))(DB, { readonly: true });
+  const emp = d.prepare('SELECT id FROM employees LIMIT 1').get();
+  d.close();
+  assert.ok(emp, 'need an employee to open a sheet for');
+
+  const frag = await (await fetch(`${BASE}/payroll/timesheets/${emp.id}?frag=1`)).text();
+  const inFrag = [...frag.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)]
+    .map(m => m[1]).join('\n');
+  assert.match(inFrag, /tsx-f|__tsxBound/,
+    'the fragment no longer carries the delete script — if it moved to the parent page, this test should move with it');
+
+  const list = await (await fetch(`${BASE}/payroll/timesheets`)).text();
+  const loader = [...list.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)]
+    .map(m => m[1]).find(s => s.includes('tso-body'));
+  assert.ok(loader, 'no overlay loader on the Timesheets list');
+
+  // It must both write the fragment in AND run what it wrote.
+  assert.match(loader, /innerHTML\s*=\s*html/, 'loader no longer injects the fragment');
+  assert.match(loader, /createElement\(['"]script['"]\)/,
+    'the loader injects the sheet but never executes its scripts — Delete is dead again');
+  // ...and the execution has to come after the write, or it runs over nothing.
+  assert.ok(loader.indexOf('createElement(\'script\')') > loader.indexOf('innerHTML = html'),
+    'scripts are re-created before the fragment is written in');
+});

@@ -24057,7 +24057,32 @@ app.get('/payroll/timesheets', (req, res) => {
           function load(href) {
             return fetch(href + (href.indexOf('?') > -1 ? '&' : '?') + 'frag=1', { credentials: 'same-origin' })
               .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
-              .then(function (html) { body.innerHTML = html; })
+              .then(function (html) {
+                body.innerHTML = html;
+                // AND RUN ITS SCRIPTS.
+                //
+                // innerHTML does not execute <script>. So everything the
+                // fragment brings with it — the delete dialog, the cell
+                // editor, the service chooser — was inert in this sheet:
+                // Delete did nothing, and a dropdown changed and snapped
+                // straight back because nothing was listening to commit it.
+                //
+                // The full page at /payroll/timesheets/:id worked, because
+                // there the same markup arrives as a document and its scripts
+                // run. That is the difference that hid this: opening a
+                // timesheet by URL was fine, opening it by clicking a name was
+                // not, and only the second is how the page is actually used.
+                //
+                // Re-created rather than eval'd, so it runs in page scope with
+                // the same semantics it has on the full page.
+                var scripts = body.querySelectorAll('script');
+                for (var si = 0; si < scripts.length; si++) {
+                  var old = scripts[si];
+                  var run = document.createElement('script');
+                  if (old.src) { run.src = old.src; } else { run.textContent = old.textContent; }
+                  old.parentNode.replaceChild(run, old);
+                }
+              })
               .catch(function () { location.href = href; });   // fall back to the real page
           }
           function close() {
@@ -24631,6 +24656,13 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
               // Fresh page: worked. One edit later: dead, silently. Which is
               // precisely how it behaves for somebody actually using the page,
               // and precisely what a fresh-page test never catches.
+              // Bound once, however many times this fragment is injected. The
+              // sheet re-runs its scripts on every open, every step to the next
+              // person and every reload after an edit; without this, each pass
+              // would add another document-level listener and one click would
+              // submit the delete two or three times over.
+              if (window.__tsxBound) return;
+              window.__tsxBound = 1;
               var KEY = 'zwin_tsdel_skip';
               var dlg = function () { return document.getElementById('tsx'); };
               var form = function () { return document.getElementById('tsx-f'); };
