@@ -13692,7 +13692,17 @@ const niceDate = (iso) => (iso
 // calendar. The week starts MONDAY.
 // ---------------------------------------------------------------------------
 
-const CAL_VIEWS = ['month', 'agenda'];
+const CAL_VIEWS = ['month', 'week', 'day', 'agenda'];
+
+// The time grid runs 6am to midnight. Not 24 hours: eighteen rows already fill
+// a laptop screen, and a restaurant's obligations do not land at 3am — the four
+// hours saved are four hours of empty grid a manager would scroll past every
+// time. An item outside the window still appears, pinned to the edge it fell
+// off, so nothing can hide.
+const ZC_H0 = 6;
+const ZC_H1 = 24;
+const ZC_PX = 44;                       // pixels per hour
+const zcTop = (min) => ((Math.max(ZC_H0 * 60, Math.min(ZC_H1 * 60, min)) - (ZC_H0 * 60)) / 60) * ZC_PX;
 // Monday first. Sunday-first is the US default and the wrong one here — the
 // restaurant's week runs Monday to Sunday and a manager reading the grid
 // should see the weekend where the weekend is, at the end.
@@ -13748,6 +13758,22 @@ function calRepeatText(item) {
   else if (item.rrule_count) s += `, ${item.rrule_count} times`;
   return s;
 }
+/** Where an arrow goes, in the unit the view is measured in. */
+function calStep(view, ym, anchor, n) {
+  if (view === 'week') return `/calendar?v=week&d=${addDays(anchor, n * 7)}`;
+  if (view === 'day') return `/calendar?v=day&d=${addDays(anchor, n)}`;
+  return `/calendar?v=${view}&m=${calShiftMonth(ym, n)}`;
+}
+/** What the heading says. A week that straddles two months says both. */
+function calHeading(view, ym, anchor, weekFrom, weekTo) {
+  if (view === 'day') return calDayLabel(anchor);
+  if (view !== 'week') return calMonthTitle(ym);
+  const a = new Date(`${weekFrom}T12:00:00`), b = new Date(`${weekTo}T12:00:00`);
+  const m = (d) => d.toLocaleString('en-US', { month: 'short' });
+  return a.getMonth() === b.getMonth()
+    ? `${m(a)} ${a.getDate()} – ${b.getDate()}, ${b.getFullYear()}`
+    : `${m(a)} ${a.getDate()} – ${m(b)} ${b.getDate()}, ${b.getFullYear()}`;
+}
 const calOrd = (n) => (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd'
   : n % 10 === 3 && n !== 13 ? 'rd' : 'th');
 
@@ -13772,6 +13798,7 @@ app.get('/calendar', (req, res) => {
   const view = CAL_VIEWS.includes(req.query.v) ? req.query.v : 'month';
   const today = isoDate(startOfToday());
   const ym = /^\d{4}-\d{2}$/.test(String(req.query.m || '')) ? req.query.m : today.slice(0, 7);
+  const anchor = MX.isDate(req.query.d) ? req.query.d : today;
   const monthFrom = calMonthStart(ym);
   const monthTo = calMonthEnd(ym);
 
@@ -13784,9 +13811,13 @@ app.get('/calendar', (req, res) => {
     .filter((c) => CAL.CATEGORIES.includes(c));
   const opts = cats.length ? { categories: cats } : {};
 
-  const occ = view === 'agenda'
-    ? CAL.range(today, addDays(today, 60), opts)
-    : CAL.range(gridFrom, gridTo, opts);
+  // Monday of the anchor's week — the same Monday-first rule the month grid uses.
+  const weekFrom = addDays(anchor, -calDow(anchor));
+  const weekTo = addDays(weekFrom, 6);
+  const occ = view === 'agenda' ? CAL.range(today, addDays(today, 60), opts)
+    : view === 'week' ? CAL.range(weekFrom, weekTo, opts)
+      : view === 'day' ? CAL.range(anchor, anchor, opts)
+        : CAL.range(gridFrom, gridTo, opts);
 
   const byDay = new Map();
   for (const o of occ) {
@@ -13834,6 +13865,77 @@ app.get('/calendar', (req, res) => {
     </div>`;
   }
 
+  // ---- week and day: a real time grid ---------------------------------------
+  //
+  // Not seven copies of a month cell. Hours are rows, days are columns, and a
+  // timed item occupies the space its start and end actually describe — which
+  // is the whole reason to have this view rather than a longer list.
+  //
+  // Built so drag-to-create can be added later without unpicking it: the grid
+  // maps pixels to minutes from the start, and a click already resolves to a
+  // time. The first release only handles the click.
+  let timeGrid = '';
+  if (view === 'week' || view === 'day') {
+    const days = view === 'day' ? [anchor]
+      : Array.from({ length: 7 }, (_, i) => addDays(weekFrom, i));
+    const hours = [];
+    for (let h = ZC_H0; h < ZC_H1; h++) {
+      const ap = h >= 12 ? 'PM' : 'AM';
+      hours.push(`<div class="zc-hr" style="height:${ZC_PX}px">${(h % 12) || 12} ${ap}</div>`);
+    }
+
+    const col = (d) => {
+      const all = (byDay.get(d) || []);
+      const timed = all.filter((o) => !o.allDay);
+      // Overlapping items share the column rather than hiding each other.
+      const lanes = [];
+      for (const o of timed) {
+        const start = o.startMin == null ? ZC_H0 * 60 : o.startMin;
+        const end = o.endMin == null ? start + 60 : Math.max(o.endMin, start + 30);
+        let lane = lanes.findIndex((l) => l <= start);
+        if (lane === -1) { lane = lanes.length; lanes.push(end); } else lanes[lane] = end;
+        o.__lane = lane; o.__s = start; o.__e = end;
+      }
+      const n = Math.max(1, lanes.length);
+      return `<div class="zc-col${d === today ? ' is-today' : ''}" data-date="${d}"
+          style="height:${(ZC_H1 - ZC_H0) * ZC_PX}px">
+        ${Array.from({ length: ZC_H1 - ZC_H0 }, (_, i) => `<button class="zc-slot" type="button"
+            data-add="${d}" data-min="${(ZC_H0 + i) * 60}" style="height:${ZC_PX}px"
+            aria-label="Add at ${(((ZC_H0 + i) % 12) || 12)} ${ZC_H0 + i >= 12 ? 'PM' : 'AM'} on ${esc(calDayLabel(d))}"></button>`).join('')}
+        ${timed.map((o) => {
+    const c = catOf(o.category);
+    const top = zcTop(o.__s);
+    const h = Math.max(20, zcTop(o.__e) - top);
+    return `<button class="zc-blk${o.completed ? ' is-done' : ''}" type="button"
+            data-open="${o.itemId}" data-occ="${o.occursOn}" style="--c:${c.color};
+            top:${top}px; height:${h}px; left:${(o.__lane / n) * 100}%; width:${(1 / n) * 100}%"
+            aria-label="${esc(o.title)}, ${esc(calTime(o.__s))}${o.completed ? ', complete' : ''}">
+          <b>${esc(o.title)}</b><i>${esc(calTime(o.__s))}</i>
+        </button>`;
+  }).join('')}
+      </div>`;
+    };
+
+    const allDayRow = days.map((d) => `<div class="zc-ad-c" data-date="${d}">
+      ${(byDay.get(d) || []).filter((o) => o.allDay).map(calChip).join('')}</div>`).join('');
+
+    timeGrid = `<div class="zc-tg" data-h0="${ZC_H0}" data-px="${ZC_PX}">
+      <div class="zc-tg-h" style="--n:${days.length}">
+        <div class="zc-tg-corner"></div>
+        ${days.map((d) => `<a class="zc-tg-d${d === today ? ' is-today' : ''}"
+            href="/calendar?v=day&d=${d}">
+          <i>${CAL_DOW[calDow(d)]}</i><b>${Number(d.slice(8))}</b></a>`).join('')}
+      </div>
+      <div class="zc-ad" style="--n:${days.length}">
+        <div class="zc-ad-l">All day</div>${allDayRow}
+      </div>
+      <div class="zc-tg-b">
+        <div class="zc-hrs">${hours.join('')}</div>
+        <div class="zc-cols" style="--n:${days.length}">${days.map(col).join('')}</div>
+      </div>
+    </div>`;
+  }
+
   // ---- agenda --------------------------------------------------------------
   let agenda = '';
   if (view === 'agenda') {
@@ -13861,15 +13963,15 @@ app.get('/calendar', (req, res) => {
       <div class="zc-bar">
         <div class="zc-nav">
           <a class="zc-btn" href="/calendar?v=${view}" aria-label="Today">Today</a>
-          <a class="zc-arw" href="/calendar?v=${view}&m=${calShiftMonth(ym, -1)}" aria-label="Previous month">&larr;</a>
-          <h1 class="zc-title">${esc(calMonthTitle(ym))}</h1>
-          <a class="zc-arw" href="/calendar?v=${view}&m=${calShiftMonth(ym, 1)}" aria-label="Next month">&rarr;</a>
+          <a class="zc-arw" href="${calStep(view, ym, anchor, -1)}" aria-label="Previous">&larr;</a>
+          <h1 class="zc-title">${esc(calHeading(view, ym, anchor, weekFrom, weekTo))}</h1>
+          <a class="zc-arw" href="${calStep(view, ym, anchor, 1)}" aria-label="Next">&rarr;</a>
         </div>
         <nav class="zc-seg" aria-label="Calendar view">
-          <a class="${view === 'month' ? 'on' : ''}" href="/calendar?v=month&m=${ym}"
-            aria-current="${view === 'month' ? 'page' : 'false'}">Month</a>
-          <a class="${view === 'agenda' ? 'on' : ''}" href="/calendar?v=agenda&m=${ym}"
-            aria-current="${view === 'agenda' ? 'page' : 'false'}">Agenda</a>
+          ${[['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['agenda', 'Agenda']]
+    .map(([k, label]) => `<a class="${view === k ? 'on' : ''}"
+      href="/calendar?v=${k}&m=${ym}&d=${anchor}"
+      aria-current="${view === k ? 'page' : 'false'}">${label}</a>`).join('')}
         </nav>
         ${canWrite() ? `<button class="zc-new" type="button" id="zc-new" data-add="${today}">+ New</button>` : ''}
       </div>
@@ -13883,7 +13985,9 @@ app.get('/calendar', (req, res) => {
         <div class="zc-cats">${catFilter}</div>
       </div>
 
-      ${view === 'month' ? grid : `<div class="zc-ag">${agenda}</div>`}
+      ${view === 'month' ? grid
+    : view === 'agenda' ? `<div class="zc-ag">${agenda}</div>`
+      : timeGrid}
       ${!occ.length && view === 'month'
     ? '<p class="zc-hint">Nothing this month. Click a date, or + New, to add something.</p>' : ''}
     </div>
@@ -13921,14 +14025,24 @@ app.get('/calendar', (req, res) => {
       window.calClose = function () { sheet(composer, false); sheet(detail, false); };
 
       // ---- create ----------------------------------------------------------
-      function openAdd(date) {
+      function openAdd(date, min) {
         sheet(detail, false);
         document.getElementById('zc-f-date').value = date;
         document.getElementById('zc-f-title').value = '';
         document.getElementById('zc-f-notes').value = '';
         document.getElementById('zc-f-resp').value = '';
-        document.getElementById('zc-f-allday').checked = true;
-        document.getElementById('zc-f-times').hidden = true;
+        // A slot in the time grid carries an hour with it, so the composer opens
+        // timed and already filled in rather than making you retype what you
+        // just clicked on.
+        var timed = min != null && min !== '';
+        document.getElementById('zc-f-allday').checked = !timed;
+        document.getElementById('zc-f-times').hidden = !timed;
+        if (timed) {
+          var hh = function (m) { return String(Math.floor(m / 60)).padStart(2, '0') + ':'
+            + String(m % 60).padStart(2, '0'); };
+          document.querySelector('[name=start_time]').value = hh(Number(min));
+          document.querySelector('[name=end_time]').value = hh(Number(min) + 60);
+        }
         document.getElementById('zc-f-repeat').value = '';
         document.getElementById('zc-f-more').hidden = true;
         sheet(composer, true);
@@ -13937,7 +14051,7 @@ app.get('/calendar', (req, res) => {
 
       document.addEventListener('click', function (ev) {
         var add = ev.target.closest && ev.target.closest('[data-add]');
-        if (add) { openAdd(add.dataset.add); return; }
+        if (add) { openAdd(add.dataset.add, add.dataset.min); return; }
         var cell = ev.target.closest && ev.target.closest('.zc-cell');
         if (cell && ev.target === cell) { openAdd(cell.dataset.date); return; }
         var more = ev.target.closest && ev.target.closest('[data-day]');
@@ -13991,7 +14105,13 @@ app.get('/calendar', (req, res) => {
         });
         document.getElementById('zc-d-edit').href = '/calendar?v=month&m=' + o.d.slice(0, 7) + '&edit=' + id;
         // A series asks which occurrences a delete should touch; a one-off does not.
-        document.getElementById('zc-d-scope').hidden = !o.r;
+        // A series asks which occurrences a delete should touch; a one-off does
+        // not, and defaulting a series to "the whole series" is how somebody
+        // loses a year of Mondays to one mis-tap.
+        var scope = document.getElementById('zc-d-scope');
+        scope.hidden = !o.r;
+        var one = scope.querySelector('[value=one]');
+        if (one) one.checked = true;
         sheet(detail, true);
       }
       function fmt(min) {
@@ -13999,6 +14119,20 @@ app.get('/calendar', (req, res) => {
         var h = Math.floor(min / 60), mm = min % 60;
         return ((h % 12) || 12) + ':' + String(mm).padStart(2, '0') + (h >= 12 ? 'p' : 'a');
       }
+
+      // Delete: carry the chosen scope, and say plainly what is about to go.
+      var delBtn = document.getElementById('zc-d-del');
+      if (delBtn) delBtn.addEventListener('click', function (ev) {
+        var f = document.getElementById('zc-d-del-f');
+        var sc = document.getElementById('zc-d-scope');
+        var chosen = (!sc.hidden && sc.querySelector('[name=scope]:checked'))
+          ? sc.querySelector('[name=scope]:checked').value : 'all';
+        f.querySelector('[name=scope]').value = chosen;
+        var says = chosen === 'one' ? 'Remove just this one occurrence?'
+          : chosen === 'future' ? 'Remove this occurrence and every one after it?'
+            : 'Delete the whole series, including its history?';
+        if (!confirm(says)) ev.preventDefault();
+      });
 
       document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape') window.calClose();
@@ -14193,14 +14327,18 @@ function calDetail(req) {
       <p class="zc-d-rep" id="zc-d-rep"></p>
       <div class="zc-d-l"><span>Responsible</span><b id="zc-d-who"></b></div>
       <div class="zc-d-l"><span>Notes</span><b id="zc-d-notes"></b></div>
-      <p class="zc-d-scope" id="zc-d-scope" hidden>This repeats — choose what a change should touch.</p>
+      <fieldset class="zc-d-scope" id="zc-d-scope" hidden>
+        <legend>This repeats. Apply to</legend>
+        <label><input type="radio" name="scope" value="one" checked> This occurrence</label>
+        <label><input type="radio" name="scope" value="future"> This and everything after</label>
+        <label><input type="radio" name="scope" value="all"> The whole series</label>
+      </fieldset>
     </div>
     <div class="zc-sheet-f">
       <button class="btn btn-primary" type="submit" form="zc-d-done-f" id="zc-d-done">Mark complete</button>
       <button class="btn" type="submit" form="zc-d-undone-f" id="zc-d-undone" hidden>Undo complete</button>
       <a class="btn" id="zc-d-edit" href="#">Edit</a>
-      <button class="btn zc-del" type="submit" form="zc-d-del-f"
-        onclick="return confirm('Delete this? For a repeating item this removes the whole series.')">Delete</button>
+      <button class="btn zc-del" type="submit" form="zc-d-del-f" id="zc-d-del">Delete</button>
     </div>
   </aside>${tok}`;
 }
