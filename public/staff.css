@@ -597,6 +597,11 @@ body.bare {
 .tc-row-l { display: grid; gap: 2px; min-width: 0; }
 .tc-row-l b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 14px; color: var(--pt-ink); }
 .tc-row-l i { font-style: normal; font-size: 12px; color: var(--pt-muted); }
+/* One punch per line — schedule, position, hours. Run together on one line they
+   wrapped into a paragraph with the schedule repeated at every turn, which read
+   as a rendering fault rather than as four real punches. */
+.tc-e { display: block; line-height: 1.55; }
+.tc-e + .tc-e { margin-top: 1px; }
 .tc-row-r { text-align: right; display: grid; gap: 2px; }
 .tc-row-r b { font-family: var(--pt-mono, ui-monospace, monospace); font-size: 14px; color: var(--pt-ink); }
 .tc-row-r i { font-style: normal; font-size: 11px; color: var(--pt-muted); }

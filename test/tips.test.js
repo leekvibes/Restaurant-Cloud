@@ -1029,7 +1029,12 @@ test('2F-UX: "Choose another shift" is where the history lives', async () => {
   for (const p of seed.past) {
     assert.match(picker, new RegExp(`href="/portal/tips\\?shift=${p.id}"`), `${p.date} is here`);
   }
-  assert.match(picker, /href="\/portal\/tips\?manual=1"/, 'so is reporting one that is not listed');
+  // "Report a shift not listed" used to be here. It let somebody name any date
+  // and service and have a shift CREATED from the typing — sales and tips with
+  // no punch, no hours and no wages behind them, and the easiest way there is
+  // to file tonight's money against the evening you have not worked yet.
+  assert.doesNotMatch(picker, /href="\/portal\/tips\?manual=1"/, 'and naming a shift no longer conjures one');
+  assert.match(picker, /Go to my timesheet/, 'a missing shift is fixed on the clock, where it belongs');
   assert.match(picker, /Still to report/, 'grouped by whether it still needs doing');
   assert.match(picker, /Already submitted/, 'and by what can be corrected');
 });
@@ -1734,4 +1739,27 @@ test('2F-EQ: rows written before the redesign still cost, display and correct', 
       WHERE shift_id = ? AND employee_id = ? AND source = 'imported'`).get(sid, me).n, 1,
     'the imported history row survived the correction');
   }
+});
+
+test('the portal will not file tips for somebody who is not clocked in', async () => {
+  // The rule the "report a shift not listed" button quietly broke: a shift you
+  // can report is a shift you clocked into. Asserted at the WRITE, not by the
+  // button being gone — a stale page, a phone with no JavaScript, or a crafted
+  // post all reach the route directly, and hiding a control is not a rule.
+  const { cookie } = await signIn('5154');
+  const before = db.prepare('SELECT COUNT(*) n FROM shifts').get().n;
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      position: 'server', mode: 'manual',
+      date: '2029-03-17', daypart: 'dinner', cash_tips: '80',
+    }).toString(),
+  });
+  assert.notStrictEqual(res.status, 302, 'it does not quietly succeed and redirect to a receipt');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM shifts').get().n, before,
+    'and no shift was conjured out of the date they typed');
+  assert.strictEqual(
+    db.prepare("SELECT COUNT(*) n FROM shifts WHERE date = '2029-03-17'").get().n, 0,
+    'not on the night they typed, and not on any other');
 });

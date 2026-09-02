@@ -2215,10 +2215,18 @@ test('the way in never disappears — "View requests" at zero, a count above it'
   await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3205',
     at_in: `${day}T16:00`, note: 'started earlier' }, { cookie });
 
-  html = await text('/timeclock/cafe/today');
-  assert.match(html, /class="bs-req-pill on"[^>]*><b>1<\/b> Request</, 'one waiting, and it says so');
+  // THE REQUEST GOES TO THE CLOCK IT IS ABOUT. The punch above is on the
+  // Evening clock, so the Evening manager sees it waiting and the Day manager
+  // does not — a queue that showed every clock's requests would have a Day
+  // manager deciding an Evening correction from a page with nothing else to do
+  // with Evening.
+  html = await text('/timeclock/dinner/today');
+  assert.match(html, /class="bs-req-pill on"[^>]*><b>1<\/b> Request</, 'one waiting on the clock it belongs to');
+  assert.match(html, /href="\/timeclock\/dinner\/requests"/, 'and the pill opens that clock\'s queue');
+  const dayClock = await text('/timeclock/cafe/today');
+  assert.doesNotMatch(dayClock, /class="bs-req-pill on"/, 'the other clock is not told about it');
   // On the timesheets toolbar too — where somebody is when they notice.
-  assert.match(await text('/payroll/timesheets'), /class="bs-req-pill on"/, 'both toolbars carry it');
+  assert.match(await text('/timeclock/dinner/timesheets'), /class="bs-req-pill on"/, 'both tabs carry it');
 });
 
 test('the queue shows the shift now against the shift as asked for', async () => {

@@ -100,10 +100,24 @@ test('every tab renders, and an unknown one falls back rather than blanking', as
   assert.match(bad, /Employment/, 'an unknown tab shows the first one');
 });
 
-test('no tab prints the PIN', async () => {
+test('the PIN is shown on the details tab and nowhere else', async () => {
+  // It used to be hidden everywhere, on the reasoning that a credential should
+  // not sit on screen. That is the wrong threat model here: the owner chooses
+  // these PINs, hands them out, and is who staff ask when they forget one — so
+  // it was a secret from the only person who needed it, and "what is Anna's
+  // PIN" could only be answered by resetting it.
+  const details = await text(`/employees/${ANNA}/edit`);
+  assert.ok(details.includes('value="6611"'), 'the details tab shows it, ready to change');
+
+  // It appears on every tab because personal details is the persistent left
+  // column — that is the layout, not a leak. What must not exist anywhere is a
+  // HIDDEN pin field: that is how an unrelated save comes to rewrite a
+  // credential it was never editing, and it is the bug this guards.
   for (const t of ['employment', 'pay', 'time', 'payroll', 'documents', 'activity']) {
     const html = await text(`/employees/${ANNA}/edit?tab=${t}`);
-    assert.ok(!html.includes('6611'), `${t} does not leak it`);
+    const inputs = [...html.matchAll(/<input[^>]*name="pin"[^>]*>/g)].map((m) => m[0]);
+    assert.strictEqual(inputs.length, 1, `${t}: one pin field, the editable one`);
+    assert.ok(!/type="hidden"/.test(inputs[0]), `${t}: and it is not a hidden carry-along`);
   }
 });
 
@@ -133,17 +147,32 @@ test('saving one form does not blank what another form edits', async () => {
   assert.strictEqual(after.pin, before.pin, 'and the PIN survives');
 });
 
-test('a blank PIN field KEEPS the PIN — the one rule this redesign changed', async () => {
-  // It used to mean "clear it", which was safe only because the form always
-  // rendered the real digits. The digits are gone, so blank must mean keep or
-  // an unrelated save would lock somebody out of the portal silently.
+test('an ABSENT pin field keeps the PIN; a BLANK one clears it', async () => {
+  // Six tabs post to one route. Only the details tab renders the PIN, so every
+  // other tab sends no `pin` key at all — and if absent were read as blank,
+  // saving a wage would silently lock somebody out of the portal with nothing
+  // on screen to explain it. That is the failure this guards.
   const before = emp(ANNA);
   assert.ok(before.pin, 'they start with one');
+  await post(`/employees/${ANNA}`, {
+    name: before.name, email: before.email,          // no pin key whatsoever
+    role: 'server', pay_type: 'hourly', rate: '15.00', salary: '', ot_eligible: '1', wage_from: 'today',
+  });
+  assert.strictEqual(emp(ANNA).pin, before.pin, 'a save from another tab leaves it alone');
+
+  // Emptying the box IS deliberate now — the digits are on screen, so getting
+  // to blank means selecting four visible characters and deleting them.
   await post(`/employees/${ANNA}`, {
     name: before.name, email: before.email, pin: '',
     role: 'server', pay_type: 'hourly', rate: '15.00', salary: '', ot_eligible: '1', wage_from: 'today',
   });
-  assert.strictEqual(emp(ANNA).pin, before.pin, 'still there');
+  assert.strictEqual(emp(ANNA).pin, null, 'clearing the box removes their access');
+
+  await post(`/employees/${ANNA}`, {
+    name: before.name, email: before.email, pin: before.pin,
+    role: 'server', pay_type: 'hourly', rate: '15.00', salary: '', ot_eligible: '1', wage_from: 'today',
+  });
+  assert.strictEqual(emp(ANNA).pin, before.pin, 'and typing one puts it back');
 });
 
 test('removing a PIN is possible, but only deliberately', async () => {
