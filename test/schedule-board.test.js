@@ -2223,3 +2223,51 @@ test('a schedule made without a clock is not offered as one, until it is connect
     if (sv) SVC.archive(sv.slug);
   }
 });
+
+test('picking a schedule in the portal survives every tap after it', async () => {
+  // Somebody on two schedules picks one, taps "Everyone", and lands back on the
+  // picker. Every link on that page — the three tabs, both arrows, every day in
+  // the strip, the jump to the next published week — was built without the
+  // schedule in it, and arriving with no schedule named is the exact condition
+  // that renders the picker. It read as the page glitching back a step, and it
+  // did it on every navigation rather than only on Everyone.
+  const SVC = require('../src/services');
+  const before = SVC.forEmployee(E.multi);
+  SVC.setForEmployee(E.multi, ['cafe', 'dinner']);          // two, so a choice exists
+  try {
+    const r = await fetch(`${BASE}/tips/start`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ pin: '5204' }),
+    });
+    const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+    const get = async (p) => (await fetch(BASE + p, { headers: { cookie } })).text();
+    const isPicker = (h) => h.includes('psp-cards');
+
+    // With no schedule named, the picker IS the right answer.
+    assert.ok(isPicker(await get('/portal/schedule')), 'two schedules means pick one first');
+
+    const chosen = await get('/portal/schedule?svc=cafe');
+    assert.ok(!isPicker(chosen), 'and choosing one opens it');
+
+    // EVERY self-link on that page keeps the choice. Gathered from the rendered
+    // markup rather than written out here, so a link added later is covered by
+    // this test on the day it is added.
+    const links = [...new Set([...chosen.matchAll(/href="(\/portal\/schedule\?v=[^"]*)"/g)]
+      .map((m) => m[1].replace(/&amp;/g, '&')))];
+    assert.ok(links.length >= 3, `found ${links.length} self-links to check`);
+    const naked = links.filter((h) => !/[?&]svc=/.test(h));
+    assert.deepStrictEqual(naked, [], 'no link drops the schedule');
+
+    // And following them really does stay put — the markup being right is not
+    // the same as the page behaving, which is how this shipped in the first place.
+    for (const href of links) {
+      assert.ok(!isPicker(await get(href)), `${href} stays on the schedule`);
+    }
+
+    // The one link that SHOULD go back to the picker still does.
+    assert.match(chosen, /href="\/portal\/schedule"/, 'and "Schedules" still goes back');
+  } finally {
+    SVC.setForEmployee(E.multi, before);
+  }
+});

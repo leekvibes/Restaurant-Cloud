@@ -6198,6 +6198,17 @@ app.get('/portal/schedule', (req, res) => {
   if (!pick && mySvcs.length > 1 && view !== 'avail') {
     return res.send(portalSchedulePicker(req, emp, mySvcs, from, to));
   }
+  // THE SCHEDULE THEY PICKED, carried by every link on this page.
+  //
+  // None of them carried it. So somebody on two schedules who chose Day Service
+  // and then tapped Everyone — or any day, or either arrow — arrived with no
+  // schedule named, which is the exact condition that renders the picker three
+  // lines above. It read as the page glitching back a step, and it did it on
+  // every navigation, not only that one.
+  //
+  // The single link that deliberately drops it is "← Schedules", whose whole
+  // job is to go back and choose again.
+  const keep = pick ? `&svc=${encodeURIComponent(pick)}` : '';
   const allRows = view === 'avail' ? [] : sbPortalRows(view, emp.id, from, to);
   // Scoped to the schedule they chose. With none chosen there is nothing to
   // scope to — they are on one, or looking at availability, which spans them.
@@ -6233,7 +6244,7 @@ app.get('/portal/schedule', (req, res) => {
   const strip = Array.from({ length: 7 }, (_, i) => addDays(stripWeek.start, i))
     .filter((d) => d <= stripWeek.end).map((d) => {
     const on = d === picked; const isToday = d === today;
-    return `<a class="ps-d${on ? ' on' : ''}${isToday ? ' now' : ''}" href="/portal/schedule?v=${view}&d=${d}"
+    return `<a class="ps-d${on ? ' on' : ''}${isToday ? ' now' : ''}" href="/portal/schedule?v=${view}&d=${d}${keep}"
         aria-current="${on ? 'date' : 'false'}"
         aria-label="${esc(TC.dayLabel(d))}${isToday ? ', today' : ''}${mine(d).length
           ? `, ${mine(d).length} shift${mine(d).length === 1 ? '' : 's'}` : ', nothing scheduled'}">
@@ -6339,12 +6350,12 @@ app.get('/portal/schedule', (req, res) => {
   const arrow = (delta, label, glyph) => {
     const d = stepTo(delta);
     return d
-      ? `<a class="ps-arw" href="/portal/schedule?v=${view}&d=${d}" aria-label="${label}">${glyph}</a>`
+      ? `<a class="ps-arw" href="/portal/schedule?v=${view}&d=${d}${keep}" aria-label="${label}">${glyph}</a>`
       : `<span class="ps-arw is-off" aria-hidden="true">${glyph}</span>`;
   };
 
   const tab = (k, label, glyph) => `<a class="ps-t${view === k ? ' on' : ''}"
-      href="/portal/schedule?v=${k}" aria-current="${view === k ? 'page' : 'false'}">
+      href="/portal/schedule?v=${k}${keep}" aria-current="${view === k ? 'page' : 'false'}">
     <span class="ps-t-i" aria-hidden="true">${glyph}</span><span>${label}</span></a>`;
 
   const empty = `<p class="ps-none">Nothing on your schedule yet. When a manager
@@ -6354,7 +6365,7 @@ app.get('/portal/schedule', (req, res) => {
   // out, say so and offer the jump — otherwise the first quiet week reads as
   // "I have no shifts" and the arrows are the only way to find out otherwise.
   const upcoming = [...byDay.keys()].filter((d) => d > stripWeek.end).sort()[0] || null;
-  const nextLink = upcoming ? ` <a class="ps-next" href="/portal/schedule?v=${view}&d=${upcoming}">${
+  const nextLink = upcoming ? ` <a class="ps-next" href="/portal/schedule?v=${view}&d=${upcoming}${keep}">${
     view === 'all' ? 'Next published day' : 'Your next shift'} is ${
     esc(TC.dayLabel(upcoming))} &rsaquo;</a>` : '';
   const quiet = `<p class="ps-none">${view === 'all'
