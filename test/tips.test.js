@@ -40,6 +40,12 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-tips-'));
 const DB = path.join(dir, 't.db');
 let child, db;
 
+// A writable handle. The `db` these tests read through is reopened READONLY
+// once the fixture is built, so a test that has to change a row — marking a
+// shift sent, for instance — needs its own.
+let __wdb = null;
+const wdb = () => (__wdb || (__wdb = new (require('better-sqlite3'))(DB)));
+
 const form = (url, body) => fetch(`${BASE}${url}`, {
   method: 'POST', redirect: 'manual',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -1017,7 +1023,12 @@ test('2F-UX: two services today is a compact choice, and only today is on it', a
   for (const r of radios) assert.ok(!/\bchecked\b/.test(r), `neither is guessed: ${r}`);
 });
 
-test('2F-UX: "Choose another shift" is where the history lives', async () => {
+test('2F-UX: the second screen is a record of what was sent, not a backlog', async () => {
+  // It used to list "Still to report" — every past shift worked and not filed —
+  // which is a to-do list for a job that is meant to be finished before leaving.
+  // Somebody scrolling back through last month and filing a night from memory is
+  // worse than the gap it closed, and a genuinely missed one is entered from the
+  // admin side where the figures can be checked against the till.
   const seed = seedToday('5154', 'Ruth Okon', { today: ['dinner'], past: [[2, 'cafe'], [6, 'dinner']] });
   const { cookie } = await signIn('5154');
 
@@ -1025,18 +1036,33 @@ test('2F-UX: "Choose another shift" is where the history lives', async () => {
   assert.match(first, /href="\/portal\/tips\?pick=1"/, 'one tap away');
 
   const picker = await page(cookie, '/portal/tips?pick=1');
-  assert.match(picker, /Choose another shift/, 'and it opens');
+  assert.match(picker, /What you have sent/, 'and it opens on what they have sent');
+  assert.doesNotMatch(picker, /Still to report/, 'no backlog of nights they never filed');
+
+  // Nothing filed yet, so nothing is listed — and it says so rather than
+  // showing an empty frame.
+  assert.match(picker, /Nothing submitted yet/, 'an empty record says it is empty');
   for (const p of seed.past) {
-    assert.match(picker, new RegExp(`href="/portal/tips\\?shift=${p.id}"`), `${p.date} is here`);
+    assert.doesNotMatch(picker, new RegExp(`href="/portal/tips\\?shift=${p.id}"`),
+      `${p.date} was worked but never filed, so it is not offered`);
   }
+
+  // File one — written directly, because what is under test here is what the
+  // page LISTS, and routing the fixture through the submit route would make
+  // this fail for reasons that belong to a different test.
+  const me = db.prepare('SELECT id FROM employees WHERE pin = ?').get('5154');
+  wdb().prepare(`INSERT INTO tip_submissions (shift_id, employee_id, role, cash_tips_cents)
+    VALUES (?, ?, 'server', 3000)`).run(seed.past[0].id, me.id);
+  const after = await page(cookie, '/portal/tips?pick=1');
+  assert.match(after, new RegExp(`href="/portal/tips\\?shift=${seed.past[0].id}"`),
+    'what was sent is listed');
+  assert.match(after, /Submitted — open it to correct it/, 'and can still be changed');
+
   // "Report a shift not listed" used to be here. It let somebody name any date
   // and service and have a shift CREATED from the typing — sales and tips with
-  // no punch, no hours and no wages behind them, and the easiest way there is
-  // to file tonight's money against the evening you have not worked yet.
-  assert.doesNotMatch(picker, /href="\/portal\/tips\?manual=1"/, 'and naming a shift no longer conjures one');
-  assert.match(picker, /Go to my timesheet/, 'a missing shift is fixed on the clock, where it belongs');
-  assert.match(picker, /Still to report/, 'grouped by whether it still needs doing');
-  assert.match(picker, /Already submitted/, 'and by what can be corrected');
+  // no punch, no hours and no wages behind them.
+  assert.doesNotMatch(after, /href="\/portal\/tips\?manual=1"/, 'and naming a shift no longer conjures one');
+  assert.match(after, /Go to my timesheet/, 'a missing shift is fixed on the clock, where it belongs');
 });
 
 test('2F-UX: a past shift opens to its own form, correction and all', async () => {
@@ -1762,4 +1788,54 @@ test('the portal will not file tips for somebody who is not clocked in', async (
   assert.strictEqual(
     db.prepare("SELECT COUNT(*) n FROM shifts WHERE date = '2029-03-17'").get().n, 0,
     'not on the night they typed, and not on any other');
+});
+
+test('a shift that has been sent out cannot be reported on again', async () => {
+  // /shifts/:id/send runs the tip-out, allocates every penny, emails each
+  // person their own figures and marks the shift emailed. Sales or tips
+  // arriving after that do not merely edit a row — they change the arithmetic
+  // behind numbers already sitting in people's inboxes, and nothing on any
+  // screen would say the two had stopped agreeing.
+  const { token, cookie } = await signIn('2468');
+  const day = '2026-05-14';
+  await form('/tips', { token, position: 'server', date: day, daypart: 'dinner', cash_tips: '40' });
+  const sh = db.prepare("SELECT id, status FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day);
+  assert.ok(sh, 'the shift exists');
+  const was = db.prepare('SELECT cash_tips_cents FROM tip_submissions WHERE shift_id = ?').get(sh.id);
+  assert.strictEqual(was.cash_tips_cents, 4000, 'and carries what was reported');
+
+  // The operator sends it.
+  wdb().prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?").run(sh.id);
+  try {
+    const t2 = await __token(cookie);
+    const res = await fetch(`${BASE}/portal/tips/submit`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, origin: BASE, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ shift_id: String(sh.id), position: 'server',
+        cash_tips: '999', confirm_update: '1', _csrf: t2 }).toString(),
+    });
+    assert.strictEqual(res.status, 403, 'the portal refuses it');
+    assert.match(await res.text(), /closed/i, 'and says the shift is closed');
+    // THE FIGURE IS THE POINT. A refusal that still wrote would be worse than
+    // no refusal, because it would look handled.
+    const after = db.prepare('SELECT cash_tips_cents FROM tip_submissions WHERE shift_id = ?').all(sh.id);
+    assert.deepStrictEqual(after.map((r) => r.cash_tips_cents), [4000],
+      'and not one penny moved');
+
+    // The legacy PIN door is the same door underneath, so it refuses too.
+    const legacy = await form('/tips', { token, position: 'server', date: day,
+      daypart: 'dinner', cash_tips: '888' });
+    assert.notStrictEqual(legacy.status, 302, 'the PIN form does not quietly accept it either');
+    assert.deepStrictEqual(
+      db.prepare('SELECT cash_tips_cents FROM tip_submissions WHERE shift_id = ?').all(sh.id)
+        .map((r) => r.cash_tips_cents), [4000], 'still untouched');
+  } finally {
+    wdb().prepare("UPDATE shifts SET status = 'open' WHERE id = ?").run(sh.id);
+  }
+
+  // And reopening it makes the shift reportable again — the refusal is a state,
+  // not a one-way door.
+  const ok = await form('/tips', { token, position: 'server', date: day,
+    daypart: 'dinner', cash_tips: '55' });
+  assert.strictEqual(ok.status, 302, 'reopened, it takes a correction again');
 });

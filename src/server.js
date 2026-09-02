@@ -4712,6 +4712,10 @@ function tipsWorkspace(emp, opts = {}) {
     seen.add(r.id);
     choices.push({
       id: r.id, date: r.date, daypart: r.daypart, role: r.work_role || null,
+      // Sent out: the tip-out has been run and everyone has been paid on it.
+      // Carried on every choice so the page can render it rather than finding
+      // out at the write, by which point somebody has typed a night's figures in.
+      closed: String(r.status) === 'emailed',
       filed: r.subs > 0, current: r.id === anchorShift && anchorOpen,
       recorded: r.punches > 0 || !!r.work_role, today: r.date === today,
       title: shiftTitle(r),
@@ -4806,38 +4810,95 @@ const cardStateText = (state, cents) => (state === 'unstated' ? 'Not entered'
  * path for a night with no record at all. Reaching it is one tap; arriving at
  * it by default was the mistake this replaces.
  */
+/**
+ * Tapping a closed shift says why, without a page load.
+ *
+ * There is no round trip to carry a message on — the control deliberately does
+ * not navigate — and a button that does nothing at all is the worst of the
+ * options: it reads as the app being broken rather than the shift being shut.
+ *
+ * Delegated from the document so it covers the picker rows and the today list
+ * with one binding, and appended INSIDE .pt, because every portal colour is a
+ * custom property declared there; a toast appended to the body inherits none of
+ * them and lands as white text on a white page. That has happened twice.
+ */
+const shutToastScript = () => `<script>
+  (function () {
+    if (window.__shutBound) return;
+    window.__shutBound = 1;
+    document.addEventListener('click', function (ev) {
+      var hit = ev.target.closest ? ev.target.closest('[data-shut]') : null;
+      if (!hit) return;
+      ev.preventDefault();
+      var box = document.querySelector('.pt-toasts');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'pt-toasts pt-toasts--top';
+        (document.querySelector('.pt') || document.body).appendChild(box);
+      }
+      var old = box.querySelector('.pt-toast');
+      if (old) old.remove();
+      var t = document.createElement('div');
+      t.className = 'pt-toast bad pt-toast--in';
+      t.setAttribute('role', 'alert');
+      t.textContent = hit.getAttribute('data-shut')
+        + ' has been closed and pay has gone out. Speak to a manager to reopen it.';
+      box.appendChild(t);
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { t.classList.remove('pt-toast--in'); });
+      });
+      setTimeout(function () { t.remove(); }, 4200);
+    });
+  })();
+</script>`;
+
 function tipsPickerPage(model) {
   const posName = (slug) => {
     const p = positions.bySlug.get(slug);
     return p ? p.name : slug;
   };
-  const row = (c) => `
-    <a class="st-pick" href="/portal/tips?shift=${c.id}">
+  // A CLOSED SHIFT IS SHOWN, AND IS NOT A DOOR. Rendering it as a live row and
+  // refusing on the far side would mean filling a form in before being told it
+  // could never be sent. It reads as closed, it does not navigate, and tapping
+  // it says why.
+  const row = (c) => (c.closed
+    ? `<button type="button" class="st-pick st-pick--shut" data-shut="${esc(shiftTitle(c))}">
       <span class="st-pick-b">
         <b>${esc(shiftTitle(c))}</b>
-        <i>${c.current ? 'You are clocked in now'
-    : c.filed ? 'Already submitted — open it to correct it'
-      : c.role ? `Worked as ${esc(posName(c.role))}` : 'Recorded shift'}</i>
+        <i>Closed — pay has gone out</i>
+      </span>
+      <span class="st-pick-lock" aria-hidden="true">&#128274;</span>
+    </button>`
+    : `<a class="st-pick" href="/portal/tips?shift=${c.id}">
+      <span class="st-pick-b">
+        <b>${esc(shiftTitle(c))}</b>
+        <i>${c.current ? 'You are clocked in now' : 'Submitted — open it to correct it'}</i>
       </span>
       <span class="st-pick-go" aria-hidden="true">&rsaquo;</span>
-    </a>`;
+    </a>`);
 
-  const owing = [...model.todayChoices, ...model.pastChoices].filter((c) => !c.filed);
+  // ONLY WHAT THEY HAVE ALREADY SENT.
+  //
+  // "Still to report" listed every past shift they worked and had not filed —
+  // which is a to-do list for a job that is supposed to be finished before they
+  // leave. Somebody scrolling back through last month and filing a night from
+  // memory is worse than the gap it was trying to close, and the owner enters a
+  // genuinely missed one from the admin side, where the figures can be checked
+  // against the till. What is left is a record: what you sent, and whether it
+  // can still be changed.
   const filed = [...model.todayChoices, ...model.pastChoices].filter((c) => c.filed);
-  const group = (title, list, empty) => `
-    <div class="st-sec">
-      <h2 class="st-h">${title}</h2>
-      ${list.length ? `<div class="st-picks">${list.slice(0, 15).map(row).join('')}</div>`
-    : `<p class="st-sub">${empty}</p>`}
-    </div>`;
 
   return portalPage('Sales & tips', `
     ${portalTop({ href: '/portal/tips', label: 'Back' }, 'Sales & tips')}
     <div class="pt-body tc-body st-body">
-      <h1 class="st-title">Choose another shift</h1>
-      <p class="st-lede">Report a shift other than today's, or correct one you already sent.</p>
-      ${group('Still to report', owing, 'Nothing outstanding.')}
-      ${group('Already submitted', filed, 'Nothing submitted yet.')}
+      <h1 class="st-title">What you have sent</h1>
+      <p class="st-lede">Your past submissions. One that is still open can be corrected;
+        once the shift is closed and pay has gone out, it is fixed.</p>
+      <div class="st-sec">
+        ${filed.length ? `<div class="st-picks">${filed.slice(0, 20).map(row).join('')}</div>`
+    : '<p class="st-sub">Nothing submitted yet. What you send at the end of a shift shows up here.</p>'}
+      </div>
+      ${shutToastScript()}
       ${/* "Report a shift not listed" was here, and it undid the rule the rest
            of this page is built on. It let somebody name any date and any
            service and have a shift CREATED from the typing — so tips could be
@@ -4882,22 +4943,30 @@ function tipsWorkspacePage(model, opts = {}) {
   // radio list of every past shift on arrival buries the one thing they came
   // to do. Changing it stays one tap away and stays visually secondary.
   const summaryCard = (c) => `
-    <div class="st-now${c.current ? ' is-live' : ''}">
+    <div class="st-now${c.current ? ' is-live' : ''}${c.closed ? ' is-shut' : ''}">
       <div class="st-now-t">
-        <span class="st-now-k">${c.current ? 'Current shift'
+        <span class="st-now-k">${c.closed ? 'Closed' : c.current ? 'Current shift'
     : c.today ? "Today's shift" : 'Reporting'}</span>
         <b class="st-now-v">${esc(dp(c.daypart))}${
   position ? ` · ${esc(posName(position))}` : ''}</b>
         ${c.today ? '' : `<i class="st-now-d">${esc(niceDate(c.date))}</i>`}
-        ${c.current ? '<i class="st-now-d">You are clocked in now</i>' : ''}
-        ${c.filed ? '<i class="st-now-d">Already submitted — this will update it</i>' : ''}
+        ${c.closed ? '<i class="st-now-d">Pay has gone out — this can no longer be changed</i>'
+    : c.current ? '<i class="st-now-d">You are clocked in now</i>' : ''}
+        ${!c.closed && c.filed ? '<i class="st-now-d">Already submitted — this will update it</i>' : ''}
       </div>
-      <a class="st-change" href="/portal/tips?pick=1">Change</a>
+      <a class="st-change" href="/portal/tips?pick=1">${c.closed ? 'My submissions' : 'Change'}</a>
     </div>`;
 
   // Only when today genuinely has more than one service they could be filing
   // for. Today only — old dates never appear here.
-  const todayRow = (c) => `
+  const todayRow = (c) => (c.closed ? `
+    <button type="button" class="st-ch st-ch-sm st-ch--shut" data-shut="${esc(dp(c.daypart))}">
+      <span class="st-ch-b">
+        <b>${esc(dp(c.daypart))}</b>
+        <i>Closed — pay has gone out</i>
+      </span>
+      <span class="st-pick-lock" aria-hidden="true">&#128274;</span>
+    </button>` : `
     <label class="st-ch st-ch-sm">
       <input type="radio" name="shift_id" value="${c.id}" data-st-shift
              aria-describedby="st-ch-${c.id}-m">
@@ -4907,7 +4976,7 @@ function tipsWorkspacePage(model, opts = {}) {
     : c.filed ? 'Already submitted — you can correct it'
       : c.role ? `Worked as ${esc(posName(c.role))}` : 'Open today'}</i>
       </span>
-    </label>`;
+    </label>`);
 
   const shiftBlock = manual ? `
     <div class="st-sec" id="st-manual">
@@ -5082,7 +5151,7 @@ function tipsWorkspacePage(model, opts = {}) {
       </form>
     </div>
     ${stScript()}`;
-  return portalPage('Sales & tips', body);
+  return portalPage('Sales & tips', body + shutToastScript());
 }
 
 /**
@@ -5307,6 +5376,23 @@ function writeSalesTips(req, emp, opts = {}) {
     const anchor = TC.anchorEntryFor(emp.id);
     if (anchor && anchor.shift_id) sh = s.shiftById.get(anchor.shift_id) || null;
   }
+  // A SENT SHIFT IS FINISHED.
+  //
+  // /shifts/:id/send runs the tip-out, allocates every pound of it, emails each
+  // person their own figures and marks the shift emailed. Sales or tips
+  // arriving after that do not just edit a row — they change the arithmetic
+  // behind numbers already sitting in people's inboxes, with nothing on any
+  // screen saying the two no longer agree.
+  //
+  // Refused for BOTH doors and whatever the employee is holding: an id off the
+  // form, their own open punch, a resubmission correcting an earlier one. The
+  // way back in is a manager reopening it, which is a deliberate act by
+  // somebody who can see what it costs.
+  if (sh && String(sh.status) === 'emailed') {
+    return { ok: false, closed: true,
+      refuse: `${whenOf(sh.date, sh.daypart)} has been closed and everyone's pay has gone out. `
+        + 'Ask a manager to reopen it if something needs changing.' };
+  }
   if (!sh && opts.clockedInOnly) {
     // A refusal, not a field error: there is no box they could fill in to fix
     // it. The fix is to clock in, and the message says so.
@@ -5333,6 +5419,18 @@ function writeSalesTips(req, emp, opts = {}) {
     sh = s.findShift.get(vals.date, vals.daypart);
   }
   if (!sh) return { ok: false, errs: { date: 'That shift could not be opened. Try again.' } };
+  // CHECKED AGAIN, HERE, because this is the first point at which the shift is
+  // definitively known. The check above catches an id posted from the portal;
+  // the legacy PIN door names a date and a service instead, so its shift is not
+  // resolved until this line — and a guard placed only above let that door
+  // write to a closed shift while the portal was correctly refused. One rule,
+  // and it has to sit where the answer exists rather than where it was first
+  // convenient to ask.
+  if (String(sh.status) === 'emailed') {
+    return { ok: false, closed: true,
+      refuse: `${whenOf(sh.date, sh.daypart)} has been closed and everyone's pay has gone out. `
+        + 'Ask a manager to reopen it if something needs changing.' };
+  }
   policyForShift(sh); // lock in the tip-out policy version current now
 
   // Correction or first report is the SERVER's answer, read fresh. A posted

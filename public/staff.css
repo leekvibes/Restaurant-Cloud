@@ -1769,3 +1769,22 @@ body.bare {
   border-radius: 10px; background: var(--pt-field); }
 .tcc-mgr .tcc-field { margin: 0; }
 .tcc-mgr-why { margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--pt-muted); }
+
+/* A CLOSED SHIFT — sent out, everyone paid on it, nothing left to change.
+   Rendered as a button rather than a link so it cannot navigate, and coloured
+   so it reads as shut before it is tapped rather than after. Red is reserved
+   in this app for a state somebody has to act on; here the action is asking a
+   manager, which the toast says. */
+.st-pick--shut, .st-ch--shut {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; text-align: left; font: inherit; cursor: pointer;
+  border: 1px solid var(--pt-red, #b91c1c);
+  background: color-mix(in srgb, var(--pt-red, #b91c1c) 6%, transparent);
+}
+.st-pick--shut .st-pick-b b, .st-ch--shut .st-ch-b b { color: var(--pt-red, #b91c1c); }
+.st-pick--shut .st-pick-b i, .st-ch--shut .st-ch-b i { color: var(--pt-red, #b91c1c); opacity: .85; }
+.st-pick-lock { font-size: 13px; line-height: 1; opacity: .7; }
+/* The card at the top of the form, when the shift it names is closed. */
+.st-now.is-shut { border-color: var(--pt-red, #b91c1c);
+  background: color-mix(in srgb, var(--pt-red, #b91c1c) 6%, transparent); }
+.st-now.is-shut .st-now-k { color: var(--pt-red, #b91c1c); }
