@@ -659,6 +659,27 @@ const q = {
     VALUES (@time_entry_id, @employee_id, @kind, @field, @original_value, @proposed_value, @reason, @requested_by)`),
   correctionsFor: db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id'),
   pendingCorrections: db.prepare("SELECT * FROM time_corrections WHERE decision = 'pending' ORDER BY id DESC"),
+  // THE SAME QUESTION, ASKED OF ONE TIME CLOCK.
+  //
+  // A correction has no clock column and does not need one — that would be a
+  // second place the answer is written down, and the two could disagree. It
+  // takes its clock from what it is about: the punch it wants to change, or,
+  // for a shift that has no punch yet, the service the employee chose when they
+  // asked for it. Both are the employee's own statement of where they worked,
+  // and neither can drift from the entry it belongs to.
+  //
+  // Scoped in SQL rather than filtered afterwards, so a clock's queue never
+  // holds another clock's request even for the length of a request.
+  pendingCorrectionsOn: db.prepare(`SELECT c.* FROM time_corrections c
+    LEFT JOIN time_entries te ON te.id = c.time_entry_id
+   WHERE c.decision = 'pending'
+     AND COALESCE(te.daypart, json_extract(c.payload, '$.daypart')) = ?
+   ORDER BY c.id DESC`),
+  decidedCorrectionsOn: db.prepare(`SELECT c.* FROM time_corrections c
+    LEFT JOIN time_entries te ON te.id = c.time_entry_id
+   WHERE c.decision <> 'pending'
+     AND COALESCE(te.daypart, json_extract(c.payload, '$.daypart')) = ?
+   ORDER BY COALESCE(c.decided_at, c.requested_at) DESC, c.id DESC LIMIT 100`),
   decideCorrection: db.prepare(`UPDATE time_corrections SET decision = @decision, decided_by = @by,
     decided_at = datetime('now'), decision_note = @note WHERE id = @id`),
   correctionById: db.prepare('SELECT * FROM time_corrections WHERE id = ?'),

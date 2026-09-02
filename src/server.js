@@ -4838,12 +4838,22 @@ function tipsPickerPage(model) {
       <p class="st-lede">Report a shift other than today's, or correct one you already sent.</p>
       ${group('Still to report', owing, 'Nothing outstanding.')}
       ${group('Already submitted', filed, 'Nothing submitted yet.')}
+      ${/* "Report a shift not listed" was here, and it undid the rule the rest
+           of this page is built on. It let somebody name any date and any
+           service and have a shift CREATED from the typing — so tips could be
+           filed against an evening nobody had worked yet, which is exactly the
+           mistake it is easiest to make at the end of a long day and hardest to
+           spot afterwards.
+           A shift you worked is a shift you clocked into. If the record is
+           missing, the fix is on the Time clock tab — ask for the shift to be
+           added, a manager approves it, and it appears here with hours and
+           wages attached instead of sales and tips floating free of both. */''}
       <div class="st-sec">
-        <h2 class="st-h">Not listed</h2>
-        <p class="st-sub">A shift with no record — you forgot to clock in, or it was
-          never opened. Reporting it files your sales and tips only: no clock-in,
-          no hours, no wages.</p>
-        <a class="tc-btn tc-btn-go tc-btn-big" href="/portal/tips?manual=1">Report a shift not listed</a>
+        <h2 class="st-h">Worked a shift that is not here?</h2>
+        <p class="st-sub">Every shift you can report is one you clocked into. If one is
+          missing, ask for it on your time clock — once your manager approves it, it
+          appears here with your hours attached.</p>
+        <a class="tc-btn tc-btn-quiet tc-btn-big" href="/portal/timesheet">Go to my timesheet</a>
       </div>
     </div>`);
 }
@@ -5243,24 +5253,37 @@ function writeSalesTips(req, emp, opts = {}) {
     if (!owned && !openToday) return { ok: false, refuse: 'That shift is not one of yours.' };
     sh = s.shiftById.get(wantId) || null;
   }
-  if (!sh && String(body.mode || '') === 'manual') {
-    manual = true;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date) || Number.isNaN(Date.parse(vals.date))) {
-      errs.date = 'Choose the date you worked.';
-    }
-    if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
-  }
-  if (!sh && !manual) {
-    // The legacy door and any form without an explicit choice: anchor to the
-    // punch, exactly as before. The clock is a better witness than a phone at
-    // the end of a long night.
+  // TIPS FOLLOW THE CLOCK — in the portal.
+  //
+  // `mode=manual` used to resolve-or-create a shift from a typed date and
+  // service. That meant a shift could come into existence because somebody
+  // typed its name on a phone, carrying sales and tips with no punch, no hours
+  // and no wages behind them — and it made the easiest end-of-night mistake
+  // possible: filing tonight's money against the evening you have not worked
+  // yet. In the portal a shift you can report is now a shift you clocked into.
+  //
+  // NOT ON THE LEGACY PIN DOOR at /tips, which is deliberately different and is
+  // left alone. Filing before a manager has opened the service is the ordinary
+  // case there and has been since long before the time clock existed — that
+  // door opens the service from the report, which is the oldest flow in the
+  // app. Closing it here would stop tips being filed tomorrow night.
+  if (!sh) {
     const anchor = TC.anchorEntryFor(emp.id);
     if (anchor && anchor.shift_id) sh = s.shiftById.get(anchor.shift_id) || null;
-    if (!sh) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date)) errs.date = 'Choose the date you worked.';
-      if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
-      manual = true;
-    }
+  }
+  if (!sh && opts.clockedInOnly) {
+    // A refusal, not a field error: there is no box they could fill in to fix
+    // it. The fix is to clock in, and the message says so.
+    return { ok: false,
+      refuse: 'You are not clocked in for a shift, so there is nothing to report against yet. '
+        + 'Clock in for the shift you are working and this will be waiting for you.' };
+  }
+  if (!sh) {
+    // The legacy door, exactly as it was: anchor to the punch when there is
+    // one, otherwise take the date and service off the form.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date)) errs.date = 'Choose the date you worked.';
+    if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
+    manual = true;
   }
 
   // Nothing has touched the database yet, and nothing will if anything above
@@ -5366,7 +5389,7 @@ function writeSalesTips(req, emp, opts = {}) {
 app.post('/portal/tips/submit', (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
-  const out = writeSalesTips(req, who.emp, { requireConfirm: true });
+  const out = writeSalesTips(req, who.emp, { requireConfirm: true, clockedInOnly: true });
   if (out.refuse) return refuseTips(req, res, out.refuse);
   if (!out.ok) {
     const model = tipsWorkspace(who.emp, {
@@ -8814,24 +8837,35 @@ app.get('/portal/timesheet', (req, res) => {
   const dayRow = (d) => {
     const bad = v.issues.some((i) => i.blocking && d.entries.some((e) => e.id === i.entryId));
     const dt = new Date(d.date + 'T00:00:00');
-    // What was worked, in the words the shift itself uses. Punches read as
-    // times; hours carried on a shift sheet say so, because there is no punch
-    // behind them and pretending otherwise is how somebody taps a row expecting
-    // to edit a time and finds nothing to edit.
-    // WHICH CLOCK EACH ONE WAS. Somebody who works Day and Evening in the same
-    // fortnight is signing for both on this one sheet — that is deliberate, and
-    // it is exactly why each line has to say which is which. Without it the
-    // sheet reads as two shifts on one day with no way to tell them apart, and
-    // "are these hours right?" becomes unanswerable.
-    const bits = d.entries.map((e) => {
-      const face = `${TC.clockFace(e.clock_in_at, TC.zoneFor(e.daypart))}–${e.clock_out_at ? TC.clockFace(e.clock_out_at, TC.zoneFor(e.daypart)) : 'open'}`;
-      return e.daypart ? `${face} · ${dp(e.daypart)}` : face;
-    });
-    if (d.extra.length) bits.push(d.extra.length === 1 ? 'on the shift sheet' : `${d.extra.length} on the shift sheet`);
+    // ONE LINE PER PUNCH: schedule, position, hours. Not one sentence made of
+    // all of them.
+    //
+    // Joining them with a separator produced exactly the mess it sounds like —
+    // four punches on a Tuesday read as "10:22 AM–10:23 AM · Day Service ·
+    // 11:20 AM–11:20 AM · Day Service · 11:47 AM–11:47 AM · Day Service ·
+    // 11:47 AM–11:47 AM · Day Service", wrapping over three lines with the
+    // schedule repeated at every turn. Nothing about that is readable, and the
+    // repetition looks like a rendering fault rather than four real punches.
+    //
+    // Stacked, each line answers the three questions somebody checking their
+    // hours actually has — which schedule, doing what, for how long — and a day
+    // with one punch is one line rather than a paragraph.
+    const line = (a, b2, c2) => `<i class="tc-e">${[a, b2, c2].filter(Boolean).map(esc).join(' · ')}</i>`;
+    const rows = d.entries.map((e) => line(
+      e.daypart ? dp(e.daypart) : '',
+      (positions.bySlug.get(e.position) || {}).name || e.position || '',
+      `${TC.clockFace(e.clock_in_at, TC.zoneFor(e.daypart))}–${e.clock_out_at ? TC.clockFace(e.clock_out_at, TC.zoneFor(e.daypart)) : 'open'}`,
+    ));
+    // Hours carried on a shift sheet say so, because there is no punch behind
+    // them — pretending otherwise is how somebody taps a row expecting to edit
+    // a time and finds nothing to edit.
+    for (const x of d.extra) {
+      rows.push(line(x && x.daypart ? dp(x.daypart) : '', 'on the shift sheet', ''));
+    }
     return `<a class="tc-row${bad ? ' tc-row-bad' : ''}" href="/portal/timesheet/day/${d.date}">
       <span class="tc-row-l">
         <b>${esc(dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }))}</b>
-        <i>${esc(bits.join(' · '))}</i></span>
+        ${rows.join('')}</span>
       <span class="tc-row-r"><b>${esc(TC.hm(d.minutes))}</b>${bad ? '<i>needs a fix</i>' : ''}</span>
     </a>`;
   };
@@ -9920,19 +9954,26 @@ app.get('/employees/:id/edit', (req, res) => {
         placeholder="for their pay summary" ${w ? '' : 'disabled'}></label>
 
       <h2 class="epr-h epr-h--2">Portal access</h2>
-      ${/* The PIN is a credential, not a payroll field. It is shown as a state
-           first and only editable deliberately — and the digits are never put
-           on screen for somebody standing behind the manager to read. */''}
+      ${/* THE PIN IS SHOWN. It used to be hidden behind a disclosure with the
+           digits never rendered, on the reasoning that a credential should not
+           sit on screen for somebody behind the manager to read.
+           That is the wrong threat model for this app. The owner sets these
+           PINs, hands them out, and is the person staff ask when they forget
+           one — a four-digit code he chose himself is not a secret from him,
+           and hiding it only meant resetting a PIN he already knew. Anyone who
+           can open this page can already read the wages on the next tab.
+           It stays a text field rather than a password one for the same reason:
+           there is nothing here to shoulder-surf that the page does not already
+           show. */''}
       <p class="epr-acc epr-acc--${pinState.k}">${esc(pinState.t)}</p>
-      <details class="epr-pin"${w ? '' : ' hidden'}>
-        <summary>${e.pin ? 'Change PIN' : 'Set a PIN'}</summary>
-        <label class="epr-f">4-digit PIN
-          <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
-            value="" placeholder="${e.pin ? 'leave blank to keep the current PIN' : '0000'}"></label>
-        <p class="epr-hint">They sign in to the staff portal with this. Four digits, and no two people can share one. Leave it blank to keep the one they have.</p>
-        ${e.pin ? `<label class="epr-clear"><input type="checkbox" name="pin_clear" value="1">
-          Remove their PIN &mdash; they will not be able to sign in to the portal</label>` : ''}
-      </details>
+      <label class="epr-f epr-f--pin">4-digit PIN
+        <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
+          value="${val(e.pin)}" placeholder="0000" ${w ? '' : 'disabled'}
+          aria-describedby="pin-hint">
+      </label>
+      <p class="epr-hint" id="pin-hint">They sign in to the staff portal with this. Four digits, and no
+        two people can share one. Change it here and tell them the new one; clearing the box removes
+        their access${w ? '' : ' — your account is view-only'}.</p>
 
       ${w ? '<button class="bs-btn epr-save" type="submit">Save details</button>' : ''}
     </form>`;
@@ -10049,15 +10090,18 @@ app.post('/employees/:id', (req, res) => {
 
   q.updateEmployee.run({
     id: e.id, name: name.trim(), role, email: (email || '').trim() || null,
-    // BLANK MEANS KEEP, not clear.
+    // ABSENT MEANS KEEP. BLANK MEANS CLEAR. They are not the same thing.
     //
-    // It used to mean clear, and that was only safe because the form always
-    // rendered the real digits — so blank could only happen if somebody
-    // emptied the box on purpose. The digits are not rendered any more, so the
-    // old rule would wipe a PIN every time an unrelated tab was saved, locking
-    // that person out of the portal with nothing on screen to explain it.
-    // Removing one is its own deliberate tick now.
-    pin: req.body.pin_clear === '1' ? null : ((pin || '').trim() || e.pin || null),
+    // The profile has six tabs and they all post to this one route. Only the
+    // details tab renders the PIN field, so every other tab sends no `pin` key
+    // at all — and if absent were read as blank, saving a wage would silently
+    // wipe somebody's portal access with nothing on screen to explain it.
+    //
+    // Now that the digits are on screen, an EMPTY box is a deliberate act: you
+    // can only get there by selecting four visible characters and deleting
+    // them. So that clears, which is what the hint under the field promises.
+    pin: req.body.pin_clear === '1' ? null
+      : (req.body.pin === undefined ? (e.pin || null) : ((pin || '').trim() || null)),
     // A raise that starts next month is not what they earn now. Leaving the
     // current wage alone until then is what makes "from a date" mean anything.
     hourly_rate_cents: wage && wage.future ? (e.hourly_rate_cents || 0) : newRate,
@@ -22031,7 +22075,7 @@ function clockToday(req, res, tcSvc) {
         ${pending.slice(0, 3).map((c) => `<a class="tcm-live-r" href="/timeclock/requests?id=${c.id}">
           <span class="tcm-dot warn"></span><b>${esc(tcEmpName(c.employee_id))}</b>
           <span>${esc(reqKind(c))} — ${esc(String(c.reason || c.proposed_value || '').slice(0, 60))}</span><i>open</i></a>`).join('')}
-        <p class="inc-hint"><a class="bs-act" href="/timeclock/requests">Review all ${pending.length} →</a></p>
+        <p class="inc-hint"><a class="bs-act" href="/timeclock/${encodeURIComponent(tcSvc)}/requests">Review all ${pending.length} →</a></p>
       </section>` : ''}
 
       <form class="tcm-filters" method="get" action="/timeclock/${encodeURIComponent(tcSvc)}/today">
@@ -22094,7 +22138,7 @@ function clockToday(req, res, tcSvc) {
       })();
     </script>`, {
     meta: 'Who is on now, and which punches need fixing. Clocking out sets the hours on the shift.',
-    acts: `${reqPill(pending.length + offWaiting())}
+    acts: `${reqPill(TC.q.pendingCorrectionsOn.all(tcSvc).length + offWaiting(), tcSvc)}
       <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
       ${svcCrossLink(tcSvc, 'schedule')}
       ${canWrite() ? `<a class="bs-btn-sm" href="/timeclock/new?svc=${encodeURIComponent(tcSvc)}">+ Add a punch</a>` : ''}`,
@@ -22975,18 +23019,23 @@ const offWaiting = () => {
   try { return db.prepare("SELECT COUNT(*) c FROM time_off_requests WHERE status = 'pending'").get().c; }
   catch { return 0; }
 };
-const reqPill = (n) => (n
-  ? `<a class="bs-req-pill on" href="/timeclock/requests"><b>${n}</b> Request${n === 1 ? '' : 's'}</a>`
-  : '<a class="bs-req-pill" href="/timeclock/requests">View requests</a>');
+const reqPill = (n, svc) => {
+  const href = svc ? `/timeclock/${encodeURIComponent(svc)}/requests` : '/timeclock/requests';
+  return n
+    ? `<a class="bs-req-pill on" href="${href}"><b>${n}</b> Request${n === 1 ? '' : 's'}</a>`
+    : `<a class="bs-req-pill" href="${href}">View requests</a>`;
+};
 
 /**
  * The queue. Every request, in one place, decided from here.
  */
-app.get('/timeclock/requests', (req, res) => {
-  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+function correctionQueue(req, res, svc) {
   const tab = req.query.tab === 'history' ? 'history' : 'pending';
-  const pending = TC.q.pendingCorrections.all();
-  const history = db.prepare(`SELECT * FROM time_corrections
+  // Scoped in SQL when there is a clock, so this page cannot hold another
+  // clock's request even briefly. Unscoped it is every clock, which is what the
+  // directory's own Requests link is for.
+  const pending = svc ? TC.q.pendingCorrectionsOn.all(svc) : TC.q.pendingCorrections.all();
+  const history = svc ? TC.q.decidedCorrectionsOn.all(svc) : db.prepare(`SELECT * FROM time_corrections
     WHERE decision <> 'pending' ORDER BY COALESCE(decided_at, requested_at) DESC, id DESC LIMIT 100`).all();
   const rows = tab === 'history' ? history : pending;
   const sel = rows.find((c) => String(c.id) === String(req.query.id)) || rows[0] || null;
@@ -23154,6 +23203,21 @@ app.get('/timeclock/requests', (req, res) => {
       </div>
       ${offBlock}
     </div>`));
+}
+
+// Inside a clock: only that clock's requests, and the tab bar stays put.
+app.get('/timeclock/:slug/requests', (req, res, next) => {
+  const sv = clockOr404(req, res, { next });
+  if (!sv) return;
+  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  return correctionQueue(req, res, sv.slug);
+});
+
+// And the whole queue, from the directory, for somebody working through
+// everything rather than running one service.
+app.get('/timeclock/requests', (req, res) => {
+  if (!punchReadable()) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  return correctionQueue(req, res, '');
 });
 
 /**
@@ -24951,7 +25015,7 @@ function clockTimesheets(req, res, svc) {
     ${svSheet
     ? clockShell(svSheet, 'timesheets', sheetBody, {
       meta: 'What this clock recorded, and who has signed it off.',
-      acts: `${reqPill(TC.q.pendingCorrections.all().length + offWaiting())}
+      acts: `${reqPill(TC.q.pendingCorrectionsOn.all(svc).length + offWaiting(), svc)}
              <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;svc=${encodeURIComponent(svc)}">Download CSV</a>
              ${svcCrossLink(svc, 'schedule')}`,
     })
