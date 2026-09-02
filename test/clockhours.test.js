@@ -2101,3 +2101,87 @@ test('a manager can let somebody clock in for a shift they are not on', async ()
     else db.prepare('DELETE FROM employees WHERE id = ?').run(mgrId);
   }
 });
+
+test('a refused clock-in shows why, and does not bounce back to the picker', async () => {
+  // The refusal redirect carried the service TWICE — `back()` puts it on the
+  // front of the query and the limit branch appended another. Express hands a
+  // repeated parameter over as an array, so String(['cafe','cafe']) is
+  // 'cafe,cafe', which matches no service, and the page fell through to the
+  // picker. Somebody hit the limit, got thrown back to choosing a clock, and
+  // the message explaining why never got a screen to appear on. They picked
+  // again, failed again, and nothing ever said what was wrong.
+  const SVC = require('../src/services');
+  const emp = db.prepare(`SELECT id, pin FROM employees
+    WHERE active = 1 AND pin IS NOT NULL AND role <> 'manager' LIMIT 1`).get();
+  if (!emp) return;
+  const wasLimit = SVC.limitOf('dinner');
+  const wasSvcs = SVC.forEmployee(emp.id);
+  SVC.setForEmployee(emp.id, ['cafe', 'dinner']);     // two, so a picker exists at all
+  SVC.setLimit('dinner', 'early', 10);
+  for (const p of db.prepare('SELECT id FROM time_entries WHERE employee_id = ? AND clock_out_at IS NULL').all(emp.id)) {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(p.id);
+  }
+  const cookie = await signIn(emp.pin);
+  try {
+    const res = await post('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+    const loc = String(res.headers.get('location') || '');
+
+    // ONE service in the query. Two is the bug, whatever it redirects to.
+    assert.strictEqual((loc.match(/[?&]svc=/g) || []).length, 1,
+      `the service is named once, not twice — got ${loc}`);
+    assert.match(loc, /[?&]needmgr=1/, 'and the way through is offered');
+
+    // Follow it exactly as the browser would.
+    const page = await text(loc, { cookie });
+    assert.ok(!page.includes('psp-cards'), 'it does not bounce back to the picker');
+    assert.match(page, /not scheduled on|Too early|outside your/,
+      'and the reason is on the screen they land on');
+    assert.match(page, /mgr_pin/, 'with the manager override beside it');
+  } finally {
+    SVC.setLimit('dinner', wasLimit.mode, wasLimit.earlyMin);
+    SVC.setForEmployee(emp.id, wasSvcs);
+  }
+});
+
+test('too early says when the door opens and how long that is', async () => {
+  // "Your shift starts at 5:00 PM" leaves somebody holding a phone doing
+  // arithmetic against a clock they cannot see — and when the clock opens early
+  // the shift time is not even the number they want. Both are given: the moment
+  // they can punch, and the wait until then.
+  const SVC = require('../src/services');
+  const emp = db.prepare(`SELECT id, pin FROM employees
+    WHERE active = 1 AND pin IS NOT NULL AND role <> 'manager' LIMIT 1`).get();
+  if (!emp) return;
+  const wasLimit = SVC.limitOf('dinner');
+  const wasSvcs = SVC.forEmployee(emp.id);
+  SVC.setForEmployee(emp.id, ['cafe', 'dinner']);
+  SVC.setLimit('dinner', 'early', 10);
+  for (const p of db.prepare('SELECT id FROM time_entries WHERE employee_id = ? AND clock_out_at IS NULL').all(emp.id)) {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(p.id);
+  }
+  // A shift starting 40 minutes out: too early, and the door opens in 30.
+  const st = new Date(Date.now() + 40 * 60000).toISOString().slice(0, 19).replace('T', ' ');
+  const en = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+  const bd = db.prepare("SELECT date('now','-4 hours') d").get().d;
+  const sid = Number(db.prepare(`INSERT INTO scheduled_shifts
+    (employee_id, position, business_date, starts_at, ends_at, daypart)
+    VALUES (?, 'server', ?, ?, ?, 'dinner')`).run(emp.id, bd, st, en).lastInsertRowid);
+  const pid = Number(db.prepare(`INSERT INTO published_schedule
+    (scheduled_shift_id, employee_id, position, business_date, starts_at, ends_at, daypart)
+    VALUES (?, ?, 'server', ?, ?, ?, 'dinner')`).run(sid, emp.id, bd, st, en).lastInsertRowid);
+  const cookie = await signIn(emp.pin);
+  try {
+    const res = await post('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+    const page = await text(String(res.headers.get('location') || ''), { cookie });
+    assert.match(page, /Too early/, 'it says too early');
+    assert.match(page, /you can clock in from/, 'and when the door opens');
+    assert.match(page, /\d+ minutes? from now|\d+h \d+m from now|\d+ hours? from now/,
+      'and how long that is, so nobody has to work it out');
+    assert.ok(!page.includes('psp-cards'), 'still not the picker');
+  } finally {
+    db.prepare('DELETE FROM published_schedule WHERE id = ?').run(pid);
+    db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(sid);
+    SVC.setLimit('dinner', wasLimit.mode, wasLimit.earlyMin);
+    SVC.setForEmployee(emp.id, wasSvcs);
+  }
+});

@@ -7765,7 +7765,14 @@ app.get('/portal/clock', (req, res) => {
   // their own — a schedule nobody punches into is not somewhere to punch in.
   const clockable = SERVICES.forEmployee(who.emp.id)
     .filter((sl) => SERVICES.withClock().some((x) => x.slug === sl));
-  const picked = clockable.includes(String(req.query.svc)) ? String(req.query.svc) : '';
+  // FIRST VALUE, not the array. A repeated query parameter arrives from express
+  // as an array, and String(['cafe','cafe']) is 'cafe,cafe' — which matches no
+  // service, so the page falls through to the picker and whatever message the
+  // redirect was carrying never gets a screen to appear on. One redirect really
+  // did send svc twice; taking the first value here means a second one can only
+  // ever be redundant rather than destructive.
+  const askedSvc = Array.isArray(req.query.svc) ? req.query.svc[0] : req.query.svc;
+  const picked = clockable.includes(String(askedSvc)) ? String(askedSvc) : '';
   // Not while they are on a punch, and not on the receipt screen: both are
   // about a shift that already has its answer.
   const onClock = !!TC.q.active.get(who.emp.id);
@@ -7896,15 +7903,43 @@ app.post('/portal/clock/in', (req, res) => {
       const next = mine.map((sh) => sh.starts_at)
         .filter((t) => TC.toDate(t).getTime() > nowMs)
         .sort((a, b) => String(a).localeCompare(String(b)))[0];
-      const why = mine.length
-        ? (next
-          ? `Too early — your ${SERVICES.nameOf(daypart)} shift starts at ${TC.clockFace(next)}.`
-          : `That is outside your ${SERVICES.nameOf(daypart)} shift today.`)
-        : `You are not scheduled on ${SERVICES.nameOf(daypart)} today.`;
+      // HOW LONG, not just when. "Your shift starts at 5:00 PM" leaves somebody
+      // holding a phone doing arithmetic against a clock they cannot see, and
+      // the number they actually want is how many minutes to wait — which is
+      // not the shift time at all when the clock opens early. Both are given:
+      // the moment the door opens, and the wait until it does.
+      const svcName = SERVICES.nameOf(daypart);
+      const waitFor = (fromMs) => {
+        const mins = Math.max(1, Math.ceil((fromMs - nowMs) / 60000));
+        if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`;
+        const h = Math.floor(mins / 60); const m = mins % 60;
+        return m ? `${h}h ${m}m` : `${h} hour${h === 1 ? '' : 's'}`;
+      };
+      let why;
+      if (!mine.length) {
+        why = `You are not scheduled on ${svcName} today.`;
+      } else if (next) {
+        const opensMs = TC.toDate(next).getTime() - graceMs;
+        why = graceMs
+          ? `Too early. Your ${svcName} shift starts at ${TC.clockFace(next)} and you can clock in `
+            + `from ${TC.clockFace(new Date(opensMs).toISOString().slice(0, 19).replace('T', ' '))}`
+            + ` — ${waitFor(opensMs)} from now.`
+          : `Too early. Your ${svcName} shift starts at ${TC.clockFace(next)}, in ${waitFor(TC.toDate(next).getTime())}.`;
+      } else {
+        why = `That is outside your ${svcName} shift today.`;
+      }
       // `override` is a refusal only when a PIN was actually typed — an empty
       // box is somebody who has not asked for one yet, not a failed attempt.
+      //
+      // NO SECOND svc HERE. `back` already puts the service on the front of the
+      // query, and appending another made the URL carry it twice — which express
+      // parses as an ARRAY, so String(['cafe','cafe']) is 'cafe,cafe', matches no
+      // real service, and the page fell through to the picker. So a refusal
+      // bounced somebody back to choosing a service with the message they needed
+      // still sitting in a query string nothing read. Same duplicate-field trap
+      // as the two _csrf inputs, in a different place.
       return back('err=' + encodeURIComponent(override.tried ? `${why} ${override.msg}` : why)
-        + '&needmgr=1&svc=' + encodeURIComponent(daypart)
+        + '&needmgr=1'
         + (position ? '&pos=' + encodeURIComponent(position) : ''));
     }
     if (override && override.ok) coverBy = override.manager;
