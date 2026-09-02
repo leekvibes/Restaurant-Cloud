@@ -616,7 +616,8 @@ test('B: a new item is created through the composer form', async () => {
 test('B: the composer defaults to a TASK and to not repeating', async () => {
   const html = await page('/calendar');
   const form = html.slice(html.indexOf('id="zc-composer"'), html.indexOf('</aside>', html.indexOf('id="zc-composer"')));
-  assert.match(form, /<option value="task" selected>/, 'a task by default — this module is for the work that must happen');
+  assert.match(form, /name="kind" value="task" checked/,
+    'a task by default — this module is for the work that must happen');
   assert.match(form, /<option value="">Does not repeat<\/option>/);
   const opts = [...form.matchAll(/<option value="(\d+)">([^<]+)</g)].map((m) => m[2]);
   assert.ok(opts.every((o) => /day|week/i.test(o)),
@@ -740,7 +741,8 @@ test('C: every hour is a create target carrying its own time', async () => {
 
 test('C: the scope choice is offered for a series and defaults to the safest', async () => {
   const html = await page('/calendar');
-  const sc = html.slice(html.indexOf('id="zc-d-scope"'), html.indexOf('</fieldset>'));
+  const at = html.indexOf('id="zc-d-scope"');
+  const sc = html.slice(at, html.indexOf('</fieldset>', at));
   assert.match(sc, /value="one" checked/,
     'this occurrence by default — defaulting to the series is how a year of Mondays goes to one mis-tap');
   for (const v of ['one', 'future', 'all']) assert.match(sc, new RegExp(`value="${v}"`));
@@ -780,4 +782,102 @@ test('C: the arrows step in the unit the view is measured in', async () => {
 test('C: a week straddling two months says both in the heading', async () => {
   const html = await page('/calendar?v=week&d=2026-09-30');
   assert.match(html, /Sep 28 – Oct 4, 2026/);
+});
+
+// ===========================================================================
+// STAGE D — reminders that actually fire, and a calendar a keyboard can use
+// ===========================================================================
+
+test('D: Task or Event is the first thing the composer asks', async () => {
+  // It used to sit inside "More options" — the single most consequential
+  // choice on the form, two clicks away and defaulting silently. Whether a
+  // thing can be completed or fall overdue is not an advanced option.
+  const html = await page('/calendar');
+  const form = html.slice(html.indexOf('id="zc-composer"'), html.indexOf('</aside>', html.indexOf('id="zc-composer"')));
+  const kindAt = form.indexOf('class="zc-kind"');
+  const titleAt = form.indexOf('zc-fld--title');
+  const moreAt = form.indexOf('id="zc-f-more"');
+  assert.ok(kindAt > -1, 'the choice is on the form');
+  assert.ok(kindAt < titleAt, 'above the title');
+  assert.ok(kindAt < moreAt, 'and nowhere near More options');
+  assert.match(form, /value="task" checked/, 'still defaulting to a task');
+  assert.match(html, /\[name=kind\]\[value=task\]/,
+    'and reset on every open, so the last thing made cannot decide the next');
+});
+
+test('D: a due reminder becomes one notification, once', async () => {
+  const item = C.create({ kind: 'task', title: 'Backflow test', category: 'Compliance',
+    starts_on: '2027-03-10' });
+  C.setReminders(item.id, [10080]);                        // a week before
+  const due = C.dueReminders('2027-03-03', '2027-03-03');
+  assert.strictEqual(due.length, 1);
+  assert.strictEqual(due[0].key, `cal:${item.id}:2027-03-10:10080`);
+
+  // The sweep turns that into an admin event through adminNotifyOnce, whose
+  // whole job is that a restart or a second run announces nothing twice.
+  const P = require('../src/portal');
+  const before = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'calendar'").get().n;
+  P.adminNotifyOnce(due[0].key, 'calendar', `${due[0].title} is on Mar 10`, { href: '/calendar' });
+  P.adminNotifyOnce(due[0].key, 'calendar', `${due[0].title} is on Mar 10`, { href: '/calendar' });
+  const after = db.prepare("SELECT COUNT(*) n FROM admin_events WHERE kind = 'calendar'").get().n;
+  assert.strictEqual(after, before + 1, 'twice through the same key is once on the bell');
+});
+
+test('D: the sweep is wired to the reminders, and only offers what it can deliver', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const sweep = src.slice(src.indexOf('function runAdminSweep()'), src.indexOf('function runAdminSweep()') + 1400);
+  assert.match(sweep, /CAL\.dueReminders\(today, today\)/, 'the daily pass asks for the day\'s reminders');
+  assert.match(sweep, /adminNotifyOnce\(r\.key/, 'and each goes out under its own deterministic key');
+  // The menu may only contain offsets a DAILY sweep can honour.
+  for (const o of C.REMINDER_OFFSETS) {
+    assert.strictEqual(o.min % 1440, 0, `${o.label} is a whole number of days`);
+  }
+});
+
+test('D: a completed occurrence is never reminded about', async () => {
+  const item = C.create({ kind: 'task', title: 'Already done', starts_on: '2027-04-10' });
+  C.setReminders(item.id, [1440]);
+  assert.strictEqual(C.dueReminders('2027-04-09', '2027-04-09').length, 1);
+  C.complete(item.id, '2027-04-10', 'Malek');
+  assert.strictEqual(C.dueReminders('2027-04-09', '2027-04-09').length, 0);
+});
+
+test('D: the sheets are dialogs, trap Tab, and hand focus back', async () => {
+  const html = await page('/calendar');
+  assert.match(html, /id="zc-composer" hidden role="dialog" aria-modal="true"/);
+  assert.match(html, /id="zc-detail" hidden role="dialog" aria-modal="true"\s*\n?\s*aria-labelledby="zc-d-title"/,
+    'the detail card is named by its own title');
+  assert.match(html, /if \(e\.key !== 'Tab'\) return;/, 'Tab is contained');
+  assert.match(html, /returnTo\.focus\(\)/,
+    'and focus goes back where it came from — not to the top of the document');
+});
+
+test('D: nothing in the calendar is carried by colour alone', async () => {
+  // Seeds its own month rather than depending on whatever the migration left
+  // lying in the current one — an assertion about markup should not be able to
+  // pass or fail on the calendar date it is run.
+  C.create({ kind: 'task', title: 'A11y probe', category: 'Safety',
+    starts_on: '2027-06-08', rrule_freq: 'weekly' });
+  const html = await page('/calendar?v=month&m=2027-06');
+  // Category is in the label, not only the dot. Completion is a line through
+  // the text as well as a faded accent. Recurrence has a mark and says so.
+  assert.match(html, /aria-pressed="(true|false)"/, 'the category filters state their own state');
+  assert.match(html, /class="zc-ev-r" aria-hidden="true" title="Repeats"/);
+  const g = html.indexOf('class="zc-grid"');
+  const grid = html.slice(g, html.indexOf('<script', g));
+  assert.match(grid, /role="grid"/);
+  assert.match(grid, /role="columnheader"/);
+  assert.match(grid, /role="gridcell"/);
+  assert.match(grid, /aria-label="[A-Z][a-z]+day, [A-Z][a-z]+ \d+(, (\d+ items?|nothing scheduled))"/,
+    'and every cell says what day it is and whether anything is on it');
+});
+
+test('D: an item announces its own state, not just its colour', async () => {
+  const d = '2027-05-04';
+  const item = C.create({ kind: 'task', title: 'Spoken state', starts_on: d, rrule_freq: 'weekly' });
+  C.complete(item.id, d, 'Malek');
+  const html = await page(`/calendar?v=month&m=2027-05`);
+  const chip = (html.match(/<button class="zc-ev[^"]*"[^>]*aria-label="[^"]*Spoken state[^"]*"/) || [])[0] || '';
+  assert.match(chip, /aria-label="Spoken state, all day, complete, repeats"/,
+    'a screen reader hears everything the styling shows');
 });

@@ -13852,7 +13852,8 @@ app.get('/calendar', (req, res) => {
       const shown = items.slice(0, 3);
       const rest = items.length - shown.length;
       cells.push(`<div class="zc-cell${outside ? ' zc-out' : ''}${d === today ? ' zc-today' : ''}"
-          data-date="${d}">
+          role="gridcell" data-date="${d}"
+          aria-label="${esc(calDayLabel(d))}${items.length ? `, ${items.length} item${items.length === 1 ? '' : 's'}` : ', nothing scheduled'}">
         <button class="zc-num" type="button" data-add="${d}"
           aria-label="Add something on ${esc(calDayLabel(d))}">${Number(d.slice(8))}</button>
         <div class="zc-evs">${shown.map(calChip).join('')}
@@ -14015,11 +14016,32 @@ app.get('/calendar', (req, res) => {
       var byKey = {};
       occ.forEach(function (o) { byKey[o.i + '|' + o.o] = o; });
 
+      // Where focus was when a sheet opened, so closing it puts focus back
+      // rather than dropping the reader at the top of the document.
+      var returnTo = null;
       function sheet(el, on) {
         if (!el) return;
+        if (on && !returnTo) returnTo = document.activeElement;
         el.hidden = !on;
-        document.body.classList.toggle('zc-open', !!on);
+        var anyOpen = [composer, detail].some(function (x) { return x && !x.hidden; });
+        document.body.classList.toggle('zc-open', anyOpen);
+        if (!anyOpen && returnTo && returnTo.focus) { returnTo.focus(); returnTo = null; }
       }
+
+      // Tab stays inside an open sheet. Without this, tabbing walks out into a
+      // page the reader cannot see past the scrim, which is the commonest way a
+      // dialog fails for somebody not using a mouse.
+      document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Tab') return;
+        var open = [composer, detail].find(function (x) { return x && !x.hidden; });
+        if (!open) return;
+        var f = open.querySelectorAll('a[href],button:not([disabled]),input,select,textarea');
+        var list = Array.prototype.filter.call(f, function (el) { return el.offsetParent !== null; });
+        if (!list.length) return;
+        var first = list[0], last = list[list.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      });
       var composer = document.getElementById('zc-composer');
       var detail = document.getElementById('zc-detail');
       window.calClose = function () { sheet(composer, false); sheet(detail, false); };
@@ -14044,6 +14066,8 @@ app.get('/calendar', (req, res) => {
           document.querySelector('[name=end_time]').value = hh(Number(min) + 60);
         }
         document.getElementById('zc-f-repeat').value = '';
+        var k = document.querySelector('#zc-composer [name=kind][value=task]');
+        if (k) k.checked = true;
         document.getElementById('zc-f-more').hidden = true;
         sheet(composer, true);
         setTimeout(function () { document.getElementById('zc-f-title').focus(); }, 60);
@@ -14243,12 +14267,20 @@ function calComposer(req, today) {
   const cats = CAL.CATEGORIES.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   return `
   <div class="zc-scrim" onclick="calClose()" hidden></div>
-  <aside class="zc-sheet" id="zc-composer" hidden aria-label="Add to calendar">
+  <aside class="zc-sheet" id="zc-composer" hidden role="dialog" aria-modal="true"
+    aria-label="Add to calendar">
     <form method="post" action="/calendar/new">
       <input type="hidden" name="_csrf" value="${csrfFor(req)}">
       <div class="zc-sheet-h"><b>Add to calendar</b>
         <button class="zc-x" type="button" onclick="calClose()" aria-label="Close">&#10005;</button></div>
       <div class="zc-sheet-b">
+        <fieldset class="zc-kind">
+          <legend class="zc-sr">What is this</legend>
+          <label><input type="radio" name="kind" value="task" checked>
+            <b>Task</b><i>Can be completed, and can fall overdue</i></label>
+          <label><input type="radio" name="kind" value="event">
+            <b>Event</b><i>It simply happens</i></label>
+        </fieldset>
         <label class="zc-fld zc-fld--title">Title
           <input name="title" id="zc-f-title" required maxlength="120" autocomplete="off"
             placeholder="Hood cleaning"></label>
@@ -14277,11 +14309,6 @@ function calComposer(req, today) {
           <select name="category">${cats}</select></label>
         <button class="zc-more-b" type="button" id="zc-f-morebtn">More options</button>
         <div id="zc-f-more" hidden>
-          <label class="zc-fld">This is
-            <select name="kind">
-              <option value="task" selected>A task — can be completed</option>
-              <option value="event">An event — it just happens</option>
-            </select></label>
           <label class="zc-fld">Responsible
             <input name="responsible" id="zc-f-resp" maxlength="80"
               placeholder="A person, or a vendor"></label>
@@ -14318,7 +14345,8 @@ function calDetail(req) {
       ${t}<input type="hidden" name="id"><input type="hidden" name="occurs_on">
       <input type="hidden" name="scope" value="all"></form>`;
   return `
-  <aside class="zc-sheet zc-sheet--d" id="zc-detail" hidden aria-label="Calendar item">
+  <aside class="zc-sheet zc-sheet--d" id="zc-detail" hidden role="dialog" aria-modal="true"
+    aria-labelledby="zc-d-title">
     <div class="zc-sheet-h"><b id="zc-d-title"></b>
       <button class="zc-x" type="button" onclick="calClose()" aria-label="Close">&#10005;</button></div>
     <div class="zc-sheet-b">
@@ -27361,6 +27389,29 @@ if (process.env.ZWIN_SKIP_BACKFILL !== '1') {
 const daysUntil = (d) => (d ? Math.round((new Date(d + 'T00:00:00') - startOfToday()) / 86400000) : null);
 
 function runAdminSweep() {
+  // Calendar reminders.
+  //
+  // The rules layer stores any offset; only whole-day ones are OFFERED, because
+  // this sweep is what delivers them and it runs once a day. A control that
+  // cannot fire would be a lie, so the menu does not show one.
+  //
+  // dueReminders() returns what SHOULD be sent and sends nothing itself. That
+  // separation is what lets the timing be tested without a push subscription,
+  // and it means a delivery failure can never be mistaken for a scheduling bug.
+  // The key is deterministic — cal:<item>:<occurrence>:<offset> — so a restart,
+  // a redeploy or a second run on the same day announces nothing twice.
+  try {
+    const today = isoDate(startOfToday());
+    for (const r of CAL.dueReminders(today, today)) {
+      const when = r.offsetMin === 0 ? 'today'
+        : r.offsetMin === 1440 ? 'tomorrow'
+          : `on ${niceDate(r.date)}`;
+      PORTAL.adminNotifyOnce(r.key, 'calendar', `${r.title} is ${when}`,
+        { body: r.category, href: `/calendar?v=day&d=${r.date}` });
+    }
+  } catch (e) { console.error('[sweep] calendar reminders', e && e.message); }
+
+
   const docsDated = db.prepare(
     'SELECT id, title, category, expires_on, action_by FROM m_documents WHERE expires_on IS NOT NULL OR action_by IS NOT NULL');
 
