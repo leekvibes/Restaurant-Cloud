@@ -2212,12 +2212,12 @@ test('a schedule made without a clock is not offered as one, until it is connect
   try {
     assert.ok(SVC.all().some((x) => x.name === 'Board Nightshift'), 'the schedule exists');
     const clocks = await raw('/timeclock');
-    assert.doesNotMatch(clocks, /<h2 class="svc-card-h">Board Nightshift</, 'no clock card');
+    assert.doesNotMatch(clocks, /<h2 class="tcc-name">Board Nightshift</, 'no clock card');
     assert.match(clocks, /Connect a time clock/, 'but it is offered');
 
     const slug = SVC.all().find((x) => x.name === 'Board Nightshift').slug;
     await post(`/services/${slug}/clock`, { on: '1', back: '/timeclock' });
-    assert.match(await raw('/timeclock'), /<h2 class="svc-card-h">Board Nightshift</, 'connected');
+    assert.match(await raw('/timeclock'), /<h2 class="tcc-name">Board Nightshift</, 'connected');
   } finally {
     const sv = SVC.all().find((x) => x.name === 'Board Nightshift');
     if (sv) SVC.archive(sv.slug);

@@ -363,7 +363,7 @@ test('every inline script the server emits actually parses', async () => {
   // literal reached the browser as a real newline, ended a string mid-line,
   // and took the whole click-to-edit grid down with it.
   const pages = ['/', '/shifts', '/sales', '/payroll', '/cash', '/costs',
-    '/timeclock', '/payroll/timesheets', '/c/invoices', '/c/expenses'];
+    '/timeclock/cafe/today', '/payroll/timesheets', '/c/invoices', '/c/expenses'];
   // Plus one employee's review, which is where most of the client code lives.
   {
     const d2 = new (require('better-sqlite3'))(DB, { readonly: true });
@@ -546,7 +546,7 @@ test('both themes give the stripe its own colour', () => {
 // densest markup in the app, and until they were listed they were the only
 // panelled pages exempt from the no-nested-panels and one-heading-per-panel
 // rules the rest of the app is held to.
-const PANEL_PAGES = ['/shifts', '/sales', '/payroll', '/timeclock', '/payroll/timesheets'];
+const PANEL_PAGES = ['/shifts', '/sales', '/payroll', '/timeclock/cafe/today', '/payroll/timesheets'];
 
 /** Outermost-first list of panel fragments on a page, with nesting depth. */
 function panelsWithDepth(html) {

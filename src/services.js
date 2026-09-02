@@ -323,6 +323,153 @@ function setSettingsFor(slug, v) {
 /** Schedules that carry their own time clock. */
 const withClock = () => all().filter((x) => x.has_clock !== 0);
 
+// --- the timekeeping cycle --------------------------------------------------
+//
+// A time clock's own period structure: how long a timesheet period is, which
+// day it is anchored to, and which day its weeks begin on.
+//
+// THIS IS NOT PAYROLL. The Payroll module keeps its own canonical calendar in
+// periods.js and nothing here writes to it, reads from it, or can move a figure
+// on it. This exists so a clock knows when its own periods end — which is what
+// a submission reminder, a manager nudge and the period arrows inside the clock
+// need — and so that a clock created for another site can have a different
+// rhythm without an argument about who owns payroll.
+//
+// Left NULL until somebody sets it, and NULL means "the same rhythm payroll
+// runs on". A clock nobody has configured therefore behaves exactly as it does
+// today, which is what makes adding this safe.
+const CYCLE_COLS = [['cycle_len', 'INTEGER'], ['cycle_anchor', 'TEXT'], ['week_start', 'INTEGER']];
+try {
+  const cols = db.prepare('PRAGMA table_info(services)').all().map((c) => c.name);
+  for (const [col, type] of CYCLE_COLS) {
+    if (!cols.includes(col)) db.exec(`ALTER TABLE services ADD COLUMN ${col} ${type}`);
+  }
+} catch { /* older engine */ }
+
+/** How long a period is, where it is anchored, and which day weeks start. */
+function cycleFor(slug) {
+  const sv = bySlug(slug) || {};
+  return {
+    length: Number(sv.cycle_len) > 0 ? Number(sv.cycle_len) : null,
+    anchor: sv.cycle_anchor || null,
+    weekStart: sv.week_start == null ? null : Number(sv.week_start),
+  };
+}
+
+/**
+ * Save one clock's cycle. Only the shapes a timesheet period can actually be.
+ *
+ * 7, 14 and 28 rather than a free number: a period has to divide into whole
+ * weeks for a weekly total to mean anything, and "every 9 days" is not a thing
+ * anybody runs. Semi-monthly is deliberately absent — it is not a fixed number
+ * of days and would need a different calculation than the one above.
+ */
+function setCycle(slug, v) {
+  const len = [7, 14, 28].includes(Number(v.length)) ? Number(v.length) : null;
+  const wk = Number(v.weekStart);
+  const anchor = /^\d{4}-\d{2}-\d{2}$/.test(String(v.anchor || '')) ? String(v.anchor) : null;
+  db.prepare('UPDATE services SET cycle_len = ?, cycle_anchor = ?, week_start = ? WHERE slug = ?')
+    .run(len, anchor, Number.isInteger(wk) && wk >= 0 && wk <= 6 ? wk : null, slug);
+}
+
+// --- membership as an ADDITIVE thing ----------------------------------------
+//
+// setForEmployee replaces one person's whole list, which is right on their own
+// staff page where every tick is on screen. It is wrong everywhere a clock is
+// the subject: assigning somebody to Evening must not be capable of taking them
+// off Day, and an employee belongs to as many clocks as management says.
+//
+// So these two work the other way round — one clock, one person, one row — and
+// they are what the wizard and Edit assignments use.
+
+/** Put somebody on this clock. Leaves every other clock alone. */
+function assignTo(slug, employeeId) {
+  db.prepare(`INSERT INTO employee_services (employee_id, service_slug, active) VALUES (?, ?, 1)
+              ON CONFLICT(employee_id, service_slug) DO UPDATE SET active = 1`).run(employeeId, slug);
+  try { db.prepare('UPDATE employees SET svc_set = 1 WHERE id = ?').run(employeeId); } catch { /* older engine */ }
+}
+
+/** Take somebody off this clock. Their history on it is untouched. */
+function unassignFrom(slug, employeeId) {
+  db.prepare('UPDATE employee_services SET active = 0 WHERE employee_id = ? AND service_slug = ?')
+    .run(employeeId, slug);
+}
+
+/**
+ * Set the whole roster of ONE clock, without touching anyone's other clocks.
+ *
+ * The difference from setForEmployee matters: this one is scoped to a clock and
+ * loops over people, that one is scoped to a person and loops over clocks.
+ * Using the wrong one on the Edit assignments screen would silently remove
+ * everybody on the clock from every OTHER clock they work.
+ */
+function setRosterFor(slug, employeeIds) {
+  const want = new Set((employeeIds || []).map(Number).filter(Boolean));
+  const have = new Set(employeesFor(slug));
+  db.transaction(() => {
+    for (const id of want) if (!have.has(id)) assignTo(slug, id);
+    for (const id of have) if (!want.has(id)) unassignFrom(slug, id);
+  })();
+}
+
+// --- what a clock is carrying ----------------------------------------------
+
+/**
+ * Has anything ever happened on this clock?
+ *
+ * Asked before a delete. A clock that has never been punched can go; one that
+ * names real history cannot, because that history has no other way of saying
+ * which clock it belonged to — the shift, the punch and the tip-out all point
+ * at this slug and nothing else.
+ */
+function historyFor(slug) {
+  const n = (sql, ...a) => { try { return db.prepare(sql).get(...a).n; } catch { return 0; } };
+  const punches = n('SELECT COUNT(*) n FROM time_entries WHERE daypart = ?', slug);
+  const shifts = n('SELECT COUNT(*) n FROM shifts WHERE daypart = ?', slug);
+  const hours = n(`SELECT COUNT(*) n FROM work w JOIN shifts s ON s.id = w.shift_id
+                   WHERE s.daypart = ?`, slug);
+  const planned = n('SELECT COUNT(*) n FROM scheduled_shifts WHERE daypart = ?', slug);
+  const policies = n('SELECT COUNT(*) n FROM policy_versions WHERE daypart = ?', slug);
+  return { punches, shifts, hours, planned, policies,
+    any: !!(punches || shifts || hours || planned || policies) };
+}
+
+/**
+ * A new clock configured like an existing one.
+ *
+ * Configuration only. Not one punch, not one shift, not one hour, not one
+ * approval, not one timesheet — those describe work that happened on the
+ * original, and copying them would invent a history for a clock that has none.
+ * What carries over is the shape of the thing: its settings, its work hours,
+ * its cycle, and optionally the same people.
+ */
+function duplicate(slug, { name, slug: newSlug, withMembers = true }) {
+  const src = bySlug(slug);
+  if (!src) throw new Error('No such time clock.');
+  const created = create({
+    slug: newSlug || `${slug}-copy`,
+    name: name || `${src.name} copy`,
+    startsMin: src.starts_min, endsMin: src.ends_min,
+    withClock: src.has_clock !== 0,
+    members: withMembers ? employeesFor(slug) : [],
+  });
+  const key = created && created.slug ? created.slug : (newSlug || `${slug}-copy`);
+  // Settings, work hours and cycle — the reusable configuration, nothing else.
+  const cols = CLOCK_SETTINGS.map(([c]) => c).concat(CYCLE_COLS.map(([c]) => c));
+  try {
+    db.prepare(`UPDATE services SET ${cols.map((c) => `${c} = @${c}`).join(', ')} WHERE slug = @to`)
+      .run({ ...Object.fromEntries(cols.map((c) => [c, src[c] == null ? null : src[c]])), to: key });
+  } catch { /* a column an older database has not grown yet */ }
+  try {
+    const rows = db.prepare('SELECT weekday, open_min, close_min FROM service_hours WHERE service_slug = ?').all(slug);
+    const ins = db.prepare(`INSERT INTO service_hours (service_slug, weekday, open_min, close_min)
+      VALUES (?, ?, ?, ?) ON CONFLICT(service_slug, weekday)
+      DO UPDATE SET open_min = excluded.open_min, close_min = excluded.close_min`);
+    db.transaction(() => { for (const r of rows) ins.run(key, r.weekday, r.open_min, r.close_min); })();
+  } catch { /* no hours to copy */ }
+  return key;
+}
+
 /**
  * WHEN somebody may clock into this schedule.
  *
@@ -558,4 +705,5 @@ module.exports = {
   CLOCK_SETTINGS, seedSettings, settingsFor, setSettingsFor, nameOf, isActive, create, rename, archive, unarchive,
   isZone,
   forEmployee, isAssigned, canWork, setForEmployee, employeesFor,
+  cycleFor, setCycle, assignTo, unassignFrom, setRosterFor, historyFor, duplicate,
 };

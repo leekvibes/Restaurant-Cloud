@@ -423,7 +423,7 @@ test('a manager edit still cannot mint a duplicate shift', () => {
 });
 
 test('the manager list and detail render', async () => {
-  const list = await text('/timeclock');
+  const list = await text('/timeclock/cafe/today');
   assert.match(list, /Time clock/);
   // The Today tab answers "what is happening now". A period's clocked-hours
   // total is a Timesheets question and moved there — this strip counts people,
@@ -1273,7 +1273,7 @@ test('a CSV field containing a comma or quote is escaped, not left to corrupt th
 });
 
 test('the time clock page still opens with everything wired', async () => {
-  const html = await text('/timeclock');
+  const html = await text('/timeclock/cafe/today');
   assert.match(html, /Reports/, 'reports are reachable');
   assert.match(html, /Settings/, 'so are settings');
   assert.match(html, /Timesheets/, 'and the timesheet ledger');
@@ -2196,7 +2196,7 @@ test('a period with hours on the sheets is one the portal asks you to sign', asy
 
 test('the way in never disappears — "View requests" at zero, a count above it', async () => {
   db.prepare("UPDATE time_corrections SET decision = 'approved' WHERE decision = 'pending'").run();
-  let html = await text('/timeclock');
+  let html = await text('/timeclock/cafe/today');
   assert.match(html, /class="bs-req-pill"[^>]*>View requests</,
     'with nothing waiting it still offers a way to look');
   assert.ok(!/bs-req-pill on/.test(html), 'and is not shouting');
@@ -2215,7 +2215,7 @@ test('the way in never disappears — "View requests" at zero, a count above it'
   await post('/portal/clock/fix', { entry_id: String(id), kind: 'shift_times', pin: '3205',
     at_in: `${day}T16:00`, note: 'started earlier' }, { cookie });
 
-  html = await text('/timeclock');
+  html = await text('/timeclock/cafe/today');
   assert.match(html, /class="bs-req-pill on"[^>]*><b>1<\/b> Request</, 'one waiting, and it says so');
   // On the timesheets toolbar too — where somebody is when they notice.
   assert.match(await text('/payroll/timesheets'), /class="bs-req-pill on"/, 'both toolbars carry it');

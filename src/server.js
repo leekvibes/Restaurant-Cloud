@@ -8818,7 +8818,15 @@ app.get('/portal/timesheet', (req, res) => {
     // times; hours carried on a shift sheet say so, because there is no punch
     // behind them and pretending otherwise is how somebody taps a row expecting
     // to edit a time and finds nothing to edit.
-    const bits = d.entries.map((e) => `${TC.clockFace(e.clock_in_at)}–${e.clock_out_at ? TC.clockFace(e.clock_out_at) : 'open'}`);
+    // WHICH CLOCK EACH ONE WAS. Somebody who works Day and Evening in the same
+    // fortnight is signing for both on this one sheet — that is deliberate, and
+    // it is exactly why each line has to say which is which. Without it the
+    // sheet reads as two shifts on one day with no way to tell them apart, and
+    // "are these hours right?" becomes unanswerable.
+    const bits = d.entries.map((e) => {
+      const face = `${TC.clockFace(e.clock_in_at, TC.zoneFor(e.daypart))}–${e.clock_out_at ? TC.clockFace(e.clock_out_at, TC.zoneFor(e.daypart)) : 'open'}`;
+      return e.daypart ? `${face} · ${dp(e.daypart)}` : face;
+    });
     if (d.extra.length) bits.push(d.extra.length === 1 ? 'on the shift sheet' : `${d.extra.length} on the shift sheet`);
     return `<a class="tc-row${bad ? ' tc-row-bad' : ''}" href="/portal/timesheet/day/${d.date}">
       <span class="tc-row-l">
@@ -21626,25 +21634,222 @@ app.post('/schedule/shift/:id/unpublish', (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// TIME CLOCKS: a directory of workspaces, not a page with a filter on it.
+// ---------------------------------------------------------------------------
+//
+// A time clock IS a service. One row in `services`, one identity, and no second
+// id that could ever disagree with it — every punch already names its clock in
+// `time_entries.daypart`, and every payable hour reaches it through
+// `shifts UNIQUE(date, daypart)`. So the isolation below is not a view built
+// over a shared page; it is the shape the data has always had, finally said out
+// loud in the URL.
+//
+// Resolve once, here, and hand the slug down. A route that cannot resolve its
+// clock renders a refusal — it never falls back to another clock's data, which
+// is the one failure mode that would be worse than an error.
+function clockOr404(req, res, { allowArchived = false, next = null } = {}) {
+  // FALL THROUGH RATHER THAN 404 when a `next` is given and this is not a clock
+  // at all. /timeclock/:slug/delete and /timeclock/:id/delete are the same shape
+  // — one deletes a time clock, the other a punch — and the clock routes are
+  // declared first, so without this every punch delete would arrive here and be
+  // answered "no such time clock". Which is exactly what happened.
+  if (next && !SERVICES.bySlug(String(req.params.slug || ''))) { next(); return null; }
+  if (!navAllowed('/timeclock')) {
+    res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+    return null;
+  }
+  const slug = String(req.params.slug || '');
+  const sv = SERVICES.bySlug(slug);
+  if (!sv || sv.has_clock === 0 || (!allowArchived && !sv.active)) {
+    res.status(404).send(layout('No such time clock', `<div class="bs-page">
+      <a class="bs-back" href="/timeclock">&larr; Time clocks</a>
+      <h1>No such time clock</h1>
+      <p class="bs-subline">${sv && !sv.active
+    ? `${esc(sv.name)} has been archived. Its history is intact — restore it from the directory to use it again.`
+    : 'This time clock does not exist, or it has no clock of its own.'}</p>
+      <p><a class="bs-act" href="/timeclock">Back to your time clocks</a></p></div>`));
+    return null;
+  }
+  return sv;
+}
+
+/**
+ * The workspace shell. Today, Timesheets and Settings all wear it.
+ *
+ * They used to be three pages that happened to be about the same subject, with
+ * the clock's name in three different places and the tabs in two. One shell
+ * means switching views never moves the furniture, and the clock you are inside
+ * is stated once, at the top, where it cannot be missed.
+ */
+function clockShell(sv, active, body, opts = {}) {
+  const base = `/timeclock/${encodeURIComponent(sv.slug)}`;
+  const tabs = [['today', 'Today'], ['timesheets', 'Timesheets']];
+  return `<div class="bs-page tcm-page tcw">
+      <div class="tcw-top">
+        <a class="tcw-back" href="/timeclock">&larr; Time clocks</a>
+        <div class="tcw-id">
+          <h1 class="tcw-name">${esc(sv.name)}</h1>
+          ${opts.meta ? `<p class="tcw-meta">${opts.meta}</p>` : ''}
+        </div>
+        <div class="tcw-acts">
+          ${opts.acts || ''}
+          ${/* Reports and Settings on every tab of the workspace, not only on
+               Today. They were in Today's header before, so stepping to
+               Timesheets quietly took Reports away — the whole point of one
+               shell is that the furniture does not move between views. */''}
+          <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
+          <a class="bs-btn-sm" href="${base}/settings">Settings</a>
+        </div>
+      </div>
+      <nav class="pa-tabs tcw-tabs">
+        ${tabs.map(([k, label]) => `<a class="pa-tab${k === active ? ' on' : ''}"
+          href="${base}/${k}"${k === active ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('')}
+        ${active === 'settings' ? '<span class="pa-tab on">Settings</span>' : ''}
+      </nav>
+      ${body}
+    </div>`;
+}
+
+/**
+ * THE DIRECTORY. What "Time clock" in the sidebar now opens.
+ *
+ * Cards rather than a list, and Active/Archived rather than a hidden state,
+ * because a time clock is a place you go into — the card is the door, and an
+ * archived one still has to be findable to be restored.
+ */
 app.get('/timeclock', (req, res) => {
   if (!navAllowed('/timeclock')) {
     return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
   }
-  // Choose the service first, exactly as Schedule does. This page already had
-  // a service filter — `fSvc` below — so the picker sets it rather than adding
-  // a second way to say the same thing.
-  const tcSvc = svcParam(req);
-  if (!tcSvc) {
-    const cfg0 = TC.settings();
-    const d0 = TC.businessDateOf(TC.nowUtc(), cfg0.cutoffHour);
-    return res.send(serviceCards(req, '/timeclock', {
-      title: 'Time clocks', backWord: 'Time clocks',
-      sub: 'Pick a time clock. Punches, timesheets and corrections are the same tools, scoped to it.',
-      countLabel: 'On now',
-      only: SERVICES.withClock().map((x) => x.slug),
-      countOf: (slug) => TC.q.allActive.all().filter((e) => e.daypart === slug).length,
-    }));
+  // Old ?svc= links still land where they meant to. Bookmarks, the dashboard's
+  // deep links and anything already sent to a manager keep working; they just
+  // arrive at the workspace instead of setting a filter that no longer exists.
+  const legacy = String(req.query.svc || '');
+  if (legacy && legacy !== 'all' && SERVICES.isActive(legacy)) {
+    const keep = new URLSearchParams(req.query);
+    keep.delete('svc');
+    const qsx = keep.toString();
+    return res.redirect(`/timeclock/${encodeURIComponent(legacy)}/today${qsx ? '?' + qsx : ''}`);
   }
+  const showArchived = req.query.view === 'archived';
+  const all = SERVICES.all({ includeArchived: true }).filter((x) => x.has_clock !== 0);
+  const active = all.filter((x) => x.active);
+  const archived = all.filter((x) => !x.active);
+  const list = showArchived ? archived : active;
+  const onNow = TC.q.allActive.all();
+  const w = canWrite();
+
+  const card = (sv) => {
+    const people = SERVICES.employeesFor(sv.slug).length;
+    const on = onNow.filter((e) => e.daypart === sv.slug).length;
+    const cyc = SERVICES.cycleFor(sv.slug);
+    const base = `/timeclock/${encodeURIComponent(sv.slug)}`;
+    return `<article class="tcc-card${sv.active ? '' : ' is-archived'}">
+      <h2 class="tcc-name">${esc(sv.name)}</h2>
+      <dl class="tcc-facts">
+        <div><dt>Assigned</dt><dd>${people ? `${people} ${people === 1 ? 'person' : 'people'}` : '<i class="tcc-none">Nobody yet</i>'}</dd></div>
+        <div><dt>On now</dt><dd>${on || '0'}</dd></div>
+        <div><dt>Period</dt><dd>${cyc.length ? `Every ${cyc.length / 7} week${cyc.length === 7 ? '' : 's'}` : '<i class="tcc-none">Follows payroll</i>'}</dd></div>
+      </dl>
+      <div class="tcc-acts">
+        ${sv.active
+    ? `<a class="tcc-open" href="${base}/today">Open</a>`
+    : (w ? `<form method="post" action="${base}/restore" style="margin:0">
+             <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+             <button class="tcc-open" type="submit">Restore</button></form>`
+      : '<span class="tcc-open is-off">Archived</span>')}
+        ${w && sv.active ? `<details class="tcc-menu">
+          <summary aria-label="More actions for ${esc(sv.name)}">&hellip;</summary>
+          <div class="tcc-pop">
+            <a href="${base}/settings">Edit name</a>
+            <a href="${base}/assignments">Edit assignments</a>
+            <form method="post" action="${base}/duplicate">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <button type="submit">Duplicate</button>
+            </form>
+            <form method="post" action="${base}/archive"
+              onsubmit="return confirm('Archive ${esc(sv.name).replace(/'/g, "\\'")}? Its history stays exactly as it is and you can restore it.');">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <button type="submit">Archive</button>
+            </form>
+            <form method="post" action="${base}/delete"
+              onsubmit="return confirm('Delete ${esc(sv.name).replace(/'/g, "\\'")}? This is only possible while it has no history.');">
+              <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+              <button type="submit" class="tcc-del">Delete</button>
+            </form>
+          </div>
+        </details>` : ''}
+      </div>
+    </article>`;
+  };
+
+  res.send(layout('Time clocks', `
+    ${flash(req)}
+    <div class="bs-page tcm-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Time clocks</h1>
+          <p class="bs-subline">Each time clock is its own workspace. Open one and everything inside it —
+            who is on, punches, timesheets, corrections and settings — belongs to that clock alone.</p>
+        </div>
+        <div class="bs-head-acts">
+          <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
+          ${w ? '<a class="bs-btn-sm bs-btn-go" href="/timeclock/create">+ Add a time clock</a>' : ''}
+        </div>
+      </div>
+      <nav class="rst-tabs">
+        <a class="rst-tab${showArchived ? '' : ' on'}" href="/timeclock">Active <b>${active.length}</b></a>
+        <a class="rst-tab${showArchived ? ' on' : ''}" href="/timeclock?view=archived">Archived <b>${archived.length}</b></a>
+      </nav>
+      ${list.length
+    ? `<div class="tcc-grid">${list.map(card).join('')}</div>`
+    : `<div class="bs-blank"><b>${showArchived ? 'Nothing archived' : 'No time clocks yet'}</b>
+        <span>${showArchived
+    ? 'Archived clocks keep their history and can be restored.'
+    : 'A time clock is where punches, timesheets and corrections live for one part of the operation.'}</span>
+        ${!showArchived && w ? '<a class="bs-act" href="/timeclock/create">Create your first time clock</a>' : ''}</div>`}
+      ${/* A SCHEDULE WITH NO CLOCK OF ITS OWN. The one genuinely unconnected
+           state there is: a service that plans work but never takes punches.
+           Listed rather than hidden, because the reason somebody cannot find
+           its time clock is that it does not have one, and that is a sentence
+           worth reading rather than a mystery. */''}
+      ${(() => {
+    if (showArchived) return '';
+    const noClock = SERVICES.all().filter((x) => x.has_clock === 0);
+    if (!noClock.length) return '';
+    return `<section class="bs-panel tcc-connect">
+        <div class="bs-sec-h"><span class="bs-kicker">Schedules without a time clock</span></div>
+        <p class="inc-hint">These plan work but take no punches. Give one a time clock and it becomes a
+          workspace here, with its own Today, Timesheets and settings.</p>
+        <div class="tcc-conn-rows">${noClock.map((sv) => `<div class="tcc-conn">
+          <b>${esc(sv.name)}</b>
+          ${w ? `<form method="post" action="/services/${encodeURIComponent(sv.slug)}/clock" style="margin:0">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <input type="hidden" name="on" value="1">
+            <input type="hidden" name="back" value="/timeclock">
+            <button class="bs-btn-sm" type="submit">Connect a time clock</button>
+          </form>` : '<span class="inc-hint">No time clock</span>'}
+        </div>`).join('')}</div>
+      </section>`;
+  })()}
+    </div>`));
+});
+
+/**
+ * TODAY, inside one time clock.
+ *
+ * Was the /timeclock route itself, with a ?svc= filter in front of it and a
+ * picker when the filter was absent. That made the clock a thing you selected
+ * and then had to keep verifying — open the page and the first question was
+ * always "which one am I looking at?". The clock is the workspace now: it is in
+ * the path, it survives a refresh and a pasted link, and nothing inside offers
+ * to change it. Same page, same functionality, one less thing to check.
+ *
+ * `tcSvc` is a resolved, active clock slug. Resolving it is the route's job, so
+ * this can never be reached with a clock that does not exist.
+ */
+function clockToday(req, res, tcSvc) {
   const cfg = TC.settings();
   // The cutoff-hour business date, never the calendar one, or a bartender who
   // clocked in at 6pm falls off this page the moment the clock passes midnight.
@@ -21780,28 +21985,10 @@ app.get('/timeclock', (req, res) => {
     </a>`;
   };
 
-  res.send(layout('Time clock', `
+  const svNow = SERVICES.bySlug(tcSvc) || { slug: tcSvc, name: SERVICES.nameOf(tcSvc) };
+  res.send(layout(`${svNow.name} · time clock`, `
     ${flash(req)}
-    <div class="bs-page tcm-page">
-      <div class="bs-head">
-        <div class="bs-headwrap">
-          <h1 class="bs-headline">Time clock${tcSvc && tcSvc !== 'all'
-    ? ` <span class="tcm-scope">${esc(SERVICES.nameOf(tcSvc))}</span>` : ''}</h1>
-          <p class="bs-subline">Who is on now, and which punches need fixing. Clocking out sets the hours on the shift, so there is nothing to type — unless you type over it, and then the clock leaves it alone.</p>
-        </div>
-        <div class="bs-head-acts">
-          ${reqPill(pending.length + offWaiting())}
-          <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
-          <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
-          ${svcCrossLink(tcSvc === 'all' ? '' : tcSvc, 'schedule')}
-          ${canWrite() ? '<a class="bs-btn-sm" href="/timeclock/new">+ Add a punch</a>' : ''}
-          <a class="bs-btn-sm" href="/timeclock/settings${tcSvc && tcSvc !== 'all' ? '?svc=' + encodeURIComponent(tcSvc) : ''}">Settings</a>
-        </div>
-      </div>
-      ${SERVICES.all().length > 1 ? `<div class="tcm-back">
-        <a href="/timeclock">&larr; Time clocks</a>
-      </div>` : ''}
-      ${tcTabs('/timeclock', tcSvc === 'all' ? '' : tcSvc)}
+    ${clockShell(svNow, 'today', `
       ${span.clamped ? `<div class="bs-notice"><span class="bs-notice-k">Shortened</span>
         <p>That range was wider than ${RANGE_MAX_DAYS} days, so this is the last ${RANGE_MAX_DAYS}
         (${esc(span.from)} to ${esc(span.to)}). Building a year in one page holds up everything else
@@ -21847,7 +22034,7 @@ app.get('/timeclock', (req, res) => {
         <p class="inc-hint"><a class="bs-act" href="/timeclock/requests">Review all ${pending.length} →</a></p>
       </section>` : ''}
 
-      <form class="tcm-filters" method="get" action="/timeclock">
+      <form class="tcm-filters" method="get" action="/timeclock/${encodeURIComponent(tcSvc)}/today">
         <label><span>From</span><input type="date" name="from" value="${esc(span.from)}"></label>
         <label><span>To</span><input type="date" name="to" value="${esc(span.to)}"></label>
         <details class="fsheet"><summary class="fs-btn">Filter <span class="fs-caret">▾</span></summary>
@@ -21855,9 +22042,11 @@ app.get('/timeclock', (req, res) => {
             <div class="fs-h">Employee</div>
             <select name="emp" class="bs-sel"><option value="">Anyone</option>
               ${staff.map((s2) => `<option value="${s2.id}"${String(s2.id) === fEmp ? ' selected' : ''}>${esc(s2.name)}</option>`).join('')}</select>
-            <div class="fs-h">Service</div>
-            <select name="svc" class="bs-sel"><option value="">Any</option>
-              ${SERVICES.all().map((sv) => `<option value="${esc(sv.slug)}"${sv.slug === fSvc ? ' selected' : ''}>${esc(sv.name)}</option>`).join('')}</select>
+            ${/* THE SERVICE FILTER WAS HERE and is deliberately gone. The clock in
+                 the path is the scope, and a filter that could narrow it further
+                 — or, worse, appear to widen it — is the exact thing this
+                 restructure removes. Nothing inside a workspace offers to change
+                 which workspace you are in. */''}
             <div class="fs-h">Position</div>
             <select name="pos" class="bs-sel"><option value="">Any</option>
               ${usedPos.map((p) => `<option value="${esc(p)}"${p === fPos ? ' selected' : ''}>${esc(tcPosName(p))}</option>`).join('')}</select>
@@ -21876,11 +22065,10 @@ app.get('/timeclock', (req, res) => {
              on screen; it is rendered up there from the same `qs`. */''}
       </form>
       ${isToday ? '' : `<p class="tcl-range">Showing ${esc(span.from)} to ${esc(span.to)}.
-        <a class="bs-act" href="/timeclock">Back to today</a></p>`}
+        <a class="bs-act" href="/timeclock/${encodeURIComponent(tcSvc)}/today">Back to today</a></p>`}
 
       ${rows.length ? `<div class="bs-lrows tcm-rows">${rows.map(row).join('')}</div>`
         : '<div class="bs-blank"><b>No time entries</b><span>Nothing in this range yet.</span></div>'}
-    </div>
     <script>
       // The elapsed and break figures tick, so a manager watching the floor sees
       // time move rather than a number frozen at whenever the page loaded.
@@ -21904,8 +22092,14 @@ app.get('/timeclock', (req, res) => {
         tick();
         setInterval(tick, 30000);   // minutes, so a second-by-second redraw is waste
       })();
-    </script>`));
-});
+    </script>`, {
+    meta: 'Who is on now, and which punches need fixing. Clocking out sets the hours on the shift.',
+    acts: `${reqPill(pending.length + offWaiting())}
+      <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;${qs({})}">Download CSV</a>
+      ${svcCrossLink(tcSvc, 'schedule')}
+      ${canWrite() ? `<a class="bs-btn-sm" href="/timeclock/new?svc=${encodeURIComponent(tcSvc)}">+ Add a punch</a>` : ''}`,
+  })}`));
+}
 
 // --- reports ---------------------------------------------------------------
 // Read from the entries, grouped four ways plus a corrections log. Every figure
@@ -22076,164 +22270,241 @@ app.get('/timeclock/export', (req, res) => {
 });
 
 // --- settings --------------------------------------------------------------
-app.get('/timeclock/settings', (req, res) => {
-  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+// --- settings: sections down the left, one clock at a time -----------------
+//
+// A REGISTRY, not a page. Each section is {key, label, render} and the nav is
+// generated from it, so a new area of settings is one entry in this array and
+// nothing else — no new page, no new route, no conditional threaded through a
+// thousand-line template. That is the whole point of the shape.
+//
+// Everything here belongs to ONE clock, except the two rows marked app-wide,
+// which say so on screen. A setting that reads the same on two clocks and means
+// something different on each is worse than no setting at all.
+const TC_ZONES = [
+  ['America/New_York', 'Eastern Time'],
+  ['America/Chicago', 'Central Time'],
+  ['America/Denver', 'Mountain Time'],
+  ['America/Phoenix', 'Arizona (no daylight saving)'],
+  ['America/Los_Angeles', 'Pacific Time'],
+  ['America/Anchorage', 'Alaska Time'],
+  ['Pacific/Honolulu', 'Hawaii Time'],
+  ['America/Puerto_Rico', 'Atlantic Time'],
+];
+
+const TC_SECTIONS = [
+  ['general', 'General'],
+  ['tracking', 'Time tracking'],
+  ['cycle', 'Payroll cycle'],
+  ['breaks', 'Breaks'],
+  ['issues', 'Timesheet issues'],
+  ['notifications', 'Notifications'],
+];
+
+function clockSettingsBody(req, sv, section) {
   const c = TC.settings();
+  const cs = TC.settingsOn(sv.slug);
+  const cyc = SERVICES.cycleFor(sv.slug);
   const w2 = canWrite();
   const row = (label, control, hint) => `<div class="tcs-row"><div class="tcs-l"><b>${label}</b>${hint ? `<i>${hint}</i>` : ''}</div><div class="tcs-c">${control}</div></div>`;
   const check = (name, on, label) => `<label class="tcs-check"><input type="checkbox" name="${name}" value="1"${on ? ' checked' : ''}${w2 ? '' : ' disabled'}><span>${label}</span></label>`;
-  // ONE CLOCK AT A TIME. Every setting below the trading day belongs to the
-  // clock named in the tabs — editing Day says nothing about Evening, which is
-  // what having two time clocks is supposed to mean.
-  const clocks = SERVICES.withClock();
-  // A short list, not the full IANA database. Nobody running a restaurant wants
-  // to scroll six hundred city names, and a zone typed by hand is a zone that
-  // can be wrong. Anything already stored that is not on this list is added to
-  // it below rather than silently swapped for Eastern.
-  const ZONES = [
-    ['America/New_York', 'Eastern Time'],
-    ['America/Chicago', 'Central Time'],
-    ['America/Denver', 'Mountain Time'],
-    ['America/Phoenix', 'Arizona (no daylight saving)'],
-    ['America/Los_Angeles', 'Pacific Time'],
-    ['America/Anchorage', 'Alaska Time'],
-    ['Pacific/Honolulu', 'Hawaii Time'],
-    ['America/Puerto_Rico', 'Atlantic Time'],
-  ];
-  const zoneName = (z) => (ZONES.find(([v]) => v === z) || [z, z])[1];
+  const appWide = '<i class="tcs-appwide">Applies to the whole restaurant</i>';
+  const zoneName = (z) => (TC_ZONES.find(([v]) => v === z) || [z, z])[1];
   const zoneOpts = (sel, extra) => {
-    const list = ZONES.slice();
+    const list = TC_ZONES.slice();
     if (sel && !list.some(([v]) => v === sel)) list.push([sel, sel]);
     return (extra ? `<option value=""${!sel ? ' selected' : ''}>${esc(extra)}</option>` : '')
       + list.map(([v, lbl]) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(lbl)}</option>`).join('');
   };
+  const ownZone = SERVICES.settingsFor(sv.slug, {}).timezone || '';
+  const L = SERVICES.limitOf(sv.slug);
 
-  const pick = clocks.some((x) => x.slug === req.query.svc) ? req.query.svc
-    : (clocks[0] ? clocks[0].slug : '');
-  const cs = pick ? TC.settingsOn(pick) : c;
-  // This clock's OWN zone — blank when it inherits. Read with an empty app
-  // object deliberately: settingsOn would fall back to the restaurant's and the
-  // picker could then never show "same as the restaurant".
-  const ownZone = pick ? (SERVICES.settingsFor(pick, {}).timezone || '') : '';
+  if (section === 'general') {
+    return `
+      ${row('Name', `<input name="name" value="${esc(sv.name)}" maxlength="60" ${w2 ? '' : 'disabled'}>`,
+    'What this clock is called everywhere. Renaming it changes nothing that has already happened on it.')}
+      ${row(`The trading day starts at${appWide}`,
+    `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
+    'Work before this hour counts as the night before, so an overnight shift stays on one day. '
+    + 'One rule for the whole restaurant, because two clocks disagreeing would file one night under two dates.')}
+      ${row(`Time zone${appWide}`,
+    `<select name="tz" ${w2 ? '' : 'disabled'}>${zoneOpts(c.timezone)}</select>`,
+    'Everything the owner and the staff see is shown in this zone — punches, schedules, reports and the times on their phones.')}
+      ${row('Time zone for this clock',
+    `<select name="svc_tz" ${w2 ? '' : 'disabled'}>${zoneOpts(ownZone, `Same as the restaurant (${zoneName(c.timezone)})`)}</select>`,
+    'Only for a time clock somewhere else. Left alone it follows the restaurant, so its trading day '
+    + 'starts and ends at the same moment as everything else.')}
+      <div class="tcs-row tcs-row--wh">
+        <div class="tcs-l"><b>Work hours</b>
+          <i>When this clock opens for punching, and when it closes people out. Leave a day blank for no limit that day.</i></div>
+        <div class="tcs-c wh">
+          ${SERVICES.hoursFor(sv.slug).map((d) => `<div class="wh-r">
+            <span class="wh-d" title="${esc(d.name)}" aria-hidden="true">${d.letter}</span>
+            <span class="wh-sr">${esc(d.name)}</span>
+            <label class="wh-f"><span>Clock in available from</span>
+              <input type="time" name="wh_${d.weekday}_o"
+                value="${d.openMin == null ? '' : hhmmOf(d.openMin)}" ${w2 ? '' : 'disabled'}
+                aria-label="${esc(d.name)} — clock in available from"></label>
+            <label class="wh-f"><span>Auto clock out at</span>
+              <input type="time" name="wh_${d.weekday}_c"
+                value="${d.closeMin == null ? '' : hhmmOf(d.closeMin)}" ${w2 ? '' : 'disabled'}
+                aria-label="${esc(d.name)} — auto clock out at"></label>
+          </div>`).join('')}
+        </div>
+      </div>`;
+  }
 
-  res.send(layout('Time clock settings', `
-    ${flash(req)}
-    <div class="bs-page tcm-page">
-      <a class="bs-back" href="/timeclock">← Time clock</a>
-      <div class="bs-head"><div class="bs-headwrap">
-        <h1 class="bs-headline">Time clock settings</h1>
-        <p class="bs-subline">Each time clock keeps its own settings. Changing these never alters time already recorded.</p>
-      </div></div>
-
-      ${clocks.length > 1 ? `<nav class="rst-tabs tcs-tabs" aria-label="Time clock">
-        ${clocks.map((sv) => `<a class="rst-tab${pick === sv.slug ? ' on' : ''}"
-          href="/timeclock/settings?svc=${encodeURIComponent(sv.slug)}"${
-  pick === sv.slug ? ' aria-current="page"' : ''}>${esc(sv.name)}</a>`).join('')}
-      </nav>` : ''}
-
-      <form method="post" action="/timeclock/settings" class="bs-panel tcs">
-        <input type="hidden" name="svc" value="${esc(pick)}">
-        ${row('The trading day starts at',
-          `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
-          'Work before this hour counts as the night before, so an overnight shift stays on one day.')}
-        ${/* THE RESTAURANT'S ZONE, app-wide, sitting with the trading day
-             because the two are one rule together: the day starts at this hour,
-             measured here. Every punch, schedule, report and staff phone reads
-             it. It was not a setting at all until now — it came off the host's
-             TZ variable, so the trading day quietly depended on how the server
-             happened to be configured rather than on where the restaurant is. */''}
-        ${row('Time zone',
-          `<select name="tz" ${w2 ? '' : 'disabled'}>${zoneOpts(c.timezone)}</select>`,
-          'Everything the owner and the staff see is shown in this zone — punches, schedules, '
-          + 'reports and the times on their phones.')}
-        ${clocks.length && pick ? row(`Time zone for ${esc(SERVICES.nameOf(pick))}`,
-          `<select name="svc_tz" ${w2 ? '' : 'disabled'}>${zoneOpts(ownZone, `Same as the restaurant (${zoneName(c.timezone)})`)}</select>`,
-          'Only for a time clock somewhere else. Left alone it follows the restaurant, so its '
-          + 'trading day starts and ends at the same moment as everything else.') : ''}
-        ${/* "Dinner service starts at" was here. It guessed a service from a
-             clock boundary, and nothing needs the guess any more: clock-in
-             always asks, and the schedule drawer takes the service from the
-             board it was opened on. Work hours below are the per-clock times
-             that actually matter. */''}
-        ${row('Flag a shift left open past',
-          `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === cs.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
-          'Almost always a missed clock-out rather than a very long day.')}
-        ${/* Auto clock-out, laid out like the reference the owner sent: a
-              checkbox that turns it on, and the hours beside it. Off until he
-              switches it on, deliberately — it writes a clock-out time nobody
-              punched, and that arriving with a deploy would be indefensible. */''}
-        ${row('Auto clock out',
-          `<label class="tcs-auto">
-            <input type="checkbox" name="auto_out" value="1"${c.autoOut ? ' checked' : ''} ${w2 ? '' : 'disabled'}>
-            <span>Clock people out automatically</span>
-          </label>
-          <span class="tcs-auto-n"><input type="number" name="auto_out_hours" min="4" max="24" step="1"
-            value="${cs.autoOutHours}" ${w2 ? '' : 'disabled'} aria-label="Hours before an open punch is closed"> Hours</span>`,
-          'Anyone still on the clock this long is clocked out at that mark, and the entry is flagged '
-          + 'wherever it appears so you can correct it. It writes a time nobody punched, so it stays off until you want it.')}
-        ${/* Per time clock, not global. A cafe that opens on the dot and a
-             dinner service people drift into are different rules, and one
-             number for both is the wrong number for one of them. Off for every
-             existing schedule, because switching it on can stop a real person
-             starting a real shift. */''}
-        ${/* WORK HOURS, per day, per clock. A row per weekday because a bar's
-             Friday is not its Monday, and one pair of times for the week is the
-             wrong pair on at least one day. Blank means no limit that day,
-             which is the safe direction — a clock nobody has configured behaves
-             exactly as it does now. */''}
-        ${SERVICES.withClock().map((sv) => `<div class="tcs-row tcs-row--wh">
-          <div class="tcs-l"><b>Work hours<i class="tcs-for">${esc(sv.name)}</i></b>
-            <i>When this clock opens for punching, and when it closes people out. Leave a day blank for no limit that day.</i></div>
-          <div class="tcs-c wh">
-            ${SERVICES.hoursFor(sv.slug).map((d) => `<div class="wh-r">
-              <span class="wh-d" title="${esc(d.name)}" aria-hidden="true">${d.letter}</span>
-              <span class="wh-sr">${esc(d.name)}</span>
-              <label class="wh-f"><span>Clock in available from</span>
-                <input type="time" name="wh_${esc(sv.slug)}_${d.weekday}_o"
-                  value="${d.openMin == null ? '' : hhmmOf(d.openMin)}" ${w2 ? '' : 'disabled'}
-                  aria-label="${esc(d.name)} — clock in available from"></label>
-              <label class="wh-f"><span>Auto clock out at</span>
-                <input type="time" name="wh_${esc(sv.slug)}_${d.weekday}_c"
-                  value="${d.closeMin == null ? '' : hhmmOf(d.closeMin)}" ${w2 ? '' : 'disabled'}
-                  aria-label="${esc(d.name)} — auto clock out at"></label>
-            </div>`).join('')}
-          </div>
-        </div>`).join('')}
-        ${SERVICES.withClock().map((sv) => {
-    const L = SERVICES.limitOf(sv.slug);
-    return row(`Clock in limitation<i class="tcs-for">${esc(sv.name)}</i>`,
-      `<div class="cl-set">
-        <label class="cl-on"><input type="checkbox" name="cl_on_${esc(sv.slug)}" value="1"${
-  L.mode === 'off' ? '' : ' checked'} ${w2 ? '' : 'disabled'}>
+  if (section === 'tracking') {
+    return `
+      ${row('Flag a shift left open past',
+    `<select name="long" ${w2 ? '' : 'disabled'}>${[8, 10, 12, 14, 16, 18, 20, 24].map((h) => `<option value="${h}"${h === cs.longShift ? ' selected' : ''}>${h} hours</option>`).join('')}</select>`,
+    'Almost always a missed clock-out rather than a very long day.')}
+      ${row('Auto clock out',
+    `<label class="tcs-auto">
+        <input type="checkbox" name="auto_out" value="1"${cs.autoOut ? ' checked' : ''} ${w2 ? '' : 'disabled'}>
+        <span>Clock people out automatically</span>
+      </label>
+      <span class="tcs-auto-n"><input type="number" name="auto_out_hours" min="4" max="24" step="1"
+        value="${cs.autoOutHours}" ${w2 ? '' : 'disabled'} aria-label="Hours before an open punch is closed"> Hours</span>`,
+    'Anyone still on the clock this long is clocked out at that mark, and the entry is flagged wherever it '
+    + 'appears so you can correct it. It writes a time nobody punched, so it stays off until you want it.')}
+      ${row('Clock in limitation',
+    `<div class="cl-set">
+        <label class="cl-on"><input type="checkbox" name="cl_on" value="1"${L.mode === 'off' ? '' : ' checked'} ${w2 ? '' : 'disabled'}>
           <span>Limit when people can clock in</span></label>
         <div class="cl-opts">
-          <label class="cl-o"><input type="radio" name="cl_mode_${esc(sv.slug)}" value="scheduled"${
-  L.mode === 'early' ? '' : ' checked'} ${w2 ? '' : 'disabled'}>
+          <label class="cl-o"><input type="radio" name="cl_mode" value="scheduled"${L.mode === 'early' ? '' : ' checked'} ${w2 ? '' : 'disabled'}>
             <span>Only within their scheduled shifts</span></label>
-          <label class="cl-o"><input type="radio" name="cl_mode_${esc(sv.slug)}" value="early"${
-  L.mode === 'early' ? ' checked' : ''} ${w2 ? '' : 'disabled'}>
-            <span>Up to <input class="cl-n" type="number" name="cl_min_${esc(sv.slug)}" min="0" max="240"
+          <label class="cl-o"><input type="radio" name="cl_mode" value="early"${L.mode === 'early' ? ' checked' : ''} ${w2 ? '' : 'disabled'}>
+            <span>Up to <input class="cl-n" type="number" name="cl_min" min="0" max="240"
               value="${L.earlyMin}" ${w2 ? '' : 'disabled'} aria-label="Minutes before their shift"> minutes before their shift starts</span></label>
         </div>
       </div>`,
-      'Somebody with no shift on this schedule that day cannot clock into it at all. '
-      + 'Leave it off and anybody assigned to the schedule can clock in whenever they arrive.');
-  }).join('')}
-        ${row('Breaks', check('breaks_paid', cs.breaksPaid, 'Count breaks as paid by default'),
-          'Either way a manager can change any single break.')}
-        ${/* No clock-out switch. It used to be here, off by default, and it was
-              the wrong thing to offer: a PIN at clock-out confirms nothing the
-              session has not already established, and the one place it fired it
-              stood between somebody and the end of their shift. Corrections
-              still ask, because a correction is a claim about a time that has
-              already passed rather than a thing happening now. */''}
-        ${row('Ask for the PIN', check('pin_fix', cs.pinForFix, 'when asking for a correction'),
-          'Clocking in and out never asks — they are already signed in. Editing or adding a shift always does.')}
-        ${row('Dashboard', check('alerts', cs.alertsOn, 'Show time-clock items that need attention'),
-          'Only things somebody has to act on ever appear.')}
-        ${w2 ? '<button class="bs-btn" type="submit">Save settings</button>' : '<p class="inc-hint">Your account is view-only.</p>'}
-      </form>
-    </div>`));
+    'Somebody with no shift on this schedule that day cannot clock into it at all. '
+    + 'Leave it off and anybody assigned to the schedule can clock in whenever they arrive.')}`;
+  }
+
+  if (section === 'cycle') {
+    const cur = currentPeriod();
+    return `
+      <p class="tcs-note">This is the clock's own timesheet rhythm — when a period ends, and so when a
+        timesheet is ready to be looked at and who needs reminding. <b>It does not change how Payroll is
+        calculated.</b> Payroll keeps its own calendar and this cannot move a figure on it.</p>
+      ${row('Week starts on',
+    `<select name="week_start" ${w2 ? '' : 'disabled'}>
+        <option value=""${cyc.weekStart == null ? ' selected' : ''}>Same as the rest of the app</option>
+        ${WEEK_DAYS.map((d, i) => `<option value="${i}"${cyc.weekStart === i ? ' selected' : ''}>${d}</option>`).join('')}
+      </select>`,
+    'Where this clock draws its week boundary for its own totals.')}
+      ${row('Timesheet period',
+    `<select name="length" ${w2 ? '' : 'disabled'}>
+        <option value=""${cyc.length == null ? ' selected' : ''}>Same as the rest of the app</option>
+        ${CYCLE_CHOICES.map(([v, label]) => `<option value="${v}"${cyc.length === v ? ' selected' : ''}>${label}</option>`).join('')}
+      </select>`,
+    'How long one timesheet period runs on this clock.')}
+      ${row('Counted from',
+    `<input type="date" name="anchor" value="${esc(cyc.anchor || '')}" ${w2 ? '' : 'disabled'}>`,
+    `A real period start. Every period before and after is counted from it. Blank follows the app, whose current period is ${esc(labelFor(cur))}.`)}`;
+  }
+
+  if (section === 'breaks') {
+    return row('Breaks', check('breaks_paid', cs.breaksPaid, 'Count breaks as paid by default'),
+      'Either way a manager can change any single break on this clock.');
+  }
+
+  if (section === 'issues') {
+    return `
+      ${row('Ask for the PIN', check('pin_fix', cs.pinForFix, 'when asking for a correction'),
+    'Clocking in and out never asks — they are already signed in. Editing or adding a shift always does.')}
+      <p class="tcs-note">What counts as an issue — a missing clock-out, an implausibly long shift, an
+        overlap — is worked out from the punches themselves and is not a toggle. Those are questions with
+        a right answer rather than a preference, and a switch that turned one off would only hide it.</p>`;
+  }
+
+  // notifications
+  return `
+    ${row('Dashboard', check('alerts', cs.alertsOn, 'Show this clock\'s items that need attention'),
+    'Only things somebody has to act on ever appear.')}
+    <p class="tcs-note">Timesheet submission and approval reminders will read this clock's period from
+      <b>Payroll cycle</b> when they are built. The cycle is stored as real dates for that reason rather
+      than as a label.</p>`;
+}
+
+app.get('/timeclock/:slug/settings', (req, res) => {
+  const sv = clockOr404(req, res);
+  if (!sv) return;
+  const section = TC_SECTIONS.some(([k]) => k === req.query.s) ? req.query.s : 'general';
+  const base = `/timeclock/${encodeURIComponent(sv.slug)}`;
+  const w2 = canWrite();
+  res.send(layout(`${sv.name} · settings`, `
+    ${flash(req)}
+    ${clockShell(sv, 'settings', `
+      <form method="post" action="${base}/settings" class="bs-panel tcs tcs-split">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="s" value="${esc(section)}">
+        <nav class="tcs-nav" aria-label="Settings sections">
+          ${TC_SECTIONS.map(([k, label]) => `<a class="tcs-navi${k === section ? ' on' : ''}"
+            href="${base}/settings?s=${k}"${k === section ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('')}
+        </nav>
+        <div class="tcs-pane">
+          <h2 class="tcs-h">${esc((TC_SECTIONS.find(([k]) => k === section) || [, ''])[1])}</h2>
+          ${clockSettingsBody(req, sv, section)}
+          ${w2 ? '<div class="tcs-save"><button class="bs-btn bs-btn-go" type="submit">Save changes</button></div>'
+    : '<p class="inc-hint">Your account is view-only.</p>'}
+        </div>
+      </form>`, { meta: 'Settings for this time clock only, unless a row says otherwise.' })}`));
+});
+
+app.post('/timeclock/:slug/settings', (req, res, next) => {
+  const sv = clockOr404(req, res, { next });
+  if (!sv) return;
+  if (!tcCanEdit(req, res)) return;
+  const section = TC_SECTIONS.some(([k]) => k === req.body.s) ? req.body.s : 'general';
+  const b = req.body;
+  // ONLY the section that was on screen. A form posts the fields it rendered
+  // and nothing else, so saving General with a blanket write would reset every
+  // switch on Time tracking to unchecked — the classic way a settings page
+  // silently undoes itself.
+  try {
+    if (section === 'general') {
+      if (String(b.name || '').trim() && String(b.name).trim() !== sv.name) SERVICES.rename(sv.slug, b.name);
+      const now = TC.settings();
+      TC.saveSettings({ ...now, cutoffHour: b.cutoff, timezone: b.tz });
+      SERVICES.setSettingsFor(sv.slug, { ...TC.settingsOn(sv.slug), timezone: b.svc_tz || '' });
+      for (let d = 0; d < 7; d += 1) {
+        // asMin, because setHours takes MINUTES and a time input sends "09:00".
+        // Without it Math.round("09:00") is NaN and every day silently saved as
+        // "no limit" — a work-hours screen that looked like it worked and never
+        // stored a thing.
+        SERVICES.setHours(sv.slug, d, SERVICES.asMin(b[`wh_${d}_o`]), SERVICES.asMin(b[`wh_${d}_c`]));
+      }
+    } else if (section === 'tracking') {
+      SERVICES.setSettingsFor(sv.slug, {
+        ...TC.settingsOn(sv.slug),
+        longShift: b.long, autoOut: b.auto_out === '1', autoOutHours: b.auto_out_hours,
+      });
+      SERVICES.setLimit(sv.slug, b.cl_on === '1' ? (b.cl_mode === 'early' ? 'early' : 'scheduled') : 'off', b.cl_min);
+    } else if (section === 'cycle') {
+      SERVICES.setCycle(sv.slug, { length: b.length, weekStart: b.week_start, anchor: b.anchor });
+    } else if (section === 'breaks') {
+      SERVICES.setSettingsFor(sv.slug, { ...TC.settingsOn(sv.slug), breaksPaid: b.breaks_paid === '1' });
+    } else if (section === 'issues') {
+      SERVICES.setSettingsFor(sv.slug, { ...TC.settingsOn(sv.slug), pinForFix: b.pin_fix === '1' });
+    } else {
+      SERVICES.setSettingsFor(sv.slug, { ...TC.settingsOn(sv.slug), alertsOn: b.alerts === '1' });
+    }
+  } catch (e) {
+    return res.redirect(`/timeclock/${encodeURIComponent(sv.slug)}/settings?s=${section}&err=${encodeURIComponent(e.message || 'Could not save that.')}`);
+  }
+  return res.redirect(`/timeclock/${encodeURIComponent(sv.slug)}/settings?s=${section}&msg=${encodeURIComponent('Saved.')}`);
+});
+
+// The old settings URL, which every existing link and bookmark still points at.
+app.get('/timeclock/settings', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const clocks = SERVICES.withClock();
+  const want = clocks.find((x) => x.slug === req.query.svc) || clocks[0];
+  if (!want) return res.redirect('/timeclock');
+  return res.redirect(`/timeclock/${encodeURIComponent(want.slug)}/settings`);
 });
 
 app.post('/timeclock/settings', (req, res) => {
@@ -22972,6 +23243,369 @@ app.get('/timeclock/request/:id', (req, res) =>
 // parameter route first "requests" is read as an id, Number('requests') is NaN,
 // and the queue 404s — the same trap /payroll/:employeeId and /payroll/export
 // fell into further up this file.
+// --- creating a time clock -------------------------------------------------
+//
+// A wizard rather than a name field, because a clock with no people and no
+// period structure is not a working clock — it is a thing you then have to
+// remember to finish. Four steps now; the array is the flow, so a fifth slots
+// in without touching the machinery.
+//
+// NOTHING IS WRITTEN UNTIL THE LAST STEP. State lives in the form, posted from
+// one step to the next, so abandoning the wizard at step three leaves no
+// half-made clock behind — the failure mode of every "create then configure"
+// flow. The final POST is one transaction.
+const WIZ_STEPS = [
+  ['setup', 'Setup'],
+  ['cycle', 'Payroll cycle'],
+  ['assignees', 'Assignees'],
+  ['summary', 'Summary'],
+];
+
+const WEEK_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const CYCLE_CHOICES = [[7, 'Every week'], [14, 'Every 2 weeks'], [28, 'Every 4 weeks']];
+
+/** The wizard's state, carried in the form rather than in a half-made row. */
+function wizState(src) {
+  const picked = [].concat(src.emp || []).map(Number).filter(Boolean);
+  return {
+    name: String(src.name || '').trim(),
+    length: [7, 14, 28].includes(Number(src.length)) ? Number(src.length) : 14,
+    weekStart: Number.isInteger(Number(src.week_start)) && Number(src.week_start) >= 0 && Number(src.week_start) <= 6
+      ? Number(src.week_start) : 1,
+    anchor: /^\d{4}-\d{2}-\d{2}$/.test(String(src.anchor || '')) ? String(src.anchor) : '',
+    emp: picked,
+  };
+}
+/**
+ * The state a step is NOT showing, carried forward as hidden fields.
+ *
+ * `skip` is a list, and it has to be: a step that renders three visible inputs
+ * while this emits a hidden one for the same name posts that name twice, and
+ * Number(['14','7']) is NaN — so the field silently reverts to its default. The
+ * cycle step did exactly that, and the summary confidently reported a period
+ * nobody had chosen.
+ */
+const wizHidden = (st, ...skip) => [
+  ['name', st.name], ['length', st.length], ['week_start', st.weekStart], ['anchor', st.anchor],
+].filter(([k]) => !skip.includes(k)).map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(String(v))}">`).join('')
+  + (skip.includes('emp') ? '' : st.emp.map((id) => `<input type="hidden" name="emp" value="${id}">`).join(''));
+
+function wizPage(req, res, step, st, body, opts = {}) {
+  const at = WIZ_STEPS.findIndex(([k]) => k === step);
+  res.send(layout('New time clock', `
+    ${flash(req)}
+    <div class="bs-page tcw-wiz">
+      <div class="wiz-top">
+        <a class="wiz-x" href="/timeclock">Close</a>
+        <span class="wiz-title">Time clock setup</span>
+      </div>
+      <div class="wiz-body">${body}</div>
+      <div class="wiz-foot">
+        <ol class="wiz-steps">
+          ${WIZ_STEPS.map(([k, label], i) => `<li class="wiz-step${i === at ? ' on' : ''}${i < at ? ' done' : ''}">
+            <span class="wiz-dot" aria-hidden="true"></span>${esc(label)}</li>`).join('')}
+        </ol>
+        <div class="wiz-acts">${opts.acts || ''}</div>
+      </div>
+    </div>`));
+}
+
+app.get('/timeclock/create', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  if (!canWrite()) return res.redirect('/timeclock?err=' + encodeURIComponent('Your account can look but not change.'));
+  const st = wizState(req.query);
+  const step = WIZ_STEPS.some(([k]) => k === req.query.step) ? req.query.step : 'setup';
+  return wizStep(req, res, step, st);
+});
+
+app.post('/timeclock/create', (req, res) => {
+  if (!navAllowed('/timeclock')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  if (!canWrite()) return res.redirect('/timeclock?err=' + encodeURIComponent('Your account can look but not change.'));
+  const st = wizState(req.body);
+  // 'create' is the submit action, not one of the steps — it is deliberately
+  // not in WIZ_STEPS, so it has to be allowed here explicitly. It was not, and
+  // the final button quietly bounced back to step one having written nothing.
+  const asked = String(req.body.step || '');
+  const step = asked === 'create' || WIZ_STEPS.some(([k]) => k === asked) ? asked : 'setup';
+  if (step === 'create') return wizCreate(req, res, st);
+  return wizStep(req, res, step, st, req.body.err || '');
+});
+
+function wizStep(req, res, step, st, err) {
+  const post = (to, label, cls) => `<button class="${cls || 'bs-btn bs-btn-go'}" type="submit" name="step" value="${to}">${esc(label)}</button>`;
+  const form = (inner, ...skip) => `<form method="post" action="/timeclock/create" class="wiz-f">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      ${wizHidden(st, ...skip)}
+      ${inner}
+    </form>`;
+
+  if (step === 'setup') {
+    return wizPage(req, res, 'setup', st, form(`
+      <div class="wiz-hero">
+        <h1>Create your time clock in a few easy steps</h1>
+        <p>Start by naming it so it is easy to identify later.</p>
+        ${err ? `<p class="wiz-err" role="alert">${esc(err)}</p>` : ''}
+        <label class="wiz-field">
+          <span class="wiz-lab">Time clock name</span>
+          <input name="name" value="${esc(st.name)}" required maxlength="60" autofocus
+                 placeholder="Day Service">
+          <i>For example: Day Service, Evening Service, Private Events</i>
+        </label>
+      </div>
+      <div class="wiz-go">${post('cycle', 'Next')}</div>`, 'name'));
+  }
+
+  if (step === 'cycle') {
+    return wizPage(req, res, 'cycle', st, form(`
+      <div class="wiz-hero">
+        <h1>How does this clock's timesheet period work?</h1>
+        <p>This is the clock's own timekeeping rhythm — when a period ends, and so when a
+           timesheet is ready to be looked at. It does not change how Payroll is calculated.</p>
+        <label class="wiz-field">
+          <span class="wiz-lab">Week starts on</span>
+          <select name="week_start">
+            ${WEEK_DAYS.map((d, i) => `<option value="${i}"${i === st.weekStart ? ' selected' : ''}>${d}</option>`).join('')}
+          </select>
+        </label>
+        <label class="wiz-field">
+          <span class="wiz-lab">Timesheet period</span>
+          <select name="length">
+            ${CYCLE_CHOICES.map(([v, label]) => `<option value="${v}"${v === st.length ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </label>
+        <label class="wiz-field">
+          <span class="wiz-lab">A period that has already started</span>
+          <input type="date" name="anchor" value="${esc(st.anchor)}">
+          <i>Any real start date. Every period before and after is counted from it.
+             Leave it blank to follow the same dates the rest of the app already uses.</i>
+        </label>
+      </div>
+      <div class="wiz-go">${post('setup', 'Back', 'bs-btn')}${post('assignees', 'Next')}</div>`,
+    'week_start', 'length', 'anchor'));
+  }
+
+  if (step === 'assignees') {
+    const staff = q.allEmployees.all();
+    const on = new Set(st.emp);
+    return wizPage(req, res, 'assignees', st, `
+      <form method="post" action="/timeclock/create" class="wiz-f">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        ${wizHidden(st, 'emp')}
+        <div class="wiz-hero wiz-hero--wide">
+          <h1>Who works this time clock?</h1>
+          <p>Picking somebody here does not take them off any clock they are already on —
+             people work as many as you put them on.</p>
+          ${err ? `<p class="wiz-err" role="alert">${esc(err)}</p>` : ''}
+          <div class="tca-grid">
+            ${staff.map((e) => `<label class="tca-p${on.has(e.id) ? ' on' : ''}">
+              <input type="checkbox" name="emp" value="${e.id}"${on.has(e.id) ? ' checked' : ''}>
+              <span>${esc(e.name)}</span>
+              <i>${esc(SERVICES.forEmployee(e.id).map((x) => SERVICES.nameOf(x)).join(' · ') || 'no clock yet')}</i>
+            </label>`).join('')}
+          </div>
+        </div>
+        <div class="wiz-go">${post('cycle', 'Back', 'bs-btn')}${post('summary', 'Next')}</div>
+      </form>`);
+  }
+
+  // summary
+  const cyc = (CYCLE_CHOICES.find(([v]) => v === st.length) || [0, ''])[1];
+  return wizPage(req, res, 'summary', st, form(`
+    <div class="wiz-hero">
+      <h1>Ready to create</h1>
+      ${err ? `<p class="wiz-err" role="alert">${esc(err)}</p>` : ''}
+      <dl class="wiz-sum">
+        <div><dt>Time clock</dt><dd>${esc(st.name) || '<i>unnamed</i>'}</dd>
+          <dd class="wiz-edit"><button type="submit" name="step" value="setup">Edit</button></dd></div>
+        <div><dt>Timesheet period</dt><dd>${esc(cyc)}<br><span>Week begins ${esc(WEEK_DAYS[st.weekStart])}${
+  st.anchor ? `, counted from ${esc(st.anchor)}` : ', on the same dates as the rest of the app'}</span></dd>
+          <dd class="wiz-edit"><button type="submit" name="step" value="cycle">Edit</button></dd></div>
+        <div><dt>Assigned</dt><dd>${st.emp.length} ${st.emp.length === 1 ? 'employee' : 'employees'}</dd>
+          <dd class="wiz-edit"><button type="submit" name="step" value="assignees">Edit</button></dd></div>
+      </dl>
+    </div>
+    <div class="wiz-go">${post('assignees', 'Back', 'bs-btn')}${post('create', 'Create time clock')}</div>`));
+}
+
+/** The only place the wizard writes anything. All of it, or none of it. */
+function wizCreate(req, res, st) {
+  if (!st.name) return wizStep(req, res, 'setup', st, 'Give the time clock a name.');
+  const key = String(st.name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (!key) return wizStep(req, res, 'setup', st, 'That name has no letters or numbers in it.');
+  let slug = key; let n = 2;
+  while (SERVICES.bySlug(slug)) { slug = `${key}-${n}`; n += 1; }
+  try {
+    db.transaction(() => {
+      SERVICES.create({ slug, name: st.name, withClock: true, members: st.emp });
+      SERVICES.setCycle(slug, { length: st.length, weekStart: st.weekStart, anchor: st.anchor });
+    })();
+  } catch (e) {
+    // Nothing was written — the transaction saw to that — so the wizard can go
+    // back to the step that caused it with everything the admin typed intact.
+    return wizStep(req, res, 'summary', st, e.message || 'Could not create that time clock.');
+  }
+  return res.redirect(`/timeclock/${encodeURIComponent(slug)}/today?msg=${
+    encodeURIComponent(`${st.name} is ready.`)}`);
+}
+
+// --- the card actions ------------------------------------------------------
+//
+// Every one of them is about the clock as a THING — its name, its people, its
+// place in the list — and none of them may touch what happened on it. That is
+// the line: current configuration is editable, history is not.
+const clockWrite = (req, res) => {
+  if (!canWrite()) {
+    res.status(403).send(layout('Not allowed', '<div class="bs-page"><h1>Not allowed</h1><p>Your account can look but not change.</p></div>'));
+    return false;
+  }
+  return true;
+};
+
+/** Who is on this clock, and who could be. */
+app.get('/timeclock/:slug/assignments', (req, res) => {
+  const sv = clockOr404(req, res);
+  if (!sv) return;
+  const on = new Set(SERVICES.employeesFor(sv.slug));
+  const staff = q.allEmployees.all();
+  const w = canWrite();
+  res.send(layout(`${sv.name} · assignments`, `
+    ${flash(req)}
+    ${clockShell(sv, 'assignments', `
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">Who works this clock</span></div>
+        <p class="inc-hint">Ticking somebody adds them here and changes nothing else — they keep every other
+          time clock they are on. Unticking affects who can clock in from now on; every punch, break,
+          correction and timesheet they already have on this clock stays exactly as it is.</p>
+        <form method="post" action="/timeclock/${encodeURIComponent(sv.slug)}/assignments">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <div class="tca-grid">
+            ${staff.map((e) => `<label class="tca-p${on.has(e.id) ? ' on' : ''}">
+              <input type="checkbox" name="emp" value="${e.id}"${on.has(e.id) ? ' checked' : ''}${w ? '' : ' disabled'}>
+              <span>${esc(e.name)}</span>
+              <i>${esc(SERVICES.forEmployee(e.id).filter((x) => x !== sv.slug).map((x) => SERVICES.nameOf(x)).join(' · ') || 'no other clock')}</i>
+            </label>`).join('')}
+          </div>
+          ${w ? `<div class="bs-form-acts"><button class="bs-btn bs-btn-go" type="submit">Save assignments</button>
+            <a class="bs-act" href="/timeclock">Cancel</a></div>` : ''}
+        </form>
+      </section>`, { meta: `${on.size} assigned` })}`));
+});
+
+app.post('/timeclock/:slug/assignments', (req, res, next) => {
+  const sv = clockOr404(req, res, { next });
+  if (!sv || !clockWrite(req, res)) return;
+  const picked = [].concat(req.body.emp || []).map(Number).filter(Boolean);
+  // setRosterFor, NOT setForEmployee: this is one clock's roster, and the other
+  // one would take everybody on it off every OTHER clock they work.
+  SERVICES.setRosterFor(sv.slug, picked);
+  res.redirect(`/timeclock?msg=${encodeURIComponent(`${sv.name}: ${picked.length} assigned.`)}`);
+});
+
+app.post('/timeclock/:slug/duplicate', (req, res, next) => {
+  const sv = clockOr404(req, res, { next });
+  if (!sv || !clockWrite(req, res)) return;
+  try {
+    let base = `${sv.slug}-copy`; let n = 2;
+    while (SERVICES.bySlug(base)) { base = `${sv.slug}-copy-${n}`; n += 1; }
+    const made = SERVICES.duplicate(sv.slug, { slug: base, name: `${sv.name} copy`, withMembers: true });
+    res.redirect(`/timeclock/${encodeURIComponent(made)}/settings?msg=${
+      encodeURIComponent('Copied the settings, work hours, cycle and people. No punches or timesheets came with it.')}`);
+  } catch (e) {
+    res.redirect(`/timeclock?err=${encodeURIComponent(e.message || 'Could not duplicate that time clock.')}`);
+  }
+});
+
+app.post('/timeclock/:slug/archive', (req, res, next) => {
+  const sv = clockOr404(req, res, { next });
+  if (!sv || !clockWrite(req, res)) return;
+  try {
+    SERVICES.archive(sv.slug);
+    res.redirect(`/timeclock?msg=${encodeURIComponent(`${sv.name} archived. Its history is untouched.`)}`);
+  } catch (e) {
+    res.redirect(`/timeclock?err=${encodeURIComponent(e.message)}`);
+  }
+});
+
+app.post('/timeclock/:slug/restore', (req, res, next) => {
+  const sv = clockOr404(req, res, { allowArchived: true, next });
+  if (!sv || !clockWrite(req, res)) return;
+  SERVICES.unarchive(sv.slug);
+  res.redirect(`/timeclock?msg=${encodeURIComponent(`${sv.name} is back.`)}`);
+});
+
+/**
+ * DELETE, which almost never happens.
+ *
+ * A clock that has been used is the only record of which clock its punches,
+ * shifts, hours and tip-out policies belonged to — the slug IS that attribution.
+ * Removing the row would leave every one of those pointing at nothing, and a
+ * payroll page unable to say what a past service was even called. So a clock
+ * with history cannot be deleted at all; it is archived, which keeps every
+ * record and takes it out of the way. Only a clock nothing ever happened on
+ * goes for real.
+ */
+app.post('/timeclock/:slug/delete', (req, res, next) => {
+  const sv = clockOr404(req, res, { allowArchived: true, next });
+  if (!sv || !clockWrite(req, res)) return;
+  const h = SERVICES.historyFor(sv.slug);
+  if (h.any) {
+    const bits = [];
+    if (h.punches) bits.push(`${h.punches} punch${h.punches === 1 ? '' : 'es'}`);
+    if (h.hours) bits.push(`${h.hours} hour row${h.hours === 1 ? '' : 's'}`);
+    if (h.shifts) bits.push(`${h.shifts} service${h.shifts === 1 ? '' : 's'}`);
+    if (h.policies) bits.push(`${h.policies} tip-out ${h.policies === 1 ? 'policy' : 'policies'}`);
+    try {
+      SERVICES.archive(sv.slug);
+      return res.redirect(`/timeclock?msg=${encodeURIComponent(
+        `${sv.name} has ${bits.join(', ')} against it, so it was archived instead of deleted. Nothing was lost.`)}`);
+    } catch (e) {
+      return res.redirect(`/timeclock?err=${encodeURIComponent(e.message)}`);
+    }
+  }
+  try {
+    db.transaction(() => {
+      db.prepare('DELETE FROM employee_services WHERE service_slug = ?').run(sv.slug);
+      try { db.prepare('DELETE FROM service_hours WHERE service_slug = ?').run(sv.slug); } catch { /* none */ }
+      db.prepare('DELETE FROM services WHERE slug = ?').run(sv.slug);
+    })();
+    res.redirect(`/timeclock?msg=${encodeURIComponent(`${sv.name} deleted. It had no history.`)}`);
+  } catch (e) {
+    res.redirect(`/timeclock?err=${encodeURIComponent(e.message || 'Could not delete that time clock.')}`);
+  }
+});
+
+// --- the workspace routes --------------------------------------------------
+//
+// DEFINED BEFORE /timeclock/:id, which takes a punch id. Three segments against
+// two means they cannot collide, but the ordering is load-bearing the moment
+// anybody adds a two-segment route here, so it is deliberate rather than lucky.
+app.get('/timeclock/:slug/today', (req, res) => {
+  const sv = clockOr404(req, res);
+  if (sv) clockToday(req, res, sv.slug);
+});
+
+app.get('/timeclock/:slug/timesheets', (req, res) => {
+  const sv = clockOr404(req, res);
+  if (!sv) return;
+  // Timesheets is Payroll's area as well as the clock's — somebody who can see
+  // a clock but not payroll figures does not get the review grid through a side
+  // door. Both gates, in the order they would be met on their own pages.
+  if (!navAllowed('/payroll')) {
+    return res.status(403).send(layout('Not your area',
+      `<div class="bs-page"><a class="bs-back" href="/timeclock/${esc(sv.slug)}/today">&larr; ${esc(sv.name)}</a>
+       <h1>Not your area</h1><p class="bs-subline">Timesheets belong to Payroll.</p></div>`));
+  }
+  clockTimesheets(req, res, sv.slug);
+});
+
+// A bare clock URL is the workspace, and the workspace opens on Today.
+app.get('/timeclock/:slug', (req, res, next) => {
+  // Only for something that is actually a clock. A punch id falls through to
+  // the route below, which is what /timeclock/1234 has always meant.
+  if (!SERVICES.bySlug(String(req.params.slug || ''))) return next();
+  return res.redirect(`/timeclock/${encodeURIComponent(req.params.slug)}/today`);
+});
+
 app.get('/timeclock/:id', (req, res) => {
   // Payroll may read a punch too: a reviewer cannot clear a blocker they
   // are not allowed to look at.
@@ -23815,8 +24449,19 @@ const qEnteredForEmp = db.prepare(`SELECT COALESCE(SUM(w.hours), 0) h,
     FROM work w JOIN shifts sh ON sh.id = w.shift_id
    WHERE w.employee_id = ? AND sh.date >= ? AND sh.date <= ?`);
 
-app.get('/payroll/timesheets', (req, res) => {
-  if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+/**
+ * TIMESHEETS, inside one time clock — the other half of the same workspace.
+ *
+ * `svc` was a query filter here and is now the clock in the path. The engine
+ * underneath is untouched: same grid, same review sheet, same approvals, same
+ * period arithmetic. Only who is on the list changed, and it changed at the
+ * query rather than in the markup.
+ *
+ * Empty `svc` is still meaningful and still reachable at /payroll/timesheets —
+ * that is the everyone view Payroll works from, and it is the one place in the
+ * app that is deliberately NOT scoped to a clock.
+ */
+function clockTimesheets(req, res, svc) {
   const periods = recentPeriods(8);
   const pIdx = Math.max(0, periods.findIndex((p) => p.start === req.query.p));
   // A custom range is READ-ONLY, and never reaches sheetFor.
@@ -23845,7 +24490,6 @@ app.get('/payroll/timesheets', (req, res) => {
   // Blank is the everyone view and stays reachable. A slug scopes the page to
   // that time clock the same way /timeclock and /schedule already scope
   // theirs — same helper, same meaning of "on this clock".
-  const svc = SERVICES.isActive(String(req.query.svc || '')) ? String(req.query.svc) : '';
   const onSvc = svc ? new Set(SERVICES.employeesFor(svc)) : null;
   const staffIds = new Set([
     ...q.allEmployees.all().map((e) => e.id),
@@ -23911,21 +24555,28 @@ app.get('/payroll/timesheets', (req, res) => {
   const filtered = rows.filter((r) => (!fSheet || r.status === fSheet)
     && (!fTrans || r.transferState === fTrans)
     && (!fIssues || r.issues.some((i) => i.blocking) || r.blockers.length));
-  const filtering = !!(fSheet || fTrans || fIssues || svc);
+  // The clock is NOT a filter. It was counted as one for a session, which left
+  // the filter sheet hanging open with a badge on it the moment you entered a
+  // workspace — telling you something was narrowing the list when nothing was.
+  const filtering = !!(fSheet || fTrans || fIssues);
   // Everything needed to come back to this exact view. Both row links carried
   // only ?p= before, so the detail page's carefully-built keepQ arrived empty
   // and the back link and the walker both silently dropped the filter.
   const rowQ = `?p=${encodeURIComponent(period.start)}`
     + (custom ? `&from=${encodeURIComponent(period.start)}&to=${encodeURIComponent(period.end)}` : '')
-    + (svc ? `&svc=${encodeURIComponent(svc)}` : '')
     + (fSheet ? `&st=${encodeURIComponent(fSheet)}` : '')
     + (fTrans ? `&tr=${encodeURIComponent(fTrans)}` : '')
     + (fIssues ? '&iss=1' : '');
   // The same suffix for the page's own links — the period arrows, Today, the
   // range form and the filter sheet. Any one of them dropping it puts you back
   // on the everyone view without saying so, which is the bug this page had.
-  const svcQ = svc ? `&svc=${encodeURIComponent(svc)}` : '';
-  const svcHidden = svc ? `<input type="hidden" name="svc" value="${esc(svc)}">` : '';
+  // WHERE THIS PAGE LIVES. Inside a clock it is that clock's Timesheets tab;
+  // with no clock it is Payroll's everyone view. Every self-link below is built
+  // from it, so a period arrow or a range form can never quietly move you from
+  // one to the other — which is what a ?svc= query string made possible.
+  const base = svc ? `/timeclock/${encodeURIComponent(svc)}/timesheets` : '/payroll/timesheets';
+  const svcQ = '';
+  const svcHidden = '';
 
   // --- hours by day ---------------------------------------------------------
   // The spine is every date in the period, built here rather than read from the
@@ -23963,7 +24614,7 @@ app.get('/payroll/timesheets', (req, res) => {
         data-t="${esc(TC.hm(c.payable_min))}${c.entries > 1 ? ` · ${c.entries} punches` : ''}${c.positions > 1 ? ' · 2 positions' : ''}${c.edited ? ' · edited' : ''}">${hrs}</span>`;
     }).join('');
     const running = days.some((d) => (cells.get(`${r.emp.id}|${d}`) || {}).open_entries);
-    return `<a class="tsg-row egrid-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
+    return `<a class="tsg-row egrid-row" id="p-${r.emp.id}" href="${base}/${r.emp.id}${rowQ}">
       <span class="tsg-emp egrid-lead"><b>${esc(r.emp.name)}</b><i>${esc(TC.SHEET_LABEL[r.status] || r.status)}${r.emp.active ? '' : ' · left'}</i></span>
       ${dayCells}
       <span class="tsg-tot egrid-tail"><b>${TC.toHours(r.totals.payable) || 0}</b><i>${r.totals.overtime
@@ -23991,37 +24642,21 @@ app.get('/payroll/timesheets', (req, res) => {
     : transferred < rows.length ? 'Partially transferred'
     : 'Ready to finalize';
 
-  res.send(layout('Timesheets', `
-    ${flash(req)}
-    <div class="bs-page tcm-page">
-      <div class="bs-head">
+  const svSheet = svc ? (SERVICES.bySlug(svc) || { slug: svc, name: SERVICES.nameOf(svc) }) : null;
+  const sheetBody = `
+      ${svc ? '' : `<div class="bs-head">
         <div class="bs-headwrap">
           <h1 class="bs-headline">Timesheets</h1>
-          <p class="bs-subline">What the clock recorded this period, and who has signed it off. These are the hours <a class="bs-act" href="/payroll">Payroll</a> runs on — the clock writes them onto each shift as people punch out, and anything typed over is marked.</p>
+          <p class="bs-subline">Every clock, this period, and who has signed off. These are the hours <a class="bs-act" href="/payroll">Payroll</a> runs on — the clock writes them onto each shift as people punch out, and anything typed over is marked. For one clock on its own, open it from <a class="bs-act" href="/timeclock">Time clocks</a>.</p>
         </div>
-        ${/* The same page actions the Today tab carries, in the same place, so
-             the two tabs of one screen do not put Settings in two different
-             corners. */''}
         <div class="bs-head-acts">
-          ${svcCrossLink(svc, 'schedule')}
           <a class="bs-btn-sm" href="/timeclock/reports">Reports</a>
-          <a class="bs-btn-sm" href="/timeclock/settings${svc ? '?svc=' + encodeURIComponent(svc) : ''}">Settings</a>
         </div>
-      </div>
-      ${/* WHICH CLOCK THIS IS, said out loud. A filtered list that looks like an
-           unfiltered one is how somebody concludes half their staff are missing
-           — the same bar carries the way back to everyone, so the scope is never
-           a thing you have to guess at or clear from a menu. */''}
-      ${svc ? `<div class="sb-svc tsm-svc">
-        <a class="sb-svc-back" href="/timeclock">&larr; Time clocks</a>
-        <b>${esc(SERVICES.nameOf(svc))}</b>
-        <a class="sb-svc-all" href="/payroll/timesheets?p=${encodeURIComponent(period.start)}">Everyone</a>
-      </div>` : ''}
-      ${tcTabs('/payroll/timesheets', svc)}
+      </div>`}
       ${custom ? `<div class="bs-notice"><span class="bs-notice-k">Read-only report</span>
         <p>${esc(period.start)} to ${esc(period.end)} is not one of your pay periods, so there is no timesheet
         to sign for it. Hours are shown; approval, payroll and overtime belong to a period and are not.
-        <a class="bs-act" href="/payroll/timesheets${svc ? '?svc=' + encodeURIComponent(svc) : ''}">Back to the current period</a></p></div>` : ''}
+        <a class="bs-act" href="${base}">Back to the current period</a></p></div>` : ''}
       <section class="bs-panel bs-strip">
         ${statCell('Clocked', TC.hm(totalMin), `${rows.length} ${rows.length === 1 ? 'person' : 'people'}${totalOt && !custom ? ` · ${TC.hm(totalOt)} OT` : ''}`)}
         ${custom ? `
@@ -24037,13 +24672,13 @@ app.get('/payroll/timesheets', (req, res) => {
 
       <nav class="tsm-per">
         <a class="tsx-arrow${pIdx + 1 < periods.length ? '' : ' off'}"
-           href="${pIdx + 1 < periods.length ? `/payroll/timesheets?p=${periods[pIdx + 1].start}${svcQ}` : '#'}" aria-label="Earlier period">←</a>
+           href="${pIdx + 1 < periods.length ? `${base}?p=${periods[pIdx + 1].start}${svcQ}` : '#'}" aria-label="Earlier period">←</a>
         <span class="tsm-range">${esc(labelFor(period))}</span>
         <a class="tsx-arrow${pIdx > 0 ? '' : ' off'}"
-           href="${pIdx > 0 ? `/payroll/timesheets?p=${periods[pIdx - 1].start}${svcQ}` : '#'}" aria-label="Later period">→</a>
-        <a class="tsx-today${pIdx === 0 && !custom ? ' on' : ''}" href="/payroll/timesheets${svc ? '?svc=' + encodeURIComponent(svc) : ''}">Today</a>
+           href="${pIdx > 0 ? `${base}?p=${periods[pIdx - 1].start}${svcQ}` : '#'}" aria-label="Later period">→</a>
+        <a class="tsx-today${pIdx === 0 && !custom ? ' on' : ''}" href="${base}">Today</a>
         ${custom ? '<span class="bs-fchip on">Custom</span>' : ''}
-        <form class="tsm-range-f" method="get" action="/payroll/timesheets">
+        <form class="tsm-range-f" method="get" action="${base}">
           ${svcHidden}
           <input type="date" name="from" value="${esc(period.start)}" aria-label="From">
           <span>to</span>
@@ -24063,20 +24698,17 @@ app.get('/payroll/timesheets', (req, res) => {
       <!-- No status filter on a custom range: there are no statuses over a span
            with no timesheet, and the dropdown would list payroll states that
            cannot apply to anything on screen. -->
-      ${custom ? '' : `<form class="tcm-filters" method="get" action="/payroll/timesheets">
+      ${custom ? '' : `<form class="tcm-filters" method="get" action="${base}">
         <input type="hidden" name="p" value="${esc(period.start)}">
         <details class="fsheet"${filtering ? ' open' : ''}><summary class="fs-btn">Filter${filtering
           ? ` <b class="pa-badge">${filtered.length}</b>` : ''} <span class="fs-caret">▾</span></summary>
           <div class="fs-pop"><div class="fs-body">
-            ${/* THE CLOCK. Built from the services table, so a clock created
-                 next week appears here on its own — there is no list of them
-                 written down anywhere in this file to forget to update. Set
-                 for you when you arrive from a time clock, and changeable
-                 here, which is the only way back to the everyone view. */''}
-            ${SERVICES.withClock().length > 1 ? `<div class="fs-h">Time clock</div>
-            <select name="svc" class="bs-sel"><option value="">Everyone</option>
-              ${SERVICES.withClock().map((sv) => `<option value="${esc(sv.slug)}"${
-  sv.slug === svc ? ' selected' : ''}>${esc(sv.name)}</option>`).join('')}</select>` : svcHidden}
+            ${/* A CLOCK PICKER LIVED HERE for exactly one session. It was the
+                 right answer to the wrong question: the complaint was never
+                 "let me choose a clock from the filters", it was "stop making
+                 me check which clock I am looking at". The clock is the page
+                 now, so choosing one happens in the directory and never
+                 halfway down a filter sheet. */''}
             <div class="fs-h">Where the timesheet stands</div>
             <select name="st" class="bs-sel"><option value="">Any</option>
               ${Object.entries(TC.SHEET_LABEL).map(([k, v]) =>
@@ -24088,7 +24720,7 @@ app.get('/payroll/timesheets', (req, res) => {
             <label class="fs-chk"><input type="checkbox" name="iss" value="1"${fIssues ? ' checked' : ''}>
               <span>Unresolved issues only</span></label>
             <button class="bs-btn-sm" type="submit">Apply</button>
-            ${filtering ? `<a class="bs-btn-sm" href="/payroll/timesheets?p=${period.start}${svcQ}">Clear</a>` : ''}
+            ${filtering ? `<a class="bs-btn-sm" href="${base}?p=${period.start}${svcQ}">Clear</a>` : ''}
           </div></div>
         </details>
         ${filtering ? `<span class="tsm-filtered">${filtered.length} of ${rows.length} shown</span>` : ''}
@@ -24296,7 +24928,7 @@ app.get('/payroll/timesheets', (req, res) => {
       </form>` : ''}
 
       ${filtered.length ? `<div class="bs-lrows tcm-rows">
-        ${filtered.map((r) => `<a class="bs-lr tcm-row ts-row" id="p-${r.emp.id}" href="/payroll/timesheets/${r.emp.id}${rowQ}">
+        ${filtered.map((r) => `<a class="bs-lr tcm-row ts-row" id="p-${r.emp.id}" href="${base}/${r.emp.id}${rowQ}">
           <span class="tcm-who">${autoOutMark({ auto_closed: r.entries.some((x) => x.auto_closed) })}<b>${
             esc(r.emp.name)}</b><i>${r.entries.length} ${r.entries.length === 1 ? 'entry' : 'entries'}</i></span>
           <span class="tcm-times">${esc(TC.hm(r.totals.payable))} payable${otRule.enabled && !r.emp.ot_exempt && r.totals.overtime ? ` · <i>${TC.hm(r.totals.overtime)} OT</i>` : ''}</span>
@@ -24311,7 +24943,34 @@ app.get('/payroll/timesheets', (req, res) => {
           <span class="bs-lr-go">›</span>
         </a>`).join('')}</div>`
         : '<div class="bs-blank"><b>No time recorded</b><span>Nobody clocked in during this period.</span></div>'}
-    </div>`));
+    `;
+  // One shell for both tabs inside a clock; Payroll's everyone view keeps the
+  // plain page it has always had, because it is not inside any clock.
+  res.send(layout(svSheet ? `${svSheet.name} · timesheets` : 'Timesheets', `
+    ${flash(req)}
+    ${svSheet
+    ? clockShell(svSheet, 'timesheets', sheetBody, {
+      meta: 'What this clock recorded, and who has signed it off.',
+      acts: `${reqPill(TC.q.pendingCorrections.all().length + offWaiting())}
+             <a class="bs-btn-sm" href="/timeclock/export?kind=punches&amp;svc=${encodeURIComponent(svc)}">Download CSV</a>
+             ${svcCrossLink(svc, 'schedule')}`,
+    })
+    : `<div class="bs-page tcm-page">${sheetBody}</div>`}`));
+}
+
+// The everyone view. Payroll's own list, deliberately not scoped to a clock —
+// it is where a whole period is reviewed across every service at once, and the
+// isolated workspaces exist alongside it rather than instead of it.
+app.get('/payroll/timesheets', (req, res) => {
+  if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const legacy = String(req.query.svc || '');
+  if (legacy && SERVICES.isActive(legacy)) {
+    const keep = new URLSearchParams(req.query);
+    keep.delete('svc');
+    const qsx = keep.toString();
+    return res.redirect(`/timeclock/${encodeURIComponent(legacy)}/timesheets${qsx ? '?' + qsx : ''}`);
+  }
+  return clockTimesheets(req, res, '');
 });
 
 const tsGridScript = () => `<script>
@@ -24597,8 +25256,16 @@ const tsGridScript = () => `<script>
     })();
     </script>`;
 
-app.get('/payroll/timesheets/:empId', (req, res) => {
-  if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+/**
+ * ONE PERSON'S SHEET, opened from either list.
+ *
+ * Reached at /timeclock/<clock>/timesheets/<id> inside a workspace and at
+ * /payroll/timesheets/<id> from Payroll's everyone view. Same sheet either way
+ * — a person has ONE timesheet per period covering every clock they worked, and
+ * splitting it would mean approving half of somebody's fortnight. What the clock
+ * changes is the list you are walking through, not what the sheet contains.
+ */
+function clockTimesheetDetail(req, res, dSvc) {
   const emp = q.employee.get(Number(req.params.empId));
   if (!emp) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such employee</h1></div>'));
   const periods = recentPeriods(8);
@@ -24624,8 +25291,10 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   // would mean something different on the two screens.
   // Scoped the same way the ledger is, or the arrows walk out of the clock you
   // were reviewing and "3 of 5" starts counting a list you are not looking at.
-  const dSvc = SERVICES.isActive(String(req.query.svc || '')) ? String(req.query.svc) : '';
   const dOnSvc = dSvc ? new Set(SERVICES.employeesFor(dSvc)) : null;
+  // Where the list lives, so Back and the walker return to the page you opened
+  // this from rather than to Payroll's everyone view.
+  const dBase = dSvc ? `/timeclock/${encodeURIComponent(dSvc)}/timesheets` : '/payroll/timesheets';
   const siblingIds = [...new Set([
     ...q.allEmployees.all().map((x) => x.id),
     ...TC.gridPeople(period.start, period.end),
@@ -24643,9 +25312,9 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
   // Carry the filter as well as the period. Walking out of a filtered review
   // into an unfiltered one silently changes which people you are working
   // through, and the count beside the arrows would stop describing the list.
-  const keepQ = ['st', 'tr', 'iss', 'svc'].filter((k) => req.query[k])
+  const keepQ = ['st', 'tr', 'iss'].filter((k) => req.query[k])
     .map((k) => `&${k}=${encodeURIComponent(String(req.query[k]))}`).join('');
-  const stepTo = (x) => (x ? `/payroll/timesheets/${x.id}?p=${period.start}${keepQ}` : '#');
+  const stepTo = (x) => (x ? `${dBase}/${x.id}?p=${period.start}${keepQ}` : '#');
   const prev = at > 0 ? siblings[at - 1] : null;
   const next = at > -1 && at < siblings.length - 1 ? siblings[at + 1] : null;
   // NAMES THE PERSON, not just a direction. A payroll review is a run through
@@ -24691,7 +25360,7 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
     : (split.hard.length || split.found.length) ? (raw === 'submitted' ? 'return' : null)
     : 'approve';
   const PRIMARY_LABEL = { approve: 'Approve', return: 'Return to employee', reopen: 'Reopen', transfer: 'Send to payroll' };
-  const backTo = `/payroll/timesheets?p=${period.start}${keepQ}`;
+  const backTo = `${dBase}?p=${period.start}${keepQ}`;
 
   // The same workspace, served two ways. ?frag=1 returns the body alone, which
   // the grid drops into a layer over itself — so flicking through a roster is
@@ -25253,6 +25922,25 @@ app.get('/payroll/timesheets/:empId', (req, res) => {
     return res.send(body);
   }
   res.send(layout(`${emp.name} · timesheet`, body + tsGridScript()));
+}
+
+// Both ways in. The workspace route is the one the isolated lists link to; the
+// Payroll route is what the everyone view uses and what every existing link and
+// bookmark already points at, so neither stops working.
+app.get('/timeclock/:slug/timesheets/:empId', (req, res) => {
+  const sv = clockOr404(req, res);
+  if (!sv) return;
+  if (!navAllowed('/payroll')) {
+    return res.status(403).send(layout('Not your area',
+      '<div class="bs-page"><h1>Not your area</h1><p>Timesheets belong to Payroll.</p></div>'));
+  }
+  clockTimesheetDetail(req, res, sv.slug);
+});
+
+app.get('/payroll/timesheets/:empId', (req, res) => {
+  if (!navAllowed('/payroll')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const legacy = String(req.query.svc || '');
+  clockTimesheetDetail(req, res, SERVICES.isActive(legacy) ? legacy : '');
 });
 
 // --- approval, locking, reopening -----------------------------------------
