@@ -6454,7 +6454,13 @@ input[type="date"], input[type="time"], input[type="search"], select {
 /* `display:flex` on a class beats the [hidden] attribute's UA rule, so both
    sheets rendered open on first paint — the detail card sat over the grid with
    nothing selected. Stated explicitly rather than relying on the default. */
-.zc-sheet[hidden], .zc-scrim[hidden] { display:none !important; }
+/* Anything in the calendar that sets its own display must still obey [hidden].
+   This has now bitten twice: the sheets rendered open on first paint, and the
+   time fields showed while All day was ticked, both because a class beats the
+   attribute's UA rule. Stated once for the whole block rather than per element,
+   so the next thing given a display does not have to remember. */
+.zc [hidden], .zc-sheet[hidden], .zc-scrim[hidden],
+.zc-sheet [hidden], .zc-kind[hidden] { display:none !important; }
 .zc-sheet-h { display:flex; align-items:center; justify-content:space-between; gap:12px;
   padding:18px 20px 14px; border-bottom:1px solid var(--rule); }
 .zc-sheet-h b { font-size:16px; font-weight:680; color:var(--headline); }
@@ -6568,3 +6574,28 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .zc-tg-b { min-width:560px; max-height:56vh; }
   .zc-tg-d b { font-size:15px; }
 }
+
+/* --- Task or Event, at the top -------------------------------------------
+   The most consequential choice on the form: whether this thing can ever be
+   completed or fall overdue. It was inside "More options", two clicks from
+   where it mattered, defaulting silently. */
+.zc-kind { display:grid; grid-template-columns:1fr 1fr; gap:8px; border:0; padding:0; margin:0; }
+.zc-kind label { display:block; border:1px solid var(--rule); padding:10px 12px; cursor:pointer;
+  min-height:60px; }
+.zc-kind label:has(input:checked) { border-color:var(--ink); background:var(--panel); }
+.zc-kind input { position:absolute; opacity:0; pointer-events:none; }
+.zc-kind b { display:block; font-size:14px; font-weight:650; color:var(--headline); }
+.zc-kind i { display:block; font-style:normal; font-size:11.5px; color:var(--muted); margin-top:2px; }
+/* Focus has to be visible when the radio itself is not. */
+.zc-kind label:has(input:focus-visible) { outline:2px solid var(--headline); outline-offset:2px; }
+
+/* Announced to a screen reader, absent from the page. */
+.zc-sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden;
+  clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+
+/* Focus must be visible everywhere in the calendar, not only where a browser
+   happens to default to it. */
+.zc-ev:focus-visible, .zc-blk:focus-visible, .zc-slot:focus-visible,
+.zc-num:focus-visible, .zc-more:focus-visible, .zc-ag-r:focus-visible,
+.zc-cat:focus-visible, .zc-seg a:focus-visible, .zc-tg-d:focus-visible {
+  outline:2px solid var(--headline); outline-offset:-2px; }
