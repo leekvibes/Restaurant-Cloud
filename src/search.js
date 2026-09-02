@@ -88,11 +88,21 @@ const SOURCES = [
       .map((r) => ({ title: r.name, sub: [r.email, r.role === 'viewer' ? 'view only' : 'editor'].filter(Boolean).join(' · '), href: '/users' })),
   },
   {
-    key: 'task', label: 'Recurring task', area: 'trackers', icon: 'recurring',
-    run: (p, n) => db.prepare(`SELECT id, name, next_due, responsible FROM m_recurring
-      WHERE name LIKE ? ESCAPE '\\' OR responsible LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\'
-      ORDER BY next_due LIMIT ?`).all(p, p, p, n)
-      .map((r) => ({ title: r.name, sub: [r.responsible, r.next_due ? `due ${r.next_due}` : ''].filter(Boolean).join(' · '), href: '/c/recurring' })),
+    // The calendar, not the retired m_recurring table. Notes are searchable now
+    // too, which the old query could not do, and a hit opens the item itself
+    // rather than dropping you on a list to find it again.
+    key: 'task', label: 'Calendar', area: 'trackers', icon: 'calendar',
+    run: (p, n) => db.prepare(`SELECT id, title, category, responsible, starts_on, rrule_freq
+      FROM cal_items
+      WHERE archived_at IS NULL AND (title LIKE ? ESCAPE '\\' OR responsible LIKE ? ESCAPE '\\'
+        OR category LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\')
+      ORDER BY starts_on DESC LIMIT ?`).all(p, p, p, p, n)
+      .map((r) => ({
+        title: r.title,
+        sub: [r.category, r.responsible, r.rrule_freq ? 'repeats' : null]
+          .filter(Boolean).join(' · '),
+        href: `/calendar?v=month&m=${String(r.starts_on).slice(0, 7)}&item=${r.id}`,
+      })),
   },
   {
     key: 'expiration', label: 'Expiration', area: 'trackers', icon: 'expirations',

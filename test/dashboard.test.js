@@ -691,7 +691,7 @@ test('the index reaches every section, and the account', async () => {
   for (const href of ['/shifts', '/sales', '/costs', '/cash', '/payroll',
     '/c/invoices', '/c/vendors', '/c/products', '/menu',
     '/c/expirations', '/c/equipment', '/c/documents', '/c/contacts',
-    '/c/recurring', '/c/incidents', '/c/notes', '/employees', '/positions', '/policy']) {
+    '/calendar', '/c/incidents', '/c/notes', '/employees', '/positions', '/policy']) {
     assert.ok(sheet.includes(`href="${href}"`), `${href} is reachable from the index`);
   }
   // A close button that closes. Tapping another tab also works, but a

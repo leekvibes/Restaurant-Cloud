@@ -72,7 +72,9 @@ test.before(async () => {
   db.prepare('INSERT INTO employees (name, role, active) VALUES (?, ?, 1)').run(`${TAG} Sandra`, 'server');
   db.prepare("INSERT INTO shifts (date, daypart, status) VALUES ('2026-07-15','dinner','open')").run();
   db.prepare('INSERT INTO menu_items (name, category, status) VALUES (?,?,?)').run(`${TAG} sandwich`, 'Breakfast', 'active');
-  db.prepare('INSERT INTO m_recurring (name, next_due) VALUES (?, ?)').run(`${TAG} hood clean`, '2026-08-01');
+  // The calendar, which replaced the recurring tracker as the searchable one.
+  db.prepare(`INSERT INTO cal_items (kind, title, category, starts_on, all_day)
+    VALUES ('task', ?, 'Cleaning', '2026-08-01', 1)`).run(`${TAG} hood clean`);
   db.prepare('INSERT INTO m_expirations (name, expires_on) VALUES (?, ?)').run(`${TAG} licence`, '2026-09-01');
   db.close();
 });
@@ -96,7 +98,7 @@ test('the owner finds things across every area', async () => {
   const owner = await login({ password: 'owner-pw' });
   const d = await find(owner, TAG);
   const got = labels(d);
-  for (const want of ['Product', 'Menu item', 'Vendor', 'Invoice', 'Staff', 'Recurring task', 'Expiration']) {
+  for (const want of ['Product', 'Menu item', 'Vendor', 'Invoice', 'Staff', 'Calendar', 'Expiration']) {
     assert.ok(got.includes(want), `owner should see ${want}; got ${got.join(', ')}`);
   }
 });
@@ -166,7 +168,8 @@ test('results are capped so one query cannot return the whole database', async (
       db.prepare('INSERT INTO m_vendors (name, category) VALUES (?, ?)').run(`Bulkthing v${i}`, 'Other');
       db.prepare('INSERT INTO employees (name, role, active) VALUES (?, ?, 1)').run(`Bulkthing e${i}`, 'server');
       db.prepare('INSERT INTO menu_items (name, category, status) VALUES (?,?,?)').run(`Bulkthing m${i}`, 'Sides', 'active');
-      db.prepare('INSERT INTO m_recurring (name, next_due) VALUES (?, ?)').run(`Bulkthing t${i}`, '2026-08-01');
+      db.prepare(`INSERT INTO cal_items (kind, title, starts_on, all_day)
+        VALUES ('task', ?, '2026-08-01', 1)`).run(`Bulkthing t${i}`);
       db.prepare('INSERT INTO m_contacts (name, role) VALUES (?, ?)').run(`Bulkthing c${i}`, 'plumber');
       db.prepare('INSERT INTO m_equipment (name, location) VALUES (?, ?)').run(`Bulkthing q${i}`, 'kitchen');
     }
