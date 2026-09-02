@@ -512,9 +512,9 @@ test('the missing-punch filter finds punches that ended without a clock-out', as
   const e = entriesOf(E.long).slice(-1)[0];
   db.prepare("UPDATE time_entries SET status = 'complete' WHERE id = ?").run(e.id);
 
-  const html = await text('/timeclock?st=missing_punch&from=2026-04-01&to=2026-04-03');
+  const html = await text('/timeclock/cafe/today?st=missing_punch&from=2026-04-01&to=2026-04-03');
   assert.match(html, new RegExp(`/timeclock/${e.id}"`), 'the entry with no clock-out is listed');
-  const clean = await text('/timeclock?st=missing_punch&from=2026-03-04&to=2026-03-04');
+  const clean = await text('/timeclock/cafe/today?st=missing_punch&from=2026-03-04&to=2026-03-04');
   assert.doesNotMatch(clean, /tcm-row/, 'and a day of finished punches lists none');
 });
 
@@ -540,7 +540,7 @@ test('the long-shift threshold is the one set on THAT clock', async () => {
   // It belongs to a clock now. A fourteen-hour punch is routine on one service
   // and a missed clock-out on another, and one number for both is wrong for at
   // least one of them.
-  const before = await text('/timeclock');
+  const before = await text('/timeclock/cafe/today');
   assert.doesNotMatch(before, /past 16h/, 'nothing is hardcoded to 16 once a setting exists');
   await post('/timeclock/settings', { svc: 'cafe', cutoff: '4', long: '10', pin_fix: '1', alerts: '1' });
   const T = require('../src/timeclock');
@@ -554,13 +554,13 @@ test('an absurd date range is shortened rather than served', async () => {
   // Node is single-threaded and the page is built synchronously into one
   // string, so a range nobody meant to ask for used to block every other
   // request for about two seconds — including a staff phone trying to clock in.
-  const html = await text('/timeclock?from=1900-01-01&to=2099-12-31');
+  const html = await text('/timeclock/cafe/today?from=1900-01-01&to=2099-12-31');
   assert.match(html, /Shortened/, 'it says the range was cut, rather than quietly returning less');
   assert.match(html, /name="from" value="2099-/, 'and the form shows the span actually used');
 });
 
 test('a range typed backwards is read the way it was meant', async () => {
-  const html = await text('/timeclock?from=2026-07-01&to=2026-06-01');
+  const html = await text('/timeclock/cafe/today?from=2026-07-01&to=2026-06-01');
   assert.match(html, /name="from" value="2026-06-01"/, 'the earlier date is the start');
   assert.match(html, /name="to" value="2026-07-01"/, 'and the later one is the end');
 });
@@ -985,11 +985,11 @@ test('clocking out of a signed day closes the punch but holds the hours', async 
 test('Today shows today, and says so when it is showing something else', async () => {
   const T = require('../src/timeclock');
   const today = T.businessDateOf(T.nowUtc(), T.settings().cutoffHour);
-  const html = await text('/timeclock');
+  const html = await text('/timeclock/cafe/today');
   assert.match(html, new RegExp(`name="from" value="${today}"`), 'it opens on today, not a trailing fortnight');
   assert.doesNotMatch(html, /Back to today/, 'and does not offer a way back it does not need');
 
-  const wider = await text('/timeclock?from=2026-03-01&to=2026-03-31');
+  const wider = await text('/timeclock/cafe/today?from=2026-03-01&to=2026-03-31');
   assert.match(wider, /Showing 2026-03-01 to 2026-03-31/, 'a wider range says what it is showing');
   assert.match(wider, /Back to today/, 'with the way back');
 });
@@ -1001,7 +1001,7 @@ test('a punch nobody closed is counted and listed however old it is', async () =
   const old = await punch(E.long, '2026-02-10', '09:00', null, 'dinner');
   db.prepare("UPDATE time_entries SET status = 'complete' WHERE id = ?").run(old.id);
 
-  const html = await text('/timeclock');            // today, which 2026-02-10 is not
+  const html = await text('/timeclock/cafe/today');   // today, which 2026-02-10 is not
   assert.match(html, /Never clocked out/, 'the panel is there');
   assert.match(html, new RegExp(`/timeclock/${old.id}"`), 'and the punch is in it');
   const strip = (html.match(/Missing a punch<\/span><span class="bs-stat[^>]*>(\d+)/) || [])[1];
@@ -1024,8 +1024,8 @@ test('payable-so-far deducts a running unpaid break as it runs', () => {
 });
 
 test('the live panel obeys the same filter as the ledger', async () => {
-  const all = await text('/timeclock');
-  const onlyOne = await text('/timeclock?emp=999999');   // nobody
+  const all = await text('/timeclock/cafe/today');
+  const onlyOne = await text('/timeclock/cafe/today?emp=999999');   // nobody
   assert.match(onlyOne, /Nobody on the clock matches that filter|Nobody is clocked in right now/,
     'narrowing to one person does not leave the whole floor showing above the results');
   assert.ok(all.length > 0);
@@ -1615,8 +1615,8 @@ test('a scoped time clock shows only the people on that clock', async () => {
   SVC.setForEmployee(E.both, ['cafe']);            // Day only
   try {
     const name = db.prepare('SELECT name FROM employees WHERE id = ?').get(E.both).name;
-    const day = await text('/timeclock?svc=cafe');
-    const eve = await text('/timeclock?svc=dinner');
+    const day = await text('/timeclock/cafe/today');
+    const eve = await text('/timeclock/dinner/today');
     assert.ok(day.includes(name), 'they are on the Day clock');
     assert.ok(!eve.includes(name), 'and not on the Evening one');
   } finally {
@@ -1682,19 +1682,33 @@ test('somebody on the clock who has not punched is still on its timesheet', asyn
   }
 });
 
-test('the tabs and the links keep the clock, and the picker is built from what exists', async () => {
-  // Every link on the page has to carry it. Any one of them dropping it puts
-  // you back on the everyone view without saying so, which is indistinguishable
-  // from the scope having done nothing.
+test('the workspace keeps its clock in the path, not in a filter', async () => {
+  // This test used to assert the opposite — that the tabs carried ?svc= and a
+  // picker let you change it. That whole idea is gone. A filter you have to
+  // keep verifying is worse than no filter, so the clock is the URL now: it
+  // survives a refresh, it survives a pasted link, and nothing inside a
+  // workspace offers to change which workspace you are in.
   const per = gridPeriod();
-  const html = await text(`/payroll/timesheets?p=${per.start}&svc=dinner`);
-  assert.match(html, /href="\/timeclock\?svc=dinner"/, 'the Today tab keeps the clock');
-  assert.match(html, /href="\/payroll\/timesheets\?svc=dinner"/, 'and so does Timesheets');
-  assert.ok(html.includes('svc=dinner'), 'and the row links carry it');
-  // Built from the services table, so a clock made next week appears on its own.
-  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
-  assert.match(src, /SERVICES\.withClock\(\)\.map\(\(sv\) => `<option value="\$\{esc\(sv\.slug\)\}"/,
-    'the clock picker is generated, not a written-down list of two');
+  const html = await text(`/timeclock/dinner/timesheets?p=${per.start}`);
+  assert.match(html, /href="\/timeclock\/dinner\/today"/, 'the Today tab stays in this clock');
+  assert.match(html, /href="\/timeclock\/dinner\/timesheets"/, 'and so does Timesheets');
+  assert.doesNotMatch(html, /<select name="svc"/, 'there is no clock picker inside a clock');
+  // No self-link carries the old filter. /schedule?svc= and the CSV export
+  // legitimately still take one — they are other pages being told what to show,
+  // not this page remembering a scope it no longer has.
+  const selfLinks = [...html.matchAll(/href="((?:\/payroll\/timesheets|\/timeclock\/[a-z0-9-]+\/timesheets)[^"]*)"/g)]
+    .map((m) => m[1]);
+  assert.ok(selfLinks.length, 'the page links to itself somewhere');
+  assert.deepStrictEqual(selfLinks.filter((h) => /[?&]svc=/.test(h)), [],
+    'no timesheets link carries ?svc=');
+
+  // The old links still land where they meant to, so nobody's bookmark breaks.
+  const moved = await fetch(`${BASE}/payroll/timesheets?p=${per.start}&svc=dinner`, { redirect: 'manual' });
+  assert.strictEqual(moved.status, 302, 'an old ?svc= link redirects');
+  assert.match(String(moved.headers.get('location')), /\/timeclock\/dinner\/timesheets/);
+  const movedToday = await fetch(`${BASE}/timeclock?svc=dinner`, { redirect: 'manual' });
+  assert.strictEqual(movedToday.status, 302);
+  assert.match(String(movedToday.headers.get('location')), /\/timeclock\/dinner\/today/);
 });
 
 test('a board and its clock link to each other', async () => {
@@ -1703,6 +1717,330 @@ test('a board and its clock link to each other', async () => {
   // which is the reason it cannot point at the wrong one.
   const board = await text('/schedule?svc=dinner');
   assert.match(board, /href="\/timeclock\?svc=dinner"/, 'the board offers its time clock');
-  const clock = await text('/timeclock?svc=dinner');
+  const clock = await text('/timeclock/dinner/today');
   assert.match(clock, /href="\/schedule\?svc=dinner"/, 'and the clock offers its board');
+});
+
+// ---------------------------------------------------------------------------
+// ISOLATED TIME CLOCK WORKSPACES
+// ---------------------------------------------------------------------------
+
+test('a time clock is a workspace in the path, and the directory is the way in', async () => {
+  const dir = await text('/timeclock');
+  assert.match(dir, /Time clocks/, 'the sidebar lands on a directory');
+  assert.match(dir, /<h2 class="tcc-name">Day Service</, 'with a card per clock');
+  assert.match(dir, /<h2 class="tcc-name">Evening Service</);
+  assert.match(dir, /href="\/timeclock\/cafe\/today"/, 'each card opens its workspace');
+  // Active and archived are both reachable, with counts.
+  assert.match(dir, /href="\/timeclock\?view=archived"/, 'archived clocks are findable');
+  // And the directory does NOT try to be a Today page.
+  assert.doesNotMatch(dir, /class="tcl-r tcl-h"/, 'no live ledger on the directory');
+});
+
+test('a direct URL and a refresh both keep the clock — there is no filter state', async () => {
+  // The clock is the route. Nothing about it lives in a query string that could
+  // be dropped, in a cookie that could be stale, or in client state that a
+  // refresh would lose.
+  for (const slug of ['cafe', 'dinner']) {
+    for (const tab of ['today', 'timesheets']) {
+      const html = await text(`/timeclock/${slug}/${tab}`);
+      const name = slug === 'cafe' ? 'Day Service' : 'Evening Service';
+      assert.match(html, new RegExp(`<h1 class="tcw-name">${name}<`),
+        `${slug}/${tab} says which clock you are in`);
+      // Fetched twice: same answer, because nothing was remembered between them.
+      const again = await text(`/timeclock/${slug}/${tab}`);
+      assert.strictEqual(html.length, again.length, 'a reload lands in the same place');
+    }
+  }
+});
+
+test('one clock cannot show another clock\'s people — and it is the query, not the markup', async () => {
+  // The important half of this test is the last assertion. Hiding a row in the
+  // template would pass every visual check and still hand the other clock's
+  // data to the browser, so what is asserted is that the name is not in the
+  // RESPONSE AT ALL.
+  const SVC = require('../src/services');
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(E.both).map((r) => r.service_slug);
+  SVC.setForEmployee(E.both, ['cafe']);
+  try {
+    const name = db.prepare('SELECT name FROM employees WHERE id = ?').get(E.both).name;
+    const per = gridPeriod();
+    for (const tab of ['today', 'timesheets']) {
+      const day = await text(`/timeclock/cafe/${tab}?p=${per.start}`);
+      const eve = await text(`/timeclock/dinner/${tab}?p=${per.start}`);
+      assert.ok(day.includes(name), `${tab}: on the Day clock`);
+      assert.ok(!eve.includes(name), `${tab}: the Evening clock never receives them`);
+    }
+  } finally {
+    SVC.setForEmployee(E.both, before);
+  }
+});
+
+test('an employee belongs to as many clocks as management says', async () => {
+  // There is no exclusivity anywhere: not in the schema, not in the assignment
+  // helpers, not in the UI. Assigning somebody to a second clock must be purely
+  // additive, or a manager staffing Evening would quietly empty Day.
+  const SVC = require('../src/services');
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(E.both).map((r) => r.service_slug);
+  try {
+    SVC.setForEmployee(E.both, []);
+    SVC.assignTo('cafe', E.both);
+    assert.deepStrictEqual(SVC.forEmployee(E.both).sort(), ['cafe']);
+    SVC.assignTo('dinner', E.both);
+    assert.deepStrictEqual(SVC.forEmployee(E.both).sort(), ['cafe', 'dinner'],
+      'the second clock is added, the first is kept');
+
+    // A third, and a fourth, and the same again — no ceiling, and idempotent.
+    SVC.create({ slug: 'iso-brunch', name: 'Iso Brunch' });
+    SVC.create({ slug: 'iso-events', name: 'Iso Events' });
+    SVC.assignTo('iso-brunch', E.both);
+    SVC.assignTo('iso-events', E.both);
+    SVC.assignTo('iso-events', E.both);
+    assert.deepStrictEqual(SVC.forEmployee(E.both).sort(),
+      ['cafe', 'dinner', 'iso-brunch', 'iso-events'], 'four clocks, no argument');
+
+    // Setting ONE clock's roster leaves every other clock alone. This is the
+    // difference between setRosterFor and setForEmployee, and getting it wrong
+    // on the assignments screen would take everybody off everything else.
+    SVC.setRosterFor('iso-brunch', []);
+    assert.deepStrictEqual(SVC.forEmployee(E.both).sort(), ['cafe', 'dinner', 'iso-events'],
+      'removed from that one clock only');
+  } finally {
+    for (const s of ['iso-brunch', 'iso-events']) {
+      try { SVC.archive(s); } catch { /* already gone */ }
+      db.prepare('DELETE FROM employee_services WHERE service_slug = ?').run(s);
+      db.prepare('DELETE FROM services WHERE slug = ?').run(s);
+    }
+    SVC.setForEmployee(E.both, before);
+  }
+});
+
+test('taking somebody off a clock never touches what they already did on it', async () => {
+  // Current assignment is about who may clock in from now on. It is not a claim
+  // about the past, and it must never be read as one — the punch says which
+  // clock it belonged to, and that is the only thing that ever decides.
+  const SVC = require('../src/services');
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(E.both).map((r) => r.service_slug);
+  const per = gridPeriod();
+  const sh = db.prepare("SELECT id FROM shifts WHERE daypart = 'dinner' LIMIT 1").get()
+    || db.prepare('SELECT id FROM shifts LIMIT 1').get();
+  const id = Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, 'dinner', 'server', ?, ?, 'complete', 'isotest', 300, 300)`)
+    .run(E.both, sh.id, per.start, `${per.start} 22:00:00`, `${per.start} 23:00:00`).lastInsertRowid);
+  const snap = () => JSON.stringify(db.prepare('SELECT * FROM time_entries WHERE id = ?').get(id));
+  const wasRow = snap();
+  try {
+    SVC.assignTo('dinner', E.both);
+    SVC.unassignFrom('dinner', E.both);
+    assert.ok(!SVC.canWork(E.both, 'dinner'), 'they can no longer clock into it');
+    assert.strictEqual(snap(), wasRow, 'and the punch is byte-identical');
+    // Still attributed to the clock it happened on, whatever the roster says.
+    const row = db.prepare('SELECT daypart FROM time_entries WHERE id = ?').get(id);
+    assert.strictEqual(row.daypart, 'dinner', 'history keeps its own clock');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(id);
+    SVC.setForEmployee(E.both, before);
+  }
+});
+
+test('the employee portal still shows ONE timesheet, across every clock, each line named', async () => {
+  // The admin side is isolated; the employee side is emphatically not. Somebody
+  // who worked Day and Evening reviews both together and signs once — making
+  // them submit twice would be asking the same person the same question about
+  // the same fortnight in two places.
+  const SVC = require('../src/services');
+  const per = gridPeriod();
+  const before = db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ?')
+    .all(E.both).map((r) => r.service_slug);
+  const shifts = db.prepare('SELECT id, daypart FROM shifts WHERE date = ? ').all(per.start);
+  const cafe = shifts.find((x) => x.daypart === 'cafe') || db.prepare("SELECT id FROM shifts WHERE daypart='cafe' LIMIT 1").get();
+  const dinner = shifts.find((x) => x.daypart === 'dinner') || db.prepare("SELECT id FROM shifts WHERE daypart='dinner' LIMIT 1").get();
+  if (!cafe || !dinner) return;
+  const mk = (shift, part, inAt, outAt) => Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, ?, 'server', ?, ?, 'complete', 'isotest', 240, 240)`)
+    .run(E.both, shift.id, per.start, part, inAt, outAt).lastInsertRowid);
+  const a = mk(cafe, 'cafe', `${per.start} 14:00:00`, `${per.start} 18:00:00`);
+  const b = mk(dinner, 'dinner', `${per.start} 22:00:00`, `${per.start} 23:00:00`);
+  try {
+    SVC.setForEmployee(E.both, ['cafe', 'dinner']);
+    const pin = db.prepare('SELECT pin FROM employees WHERE id = ?').get(E.both).pin;
+    if (!pin) return;
+    const cookie = await signIn(pin);
+    const sheet = await text(`/portal/timesheet?p=${per.start}`, { cookie });
+    assert.ok(sheet.includes('Day Service'), 'the Day entry is on their sheet');
+    assert.ok(sheet.includes('Evening Service'), 'and so is the Evening one');
+    // ONE submission covering both. There is exactly one submit form.
+    const forms = (sheet.match(/action="\/portal\/timesheet\/submit"/g) || []).length;
+    assert.ok(forms <= 1, `one submission for the period, found ${forms}`);
+    assert.doesNotMatch(sheet, /Submit Day|Submit Evening/, 'not one per clock');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id IN (?, ?)').run(a, b);
+    SVC.setForEmployee(E.both, before);
+  }
+});
+
+test('duplicating copies the configuration and none of the history', async () => {
+  const SVC = require('../src/services');
+  SVC.create({ slug: 'dup-src', name: 'Dup Source' });
+  SVC.setCycle('dup-src', { length: 7, weekStart: 1, anchor: '2026-01-05' });
+  SVC.setSettingsFor('dup-src', { ...require('../src/timeclock').settings(), autoOutHours: 9, longShift: 10 });
+  SVC.setHours('dup-src', 1, SVC.asMin('09:00'), SVC.asMin('17:00'));
+  SVC.assignTo('dup-src', E.both);
+  const sh = db.prepare('SELECT id FROM shifts LIMIT 1').get();
+  const per = gridPeriod();
+  const punch = Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, 'dup-src', 'server', ?, ?, 'complete', 'isotest', 60, 60)`)
+    .run(E.both, sh.id, per.start, `${per.start} 10:00:00`, `${per.start} 11:00:00`).lastInsertRowid);
+  try {
+    const made = SVC.duplicate('dup-src', { slug: 'dup-copy', name: 'Dup Copy' });
+    assert.strictEqual(made, 'dup-copy');
+    assert.deepStrictEqual(SVC.cycleFor('dup-copy'), { length: 7, anchor: '2026-01-05', weekStart: 1 },
+      'the cycle came with it');
+    const cs = require('../src/timeclock').settingsOn('dup-copy');
+    assert.strictEqual(cs.autoOutHours, 9, 'and the settings');
+    assert.strictEqual(cs.longShift, 10);
+    assert.strictEqual(SVC.hoursOn('dup-copy', 1).openMin, 9 * 60, 'and the work hours');
+    assert.deepStrictEqual(SVC.employeesFor('dup-copy'), [E.both], 'and the people');
+    // But nothing that describes work that happened.
+    assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM time_entries WHERE daypart = 'dup-copy'").get().n, 0,
+      'not one punch');
+    assert.strictEqual(db.prepare("SELECT COUNT(*) n FROM shifts WHERE daypart = 'dup-copy'").get().n, 0,
+      'not one service');
+    assert.strictEqual(SVC.historyFor('dup-copy').any, false, 'a copy has no history at all');
+    assert.strictEqual(SVC.historyFor('dup-src').punches, 1, 'and the original keeps its own');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(punch);
+    for (const s of ['dup-src', 'dup-copy']) {
+      db.prepare('DELETE FROM employee_services WHERE service_slug = ?').run(s);
+      try { db.prepare('DELETE FROM service_hours WHERE service_slug = ?').run(s); } catch { /* none */ }
+      db.prepare('DELETE FROM services WHERE slug = ?').run(s);
+    }
+  }
+});
+
+test('a clock with history is archived instead of deleted, and one without is really gone', async () => {
+  // The slug IS the attribution. Deleting a used clock would leave its punches,
+  // shifts, hours and tip-out policies pointing at nothing, and payroll unable
+  // to say what a past service was called.
+  const SVC = require('../src/services');
+  SVC.create({ slug: 'del-empty', name: 'Del Empty' });
+  await post('/timeclock/del-empty/delete', {});
+  assert.strictEqual(SVC.bySlug('del-empty'), null, 'an unused clock is deleted for real');
+
+  SVC.create({ slug: 'del-used', name: 'Del Used' });
+  const sh = db.prepare('SELECT id FROM shifts LIMIT 1').get();
+  const per = gridPeriod();
+  const punch = Number(db.prepare(`INSERT INTO time_entries
+    (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
+     status, source, raw_minutes, payable_minutes)
+    VALUES (?, ?, ?, 'del-used', 'server', ?, ?, 'complete', 'isotest', 60, 60)`)
+    .run(E.both, sh.id, per.start, `${per.start} 10:00:00`, `${per.start} 11:00:00`).lastInsertRowid);
+  try {
+    await post('/timeclock/del-used/delete', {});
+    const still = SVC.bySlug('del-used');
+    assert.ok(still, 'a used clock survives a delete');
+    assert.strictEqual(still.active, 0, 'as an archived one');
+    assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_entries WHERE id = ?').get(punch).n, 1,
+      'and its punch is still there');
+  } finally {
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(punch);
+    db.prepare("DELETE FROM services WHERE slug = 'del-used'").run();
+  }
+});
+
+test('the wizard writes everything or nothing, and validates before it writes', async () => {
+  const SVC = require('../src/services');
+  // A step that fails leaves no row behind — the whole reason nothing is
+  // created until the last post.
+  const before = SVC.all({ includeArchived: true }).length;
+  await post('/timeclock/create', { step: 'create', name: '' });
+  assert.strictEqual(SVC.all({ includeArchived: true }).length, before,
+    'a nameless clock creates nothing');
+  await post('/timeclock/create', { step: 'create', name: '!!!' });
+  assert.strictEqual(SVC.all({ includeArchived: true }).length, before,
+    'and neither does a name with nothing usable in it');
+
+  await post('/timeclock/create', {
+    step: 'create', name: 'Wizard Clock', length: '7', week_start: '1',
+    anchor: '2026-01-05', emp: String(E.both),
+  });
+  const made = SVC.all({ includeArchived: true }).find((x) => x.name === 'Wizard Clock');
+  try {
+    assert.ok(made, 'the clock exists');
+    assert.deepStrictEqual(SVC.cycleFor(made.slug), { length: 7, anchor: '2026-01-05', weekStart: 1 },
+      'with the cycle it was given');
+    assert.deepStrictEqual(SVC.employeesFor(made.slug), [E.both], 'and the people');
+    assert.notStrictEqual(SVC.bySlug(made.slug).has_clock, 0, 'and a time clock of its own');
+  } finally {
+    if (made) {
+      db.prepare('DELETE FROM employee_services WHERE service_slug = ?').run(made.slug);
+      try { db.prepare('DELETE FROM service_hours WHERE service_slug = ?').run(made.slug); } catch { /* none */ }
+      db.prepare('DELETE FROM services WHERE slug = ?').run(made.slug);
+    }
+  }
+});
+
+test('settings are per clock, sectioned, and a new one is safe on an old clock', async () => {
+  const SVC = require('../src/services');
+  const TCm = require('../src/timeclock');
+  const page = await text('/timeclock/cafe/settings');
+  assert.match(page, /class="tcs-nav"/, 'sections down the left');
+  for (const label of ['General', 'Time tracking', 'Payroll cycle', 'Breaks', 'Timesheet issues', 'Notifications']) {
+    assert.ok(page.includes(label), `the ${label} section is listed`);
+  }
+  // Editing one clock says nothing about another.
+  const wasDay = TCm.settingsOn('cafe').autoOutHours;
+  const wasEve = TCm.settingsOn('dinner').autoOutHours;
+  try {
+    await post('/timeclock/cafe/settings', { s: 'tracking', long: '12', auto_out: '1', auto_out_hours: '8' });
+    assert.strictEqual(TCm.settingsOn('cafe').autoOutHours, 8, 'Day took the change');
+    assert.strictEqual(TCm.settingsOn('dinner').autoOutHours, wasEve, 'Evening did not');
+
+    // A clock created before a setting existed reads a safe default rather than
+    // undefined — which is what makes adding the next setting safe.
+    SVC.create({ slug: 'old-clock', name: 'Old Clock' });
+    db.prepare('UPDATE services SET cycle_len = NULL, cycle_anchor = NULL, week_start = NULL WHERE slug = ?').run('old-clock');
+    assert.deepStrictEqual(SVC.cycleFor('old-clock'), { length: null, anchor: null, weekStart: null },
+      'no cycle of its own');
+    const s2 = await text('/timeclock/old-clock/settings?s=cycle');
+    assert.match(s2, /Same as the rest of the app/, 'and the page says what that means');
+  } finally {
+    await post('/timeclock/cafe/settings', { s: 'tracking', long: '16', auto_out: '', auto_out_hours: String(wasDay) });
+    db.prepare("DELETE FROM services WHERE slug = 'old-clock'").run();
+  }
+});
+
+test('what the wizard shows on the summary is what it actually creates', async () => {
+  // Every step carries the earlier answers as hidden fields. A step that renders
+  // a visible input for a name it ALSO emits a hidden field for posts that name
+  // twice, and Number(['14','7']) is NaN — so the answer silently reverts to a
+  // default. The cycle step did that, and the summary reported "Every 2 weeks"
+  // for a clock the admin had set to weekly. The page looked perfect.
+  const SVC = require('../src/services');
+  const html = await text('/timeclock/create?step=cycle&name=Dup%20Field%20Check');
+  const dupes = ['length', 'week_start', 'anchor'].filter((n) =>
+    (html.match(new RegExp(`name="${n}"`, 'g')) || []).length > 1);
+  assert.deepStrictEqual(dupes, [], 'no field is posted twice from one step');
+
+  // And end to end: what goes in comes out.
+  await post('/timeclock/create', {
+    step: 'create', name: 'Weekly Clock', length: '7', week_start: '3', anchor: '2026-02-02',
+  });
+  const made = SVC.all({ includeArchived: true }).find((x) => x.name === 'Weekly Clock');
+  try {
+    assert.ok(made, 'created');
+    assert.deepStrictEqual(SVC.cycleFor(made.slug), { length: 7, anchor: '2026-02-02', weekStart: 3 },
+      'weekly, anchored, Wednesday — exactly what was asked for');
+  } finally {
+    if (made) db.prepare('DELETE FROM services WHERE slug = ?').run(made.slug);
+  }
 });
