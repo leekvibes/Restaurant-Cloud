@@ -6507,3 +6507,64 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .zc-sheet-f { position:sticky; bottom:0; background:var(--paper);
     padding-bottom:calc(14px + env(safe-area-inset-bottom)); }
 }
+
+/* --- week and day: the time grid -----------------------------------------
+   Hours are rows, days are columns, and a timed item occupies the space its
+   start and end describe. That is the whole reason this view exists rather
+   than a longer list. */
+.zc-tg { border:1px solid var(--rule); background:var(--paper); }
+.zc-tg-h { display:grid; grid-template-columns:62px repeat(var(--n), minmax(0,1fr));
+  border-bottom:1px solid var(--rule); background:var(--panel); position:sticky; top:0; z-index:2; }
+.zc-tg-corner { border-right:1px solid var(--rule); }
+.zc-tg-d { display:flex; flex-direction:column; align-items:center; gap:1px; padding:8px 4px;
+  border-left:1px solid var(--rule); text-decoration:none; }
+.zc-tg-d i { font-style:normal; font-family:var(--mono); font-size:10px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--muted); }
+.zc-tg-d b { font-size:17px; font-weight:650; color:var(--headline); }
+/* Today is a filled circle on the number, matching the month grid. */
+.zc-tg-d.is-today b { background:var(--ink); color:var(--paper); border-radius:50% !important;
+  width:28px; height:28px; display:flex; align-items:center; justify-content:center; }
+.zc-ad { display:grid; grid-template-columns:62px repeat(var(--n), minmax(0,1fr));
+  border-bottom:1px solid var(--rule); min-height:34px; }
+.zc-ad-l { font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--muted); padding:9px 8px; border-right:1px solid var(--rule); }
+.zc-ad-c { border-left:1px solid var(--rule); padding:3px; display:flex; flex-direction:column; gap:2px; }
+.zc-tg-b { display:flex; max-height:62vh; overflow-y:auto; }
+.zc-hrs { flex:0 0 62px; border-right:1px solid var(--rule); }
+.zc-hr { font-family:var(--mono); font-size:10.5px; color:var(--muted); padding:2px 8px 0;
+  text-align:right; border-bottom:1px solid var(--sb-hline, var(--rule)); box-sizing:border-box; }
+.zc-cols { flex:1; display:grid; grid-template-columns:repeat(var(--n), minmax(0,1fr)); }
+.zc-col { position:relative; border-left:1px solid var(--rule); }
+.zc-col.is-today { background:color-mix(in srgb, var(--ink) 3%, var(--paper)); }
+/* Each hour is a button. A click already resolves to a time, so drag-to-create
+   can be layered on later without unpicking any of this. */
+.zc-slot { display:block; width:100%; border:0; border-bottom:1px solid var(--rule);
+  background:none; padding:0; cursor:pointer; box-sizing:border-box; }
+.zc-slot:hover { background:var(--panel); }
+.zc-blk { position:absolute; border:0; border-left:3px solid var(--c);
+  background:color-mix(in srgb, var(--c) 12%, var(--paper)); color:var(--headline);
+  padding:3px 6px; font:inherit; text-align:left; cursor:pointer; overflow:hidden;
+  box-sizing:border-box; }
+.zc-blk:hover { background:color-mix(in srgb, var(--c) 20%, var(--paper)); }
+.zc-blk b { display:block; font-size:12px; font-weight:600; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.zc-blk i { font-style:normal; font-size:10.5px; font-family:var(--mono); color:var(--muted); }
+.zc-blk.is-done b { text-decoration:line-through; color:var(--muted); }
+
+/* The scope choice. Never defaults to "the whole series" — that is how somebody
+   loses a year of Mondays to one mis-tap. */
+.zc-d-scope { border:1px solid var(--rule); padding:10px 12px; margin:0; display:flex;
+  flex-direction:column; gap:6px; }
+.zc-d-scope legend { font-family:var(--mono); font-size:10px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted); padding:0 4px; }
+.zc-d-scope label { display:flex; align-items:center; gap:8px; font-size:13px;
+  color:var(--body); min-height:32px; cursor:pointer; }
+
+@media (max-width:760px){
+  /* Seven columns of time grid on a phone is unreadable. Week keeps its columns
+     but scrolls sideways inside its own box, and Day is the one to reach for. */
+  .zc-tg { overflow-x:auto; }
+  .zc-tg-h, .zc-ad { min-width:560px; }
+  .zc-tg-b { min-width:560px; max-height:56vh; }
+  .zc-tg-d b { font-size:15px; }
+}

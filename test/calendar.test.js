@@ -683,3 +683,101 @@ test('B: the calendar page writes nothing to the schedule or the clock', async (
   await page('/calendar');
   assert.deepStrictEqual(['scheduled_shifts', 'time_entries', 'work', 'shifts'].map(count), before);
 });
+
+// ===========================================================================
+// STAGE C — the time grid, and what a change to a series touches
+// ===========================================================================
+
+test('C: week and day are real views, and the week starts Monday', async () => {
+  const wk = await page('/calendar?v=week&d=2026-09-09');
+  assert.match(wk, /class="zc-tg"/, 'a time grid, not seven month cells');
+  const heads = [...wk.matchAll(/class="zc-tg-d[^"]*"[\s\S]{0,80}?<i>([A-Za-z]+)<\/i><b>(\d+)</g)]
+    .map((m) => [m[1], m[2]]);
+  assert.deepStrictEqual(heads.map((h) => h[0]), ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
+  assert.strictEqual(heads[0][1], '7', 'the week containing Wed the 9th begins Mon the 7th');
+
+  const day = await page('/calendar?v=day&d=2026-09-09');
+  assert.match(day, /class="zc-tg"/);
+  assert.strictEqual((day.match(/class="zc-tg-d/g) || []).length, 1, 'one column');
+  assert.match(day, /Wednesday, September 9/, 'and the date is the heading');
+});
+
+test('C: a timed item is placed by its actual start, not by its row', async () => {
+  const d = '2026-10-07';
+  C.create({ kind: 'event', title: 'Grid probe', starts_on: d,
+    all_day: 0, start_min: (9 * 60) + 30, end_min: 11 * 60 });
+  const html = await page(`/calendar?v=day&d=${d}`);
+  const blk = (html.match(/class="zc-blk[^"]*"[^>]*style="[^"]*"/) || [])[0] || '';
+  // 6am is the top of the grid at 44px an hour, so 9:30 is 3.5 hours down.
+  assert.match(blk, /top:154px/, '9:30am sits three and a half hours below 6am');
+  assert.match(blk, /height:66px/, 'and an hour and a half tall');
+});
+
+test('C: an all-day item goes in the all-day strip, never the time grid', async () => {
+  const d = '2026-10-08';
+  C.create({ kind: 'task', title: 'All day probe', starts_on: d });
+  const html = await page(`/calendar?v=day&d=${d}`);
+  const strip = html.slice(html.indexOf('class="zc-ad"'), html.indexOf('class="zc-tg-b"'));
+  assert.match(strip, /All day probe/, 'it is in the strip');
+  // Bounded at the end of the grid: everything after it is the page's own data
+  // blob, which naturally lists every title and would match anything.
+  const body = html.slice(html.indexOf('class="zc-tg-b"'), html.indexOf('</script>'));
+  const cols = body.slice(0, body.indexOf('<script'));
+  assert.ok(!cols.includes('All day probe'), 'and not floating at an invented hour');
+});
+
+test('C: every hour is a create target carrying its own time', async () => {
+  const html = await page('/calendar?v=day&d=2026-10-09');
+  const slots = [...html.matchAll(/class="zc-slot"[^>]*data-add="2026-10-09" data-min="(\d+)"/g)]
+    .map((m) => Number(m[1]));
+  assert.strictEqual(slots.length, 18, '6am to midnight');
+  assert.strictEqual(slots[0], 360, 'the first is 6am');
+  assert.strictEqual(slots[slots.length - 1], 1380, 'the last is 11pm');
+  // Built so drag-to-create can be layered on later: a click already resolves
+  // to a minute, so the mapping does not have to be invented then.
+  assert.match(html, /data-h0="6" data-px="44"/, 'the grid publishes its own scale');
+});
+
+test('C: the scope choice is offered for a series and defaults to the safest', async () => {
+  const html = await page('/calendar');
+  const sc = html.slice(html.indexOf('id="zc-d-scope"'), html.indexOf('</fieldset>'));
+  assert.match(sc, /value="one" checked/,
+    'this occurrence by default — defaulting to the series is how a year of Mondays goes to one mis-tap');
+  for (const v of ['one', 'future', 'all']) assert.match(sc, new RegExp(`value="${v}"`));
+  assert.match(html, /scope\.hidden = !o\.r/, 'and it is hidden entirely for a one-off');
+});
+
+test('C: deleting "this and following" splits rather than erasing the past', async () => {
+  const item = C.create({ title: 'Scope route', starts_on: '2026-10-05', rrule_freq: 'weekly' });
+  const res = await send('/calendar/delete',
+    { id: String(item.id), occurs_on: '2026-10-19', scope: 'future' });
+  assert.strictEqual(res.status, 302);
+  assert.deepStrictEqual(C.datesFor(C.q.byId.get(item.id), '2026-10-01', '2026-11-30'),
+    ['2026-10-05', '2026-10-12'], 'the two that already happened are still there');
+});
+
+test('C: the whole series can still be deleted deliberately', async () => {
+  const item = C.create({ title: 'Scope all', starts_on: '2026-10-06', rrule_freq: 'weekly' });
+  await send('/calendar/delete', { id: String(item.id), occurs_on: '2026-10-13', scope: 'all' });
+  assert.strictEqual(C.q.byId.get(item.id), undefined);
+});
+
+test('C: a forged scope falls back rather than doing something unasked', async () => {
+  const item = C.create({ title: 'Forged scope', starts_on: '2026-10-07', rrule_freq: 'weekly' });
+  await send('/calendar/delete', { id: String(item.id), occurs_on: '2026-10-14', scope: 'everything' });
+  assert.strictEqual(C.q.byId.get(item.id), undefined, 'an unknown scope is treated as the explicit one');
+});
+
+test('C: the arrows step in the unit the view is measured in', async () => {
+  const wk = await page('/calendar?v=week&d=2026-09-09');
+  assert.match(wk, /href="\/calendar\?v=week&d=2026-09-16"/, 'a week forward is seven days');
+  const day = await page('/calendar?v=day&d=2026-09-09');
+  assert.match(day, /href="\/calendar\?v=day&d=2026-09-10"/, 'a day forward is one');
+  const mo = await page('/calendar?v=month&m=2026-09');
+  assert.match(mo, /m=2026-10/, 'a month forward is a month');
+});
+
+test('C: a week straddling two months says both in the heading', async () => {
+  const html = await page('/calendar?v=week&d=2026-09-30');
+  assert.match(html, /Sep 28 – Oct 4, 2026/);
+});
