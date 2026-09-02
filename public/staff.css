@@ -1761,3 +1761,11 @@ body.bare {
   .pt-toast--in { opacity: 1; transform: none; }
 }
 .st-sub--q { margin-top: 6px; font-size: 13px; opacity: .85; }
+
+/* The manager override at the terminal. Shown only once the clock has refused
+   for a schedule reason — a manager PIN box sitting there every shift is an
+   invitation to use it, and this is meant to be the exception. */
+.tcc-mgr { padding: 12px 14px; margin-bottom: 14px; border: 1px solid var(--pt-line);
+  border-radius: 10px; background: var(--pt-field); }
+.tcc-mgr .tcc-field { margin: 0; }
+.tcc-mgr-why { margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--pt-muted); }

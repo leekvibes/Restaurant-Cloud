@@ -2044,3 +2044,60 @@ test('what the wizard shows on the summary is what it actually creates', async (
     if (made) db.prepare('DELETE FROM services WHERE slug = ?').run(made.slug);
   }
 });
+
+test('a manager can let somebody clock in for a shift they are not on', async () => {
+  // The rule "you cannot clock in without a scheduled shift" is correct and
+  // occasionally unusable: somebody covering a call-out at 6pm is not on the
+  // board and cannot get on it from where they are standing. A rule that has to
+  // be worked around is a rule people learn to leave switched off, so there is
+  // a way through — a manager's own PIN, typed at the terminal.
+  const SVC = require('../src/services');
+  const emp = db.prepare(`SELECT id, name, pin FROM employees
+    WHERE active = 1 AND pin IS NOT NULL AND role <> 'manager' LIMIT 1`).get();
+  if (!emp) return;
+  const mgrPin = '9911';
+  const before = db.prepare('SELECT id, role, pin FROM employees WHERE role = ?').get('manager');
+  const mgrId = before ? before.id : Number(db.prepare(
+    "INSERT INTO employees (name, role, active, pin) VALUES ('Cover Boss', 'manager', 1, ?)")
+    .run(mgrPin).lastInsertRowid);
+  if (before) db.prepare('UPDATE employees SET pin = ? WHERE id = ?').run(mgrPin, mgrId);
+  const wasLimit = SVC.limitOf('dinner');
+  SVC.setLimit('dinner', 'scheduled', 0);          // nobody clocks in unscheduled
+  SVC.assignTo('dinner', emp.id);
+  const openPunch = db.prepare("SELECT id FROM time_entries WHERE employee_id = ? AND clock_out_at IS NULL").all(emp.id);
+  for (const p of openPunch) db.prepare('DELETE FROM time_entries WHERE id = ?').run(p.id);
+
+  const cookie = await signIn(emp.pin);
+  const count = () => db.prepare('SELECT COUNT(*) n FROM time_entries WHERE employee_id = ?').get(emp.id).n;
+  const was = count();
+  try {
+    // Without a PIN: refused, and the refusal offers the way through rather
+    // than being a dead end.
+    const no = await post('/portal/clock/in', { position: 'server', daypart: 'dinner' }, { cookie });
+    assert.strictEqual(count(), was, 'no punch without a shift');
+    const where = String(no.headers.get('location') || '');
+    assert.match(where, /needmgr=1/, 'and the refusal offers a manager');
+
+    // A wrong PIN buys nothing.
+    await post('/portal/clock/in', { position: 'server', daypart: 'dinner', mgr_pin: '0000' }, { cookie });
+    assert.strictEqual(count(), was, 'a PIN that is not a manager is still refused');
+
+    // The real one lets them start, and is recorded against the punch.
+    await post('/portal/clock/in', { position: 'server', daypart: 'dinner', mgr_pin: mgrPin }, { cookie });
+    assert.strictEqual(count(), was + 1, 'the manager PIN lets them clock in');
+    const punch = db.prepare(`SELECT id, daypart FROM time_entries WHERE employee_id = ?
+      ORDER BY id DESC LIMIT 1`).get(emp.id);
+    assert.strictEqual(punch.daypart, 'dinner', 'on the clock they were let into');
+    // AND IT LEAVES A TRACE. An exception nobody can see afterwards is
+    // indistinguishable from the rule not having been there.
+    const ev = db.prepare(`SELECT * FROM time_events WHERE entity = 'entry' AND entity_id = ?
+      AND action = 'manager_override'`).all(punch.id);
+    assert.strictEqual(ev.length, 1, 'the override is on the punch');
+    assert.ok(String(ev[0].actor || '').length, 'naming who allowed it');
+    db.prepare('DELETE FROM time_entries WHERE id = ?').run(punch.id);
+  } finally {
+    SVC.setLimit('dinner', wasLimit.mode, wasLimit.earlyMin);
+    if (before) db.prepare('UPDATE employees SET pin = ? WHERE id = ?').run(before.pin, mgrId);
+    else db.prepare('DELETE FROM employees WHERE id = ?').run(mgrId);
+  }
+});

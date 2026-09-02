@@ -5167,6 +5167,34 @@ const stScript = () => `<script>(function(){
  * `/portal/tips` to open itself; keeping it means an old page in somebody's
  * pocket still lands somewhere sensible instead of a 404.
  */
+/**
+ * A manager's own PIN, typed at the terminal to let somebody start a shift the
+ * schedule does not have them on.
+ *
+ * WHOSE PIN, not A PIN. It identifies one manager, it is checked here rather
+ * than anywhere the browser can reach, and what it buys is deliberately narrow:
+ * this one clock-in, now. It cannot approve hours, edit a punch, or authorise
+ * anything else — a code that opens everything is a code that ends up written
+ * on the wall by the terminal.
+ *
+ * Managers are excluded from staffByPin (they do not sign in to the portal), so
+ * this looks them up directly and requires the manager role explicitly.
+ */
+function managerOverride(pin) {
+  const typed = String(pin || '').trim();
+  if (!typed) return { ok: false, tried: false, msg: '' };
+  if (!/^[0-9]{4}$/.test(typed)) {
+    return { ok: false, tried: true, msg: 'A manager PIN is four digits.' };
+  }
+  let who = null;
+  try {
+    who = db.prepare("SELECT id, name FROM employees WHERE pin = ? AND active = 1 AND role = 'manager'")
+      .get(typed) || null;
+  } catch { who = null; }
+  if (!who) return { ok: false, tried: true, msg: 'That is not a manager PIN.' };
+  return { ok: true, tried: true, msg: '', manager: who };
+}
+
 const openTips = (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
@@ -5262,11 +5290,19 @@ function writeSalesTips(req, emp, opts = {}) {
   // possible: filing tonight's money against the evening you have not worked
   // yet. In the portal a shift you can report is now a shift you clocked into.
   //
-  // NOT ON THE LEGACY PIN DOOR at /tips, which is deliberately different and is
-  // left alone. Filing before a manager has opened the service is the ordinary
-  // case there and has been since long before the time clock existed — that
-  // door opens the service from the report, which is the oldest flow in the
-  // app. Closing it here would stop tips being filed tomorrow night.
+  // TIPS FOLLOW THE CLOCK in the portal, which is where the button was.
+  //
+  // NOT YET on the legacy PIN form at /tips. That door opens the service from
+  // the report — file by naming a date and a service and the shift comes into
+  // existence to hold it, with a work row on it. That is not an incidental
+  // behaviour: it is the premise the whole of tips.test.js is written against
+  // (67 tests, whose `footprint` helper asserts the shift and the work row
+  // exist BECAUSE somebody reported), and it predates the time clock entirely.
+  //
+  // Closing it is the same one-line change as above and a genuinely different
+  // piece of work: it removes a documented capability that has its own coverage,
+  // and every one of those tests then has to say what it means in a world where
+  // a report cannot open a service. Flagged rather than half-done.
   if (!sh) {
     const anchor = TC.anchorEntryFor(emp.id);
     if (anchor && anchor.shift_id) sh = s.shiftById.get(anchor.shift_id) || null;
@@ -5279,8 +5315,6 @@ function writeSalesTips(req, emp, opts = {}) {
         + 'Clock in for the shift you are working and this will be waiting for you.' };
   }
   if (!sh) {
-    // The legacy door, exactly as it was: anchor to the punch when there is
-    // one, otherwise take the date and service off the form.
     if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date)) errs.date = 'Choose the date you worked.';
     if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
     manual = true;
@@ -7273,6 +7307,20 @@ function clockPage(req, who, opts = {}) {
         <b>${esc(SERVICES.nameOf(opts.svc))}</b>
       </div>` : ''}
       <form method="post" action="/portal/clock/in" class="tcc-form">
+        ${/* THE WAY THROUGH, offered only once the clock has actually refused.
+             It appears with the refusal that names it and not before — a
+             manager PIN box sitting on the page every shift is an invitation to
+             use it, and the whole point is that this is the exception. Pre-set
+             to the service and position they already chose, so the manager
+             types four digits and nothing else is re-answered. */''}
+        ${opts.needMgr ? `<div class="tcc-mgr">
+          <label class="tcc-field"><span>Manager PIN</span>
+            <input name="mgr_pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
+              autocomplete="off" placeholder="••••" aria-describedby="mgr-why">
+          </label>
+          <p class="tcc-mgr-why" id="mgr-why">A manager can let you start this shift anyway.
+            Their name is recorded on it.</p>
+        </div>` : ''}
         ${one
           ? `<input type="hidden" name="position" value="${esc(allowed[0])}">`
           : `<label class="tcc-field"><span>Position</span>
@@ -7598,7 +7646,11 @@ app.get('/portal/clock', (req, res) => {
   if (!picked && !onClock && !doneEntry && clockable.length > 1) {
     return res.send(portalClockPicker(req, who.emp, clockable));
   }
-  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok, doneEntry, svc: picked }));
+  res.send(clockPage(req, who, { err: req.query.err, ok: req.query.ok, doneEntry, svc: picked,
+    // Only after the clock has refused for a schedule reason, and only for the
+    // service it refused on — so the box appears next to the sentence that
+    // explains why it is there.
+    needMgr: req.query.needmgr === '1' && !!picked && !onClock }));
 });
 
 /**
@@ -7683,6 +7735,10 @@ app.post('/portal/clock/in', (req, res) => {
   // the one place a plan is allowed to affect the clock, and only ever to
   // refuse. It writes nothing, invents no punch, and never implies attendance:
   // a shift on the board still means nothing happened until somebody punches.
+  // Set only when a manager waved somebody through a limit they did not meet.
+  // Stamped on the punch, so the exception is visible on the timesheet rather
+  // than being a thing that happened once and left no trace.
+  let coverBy = null;
   const limit = SERVICES.limitOf(daypart);
   if (limit.mode !== 'off') {
     const nowMs = TC.toDate(TC.nowUtc()).getTime();
@@ -7695,19 +7751,37 @@ app.post('/portal/clock/in', (req, res) => {
       const en = TC.toDate(sh.ends_at).getTime();
       return nowMs >= st - graceMs && nowMs <= en;
     });
-    if (!open) {
+    // A MANAGER CAN LET THEM IN ANYWAY.
+    //
+    // Without this the rule is correct and occasionally unusable: somebody
+    // covering a call-out at 6pm on a Friday is not on the board, cannot get on
+    // it from where they are standing, and cannot start. A rule that has to be
+    // worked around is a rule people learn to leave switched off.
+    //
+    // So the refusal names the way through, and the way through is a manager's
+    // own PIN typed on the spot. It is not a password on the wall: it
+    // identifies WHICH manager, it is checked server-side, and the punch it
+    // opens carries their name for as long as the punch exists.
+    const override = open ? null : managerOverride(req.body.mgr_pin);
+    if (!open && !override.ok) {
       // The next one that has not started, so the message says WHEN rather
       // than only no — somebody standing at the kiosk needs to know whether to
       // wait five minutes or find a manager.
       const next = mine.map((sh) => sh.starts_at)
         .filter((t) => TC.toDate(t).getTime() > nowMs)
         .sort((a, b) => String(a).localeCompare(String(b)))[0];
-      return back('err=' + encodeURIComponent(mine.length
+      const why = mine.length
         ? (next
           ? `Too early — your ${SERVICES.nameOf(daypart)} shift starts at ${TC.clockFace(next)}.`
           : `That is outside your ${SERVICES.nameOf(daypart)} shift today.`)
-        : `You are not scheduled on ${SERVICES.nameOf(daypart)} today — ask your manager.`));
+        : `You are not scheduled on ${SERVICES.nameOf(daypart)} today.`;
+      // `override` is a refusal only when a PIN was actually typed — an empty
+      // box is somebody who has not asked for one yet, not a failed attempt.
+      return back('err=' + encodeURIComponent(override.tried ? `${why} ${override.msg}` : why)
+        + '&needmgr=1&svc=' + encodeURIComponent(daypart)
+        + (position ? '&pos=' + encodeURIComponent(position) : ''));
     }
+    if (override && override.ok) coverBy = override.manager;
   }
 
   const cfg = TC.settings();
@@ -7736,6 +7810,17 @@ app.post('/portal/clock/in', (req, res) => {
         clock_in_at: at, source: 'portal', created_by: emp.name,
       });
       TC.logEvent('entry', eid, 'clock_in', emp.name, { after: at });
+      // A cover recorded on the punch itself, naming the manager who allowed it.
+      // An exception nobody can see afterwards is indistinguishable from the
+      // rule not having been there — this is what makes the override safe to
+      // hand out rather than something to be quietly grateful for.
+      if (coverBy) {
+        TC.logEvent('entry', eid, 'manager_override', coverBy.name,
+          { after: `${coverBy.name} let ${emp.name} clock in to ${SERVICES.nameOf(daypart)} without a scheduled shift` });
+        PORTAL.adminNotify('timeclock',
+          `${emp.name} clocked in to ${SERVICES.nameOf(daypart)} without a shift`,
+          { body: `${coverBy.name} allowed it at the terminal.`, href: `/timeclock/${daypart}/today` });
+      }
       tcTouchDates(emp.id, [bdate], emp.name, 'a new shift was clocked in');
     })();
   } catch (e) {
@@ -22366,8 +22451,11 @@ function clockSettingsBody(req, sv, section) {
     return `
       ${row('Name', `<input name="name" value="${esc(sv.name)}" maxlength="60" ${w2 ? '' : 'disabled'}>`,
     'What this clock is called everywhere. Renaming it changes nothing that has already happened on it.')}
+      ${/* 12-hour throughout. "4:00" read as four in the afternoon to anybody
+           not thinking in 24-hour time, which for a cutoff that means "work
+           before this counts as last night" is the wrong four by twelve hours. */''}
       ${row(`The trading day starts at${appWide}`,
-    `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${h}:00</option>`).join('')}</select>`,
+    `<select name="cutoff" ${w2 ? '' : 'disabled'}>${Array.from({ length: 9 }, (_, h) => `<option value="${h}"${h === c.cutoffHour ? ' selected' : ''}>${hhmmFace(h * 60)}</option>`).join('')}</select>`,
     'Work before this hour counts as the night before, so an overnight shift stays on one day. '
     + 'One rule for the whole restaurant, because two clocks disagreeing would file one night under two dates.')}
       ${row(`Time zone${appWide}`,
@@ -22482,20 +22570,47 @@ app.get('/timeclock/:slug/settings', (req, res) => {
   res.send(layout(`${sv.name} · settings`, `
     ${flash(req)}
     ${clockShell(sv, 'settings', `
-      <form method="post" action="${base}/settings" class="bs-panel tcs tcs-split">
-        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-        <input type="hidden" name="s" value="${esc(section)}">
+      <div class="bs-panel tcs tcs-split">
+        ${/* THE NAV IS NOT IN THE FORM. It used to be, and moving between
+             sections then silently threw away whatever had just been typed —
+             change a value, click another section to check something, come
+             back, and it reads exactly as "I saved it and it reset". The
+             warning below is the other half: a link cannot save for you, so it
+             says so before you lose anything. */''}
         <nav class="tcs-nav" aria-label="Settings sections">
           ${TC_SECTIONS.map(([k, label]) => `<a class="tcs-navi${k === section ? ' on' : ''}"
             href="${base}/settings?s=${k}"${k === section ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('')}
         </nav>
-        <div class="tcs-pane">
+        <form method="post" action="${base}/settings" class="tcs-pane" id="tcs-form">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="s" value="${esc(section)}">
           <h2 class="tcs-h">${esc((TC_SECTIONS.find(([k]) => k === section) || [, ''])[1])}</h2>
           ${clockSettingsBody(req, sv, section)}
-          ${w2 ? '<div class="tcs-save"><button class="bs-btn bs-btn-go" type="submit">Save changes</button></div>'
-    : '<p class="inc-hint">Your account is view-only.</p>'}
-        </div>
-      </form>`, { meta: 'Settings for this time clock only, unless a row says otherwise.' })}`));
+          ${w2 ? `<div class="tcs-save">
+            <button class="bs-btn bs-btn-go" type="submit">Save changes</button>
+            <span class="tcs-dirty" id="tcs-dirty" hidden>Unsaved changes</span>
+          </div>` : '<p class="inc-hint">Your account is view-only.</p>'}
+        </form>
+      </div>
+      <script>
+        (function () {
+          var f = document.getElementById('tcs-form');
+          var flag = document.getElementById('tcs-dirty');
+          if (!f) return;
+          var dirty = false;
+          function touch() { if (!dirty) { dirty = true; if (flag) flag.hidden = false; } }
+          f.addEventListener('input', touch);
+          f.addEventListener('change', touch);
+          f.addEventListener('submit', function () { dirty = false; });
+          // Leaving with something typed and unsaved is the one way this page
+          // loses work, so it asks rather than letting it go quietly.
+          window.addEventListener('beforeunload', function (e) {
+            if (!dirty) return;
+            e.preventDefault();
+            e.returnValue = '';
+          });
+        })();
+      </script>`, { meta: 'Settings for this time clock only, unless a row says otherwise.' })}`));
 });
 
 app.post('/timeclock/:slug/settings', (req, res, next) => {
@@ -24467,7 +24582,7 @@ function svcCrossLink(svc, to) {
     const hasClock = SERVICES.withClock().some((x) => x.slug === svc);
     if (!hasClock) {
       return navAllowed('/timeclock/settings')
-        ? `<a class="bs-btn-sm tcx-link tcx-off" href="/timeclock/settings?svc=${encodeURIComponent(svc)}"
+        ? `<a class="bs-btn-sm tcx-link tcx-off" href="/timeclock/${encodeURIComponent(svc)}/settings"
              title="${esc(name)} has no time clock">No time clock — turn one on</a>`
         : '';
     }
