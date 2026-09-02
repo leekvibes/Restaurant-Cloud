@@ -27,6 +27,17 @@ const TC = require('./timeclock');
 // no work row, no service, nothing Payroll aggregates. See test/scheduler for
 // the invariant that holds it to that.
 const SCH = require('./scheduler');
+// Requiring it creates the four cal_* tables, the way scheduler.js and
+// timeclock.js create their own.
+const CAL = require('./calendar');
+
+// Bring the old Recurring Tasks across, once. Idempotent — it does nothing when
+// cal_items already holds rows — and it never touches m_recurring, which stays
+// readable so a mistake here can be seen rather than argued about.
+try {
+  const moved = CAL.migrateRecurring();
+  if (moved.migrated) console.log(`  Calendar: ${moved.migrated} recurring task(s) migrated.`);
+} catch (e) { console.error('[calendar] migration skipped:', e && e.message); }
 const GUARD = require('./guard');
 const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
@@ -940,12 +951,17 @@ app.get('/', (req, res) => {
   }
 
   if (may('trackers')) {
-    for (const r of recurQ.all.all()) {
-      const st = statusOf(r);
-      const d = daysTo(r.next_due);
-      if (st.key === 'over') push('red', 'recurring', `${r.name} — ${st.label.toLowerCase()}`, r.responsible || 'Recurring task', `/c/recurring`);
-      else if (st.key === 'soon' && d <= 0) push('amber', 'recurring', `${r.name} — due today`, r.responsible || 'Recurring task', `/c/recurring`);
-      else if (st.key === 'soon' && d <= 7) due('recurring', r.name, `due ${d === 1 ? 'tomorrow' : `in ${d} days`}`, '/c/recurring');
+    // Calendar tasks, not the retired m_recurring table. Only a TASK can be
+    // late — an event that happened yesterday is not a failure, which is why
+    // CAL.statusOf refuses to give an event a status at all.
+    for (const t of CAL.q.all.all()) {
+      if (t.kind !== 'task') continue;
+      const st = CAL.statusOf(t);
+      const href = `/calendar?item=${t.id}`;
+      const who = t.responsible || 'Calendar task';
+      if (st.key === 'over') push('red', 'calendar', `${t.title} — ${st.label.toLowerCase()}`, who, href);
+      else if (st.label === 'Due today') push('amber', 'calendar', `${t.title} — due today`, who, href);
+      else if (st.key === 'soon') due('calendar', t.title, st.label.toLowerCase(), href);
     }
     for (const i of dashQ.openInvoices.all()) {
       const st = invStatus(i);
@@ -1212,6 +1228,7 @@ app.get('/', (req, res) => {
     cash: (n) => `${n === 1 ? 'One drawer' : n === 2 ? 'Two drawers' : `${n} drawers`} still uncounted.`,
     shifts: (n) => `${n === 1 ? 'One service' : `${n} services`} still to close out.`,
     recurring: (n) => `${n === 1 ? 'A task is' : `${n} tasks are`} overdue.`,
+    calendar: (n) => `${n === 1 ? 'A calendar task is' : `${n} calendar tasks are`} overdue.`,
     invoices: (n) => `${n === 1 ? 'An invoice needs' : `${n} invoices need`} looking at.`,
     expirations: (n) => `${n === 1 ? 'Something expires' : `${n} things expire`} soon.`,
     equipment: (n) => `${n === 1 ? 'A warranty is' : `${n} warranties are`} running out.`,
@@ -13755,308 +13772,536 @@ function advanceDate(iso, frequency) {
 }
 const daysTo = (iso) => (iso ? Math.round((new Date(iso + 'T00:00:00') - startOfToday()) / 86400000) : null);
 
-/** Red overdue → amber due-soon → blue scheduled, plus green when just done. */
-function statusOf(row) {
-  const today = isoDate(startOfToday());
-  if (row.last_done === today) return { key: 'done', label: 'Complete', cls: 's-done' };
-  const d = daysTo(row.next_due);
-  if (d === null) return { key: 'none', label: 'No date', cls: 's-none' };
-  if (d < 0) return { key: 'over', label: d === -1 ? '1 day late' : `${-d} days late`, cls: 's-over' };
-  if (d === 0) return { key: 'soon', label: 'Due today', cls: 's-soon' };
-  if (d <= 7) return { key: 'soon', label: d === 1 ? 'Due tomorrow' : `Due in ${d} days`, cls: 's-soon' };
-  return { key: 'sched', label: `In ${d} days`, cls: 's-sched' };
-}
 
 const niceDate = (iso) => (iso
   ? new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   : '—');
 
-const recurQ = {
-  all: db.prepare('SELECT * FROM m_recurring ORDER BY next_due IS NULL, next_due, name'),
-  one: db.prepare('SELECT * FROM m_recurring WHERE id = ?'),
-  setDates: db.prepare('UPDATE m_recurring SET last_done = @last_done, next_due = @next_due WHERE id = @id'),
+
+// ---------------------------------------------------------------------------
+// CALENDAR
+//
+// What was Recurring Tasks. The rename is not cosmetic: a page that could only
+// hold chores is now the place a vendor meeting, a licence renewal and a hood
+// clean all live, and the tracker's four frequencies have become a real
+// recurrence rule. src/calendar.js owns the domain; this owns the screens.
+//
+// Month is the default because a calendar that opens on a list is not a
+// calendar. The week starts MONDAY.
+// ---------------------------------------------------------------------------
+
+const CAL_VIEWS = ['month', 'agenda'];
+// Monday first. Sunday-first is the US default and the wrong one here — the
+// restaurant's week runs Monday to Sunday and a manager reading the grid
+// should see the weekend where the weekend is, at the end.
+const CAL_DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+/** 0 = Monday … 6 = Sunday. */
+const calDow = (iso) => (new Date(`${iso}T12:00:00`).getDay() + 6) % 7;
+const calMonthStart = (ym) => `${ym}-01`;
+const calMonthEnd = (ym) => {
+  const [y, m] = ym.split('-').map(Number);
+  return `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 };
+const calShiftMonth = (ym, n) => {
+  const [y, m] = ym.split('-').map(Number);
+  const t = (y * 12) + (m - 1) + n;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, '0')}`;
+};
+const calMonthTitle = (ym) => {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+};
+/** Minutes past midnight as a person reads them: 9:00a, 2:30p. */
+const calTime = (min) => {
+  if (min == null) return '';
+  const h = Math.floor(min / 60), m = min % 60;
+  const ap = h >= 12 ? 'p' : 'a';
+  return `${(h % 12) || 12}:${String(m).padStart(2, '0')}${ap}`;
+};
+const calDayLabel = (iso) => new Date(`${iso}T12:00:00`)
+  .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
-app.get('/c/recurring', (req, res) => {
-  const rows = recurQ.all.all();
-  const view = req.query.view === 'calendar' ? 'calendar' : 'board';
+/** The recurrence, in words. Shown on a detail card, never a rule string. */
+function calRepeatText(item) {
+  if (!item.rrule_freq) return 'Does not repeat';
+  const n = item.rrule_interval || 1;
+  const days = String(item.rrule_byday || '').split(',').filter(Boolean)
+    .map((d) => ({ MO: 'Monday', TU: 'Tuesday', WE: 'Wednesday', TH: 'Thursday',
+      FR: 'Friday', SA: 'Saturday', SU: 'Sunday' }[d])).filter(Boolean);
+  let s;
+  if (item.rrule_freq === 'daily') s = n === 1 ? 'Every day' : `Every ${n} days`;
+  else if (item.rrule_freq === 'weekly') {
+    const every = n === 1 ? 'Every' : `Every ${n} weeks on`;
+    s = days.length ? `${every} ${days.join(' and ')}` : (n === 1 ? 'Every week' : `Every ${n} weeks`);
+  } else if (item.rrule_freq === 'monthly') {
+    const base = n === 1 ? 'Every month' : `Every ${n} months`;
+    if (item.rrule_bysetpos && days.length) {
+      const pos = item.rrule_bysetpos === -1 ? 'last' : ['first', 'second', 'third', 'fourth'][item.rrule_bysetpos - 1];
+      s = `${base} on the ${pos} ${days[0]}`;
+    } else if (item.rrule_bymonthday === -1) s = `${base} on the last day`;
+    else if (item.rrule_bymonthday) s = `${base} on the ${item.rrule_bymonthday}${calOrd(item.rrule_bymonthday)}`;
+    else s = base;
+  } else s = n === 1 ? 'Every year' : `Every ${n} years`;
+  if (item.rrule_until) s += ` until ${niceDate(item.rrule_until)}`;
+  else if (item.rrule_count) s += `, ${item.rrule_count} times`;
+  return s;
+}
+const calOrd = (n) => (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd'
+  : n % 10 === 3 && n !== 13 ? 'rd' : 'th');
+
+/** One occurrence as a row inside a month cell. */
+function calChip(o) {
+  const c = catOf(o.category);
+  const cls = ['zc-ev', `zc-ev--${o.completed ? 'done' : 'open'}`].join(' ');
+  const time = o.allDay ? '' : `<span class="zc-ev-t">${esc(calTime(o.startMin))}</span>`;
+  return `<button class="${cls}" type="button" style="--c:${c.color}"
+      data-open="${o.itemId}" data-occ="${o.occursOn}"
+      aria-label="${esc(o.title)}${o.allDay ? ', all day' : `, ${esc(calTime(o.startMin))}`}${
+        o.completed ? ', complete' : ''}${o.recurring ? ', repeats' : ''}">
+    <i class="zc-ev-d" aria-hidden="true"></i>${time}<span class="zc-ev-n">${esc(o.title)}</span>
+    ${o.recurring ? '<s class="zc-ev-r" aria-hidden="true" title="Repeats">↻</s>' : ''}
+  </button>`;
+}
+
+app.get('/calendar', (req, res) => {
+  if (!navAllowed('/calendar')) {
+    return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  }
+  const view = CAL_VIEWS.includes(req.query.v) ? req.query.v : 'month';
   const today = isoDate(startOfToday());
-  const st = rows.map((r) => ({ r, s: statusOf(r) }));
+  const ym = /^\d{4}-\d{2}$/.test(String(req.query.m || '')) ? req.query.m : today.slice(0, 7);
+  const monthFrom = calMonthStart(ym);
+  const monthTo = calMonthEnd(ym);
 
-  const overdue = st.filter((x) => x.s.key === 'over');
-  const week = st.filter((x) => x.s.key === 'soon');
-  const doneMonth = rows.filter((r) => r.last_done && r.last_done.slice(0, 7) === today.slice(0, 7));
-  const nextUp = st.find((x) => x.s.key === 'soon' || x.s.key === 'sched');
+  // The grid runs from the Monday on or before the 1st to the Sunday on or
+  // after the last — six rows at most, and always whole weeks.
+  const gridFrom = addDays(monthFrom, -calDow(monthFrom));
+  const gridTo = addDays(monthTo, 6 - calDow(monthTo));
 
-  // --- summary cards: tinted, iconned, one number each --------------------
-  const card = (tone, ico, label, value, sub) => `
-    <div class="mcard mcard-${tone}">
-      <div class="mcard-ico">${icon(ico)}</div>
-      <div class="mcard-body">
-        <div class="mcard-label">${label}</div>
-        <div class="mcard-value">${value}</div>
-        <div class="mcard-sub">${sub}</div>
-      </div>
-    </div>`;
-  const cards = `<div class="mcards">
-    ${card('red', 'incidents', 'Overdue', String(overdue.length),
-      overdue.length ? esc(overdue[0].r.name) + (overdue.length > 1 ? ` +${overdue.length - 1} more` : '') : 'Nothing late')}
-    ${card('amber', 'expirations', 'Due this week', String(week.length),
-      week.length ? esc(week[0].r.name) + (week.length > 1 ? ` +${week.length - 1} more` : '') : 'Clear this week')}
-    ${card('blue', 'recurring', 'Active tasks', String(rows.length), `${new Set(rows.map((r) => r.category || 'Other')).size} categories`)}
-    ${card('green', 'policy', 'Done this month', String(doneMonth.length),
-      nextUp ? `Next: ${esc(nextUp.r.name)}` : 'Nothing scheduled')}
-  </div>`;
+  const cats = String(req.query.cat || '').split(',').filter(Boolean)
+    .filter((c) => CAL.CATEGORIES.includes(c));
+  const opts = cats.length ? { categories: cats } : {};
 
-  // --- filter bar ---------------------------------------------------------
-  const used = [...new Set(rows.map((r) => r.category || 'Other'))];
-  const chips = used.map((c) => {
-    const cc = catOf(c);
-    return `<button class="fchip" data-cat="${esc(c)}" style="--c:${cc.color};--ct:${cc.tint}">
-      <i class="fdot"></i>${esc(c)}<span class="fcount">${rows.filter((r) => (r.category || 'Other') === c).length}</span></button>`;
+  const occ = view === 'agenda'
+    ? CAL.range(today, addDays(today, 60), opts)
+    : CAL.range(gridFrom, gridTo, opts);
+
+  const byDay = new Map();
+  for (const o of occ) {
+    if (!byDay.has(o.date)) byDay.set(o.date, []);
+    byDay.get(o.date).push(o);
+  }
+
+  // Attention: one compact line, not four dashboard cards pushing the calendar
+  // below the fold. The calendar is the product.
+  const over = CAL.overdueTasks(today);
+  const todays = byDay.get(today) || [];
+  const weekAhead = CAL.range(today, addDays(today, 6), opts).length;
+
+  const catFilter = CAL.CATEGORIES.map((c) => {
+    const on = !cats.length || cats.includes(c);
+    const next = cats.includes(c) ? cats.filter((x) => x !== c)
+      : (cats.length ? [...cats, c] : CAL.CATEGORIES.filter((x) => x !== c));
+    const href = `/calendar?v=${view}&m=${ym}${next.length && next.length < CAL.CATEGORIES.length ? `&cat=${next.join(',')}` : ''}`;
+    return `<a class="zc-cat${on ? ' on' : ''}" href="${href}" style="--c:${catOf(c).color}"
+      aria-pressed="${on}"><i aria-hidden="true"></i>${esc(c)}</a>`;
   }).join('');
 
-  const toolbar = `<div class="toolbar2">
-    <div class="searchbox">
-      ${icon('search')}
-      <input id="tsearch" type="search" placeholder="Search tasks, people, categories…" autocomplete="off">
-    </div>
-    <div class="fchips">
-      <button class="fchip on" data-cat="" style="--c:var(--ink-2);--ct:var(--surface-3)">All<span class="fcount">${rows.length}</span></button>
-      ${chips}
-    </div>
-    <div class="seg-view">
-      <a class="${view === 'board' ? 'on' : ''}" href="/c/recurring">${icon('list')} List</a>
-      <a class="${view === 'calendar' ? 'on' : ''}" href="/c/recurring?view=calendar">${icon('calendar')} Calendar</a>
-    </div>
-  </div>`;
-
-  const main = view === 'calendar' ? recurCalendar(rows, req.query.m || today.slice(0, 7), today) : recurBoard(st);
-
-  res.send(layout('Recurring tasks', `
-    ${flash(req)}
-    <div class="phead">
-      <div class="phead-t">
-        <h1>Recurring tasks</h1>
-        <p class="phead-s">Everything that has to happen again — and how close it is.</p>
-      </div>
-      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>` : ''}
-    </div>
-    ${cards}
-    ${toolbar}
-    ${main}
-    ${canWrite() ? recurDrawer(today) : ''}
-    <script>
-      // Live filter: search text + category chip, both narrowing the same set.
-      (function () {
-        var q = '', cat = '';
-        function apply() {
-          var shown = 0;
-          document.querySelectorAll('[data-task]').forEach(function (el) {
-            var okCat = !cat || el.getAttribute('data-cat') === cat;
-            var okQ = !q || el.getAttribute('data-search').indexOf(q) !== -1;
-            var on = okCat && okQ;
-            el.style.display = on ? '' : 'none';
-            if (on) shown++;
-          });
-          document.querySelectorAll('[data-group]').forEach(function (g) {
-            var any = g.querySelectorAll('[data-task]:not([style*="none"])').length;
-            g.style.display = any ? '' : 'none';
-          });
-          var none = document.getElementById('tnone');
-          if (none) none.style.display = shown ? 'none' : '';
-        }
-        var si = document.getElementById('tsearch');
-        if (si) si.addEventListener('input', function () { q = this.value.toLowerCase(); apply(); });
-        document.querySelectorAll('.fchip').forEach(function (b) {
-          b.addEventListener('click', function () {
-            document.querySelectorAll('.fchip').forEach(function (x) { x.classList.remove('on'); });
-            b.classList.add('on');
-            cat = b.getAttribute('data-cat');
-            apply();
-          });
-        });
-      })();
-      function rcDrawer(open) {
-        document.body.classList.toggle('drawer-open', !!open);
-        if (open) setTimeout(function () { var f = document.querySelector('#rc-drawer input[name=name]'); if (f) f.focus(); }, 180);
-      }
-      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') rcDrawer(false); });
-    </script>`));
-});
-
-/** Task cards, grouped by urgency. */
-function recurBoard(st) {
-  if (!st.length) {
-    return `<div class="empty2">
-      <div class="empty2-ico">${icon('recurring')}</div>
-      <div class="empty2-t">No recurring tasks yet</div>
-      <div class="empty2-s">Add the ones that bite when they're forgotten — hood cleaning, grease trap, pest control.</div>
-      ${canWrite() ? `<button class="btn btn-primary" type="button" onclick="rcDrawer(true)">＋ New recurring task</button>` : ''}
-    </div>`;
-  }
-  const groups = [
-    { key: 'over', title: 'Overdue', items: st.filter((x) => x.s.key === 'over') },
-    { key: 'soon', title: 'This week', items: st.filter((x) => x.s.key === 'soon') },
-    { key: 'sched', title: 'Scheduled', items: st.filter((x) => x.s.key === 'sched') },
-    { key: 'done', title: 'Completed today', items: st.filter((x) => x.s.key === 'done') },
-    { key: 'none', title: 'No date set', items: st.filter((x) => x.s.key === 'none') },
-  ].filter((g) => g.items.length);
-
-  return groups.map((g) => `
-    <section class="tgroup" data-group>
-      <div class="tgroup-h"><span class="tgroup-dot t-${g.key}"></span>${g.title}<span class="tgroup-n">${g.items.length}</span></div>
-      <div class="tgrid">
-        ${g.items.map(({ r, s }) => {
-          const c = catOf(r.category || 'Other');
-          const search = [r.name, r.category, r.responsible, r.frequency].filter(Boolean).join(' ').toLowerCase();
-          return `
-          <article class="tcard ${s.cls}" data-task data-cat="${esc(r.category || 'Other')}" data-search="${esc(search)}" style="--c:${c.color};--ct:${c.tint}">
-            <div class="tcard-top">
-              <div class="tcard-ico">${icon(c.icon)}</div>
-              <div class="tcard-head">
-                <a class="tcard-name" href="/c/recurring/${r.id}">${esc(r.name)}</a>
-                <div class="tcard-cat">${esc(r.category || 'Other')}</div>
-              </div>
-              <span class="tstatus ${s.cls}">${esc(s.label)}</span>
-            </div>
-            <div class="tcard-facts">
-              <div class="tfact"><span>Next due</span><b>${esc(niceDate(r.next_due))}</b></div>
-              <div class="tfact"><span>Frequency</span><b>${esc(r.frequency || 'Monthly')}</b></div>
-              <div class="tfact"><span>Assigned</span><b>${r.responsible ? esc(r.responsible) : '<i class="unset">Unassigned</i>'}</b></div>
-              <div class="tfact"><span>Last done</span><b>${r.last_done ? esc(niceDate(r.last_done)) : '<i class="unset">Never</i>'}</b></div>
-            </div>
-            <div class="tcard-act">
-              <form method="post" action="/c/recurring/${r.id}/done" style="margin:0">
-                ${canWrite() ? `<button class="btn btn-sm ${s.key === 'over' || s.key === 'soon' ? 'btn-primary' : ''}" type="submit">✓ Mark done</button>` : ''}
-              </form>
-              <a class="btn btn-sm btn-ghost" href="/c/recurring/${r.id}/edit">Edit</a>
-            </div>
-          </article>`;
-        }).join('')}
-      </div>
-    </section>`).join('')
-    + '<div class="empty2" id="tnone" style="display:none"><div class="empty2-t">Nothing matches</div><div class="empty2-s">Try a different search or category.</div></div>';
-}
-
-/** Slide-in panel — creating a task shouldn't cost the page half its height. */
-function recurDrawer(today) {
-  return `
-    <div class="drawer-scrim" onclick="rcDrawer(false)"></div>
-    <aside class="drawer" id="rc-drawer" aria-label="New recurring task">
-      <div class="drawer-h">
-        <div><div class="drawer-t">New recurring task</div><div class="drawer-s">It'll reappear on its own schedule.</div></div>
-        <button class="drawer-x" type="button" onclick="rcDrawer(false)" aria-label="Close">✕</button>
-      </div>
-      <form method="post" action="/c/recurring" class="drawer-b">
-        <label class="fld">Task name <input name="name" required placeholder="e.g. Hood cleaning"></label>
-        <label class="fld">Category
-          <select name="category">${Object.keys(CATEGORIES).map((c) => `<option${c === 'Cleaning' ? ' selected' : ''}>${c}</option>`).join('')}</select>
-        </label>
-        <div class="fld-row">
-          <label class="fld">How often <select name="frequency">${FREQ.map((f) => `<option${f === 'Monthly' ? ' selected' : ''}>${f}</option>`).join('')}</select></label>
-          <label class="fld">Next due <input name="next_due" type="date" value="${today}"></label>
-        </div>
-        <label class="fld">Assigned to <input name="responsible" placeholder="Optional — who owns it"></label>
-        <label class="fld">Notes <textarea name="notes" rows="3" placeholder="Optional — vendor, access notes, anything worth remembering"></textarea></label>
-        <div class="drawer-f">
-          <button class="btn btn-ghost" type="button" onclick="rcDrawer(false)">Cancel</button>
-          <button class="btn btn-primary" type="submit">Create task</button>
-        </div>
-      </form>
-    </aside>`;
-}
-
-function recurCalendar(rows, month, today) {
-  const [y, mo] = month.split('-').map(Number);
-  if (!y || !mo) return '<p class="muted">Bad month.</p>';
-  const pad = (n) => String(n).padStart(2, '0');
-  const monthStart = `${y}-${pad(mo)}-01`;
-  const daysInMonth = new Date(y, mo, 0).getDate();
-  const monthEnd = `${y}-${pad(mo)}-${pad(daysInMonth)}`;
-  const firstWeekday = new Date(y, mo - 1, 1).getDay();
-
-  const byDay = {};
-  for (const r of rows) {
-    if (!r.next_due) continue;
-    let d = r.next_due, guard = 0, first = true;
-    while (d <= monthEnd && guard++ < 500) {
-      if (d >= monthStart) (byDay[d] = byDay[d] || []).push({ r, projected: !first });
-      d = advanceDate(d, r.frequency);
-      first = false;
+  // ---- month ---------------------------------------------------------------
+  let grid = '';
+  if (view === 'month') {
+    const cells = [];
+    for (let d = gridFrom; d <= gridTo; d = addDays(d, 1)) {
+      const items = byDay.get(d) || [];
+      const outside = d < monthFrom || d > monthTo;
+      // Three fit; a fourth becomes "+N more" rather than a cell that grows
+      // and drags the whole row with it.
+      const shown = items.slice(0, 3);
+      const rest = items.length - shown.length;
+      cells.push(`<div class="zc-cell${outside ? ' zc-out' : ''}${d === today ? ' zc-today' : ''}"
+          data-date="${d}">
+        <button class="zc-num" type="button" data-add="${d}"
+          aria-label="Add something on ${esc(calDayLabel(d))}">${Number(d.slice(8))}</button>
+        <div class="zc-evs">${shown.map(calChip).join('')}
+          ${rest > 0 ? `<button class="zc-more" type="button" data-day="${d}">+${rest} more</button>` : ''}</div>
+      </div>`);
     }
-  }
-  const prev = mo === 1 ? `${y - 1}-12` : `${y}-${pad(mo - 1)}`;
-  const nextM = mo === 12 ? `${y + 1}-01` : `${y}-${pad(mo + 1)}`;
-  const title = new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
-
-  let cells = '';
-  for (let i = 0; i < firstWeekday; i++) cells += '<div class="cal-cell cal-out"></div>';
-  for (let day = 1; day <= daysInMonth; day++) {
-    const iso = `${y}-${pad(mo)}-${pad(day)}`;
-    const items = byDay[iso] || [];
-    cells += `<div class="cal-cell${iso === today ? ' cal-today' : ''}">
-      <div class="cal-day">${day}</div>
-      ${items.map(({ r, projected }) => {
-        const c = catOf(r.category || 'Other');
-        const s = statusOf({ ...r, next_due: iso });
-        return `<a class="cal-task ${projected ? 'cal-proj' : s.cls}" style="--c:${c.color};--ct:${c.tint}"
-          href="/c/recurring/${r.id}" title="${esc(r.name)} · ${esc(r.category || 'Other')}${projected ? ' (projected)' : ''}">${esc(r.name)}</a>`;
-      }).join('')}
+    grid = `<div class="zc-grid" role="grid" aria-label="${esc(calMonthTitle(ym))}">
+      ${CAL_DOW.map((d) => `<div class="zc-dow" role="columnheader">${d}</div>`).join('')}
+      ${cells.join('')}
     </div>`;
   }
 
-  return `
-    <div class="cal-head">
-      <a class="btn btn-sm" href="/c/recurring?view=calendar&m=${prev}">←</a>
-      <strong>${esc(title)}</strong>
-      <a class="btn btn-sm" href="/c/recurring?view=calendar&m=${nextM}">→</a>
-      <a class="btn btn-sm btn-ghost" href="/c/recurring?view=calendar">Today</a>
+  // ---- agenda --------------------------------------------------------------
+  let agenda = '';
+  if (view === 'agenda') {
+    const days = [...byDay.keys()].sort();
+    agenda = days.length ? days.map((d) => {
+      const head = d === today ? 'Today' : d === addDays(today, 1) ? 'Tomorrow' : calDayLabel(d);
+      return `<section class="zc-ag-d">
+        <h3 class="zc-ag-h${d === today ? ' is-today' : ''}">${esc(head)}</h3>
+        ${byDay.get(d).map((o) => {
+    const c = catOf(o.category);
+    return `<button class="zc-ag-r" type="button" data-open="${o.itemId}" data-occ="${o.occursOn}"
+            style="--c:${c.color}">
+          <span class="zc-ag-t">${o.allDay ? 'All day' : esc(calTime(o.startMin))}</span>
+          <span class="zc-ag-b"><b>${esc(o.title)}</b>
+            <i>${esc(o.category)}${o.recurring ? ' · repeats' : ''}${o.completed ? ' · complete' : ''}</i></span>
+        </button>`;
+  }).join('')}
+      </section>`;
+    }).join('') : '<p class="zc-none">Nothing scheduled in the next 60 days.</p>';
+  }
+
+  const body = `<div class="bs-page">
+    ${flash(req)}
+    <div class="zc">
+      <div class="zc-bar">
+        <div class="zc-nav">
+          <a class="zc-btn" href="/calendar?v=${view}" aria-label="Today">Today</a>
+          <a class="zc-arw" href="/calendar?v=${view}&m=${calShiftMonth(ym, -1)}" aria-label="Previous month">&larr;</a>
+          <h1 class="zc-title">${esc(calMonthTitle(ym))}</h1>
+          <a class="zc-arw" href="/calendar?v=${view}&m=${calShiftMonth(ym, 1)}" aria-label="Next month">&rarr;</a>
+        </div>
+        <nav class="zc-seg" aria-label="Calendar view">
+          <a class="${view === 'month' ? 'on' : ''}" href="/calendar?v=month&m=${ym}"
+            aria-current="${view === 'month' ? 'page' : 'false'}">Month</a>
+          <a class="${view === 'agenda' ? 'on' : ''}" href="/calendar?v=agenda&m=${ym}"
+            aria-current="${view === 'agenda' ? 'page' : 'false'}">Agenda</a>
+        </nav>
+        ${canWrite() ? `<button class="zc-new" type="button" id="zc-new" data-add="${today}">+ New</button>` : ''}
+      </div>
+
+      <div class="zc-sub">
+        <div class="zc-att">
+          ${over.length ? `<a class="zc-att-i is-over" href="/calendar?v=agenda"><b>${over.length}</b> overdue</a>` : ''}
+          <span class="zc-att-i"><b>${todays.length}</b> today</span>
+          <span class="zc-att-i"><b>${weekAhead}</b> this week</span>
+        </div>
+        <div class="zc-cats">${catFilter}</div>
+      </div>
+
+      ${view === 'month' ? grid : `<div class="zc-ag">${agenda}</div>`}
+      ${!occ.length && view === 'month'
+    ? '<p class="zc-hint">Nothing this month. Click a date, or + New, to add something.</p>' : ''}
     </div>
-    <div class="cal">
-      ${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="cal-dow">${d}</div>`).join('')}
-      ${cells}
-    </div>
-    <p class="calnote">Solid chips are real due dates. Dashed ones are the cycle projected forward — they firm up as each task is marked done.</p>`;
+  </div>
+
+  ${calComposer(req, today)}
+  ${calDetail(req)}
+
+  <script>
+    (function () {
+      var occ = ${JSON.stringify(occ.map((o) => ({
+    i: o.itemId, o: o.occursOn, d: o.date, t: o.title, c: o.category,
+    ad: o.allDay ? 1 : 0, sm: o.startMin, em: o.endMin,
+    r: o.recurring ? 1 : 0, k: o.kind, done: o.completed ? 1 : 0,
+  })))};
+      var meta = ${JSON.stringify(Object.fromEntries(
+    [...new Set(occ.map((o) => o.itemId))].map((id) => {
+      const it = CAL.q.byId.get(id);
+      return [id, it ? {
+        repeat: calRepeatText(it), who: it.responsible || '', notes: it.notes || '',
+        kind: it.kind, cat: it.category || 'Other',
+      } : null];
+    }),
+  ))};
+      var byKey = {};
+      occ.forEach(function (o) { byKey[o.i + '|' + o.o] = o; });
+
+      function sheet(el, on) {
+        if (!el) return;
+        el.hidden = !on;
+        document.body.classList.toggle('zc-open', !!on);
+      }
+      var composer = document.getElementById('zc-composer');
+      var detail = document.getElementById('zc-detail');
+      window.calClose = function () { sheet(composer, false); sheet(detail, false); };
+
+      // ---- create ----------------------------------------------------------
+      function openAdd(date) {
+        sheet(detail, false);
+        document.getElementById('zc-f-date').value = date;
+        document.getElementById('zc-f-title').value = '';
+        document.getElementById('zc-f-notes').value = '';
+        document.getElementById('zc-f-resp').value = '';
+        document.getElementById('zc-f-allday').checked = true;
+        document.getElementById('zc-f-times').hidden = true;
+        document.getElementById('zc-f-repeat').value = '';
+        document.getElementById('zc-f-more').hidden = true;
+        sheet(composer, true);
+        setTimeout(function () { document.getElementById('zc-f-title').focus(); }, 60);
+      }
+
+      document.addEventListener('click', function (ev) {
+        var add = ev.target.closest && ev.target.closest('[data-add]');
+        if (add) { openAdd(add.dataset.add); return; }
+        var cell = ev.target.closest && ev.target.closest('.zc-cell');
+        if (cell && ev.target === cell) { openAdd(cell.dataset.date); return; }
+        var more = ev.target.closest && ev.target.closest('[data-day]');
+        if (more) { location.href = '/calendar?v=agenda&m=' + more.dataset.day.slice(0, 7); return; }
+        var open = ev.target.closest && ev.target.closest('[data-open]');
+        if (open) { showDetail(open.dataset.open, open.dataset.occ); }
+      });
+
+      var allday = document.getElementById('zc-f-allday');
+      if (allday) allday.addEventListener('change', function () {
+        document.getElementById('zc-f-times').hidden = allday.checked;
+      });
+      var moreBtn = document.getElementById('zc-f-morebtn');
+      if (moreBtn) moreBtn.addEventListener('click', function () {
+        var m = document.getElementById('zc-f-more');
+        m.hidden = !m.hidden;
+        moreBtn.textContent = m.hidden ? 'More options' : 'Fewer options';
+      });
+
+      // ---- detail ----------------------------------------------------------
+      function showDetail(id, on) {
+        var o = byKey[id + '|' + on];
+        var m = meta[id] || {};
+        if (!o) return;
+        sheet(composer, false);
+        document.getElementById('zc-d-title').textContent = o.t;
+        document.getElementById('zc-d-cat').textContent = o.c;
+        document.getElementById('zc-d-when').textContent =
+          new Date(o.d + 'T12:00:00').toLocaleDateString('en-US',
+            { weekday: 'long', month: 'long', day: 'numeric' })
+          + (o.ad ? ' · All day' : ' · ' + fmt(o.sm) + (o.em != null ? ' – ' + fmt(o.em) : ''));
+        document.getElementById('zc-d-rep').textContent = m.repeat || 'Does not repeat';
+        var who = document.getElementById('zc-d-who');
+        who.textContent = m.who || '';
+        who.parentNode.hidden = !m.who;
+        var notes = document.getElementById('zc-d-notes');
+        notes.textContent = m.notes || '';
+        notes.parentNode.hidden = !m.notes;
+        // Only a task can be completed. An event happened.
+        var done = document.getElementById('zc-d-done');
+        done.hidden = m.kind !== 'task' || !!o.done;
+        var undo = document.getElementById('zc-d-undone');
+        undo.hidden = m.kind !== 'task' || !o.done;
+        ['zc-d-done-f', 'zc-d-undone-f', 'zc-d-del-f'].forEach(function (f) {
+          var el = document.getElementById(f);
+          if (el) {
+            el.querySelector('[name=id]').value = id;
+            var occf = el.querySelector('[name=occurs_on]');
+            if (occf) occf.value = on;
+          }
+        });
+        document.getElementById('zc-d-edit').href = '/calendar?v=month&m=' + o.d.slice(0, 7) + '&edit=' + id;
+        // A series asks which occurrences a delete should touch; a one-off does not.
+        document.getElementById('zc-d-scope').hidden = !o.r;
+        sheet(detail, true);
+      }
+      function fmt(min) {
+        if (min == null) return '';
+        var h = Math.floor(min / 60), mm = min % 60;
+        return ((h % 12) || 12) + ':' + String(mm).padStart(2, '0') + (h >= 12 ? 'p' : 'a');
+      }
+
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') window.calClose();
+        if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+        if (e.key === 'n' || e.key === 'N') { openAdd('${today}'); }
+        if (e.key === 't' || e.key === 'T') { location.href = '/calendar?v=${view}'; }
+      });
+    }());
+  </script>`;
+
+  res.send(layout('Calendar', body, { active: '/calendar' }));
+});
+
+
+// --- writes ----------------------------------------------------------------
+// Every one goes through src/calendar.js. The route's job is to turn a form
+// into a call and a refusal into a sentence — never to hold a rule of its own.
+
+/** The composer's Repeat menu, into the columns the domain stores. */
+const CAL_REPEAT = {
+  daily: { rrule_freq: 'daily', rrule_interval: 1 },
+  weekday: { rrule_freq: 'weekly', rrule_interval: 1, rrule_byday: 'MO,TU,WE,TH,FR' },
+  weekly: { rrule_freq: 'weekly', rrule_interval: 1 },
+  biweekly: { rrule_freq: 'weekly', rrule_interval: 2 },
+  monthly: { rrule_freq: 'monthly', rrule_interval: 1 },
+  quarterly: { rrule_freq: 'monthly', rrule_interval: 3 },
+  yearly: { rrule_freq: 'yearly', rrule_interval: 1 },
+};
+const calMin = (hhmm) => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ''));
+  return m ? (Number(m[1]) * 60) + Number(m[2]) : null;
+};
+const calBack = (res, msg, err) => res.redirect('/calendar?msg=' + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+
+function calGuard(req, res) {
+  if (!navAllowed('/calendar')) { res.status(403).send('Not available on your account.'); return false; }
+  return true;
 }
 
-app.post('/c/recurring', (req, res) => {
-  const name = String(req.body.name || '').trim();
-  if (!name) return res.redirect('/c/recurring?err=1&msg=' + encodeURIComponent('Give the task a name.'));
-  db.prepare(`INSERT INTO m_recurring (name, category, frequency, next_due, responsible, notes)
-              VALUES (@name, @category, @frequency, @next_due, @responsible, @notes)`).run({
-    name,
-    category: CATEGORIES[req.body.category] ? req.body.category : 'Other',
-    frequency: FREQ.includes(req.body.frequency) ? req.body.frequency : 'Monthly',
-    next_due: String(req.body.next_due || '').slice(0, 10) || null,
-    responsible: String(req.body.responsible || '').trim() || null,
-    notes: String(req.body.notes || '').trim() || null,
-  });
-  res.redirect('/c/recurring?msg=' + encodeURIComponent(`${name} added.`));
+app.post('/calendar/new', (req, res) => {
+  if (!calGuard(req, res)) return;
+  try {
+    const rep = CAL_REPEAT[req.body.repeat] || {};
+    const allDay = req.body.all_day === '1';
+    const item = CAL.create({
+      kind: req.body.kind === 'event' ? 'event' : 'task',
+      title: req.body.title,
+      category: req.body.category,
+      notes: req.body.notes,
+      responsible: req.body.responsible,
+      starts_on: req.body.starts_on,
+      all_day: allDay ? 1 : 0,
+      start_min: allDay ? null : calMin(req.body.start_time),
+      end_min: allDay ? null : calMin(req.body.end_time),
+      ...rep,
+    });
+    if (req.body.reminder) CAL.setReminders(item.id, [Number(req.body.reminder)]);
+    calBack(res, `${item.title} added.`);
+  } catch (e) {
+    if (!(e instanceof CAL.CalendarError)) throw e;
+    calBack(res, e.message, true);
+  }
 });
 
-// Undo matters here: this advances by the frequency, so a mis-tap on a
-// quarterly task pushes it three months out with no way back by hand.
-app.post('/c/recurring/:id/done', (req, res) => {
-  const row = recurQ.one.get(Number(req.params.id));
-  if (!row) return res.status(404).end();
-  const today = isoDate(startOfToday());
-  const next = advanceDate(today, row.frequency);
-  recurQ.setDates.run({ id: row.id, last_done: today, next_due: next });
-  const undo = `/c/recurring/${row.id}/undo?d=${encodeURIComponent(row.next_due || '')}&l=${encodeURIComponent(row.last_done || '')}`;
-  res.redirect('/c/recurring?msg=' + encodeURIComponent(`${row.name} done — next due ${niceDate(next)}.`) + '&undo=' + encodeURIComponent(undo));
+app.post('/calendar/complete', (req, res) => {
+  if (!calGuard(req, res)) return;
+  try {
+    const done = CAL.complete(Number(req.body.id), req.body.occurs_on, tcActor(req));
+    // Undo names the completion ROW. The old tracker carried the two dates it
+    // had overwritten in an editable querystring that never expired.
+    calBack(res, 'Marked complete.' + (done ? '' : ''));
+  } catch (e) {
+    if (!(e instanceof CAL.CalendarError)) throw e;
+    calBack(res, e.message, true);
+  }
 });
 
-app.post('/c/recurring/:id/undo', (req, res) => {
-  const row = recurQ.one.get(Number(req.params.id));
-  if (!row) return res.status(404).end();
-  recurQ.setDates.run({
-    id: row.id,
-    next_due: String(req.query.d || '').slice(0, 10) || null,
-    last_done: String(req.query.l || '').slice(0, 10) || null,
-  });
-  res.redirect('/c/recurring?msg=' + encodeURIComponent(`Undone — ${row.name} is back to ${niceDate(req.query.d)}.`));
+app.post('/calendar/uncomplete', (req, res) => {
+  if (!calGuard(req, res)) return;
+  const row = CAL.q.doneOn.get(Number(req.body.id), String(req.body.occurs_on || ''));
+  if (!row) return calBack(res, 'That was already undone.', true);
+  CAL.uncomplete(row.id);
+  calBack(res, 'No longer marked complete.');
 });
+
+app.post('/calendar/delete', (req, res) => {
+  if (!calGuard(req, res)) return;
+  try {
+    const scope = ['one', 'future', 'all'].includes(req.body.scope) ? req.body.scope : 'all';
+    CAL.remove(Number(req.body.id), scope, req.body.occurs_on || null);
+    calBack(res, scope === 'one' ? 'That occurrence was removed.'
+      : scope === 'future' ? 'That one and everything after it were removed.'
+        : 'Deleted.');
+  } catch (e) {
+    if (!(e instanceof CAL.CalendarError)) throw e;
+    calBack(res, e.message, true);
+  }
+});
+
+// The old address, kept indefinitely. Bookmarks, the audit document and
+// anything else pointing at Recurring Tasks still land somewhere true.
+app.get('/c/recurring', (req, res) => res.redirect(301, '/calendar'));
+app.get('/c/recurring/:id', (req, res) => res.redirect(301, `/calendar?item=${encodeURIComponent(req.params.id)}`));
+
+/** The quick composer. Hand-written token: the stamper only runs with a password set. */
+function calComposer(req, today) {
+  if (!canWrite()) return '';
+  const cats = CAL.CATEGORIES.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  return `
+  <div class="zc-scrim" onclick="calClose()" hidden></div>
+  <aside class="zc-sheet" id="zc-composer" hidden aria-label="Add to calendar">
+    <form method="post" action="/calendar/new">
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      <div class="zc-sheet-h"><b>Add to calendar</b>
+        <button class="zc-x" type="button" onclick="calClose()" aria-label="Close">&#10005;</button></div>
+      <div class="zc-sheet-b">
+        <label class="zc-fld zc-fld--title">Title
+          <input name="title" id="zc-f-title" required maxlength="120" autocomplete="off"
+            placeholder="Hood cleaning"></label>
+        <div class="zc-row">
+          <label class="zc-fld">Date<input type="date" name="starts_on" id="zc-f-date" required
+            value="${today}"></label>
+          <label class="zc-check"><input type="checkbox" name="all_day" id="zc-f-allday" value="1" checked>
+            All day</label>
+        </div>
+        <div class="zc-row" id="zc-f-times" hidden>
+          <label class="zc-fld">Starts<input type="time" name="start_time"></label>
+          <label class="zc-fld">Ends<input type="time" name="end_time"></label>
+        </div>
+        <label class="zc-fld">Repeat
+          <select name="repeat" id="zc-f-repeat">
+            <option value="">Does not repeat</option>
+            <option value="daily">Daily</option>
+            <option value="weekday">Every weekday</option>
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Every 2 weeks</option>
+            <option value="monthly">Monthly</option>
+            <option value="quarterly">Every 3 months</option>
+            <option value="yearly">Yearly</option>
+          </select></label>
+        <label class="zc-fld">Category
+          <select name="category">${cats}</select></label>
+        <button class="zc-more-b" type="button" id="zc-f-morebtn">More options</button>
+        <div id="zc-f-more" hidden>
+          <label class="zc-fld">This is
+            <select name="kind">
+              <option value="task" selected>A task — can be completed</option>
+              <option value="event">An event — it just happens</option>
+            </select></label>
+          <label class="zc-fld">Responsible
+            <input name="responsible" id="zc-f-resp" maxlength="80"
+              placeholder="A person, or a vendor"></label>
+          <label class="zc-fld">Reminder
+            <select name="reminder">
+              <option value="">None</option>
+              ${CAL.REMINDER_OFFSETS.map((o) => `<option value="${o.min}">${esc(o.label)}</option>`).join('')}
+            </select></label>
+          <label class="zc-fld">Notes<textarea name="notes" id="zc-f-notes" rows="3" maxlength="500"></textarea></label>
+        </div>
+      </div>
+      <div class="zc-sheet-f">
+        <button class="btn" type="button" onclick="calClose()">Cancel</button>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </div>
+    </form>
+  </aside>`;
+}
+
+/** The detail card. Shown first — never straight into an edit form. */
+function calDetail(req) {
+  // The three actions post their own forms, rendered outside the card so a
+  // button can reach one by id without nesting forms. Each carries its own
+  // token: the response-level stamper only runs when APP_PASSWORD is set, so a
+  // form leaning on it ships with no field at all on a dev machine and breaks
+  // the day a password exists.
+  const t = `<input type="hidden" name="_csrf" value="${csrfFor(req)}">`;
+  const tok = `
+    <form method="post" action="/calendar/complete" id="zc-d-done-f" style="display:none">
+      ${t}<input type="hidden" name="id"><input type="hidden" name="occurs_on"></form>
+    <form method="post" action="/calendar/uncomplete" id="zc-d-undone-f" style="display:none">
+      ${t}<input type="hidden" name="id"><input type="hidden" name="occurs_on"></form>
+    <form method="post" action="/calendar/delete" id="zc-d-del-f" style="display:none">
+      ${t}<input type="hidden" name="id"><input type="hidden" name="occurs_on">
+      <input type="hidden" name="scope" value="all"></form>`;
+  return `
+  <aside class="zc-sheet zc-sheet--d" id="zc-detail" hidden aria-label="Calendar item">
+    <div class="zc-sheet-h"><b id="zc-d-title"></b>
+      <button class="zc-x" type="button" onclick="calClose()" aria-label="Close">&#10005;</button></div>
+    <div class="zc-sheet-b">
+      <p class="zc-d-cat" id="zc-d-cat"></p>
+      <p class="zc-d-when" id="zc-d-when"></p>
+      <p class="zc-d-rep" id="zc-d-rep"></p>
+      <div class="zc-d-l"><span>Responsible</span><b id="zc-d-who"></b></div>
+      <div class="zc-d-l"><span>Notes</span><b id="zc-d-notes"></b></div>
+      <p class="zc-d-scope" id="zc-d-scope" hidden>This repeats — choose what a change should touch.</p>
+    </div>
+    <div class="zc-sheet-f">
+      <button class="btn btn-primary" type="submit" form="zc-d-done-f" id="zc-d-done">Mark complete</button>
+      <button class="btn" type="submit" form="zc-d-undone-f" id="zc-d-undone" hidden>Undo complete</button>
+      <a class="btn" id="zc-d-edit" href="#">Edit</a>
+      <button class="btn zc-del" type="submit" form="zc-d-del-f"
+        onclick="return confirm('Delete this? For a repeating item this removes the whole series.')">Delete</button>
+    </div>
+  </aside>${tok}`;
+}
 
 // ---------------------------------------------------------------------------
 // INVOICES

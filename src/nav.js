@@ -38,7 +38,7 @@ const AREAS = [
   { key: 'costs',     label: 'Performance',     paths: ['/costs', '/performance'] },
   { key: 'cash',      label: 'Cash',            paths: ['/cash'] },
   { key: 'payroll',   label: 'Payroll',         paths: ['/payroll'] },   // includes /payroll/timesheets
-  { key: 'trackers',  label: 'Trackers & logs', paths: ['/c/'] },
+  { key: 'trackers',  label: 'Trackers & logs', paths: ['/c/', '/calendar'] },
   { key: 'menu',      label: 'Menu costing',    paths: ['/menu'] },
   // The portal's manager side sits with Staff: it is about the people, and
   // anybody trusted with the roster is the person who posts the board and
@@ -100,7 +100,7 @@ const SECTIONS = [
     ['/c/contacts', 'contacts', 'Contacts', '#0d9488', 'trackers'],
   ] },
   { title: 'Tasks & logs', links: [
-    ['/c/recurring', 'recurring', 'Recurring tasks', '#059669', 'trackers'],
+    ['/calendar', 'calendar', 'Calendar', '#059669', 'trackers'],
     ['/c/incidents', 'incidents', 'Incident log', '#dc2626', 'trackers'],
     ['/c/notes', 'notes', 'Decisions log', '#7c3aed', 'trackers'],
   ] },

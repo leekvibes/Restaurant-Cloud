@@ -138,6 +138,32 @@ CREATE TABLE IF NOT EXISTS cal_reminders (
 CREATE INDEX IF NOT EXISTS idx_cal_rem ON cal_reminders (item_id);
 `);
 
+// The table the calendar replaced, kept alive on purpose.
+//
+// Its definition used to come from the modules.js registry entry, and removing
+// that entry — which is what stops the generic /c/ CRUD answering for recurring
+// tasks — took the table with it. Existing installs are unaffected, because the
+// table is already there with rows in it. A FRESH install had nothing for
+// migrateRecurring() to read and nothing for anything else to reference.
+//
+// So the definition lives here now, beside the migration that is its only
+// reader. Unread by anything else, never written, and dropped a release later
+// once the migration itself is retired — which is exactly what the plan said
+// leaving it in place meant.
+db.exec(`
+CREATE TABLE IF NOT EXISTS m_recurring (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  name        TEXT,
+  frequency   TEXT,
+  next_due    TEXT,
+  last_done   TEXT,
+  responsible TEXT,
+  notes       TEXT,
+  category    TEXT
+);
+`);
+
 class CalendarError extends Error {
   constructor(message, code) { super(message); this.name = 'CalendarError'; this.code = code || 'invalid'; }
 }

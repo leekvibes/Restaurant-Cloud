@@ -223,7 +223,10 @@ test('paperwork pages still use the CALENDAR date, deliberately', async () => {
   for (const [route, marker] of [
     ['invoices', "app.get('/c/invoices'"],
     ['expenses', "app.get('/c/expenses'"],
-    ['recurring', "app.get('/c/recurring'"],
+    // The calendar replaced Recurring tasks and is still CALENDAR dated: a
+    // September 1 inspection is paperwork, not a service, and must not roll at
+    // the 4am cutoff the way a shift does.
+    ['calendar', "app.get('/calendar'"],
   ]) {
     assert.match(at(marker), /const today = isoDate\(startOfToday\(\)\)/,
       `${route} groups by calendar month and stays on the calendar date`);

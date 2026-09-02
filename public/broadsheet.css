@@ -6352,3 +6352,158 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .tcw-acts { justify-content: flex-start; }
   .wiz-foot { flex-direction: column; align-items: stretch; gap: 12px; }
 }
+
+/* ===========================================================================
+   CALENDAR
+   ===========================================================================
+   The calendar is the product, so it gets the page. No row of stat cards above
+   it pushing the grid below the fold — the attention line is one row, and it is
+   deliberately quieter than the grid it sits above.
+
+   Category colour is an ACCENT, never a fill. A month with forty obligations on
+   it has to stay readable, and forty filled blocks is a rainbow. Position
+   colours from the Scheduler are a separate palette and are not used here. */
+.zc { --zc-rule: var(--rule); }
+.zc-bar { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin:0 0 14px; }
+.zc-nav { display:flex; align-items:center; gap:10px; }
+.zc-title { margin:0; font-size:21px; font-weight:680; letter-spacing:-.02em; color:var(--headline);
+  min-width:190px; }
+.zc-btn, .zc-arw {
+  display:inline-flex; align-items:center; justify-content:center; min-height:36px; min-width:36px;
+  padding:0 12px; border:1px solid var(--rule); background:var(--paper); color:var(--body);
+  font-size:13px; text-decoration:none; }
+.zc-btn:hover, .zc-arw:hover { background:var(--panel); color:var(--headline); }
+.zc-seg { display:flex; border:1px solid var(--rule); margin-left:auto; }
+.zc-seg a { padding:0 16px; min-height:36px; display:flex; align-items:center;
+  font-size:13px; font-weight:600; color:var(--muted); text-decoration:none; }
+.zc-seg a + a { border-left:1px solid var(--rule); }
+.zc-seg a.on { background:var(--ink); color:var(--paper); }
+.zc-new { min-height:36px; padding:0 18px; border:1px solid var(--ink); background:var(--ink);
+  color:var(--paper); font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
+.zc-new:hover { opacity:.9; }
+
+/* One quiet row, not four cards. */
+.zc-sub { display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:0 0 10px;
+  padding-bottom:10px; border-bottom:1px solid var(--rule); }
+.zc-att { display:flex; gap:16px; font-size:12.5px; color:var(--muted); }
+.zc-att-i { display:inline-flex; gap:5px; align-items:baseline; text-decoration:none; color:var(--muted); }
+.zc-att-i b { color:var(--headline); font-weight:650; }
+.zc-att-i.is-over b { color:var(--danger); }
+.zc-cats { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+.zc-cat { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; min-height:30px;
+  border:1px solid var(--rule); font-size:12px; color:var(--muted); text-decoration:none; }
+.zc-cat i { width:8px; height:8px; border-radius:50% !important; background:var(--c); opacity:.3; }
+.zc-cat.on { color:var(--headline); }
+.zc-cat.on i { opacity:1; }
+
+/* The grid. Six rows at most, always whole Monday-to-Sunday weeks. */
+.zc-grid { display:grid; grid-template-columns:repeat(7, minmax(0, 1fr));
+  border:1px solid var(--rule); border-bottom:0; background:var(--paper); }
+.zc-dow { padding:8px 10px; font-family:var(--mono); font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--muted); background:var(--panel);
+  border-bottom:1px solid var(--rule); border-left:1px solid var(--rule); }
+.zc-dow:first-child { border-left:0; }
+.zc-cell { min-height:118px; padding:4px; border-bottom:1px solid var(--rule);
+  border-left:1px solid var(--rule); display:flex; flex-direction:column; gap:2px; }
+.zc-cell:nth-child(7n+1) { border-left:0; }
+.zc-out { background:var(--panel); }
+.zc-out .zc-num { color:var(--muted); opacity:.6; }
+.zc-num { align-self:flex-start; min-width:26px; height:26px; padding:0 6px; border:0;
+  background:none; font:inherit; font-size:13px; font-weight:600; color:var(--body);
+  cursor:pointer; }
+.zc-num:hover { background:var(--panel); color:var(--headline); }
+/* Today is a filled circle on the DATE, not a shouting cell. */
+.zc-today .zc-num { background:var(--ink); color:var(--paper); border-radius:50% !important;
+  min-width:26px; padding:0; text-align:center; }
+.zc-evs { display:flex; flex-direction:column; gap:2px; overflow:hidden; }
+.zc-ev { display:flex; align-items:center; gap:5px; width:100%; text-align:left;
+  border:0; background:none; padding:2px 4px; font:inherit; font-size:12px; cursor:pointer;
+  color:var(--headline); }
+.zc-ev:hover { background:var(--panel); }
+.zc-ev-d { width:3px; align-self:stretch; min-height:13px; background:var(--c); flex:0 0 3px; }
+.zc-ev-t { font-family:var(--mono); font-size:10.5px; color:var(--muted); flex:0 0 auto; }
+.zc-ev-n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.zc-ev-r { font-size:9px; color:var(--muted); text-decoration:none; flex:0 0 auto; }
+.zc-ev--done .zc-ev-n { text-decoration:line-through; color:var(--muted); }
+.zc-ev--done .zc-ev-d { opacity:.35; }
+.zc-more { border:0; background:none; padding:1px 4px; font:inherit; font-size:11px;
+  color:var(--muted); text-align:left; cursor:pointer; }
+.zc-more:hover { color:var(--headline); text-decoration:underline; }
+.zc-hint, .zc-none { margin:16px 0 0; font-size:13px; color:var(--muted); }
+
+/* Agenda — the mobile-first view, and a real list on desktop too. */
+.zc-ag { border:1px solid var(--rule); border-bottom:0; }
+.zc-ag-h { margin:0; padding:9px 14px; font-family:var(--mono); font-size:11px;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+  background:var(--panel); border-bottom:1px solid var(--rule); }
+.zc-ag-h.is-today { color:var(--headline); }
+.zc-ag-r { display:flex; gap:14px; width:100%; text-align:left; align-items:flex-start;
+  border:0; border-bottom:1px solid var(--rule); background:var(--paper);
+  padding:12px 14px; font:inherit; cursor:pointer; min-height:56px; }
+.zc-ag-r:hover { background:var(--panel); }
+.zc-ag-t { flex:0 0 76px; font-family:var(--mono); font-size:12px; color:var(--muted); padding-top:2px; }
+.zc-ag-b { border-left:3px solid var(--c); padding-left:10px; }
+.zc-ag-b b { display:block; font-size:14.5px; font-weight:600; color:var(--headline); }
+.zc-ag-b i { display:block; font-style:normal; font-size:12px; color:var(--muted); margin-top:2px; }
+
+/* Composer and detail. Same drawer mechanics as the rest of the shell. */
+.zc-scrim { position:fixed; inset:0; z-index:60; background:rgba(20,18,14,.34); }
+.zc-sheet { position:fixed; top:0; right:0; bottom:0; width:420px; max-width:94vw; z-index:61;
+  background:var(--paper); border-left:1px solid var(--rule); display:flex; flex-direction:column;
+  box-shadow:-14px 0 44px rgba(20,18,14,.16); }
+/* `display:flex` on a class beats the [hidden] attribute's UA rule, so both
+   sheets rendered open on first paint — the detail card sat over the grid with
+   nothing selected. Stated explicitly rather than relying on the default. */
+.zc-sheet[hidden], .zc-scrim[hidden] { display:none !important; }
+.zc-sheet-h { display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:18px 20px 14px; border-bottom:1px solid var(--rule); }
+.zc-sheet-h b { font-size:16px; font-weight:680; color:var(--headline); }
+.zc-x { border:0; background:none; font-size:15px; color:var(--muted); cursor:pointer;
+  min-width:36px; min-height:36px; }
+.zc-sheet-b { flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:12px; }
+.zc-sheet-f { display:flex; gap:8px; flex-wrap:wrap; padding:14px 20px;
+  border-top:1px solid var(--rule); }
+.zc-fld { display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--muted); }
+.zc-fld input, .zc-fld select, .zc-fld textarea {
+  border:1px solid var(--rule); background:var(--paper); padding:9px 10px; font:inherit;
+  font-size:14px; color:var(--headline); min-height:42px; }
+.zc-fld--title input { font-size:16px; font-weight:600; }
+.zc-row { display:flex; gap:12px; align-items:flex-end; }
+.zc-row .zc-fld { flex:1; }
+.zc-check { display:flex; align-items:center; gap:9px; font-size:13px; color:var(--body);
+  min-height:44px; cursor:pointer; }
+/* The label is the tap target, but a 13px box is hard to aim at and hard to
+   read as checked. */
+.zc-check input { width:20px; height:20px; }
+.zc-more-b { align-self:flex-start; border:0; background:none; padding:0; min-height:44px;
+  font:inherit; font-size:13px; color:var(--muted); text-decoration:underline; cursor:pointer;
+  text-align:left; }
+.zc-more-b:hover { color:var(--headline); }
+.zc-d-cat { margin:0; font-family:var(--mono); font-size:11px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted); }
+.zc-d-when { margin:0; font-size:15px; color:var(--headline); }
+.zc-d-rep { margin:0; font-size:13px; color:var(--muted); }
+.zc-d-l { display:flex; flex-direction:column; gap:2px; font-size:13px; }
+.zc-d-l span { font-size:11px; font-family:var(--mono); letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted); }
+.zc-d-l b { font-weight:500; color:var(--headline); }
+.zc-d-scope { margin:0; font-size:12.5px; color:var(--muted); }
+.zc-del { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 40%, var(--rule)); }
+
+/* Phone: the grid stays, tighter, and Agenda is where the day's work is read. */
+@media (max-width:760px){
+  .zc-title { font-size:18px; min-width:0; }
+  .zc-seg { margin-left:0; }
+  .zc-new { width:100%; }
+  .zc-cats { margin-left:0; width:100%; overflow-x:auto; }
+  .zc-cell { min-height:76px; padding:2px; }
+  .zc-ev-t, .zc-ev-r { display:none; }
+  .zc-ev { font-size:11px; }
+  .zc-dow { padding:6px 4px; font-size:9.5px; }
+  /* A bottom sheet, not a shrunken popover, and the Save row stays above the
+     keyboard rather than behind it. */
+  .zc-sheet { top:auto; left:0; right:0; width:100%; max-width:100%; max-height:88vh;
+    border-left:0; border-top:1px solid var(--rule); }
+  .zc-sheet-f { position:sticky; bottom:0; background:var(--paper);
+    padding-bottom:calc(14px + env(safe-area-inset-bottom)); }
+}
