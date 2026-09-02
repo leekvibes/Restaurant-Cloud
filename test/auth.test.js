@@ -460,7 +460,7 @@ test('a view-only account is not offered writes it cannot perform', async () => 
   });
   const v = await login({ email: 'ro@test.local', password: 'ro-password-1' });
   try {
-    for (const path of ['/c/invoices', '/c/products', '/c/vendors', '/c/recurring',
+    for (const path of ['/c/invoices', '/c/products', '/c/vendors', '/calendar',
       '/c/expirations', '/c/contacts', '/shifts']) {
       const res = await as(v, path);
       assert.strictEqual(res.status, 200, `${path} is readable`);

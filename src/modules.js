@@ -247,24 +247,6 @@ const MODULES = [
   // section in server.js backed by its own tables, because purchasing history
   // needs more than the generic one-table CRUD this registry provides. The
   // m_par table is left in place; src/products.js migrated its rows once.
-  {
-    slug: 'recurring', table: 'm_recurring', title: 'Recurring tasks', icon: '🔁',
-    blurb: 'Grease trap, hood, pest control, deep cleans',
-    orderBy: 'next_due ASC',
-    dateField: 'next_due',
-    // "mark done" advances the next-due date by the frequency.
-    rowActions: (row) => `<form method="post" action="/c/recurring/${row.id}/done" style="margin:0"><button class="link">mark done</button></form>`,
-    fields: [
-      { name: 'name', label: 'Task', type: 'text', required: true, list: true, placeholder: 'Hood cleaning' },
-      { name: 'category', label: 'Category', type: 'select', list: true,
-        options: ['Cleaning', 'Maintenance', 'Safety', 'Pest Control', 'Compliance', 'Other'] },
-      { name: 'frequency', label: 'How often', type: 'select', list: true, options: ['Weekly', 'Monthly', 'Quarterly', 'Annual'] },
-      { name: 'next_due', label: 'Next due', type: 'date', list: true },
-      { name: 'last_done', label: 'Last done', type: 'date', list: true },
-      { name: 'responsible', label: 'Who', type: 'text', list: true },
-      { name: 'notes', label: 'Notes', type: 'textarea' },
-    ],
-  },
 ];
 
 const bySlug = Object.fromEntries(MODULES.map((m) => [m.slug, m]));

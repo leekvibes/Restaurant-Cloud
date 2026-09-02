@@ -531,3 +531,155 @@ test('the calendar writes to no table but its own', () => {
   assert.deepStrictEqual(Object.fromEntries(watched.map((t) => [t, count(t)])), before,
     'a calendar is not a schedule and never writes a punch, an hour or a shift');
 });
+
+// ===========================================================================
+// STAGE B — the page
+// ===========================================================================
+//
+// A server of its own, because everything above is domain-level and needs no
+// HTTP at all. Kept in this file so the calendar's rules and its screens fail
+// together when one drifts from the other.
+
+const { spawn } = require('node:child_process');
+
+const PORT = 4005;                     // unique across the suite — boot.test.js guards this
+const BASE = `http://127.0.0.1:${PORT}`;
+let child;
+const page = async (p) => (await fetch(BASE + p)).text();
+const hit = async (p) => (await fetch(BASE + p, { redirect: 'manual' })).status;
+const send = async (p, body) => {
+  const tok = (await (await fetch(`${BASE}/csrf`)).text()).trim();
+  return fetch(BASE + p, { method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ ...body, _csrf: tok }) });
+};
+
+test.before(async () => {
+  child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: { ...process.env, PORT: String(PORT), DB_PATH: process.env.DB_PATH,
+      TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
+    stdio: 'ignore',
+  });
+  for (let i = 0; i < 200; i++) {
+    try { const r = await fetch(`${BASE}/version`); if (r.ok) break; } catch { /* not up */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+});
+test.after(() => { if (child) child.kill(); });
+
+test('B: the calendar opens on MONTH, and the week starts Monday', async () => {
+  const html = await page('/calendar');
+  assert.match(html, /class="zc-grid"/, 'a month grid, not a list — a calendar that opens on a list is not a calendar');
+  const heads = [...html.matchAll(/class="zc-dow" role="columnheader">([A-Za-z]+)</g)].map((m) => m[1]);
+  assert.deepStrictEqual(heads, ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    'Monday first: the restaurant week runs Monday to Sunday and the weekend belongs at the end');
+});
+
+test('B: agenda is reachable and groups by date', async () => {
+  const html = await page('/calendar?v=agenda');
+  assert.match(html, /class="zc-ag"/);
+  assert.doesNotMatch(html, /class="zc-grid"/, 'one view at a time');
+});
+
+test('B: the old address still resolves', async () => {
+  // Bookmarks, the audit document, and anything else pointing at Recurring
+  // tasks must still land somewhere true.
+  assert.strictEqual(await hit('/c/recurring'), 301);
+  assert.strictEqual(await hit('/c/recurring/4'), 301);
+  const r = await fetch(`${BASE}/c/recurring`, { redirect: 'manual' });
+  assert.strictEqual(r.headers.get('location'), '/calendar');
+});
+
+test('B: the generic tracker no longer answers for recurring', async () => {
+  // The "one source of truth" requirement: /c/:slug CRUD must not still be
+  // serving a second, competing version of this data.
+  const M = require('../src/modules');
+  assert.ok(!M.MODULES.some((m) => m.slug === 'recurring'),
+    'the registry entry is gone, so the generic edit and delete pages do not exist');
+});
+
+test('B: a new item is created through the composer form', async () => {
+  const before = C.q.all.all().length;
+  const res = await send('/calendar/new', {
+    title: 'Meet the linen vendor', category: 'Other', starts_on: '2026-11-12',
+    all_day: '1', repeat: 'monthly', kind: 'event', reminder: '1440',
+  });
+  assert.strictEqual(res.status, 302);
+  const made = C.q.all.all();
+  assert.strictEqual(made.length, before + 1);
+  const item = made.find((i) => i.title === 'Meet the linen vendor');
+  assert.strictEqual(item.kind, 'event');
+  assert.strictEqual(item.rrule_freq, 'monthly');
+  assert.deepStrictEqual(C.reminders(item.id).map((r) => r.offset_min), [1440]);
+});
+
+test('B: the composer defaults to a TASK and to not repeating', async () => {
+  const html = await page('/calendar');
+  const form = html.slice(html.indexOf('id="zc-composer"'), html.indexOf('</aside>', html.indexOf('id="zc-composer"')));
+  assert.match(form, /<option value="task" selected>/, 'a task by default — this module is for the work that must happen');
+  assert.match(form, /<option value="">Does not repeat<\/option>/);
+  const opts = [...form.matchAll(/<option value="(\d+)">([^<]+)</g)].map((m) => m[2]);
+  assert.ok(opts.every((o) => /day|week/i.test(o)),
+    'only reminder offsets a daily sweep can honour are offered — a control that cannot fire is a lie');
+});
+
+test('B: every posting form carries its own token', async () => {
+  // The stamper only runs when APP_PASSWORD is set, which no dev machine and
+  // almost no test does. A form leaning on it ships with no field at all.
+  const html = await page('/calendar');
+  const forms = [...html.matchAll(/<form\b[^>]*method="post"[^>]*>[\s\S]*?<\/form>/g)].map((m) => m[0]);
+  assert.ok(forms.length >= 4, `found ${forms.length} posting forms`);
+  for (const f of forms) {
+    assert.match(f, /name="_csrf"/, 'hand-written, not left to the stamper');
+  }
+});
+
+test('B: completing and undoing go through the domain, not the URL', async () => {
+  const item = C.create({ kind: 'task', title: 'Route completion', starts_on: '2026-11-03' });
+  assert.strictEqual((await send('/calendar/complete', { id: String(item.id), occurs_on: '2026-11-03' })).status, 302);
+  assert.strictEqual(C.history(item.id).length, 1);
+  assert.strictEqual((await send('/calendar/uncomplete', { id: String(item.id), occurs_on: '2026-11-03' })).status, 302);
+  assert.strictEqual(C.history(item.id).length, 0);
+  // The old undo carried the dates it had overwritten in an editable
+  // querystring. Nothing here takes a date from the caller.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const region = src.slice(src.indexOf("app.post('/calendar/uncomplete'"), src.indexOf("app.post('/calendar/delete'"));
+  assert.ok(!/req\.query/.test(region), 'undo reads no dates from the querystring');
+});
+
+test('B: deleting one occurrence of a series leaves the rest', async () => {
+  const item = C.create({ title: 'Route skip', starts_on: '2026-11-02', rrule_freq: 'weekly' });
+  await send('/calendar/delete', { id: String(item.id), occurs_on: '2026-11-09', scope: 'one' });
+  // expand(), not datesFor(). The rule still produces the 9th — an exception is
+  // not a change to the rule — and expand is what applies it. That separation
+  // is what lets "this occurrence only" leave the series itself untouched.
+  assert.deepStrictEqual(
+    C.expand(C.q.byId.get(item.id), '2026-11-01', '2026-11-30').map((o) => o.date),
+    ['2026-11-02', '2026-11-16', '2026-11-23', '2026-11-30']);
+  assert.ok(C.datesFor(C.q.byId.get(item.id), '2026-11-01', '2026-11-30').includes('2026-11-09'),
+    'while the rule itself is unchanged');
+});
+
+test('B: a task can be completed from the page; an event cannot', async () => {
+  const ev = C.create({ kind: 'event', title: 'Route event', starts_on: '2026-11-05' });
+  const res = await send('/calendar/complete', { id: String(ev.id), occurs_on: '2026-11-05' });
+  const loc = decodeURIComponent(res.headers.get('location') || '');
+  assert.match(loc, /err=1/, 'refused');
+  assert.match(loc, /Only a task can be completed/);
+});
+
+test('B: the calendar never claims attendance', async () => {
+  // It is not the Schedule. Nothing here knows or implies who turned up.
+  const html = await page('/calendar');
+  for (const claim of ['Clocked in', 'In progress', 'No-show', 'On break', 'Late arrival']) {
+    assert.ok(!html.includes(claim), `the calendar does not say "${claim}"`);
+  }
+});
+
+test('B: the calendar page writes nothing to the schedule or the clock', async () => {
+  const count = (t) => db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n;
+  const before = ['scheduled_shifts', 'time_entries', 'work', 'shifts'].map(count);
+  await send('/calendar/new', { title: 'Footprint', starts_on: '2026-11-20', all_day: '1' });
+  await page('/calendar');
+  assert.deepStrictEqual(['scheduled_shifts', 'time_entries', 'work', 'shifts'].map(count), before);
+});
