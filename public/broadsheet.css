@@ -6928,3 +6928,14 @@ input[type="date"], input[type="time"], input[type="search"], select {
    `loadEl.hidden = true` did nothing and the editor sat on "Loading document…"
    over a document that had finished loading. */
 .bs [hidden] { display: none !important; }
+/* The signed document on the admin record. Same reader, a reading width, and
+   no controls of any kind — this is a record being looked at, not a form. */
+.dsig-view { max-width: 760px; margin: 10px auto 0; }
+.bs .pdf-ov { position: absolute; inset: 0; }
+.bs .pdf-f { position: absolute; display: flex; align-items: center; justify-content: center;
+  padding: 0 6px; }
+.bs .pdf-v { width: 100%; color: #111; white-space: nowrap; overflow: hidden;
+  text-align: center; line-height: 1.05; }
+.bs .pdf-v-sig { font-family: 'Snell Roundhand', 'Apple Chancery', 'Segoe Script',
+  'Brush Script MT', cursive, serif; font-style: italic; padding-bottom: 2px;
+  border-bottom: 1px solid rgba(17,17,17,.35); }
