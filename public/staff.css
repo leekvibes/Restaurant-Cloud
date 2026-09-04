@@ -1903,3 +1903,42 @@ body.bare {
   .pdv-sheet { align-items: center; justify-content: center; }
   .pdv-bar { justify-content: center; gap: 20px; }
 }
+
+/* --- fields placed on the page ------------------------------------------ */
+/* Positioned in PERCENT of the page box, so one set of numbers works on every
+   screen width. The overlay never scrolls on its own — it is the page. */
+.pdf-ov { position: absolute; inset: 0; }
+.pdf-f { position: absolute; display: flex; align-items: center; justify-content: center;
+  padding: 0 6px; border-radius: 6px; font: inherit; text-align: center;
+  /* Comfortably tappable even when the placed box is small on a phone. */
+  min-height: 34px; }
+.pdf-f.is-locked { border: 1.5px dashed rgba(120,128,140,.75);
+  background: rgba(120,128,140,.10); color: var(--pt-muted); cursor: not-allowed; }
+.pdf-f.is-open { border: 1.5px solid var(--pt-blue); background: rgba(37,99,235,.10);
+  color: var(--pt-blue); cursor: pointer; }
+.pdf-f.is-open:active { background: rgba(37,99,235,.18); }
+.pdf-f.is-done { border: 0; background: none; }
+.pdf-p { font-size: 12px; font-weight: 650; letter-spacing: .02em; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.pdf-v { width: 100%; color: #111; white-space: nowrap; overflow: hidden;
+  /* No ellipsis: the value is scaled to fit by fitValues(), and a truncated
+     signature would be worse than a small one. */
+  text-align: center; line-height: 1.05; }
+/* The signature reads as one. Cursive where the device has it, and it degrades
+   to an italic serif rather than to nothing. */
+.pdf-v-sig { font-family: 'Snell Roundhand', 'Apple Chancery', 'Segoe Script',
+  'Brush Script MT', cursive, serif; font-style: italic;
+  padding-bottom: 2px; border-bottom: 1px solid rgba(17,17,17,.35); }
+
+.pdv-tip { position: sticky; bottom: 108px; z-index: 41; width: max-content; max-width: 90%;
+  margin: 8px auto 0; padding: 9px 14px; border-radius: 20px;
+  background: rgba(20,24,30,.9); color: #fff; font-size: 12.5px; font-weight: 600; }
+.pdv-reviewed { display: flex; align-items: center; gap: 8px; margin: 14px 0 0;
+  padding: 11px 14px; border-radius: 11px; background: rgba(22,163,74,.10);
+  color: #15803d; font-size: 13.5px; font-weight: 650; }
+.pdv-sig-prev { margin: 2px 0 0; padding: 14px 12px; border-radius: 10px;
+  background: var(--pt-field); text-align: center; font-size: 26px; line-height: 1.2;
+  font-family: 'Snell Roundhand', 'Apple Chancery', 'Segoe Script', 'Brush Script MT', cursive, serif;
+  font-style: italic; color: var(--pt-ink); min-height: 54px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdv-sh-note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--pt-muted); }

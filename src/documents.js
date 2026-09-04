@@ -143,6 +143,46 @@ CREATE TABLE IF NOT EXISTS doc_views (
   pages_seen  INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (version_id, employee_id)
 );
+-- WHERE THE SIGNATURE GOES, on the page.
+--
+-- Keyed on the VERSION, not the document, for the same reason signatures are:
+-- a field describes a spot on a specific file, and the next version is a
+-- different file whose "Employee signature:" line may be two inches lower. A
+-- new version starts with no fields and is given its own, optionally copied
+-- from the last one — which is a starting point, not an inheritance.
+--
+-- COORDINATES ARE FRACTIONS OF THE PAGE, 0 to 1. Never pixels: the same field
+-- has to land in the same place on a 390px iPhone, a 1400px desktop and a
+-- rotated tablet, and a pixel is a statement about one of those.
+CREATE TABLE IF NOT EXISTS doc_fields (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_id  INTEGER NOT NULL REFERENCES doc_versions(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,              -- 'signature' | 'date'; more later
+  page        INTEGER NOT NULL DEFAULT 1,
+  x           REAL NOT NULL,              -- 0..1 across the page
+  y           REAL NOT NULL,              -- 0..1 down the page
+  w           REAL NOT NULL DEFAULT 0.34,
+  h           REAL NOT NULL DEFAULT 0.055,
+  required    INTEGER NOT NULL DEFAULT 1,
+  label       TEXT,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_doc_fields ON doc_fields (version_id, page, sort);
+
+-- WHAT THEY PUT IN IT. Written at submit, inside the same transaction as the
+-- signature, and never updated afterwards — the value, the field it was in and
+-- the version it belonged to are one indivisible fact about a moment.
+CREATE TABLE IF NOT EXISTS doc_field_values (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  field_id     INTEGER NOT NULL REFERENCES doc_fields(id),
+  signature_id INTEGER REFERENCES doc_signatures(id) ON DELETE CASCADE,
+  employee_id  INTEGER NOT NULL REFERENCES employees(id),
+  value        TEXT NOT NULL,
+  completed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_fv_once ON doc_field_values (field_id, employee_id);
+CREATE INDEX IF NOT EXISTS idx_doc_fv_sig ON doc_field_values (signature_id);
 `);
 
 const CATEGORIES = [
@@ -314,18 +354,35 @@ function forEmployee(empId) {
  * done nothing wrong, the existing signature is returned — they signed once,
  * they see the confirmation, and there is one record.
  */
-function sign({ versionId, employeeId, employeeName, ackText, ip, userAgent }) {
+function sign({ versionId, employeeId, employeeName, ackText, ip, userAgent, values }) {
   const v = versionById(versionId);
   if (!v) throw new Error('No such document version.');
   const existing = db.prepare(`SELECT * FROM doc_signatures
      WHERE version_id = ? AND employee_id = ? AND voided_at IS NULL`).get(versionId, employeeId);
   if (existing) return { signature: existing, fresh: false };
   try {
-    const id = Number(db.prepare(`INSERT INTO doc_signatures
-      (version_id, document_id, employee_id, employee_name, ack_text, ip, user_agent)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(versionId, v.document_id, employeeId, employeeName, ackText,
-        ip || null, userAgent || null).lastInsertRowid);
+    // ONE TRANSACTION. The signature and the values that appear inside the
+    // document are the same fact — a signature with no rendered name, or a name
+    // sitting in a field with no signature behind it, is a record that says
+    // something nobody did.
+    const id = db.transaction(() => {
+      const sid = Number(db.prepare(`INSERT INTO doc_signatures
+        (version_id, document_id, employee_id, employee_name, ack_text, ip, user_agent)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(versionId, v.document_id, employeeId, employeeName, ackText,
+          ip || null, userAgent || null).lastInsertRowid);
+      const put = db.prepare(`INSERT INTO doc_field_values
+        (field_id, signature_id, employee_id, value) VALUES (?, ?, ?, ?)`);
+      for (const f of fieldsFor(versionId)) {
+        // The date is the SERVER's, taken from the signature row that was just
+        // written, so what the document shows and what the audit says are the
+        // same timestamp rather than two readings of two clocks.
+        const val = f.kind === 'date' ? null : (values && values[String(f.id)]);
+        if (f.kind === 'date') put.run(f.id, sid, employeeId, '@signed');
+        else if (val != null && String(val).trim()) put.run(f.id, sid, employeeId, String(val).trim());
+      }
+      return sid;
+    })();
     return { signature: db.prepare('SELECT * FROM doc_signatures WHERE id = ?').get(id), fresh: true };
   } catch (e) {
     // Two requests raced past the SELECT. The index held; return the winner.
@@ -383,7 +440,133 @@ function statsFor(docId) {
     viewed: new Set(viewed).size, pending, overdue, version: v };
 }
 
-module.exports = { DOC_DIR, CATEGORIES, catName, DEFAULT_ACK,
+// --- fields on a page -------------------------------------------------------
+
+const FIELD_KINDS = ['signature', 'date'];
+const fieldsFor = (versionId) => db.prepare(
+  'SELECT * FROM doc_fields WHERE version_id = ? ORDER BY page, sort, id').all(versionId);
+
+/** Clamped on the way in. A field cannot be placed off its own page. */
+function addField(versionId, f) {
+  const kind = FIELD_KINDS.includes(f.kind) ? f.kind : 'signature';
+  const num = (v, d, lo, hi) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  const w = num(f.w, kind === 'date' ? 0.22 : 0.34, 0.04, 1);
+  const h = num(f.h, 0.055, 0.015, 0.5);
+  return Number(db.prepare(`INSERT INTO doc_fields
+    (version_id, kind, page, x, y, w, h, required, label, sort)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(versionId, kind, Math.max(1, Math.round(Number(f.page) || 1)),
+      num(f.x, 0.1, 0, 1 - w), num(f.y, 0.8, 0, 1 - h), w, h,
+      f.required === false ? 0 : 1,
+      f.label || (kind === 'date' ? 'Date' : 'Signature'),
+      Number(f.sort) || 0).lastInsertRowid);
+}
+
+/**
+ * Move or resize a field — but ONLY while nothing has been signed against it.
+ *
+ * This is the rule that stops history being rewritten by dragging: once one
+ * person has signed this version, its fields describe where their signature
+ * actually sits, and moving the box would move their signature with it. The
+ * answer to "the field is in the wrong place" after a signature exists is a new
+ * version, which is a new obligation and leaves the old record standing.
+ */
+function fieldLocked(versionId) {
+  return !!db.prepare(`SELECT 1 FROM doc_signatures
+     WHERE version_id = ? AND voided_at IS NULL LIMIT 1`).get(versionId);
+}
+function moveField(id, f) {
+  const row = db.prepare('SELECT * FROM doc_fields WHERE id = ?').get(id);
+  if (!row) return false;
+  if (fieldLocked(row.version_id)) return false;
+  const num = (v, d, lo, hi) => {
+    const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  const w = num(f.w, row.w, 0.04, 1);
+  const h = num(f.h, row.h, 0.015, 0.5);
+  db.prepare('UPDATE doc_fields SET page = ?, x = ?, y = ?, w = ?, h = ? WHERE id = ?')
+    .run(Math.max(1, Math.round(Number(f.page) || row.page)),
+      num(f.x, row.x, 0, 1 - w), num(f.y, row.y, 0, 1 - h), w, h, id);
+  return true;
+}
+function removeField(id) {
+  const row = db.prepare('SELECT * FROM doc_fields WHERE id = ?').get(id);
+  if (!row || fieldLocked(row.version_id)) return false;
+  db.prepare('DELETE FROM doc_fields WHERE id = ?').run(id);
+  return true;
+}
+
+/** Start a new version from the last one's layout, when the pages line up. */
+function copyFields(fromVersionId, toVersionId) {
+  const rows = fieldsFor(fromVersionId);
+  const ins = db.prepare(`INSERT INTO doc_fields
+    (version_id, kind, page, x, y, w, h, required, label, sort)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  db.transaction(() => {
+    for (const f of rows) ins.run(toVersionId, f.kind, f.page, f.x, f.y, f.w, f.h, f.required, f.label, f.sort);
+  })();
+  return rows.length;
+}
+
+/** What one person has put into this version's fields. */
+const valuesFor = (versionId, employeeId) => db.prepare(`SELECT v.* FROM doc_field_values v
+   JOIN doc_fields f ON f.id = v.field_id
+  WHERE f.version_id = ? AND v.employee_id = ?`).all(versionId, employeeId);
+
+/**
+ * HAS THIS PERSON ACTUALLY BEEN THROUGH IT?
+ *
+ * Answered from doc_views, which the viewer posts as pages come into sight, and
+ * read HERE at submit time — the client can decorate its own buttons however it
+ * likes, and this is the sentence that decides. Nothing in the request says
+ * whether the document was read.
+ *
+ * Deliberately forgiving: the last page mostly-reached counts, because a footer
+ * two pixels below the fold is not a compliance question. What it will not
+ * accept is a document that was opened and never moved.
+ */
+function reviewComplete(versionId, employeeId) {
+  const v = db.prepare('SELECT pages FROM doc_versions WHERE id = ?').get(versionId);
+  const seen = db.prepare('SELECT pages_seen FROM doc_views WHERE version_id = ? AND employee_id = ?')
+    .get(versionId, employeeId);
+  if (!seen) return false;
+  // Page count is learned from the renderer on first open. Until it is known,
+  // any real movement through the document counts — refusing everybody because
+  // the server has not been told how long the file is would be worse.
+  const total = Number(v && v.pages) || 0;
+  if (!total) return Number(seen.pages_seen) >= 1;
+  return Number(seen.pages_seen) >= total;
+}
+
+/**
+ * What a field shows, once signed.
+ *
+ * A date is stored as the sentinel '@signed' rather than as text, so the date
+ * printed in the document is derived from the signature's own timestamp every
+ * time it is rendered. Storing a formatted string would let the two drift the
+ * first time anybody changed how dates are shown — and a document whose visible
+ * date disagrees with its audit trail is worse than one with no date at all.
+ */
+function renderValue(field, value, signature, tz) {
+  if (!value) return '';
+  if (field.kind === 'date' || value === '@signed') {
+    const at = signature && signature.signed_at;
+    if (!at) return '';
+    const d = new Date(String(at).replace(' ', 'T') + 'Z');
+    try {
+      return new Intl.DateTimeFormat('en-US', { month: '2-digit', day: '2-digit', year: 'numeric',
+        timeZone: tz || 'America/New_York' }).format(d);
+    } catch { return String(at).slice(0, 10); }
+  }
+  return String(value);
+}
+
+module.exports = { DOC_DIR, CATEGORIES, catName, DEFAULT_ACK, renderValue,
+  FIELD_KINDS, fieldsFor, addField, moveField, removeField, copyFields,
+  fieldLocked, valuesFor, reviewComplete,
   // The routes hash and write the uploaded bytes; handing them the same node
   // built-ins this file already loaded keeps one idea of where documents live.
   crypto, fs, path,

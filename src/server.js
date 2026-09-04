@@ -28925,6 +28925,9 @@ app.get('/documents/:id', (req, res, next) => {
         </div>
         <div class="bs-head-acts">
           ${cur ? `<a class="bs-btn-sm" href="/documents/${d.id}/file" target="_blank" rel="noopener">Open the file</a>` : ''}
+          ${cur && d.kind === 'sign' && w
+    ? `<a class="bs-btn-sm bs-btn-go" href="/documents/${d.id}/fields">Signing fields${
+      DOCS.fieldsFor(cur.id).length ? ` (${DOCS.fieldsFor(cur.id).length})` : ''}</a>` : ''}
           ${w ? `<a class="bs-btn-sm" href="/documents/${d.id}/edit">Edit</a>` : ''}
         </div>
       </div>
@@ -29244,6 +29247,168 @@ app.post('/documents/:id/edit', (req, res) => {
 });
 
 /**
+ * The field editor's own script.
+ *
+ * It reuses the reader's canvas rendering — the pages are drawn the same way —
+ * and adds an overlay per page that owns the fields. The overlay is positioned
+ * over the page box and every field is expressed in PERCENT of that box, so the
+ * numbers written to the server are the numbers a phone will use to place the
+ * same field over a page a third of the width.
+ */
+const fieldEditorScript = (token) => `<script>
+(function () {
+  var stage = document.getElementById('pdv-stage');
+  if (!stage || !stage.classList.contains('fe-stage')) return;
+  var pagesEl = document.getElementById('pdv-pages');
+  var locked = stage.getAttribute('data-locked') === '1';
+  var docId = stage.getAttribute('data-doc');
+  var verId = stage.getAttribute('data-ver');
+  var fields = [];
+  try { fields = JSON.parse(stage.getAttribute('data-fields') || '[]'); } catch (e) { fields = []; }
+  var tool = null, preview = false;
+
+  function post(body) {
+    return fetch('/documents/' + docId + '/fields', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-csrf-token': '${token}' },
+      body: JSON.stringify(Object.assign({ version_id: Number(verId), _csrf: '${token}' }, body))
+    }).then(function (r) { return r.json(); });
+  }
+
+  function overlayFor(page) {
+    var host = pagesEl.querySelector('[data-page="' + page + '"]');
+    if (!host) return null;
+    var ov = host.querySelector('.fe-ov');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.className = 'fe-ov';
+      host.appendChild(ov);
+    }
+    return ov;
+  }
+
+  function label(f) { return f.kind === 'date' ? 'Date signed' : 'Signature'; }
+
+  function paint() {
+    // Clear every overlay, then draw. Simpler than diffing and there are never
+    // more than a handful of fields.
+    Array.prototype.forEach.call(pagesEl.querySelectorAll('.fe-ov'), function (o) { o.innerHTML = ''; });
+    fields.forEach(function (f) {
+      var ov = overlayFor(f.page);
+      if (!ov) return;
+      var el = document.createElement('div');
+      el.className = 'fe-f fe-f-' + f.kind + (preview ? ' is-preview' : '');
+      el.style.left = (f.x * 100) + '%';
+      el.style.top = (f.y * 100) + '%';
+      el.style.width = (f.w * 100) + '%';
+      el.style.height = (f.h * 100) + '%';
+      el.setAttribute('data-id', f.id);
+      el.innerHTML = '<span class="fe-f-l">' + label(f) + '</span>'
+        + (locked || preview ? '' : '<button type="button" class="fe-f-x" aria-label="Remove">×</button>');
+      ov.appendChild(el);
+    });
+    var items = document.getElementById('fe-items');
+    var none = document.getElementById('fe-none');
+    document.getElementById('fe-count').textContent = String(fields.length);
+    if (none) none.hidden = fields.length > 0;
+    if (items) {
+      items.innerHTML = fields.map(function (f) {
+        return '<div class="fe-item"><b>' + label(f) + '</b><i>Page ' + f.page + '</i></div>';
+      }).join('');
+    }
+  }
+
+  // Placing: pick a tool, click the page.
+  document.addEventListener('click', function (ev) {
+    var t = ev.target.closest && ev.target.closest('[data-tool]');
+    if (t) {
+      var want = t.getAttribute('data-tool');
+      tool = (tool === want) ? null : want;
+      Array.prototype.forEach.call(document.querySelectorAll('[data-tool]'), function (b) {
+        b.classList.toggle('on', b.getAttribute('data-tool') === tool);
+      });
+      stage.classList.toggle('is-placing', !!tool);
+      return;
+    }
+    var x = ev.target.closest && ev.target.closest('.fe-f-x');
+    if (x) {
+      ev.preventDefault(); ev.stopPropagation();
+      var id = Number(x.parentNode.getAttribute('data-id'));
+      post({ op: 'remove', id: id }).then(function (r) {
+        if (r.ok) { fields = r.fields; paint(); }
+      });
+      return;
+    }
+    if (!tool || locked || preview) return;
+    var host = ev.target.closest && ev.target.closest('.pdv-page');
+    if (!host || !pagesEl.contains(host)) return;
+    var box = host.getBoundingClientRect();
+    var w = tool === 'date' ? 0.22 : 0.34, h = 0.055;
+    // Dropped centred on the click, which is where somebody expects a thing
+    // they placed to be, and clamped so it cannot hang off the page.
+    var fx = Math.min(Math.max(((ev.clientX - box.left) / box.width) - w / 2, 0), 1 - w);
+    var fy = Math.min(Math.max(((ev.clientY - box.top) / box.height) - h / 2, 0), 1 - h);
+    post({ op: 'add', field: { kind: tool, page: Number(host.getAttribute('data-page')),
+      x: fx, y: fy, w: w, h: h } }).then(function (r) {
+      if (r.ok) { fields = r.fields; paint(); }
+      else if (r.err) alert(r.err);
+    });
+  });
+
+  // Dragging an existing field.
+  var drag = null;
+  pagesEl.addEventListener('pointerdown', function (ev) {
+    if (locked || preview) return;
+    var el = ev.target.closest && ev.target.closest('.fe-f');
+    if (!el || ev.target.closest('.fe-f-x')) return;
+    var host = el.closest('.pdv-page');
+    var box = host.getBoundingClientRect();
+    var r = el.getBoundingClientRect();
+    drag = { el: el, id: Number(el.getAttribute('data-id')), box: box,
+      page: Number(host.getAttribute('data-page')),
+      dx: ev.clientX - r.left, dy: ev.clientY - r.top,
+      w: r.width / box.width, h: r.height / box.height };
+    el.classList.add('is-drag');
+    el.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+  pagesEl.addEventListener('pointermove', function (ev) {
+    if (!drag) return;
+    var nx = Math.min(Math.max((ev.clientX - drag.dx - drag.box.left) / drag.box.width, 0), 1 - drag.w);
+    var ny = Math.min(Math.max((ev.clientY - drag.dy - drag.box.top) / drag.box.height, 0), 1 - drag.h);
+    drag.el.style.left = (nx * 100) + '%';
+    drag.el.style.top = (ny * 100) + '%';
+    drag.nx = nx; drag.ny = ny;
+  });
+  pagesEl.addEventListener('pointerup', function () {
+    if (!drag) return;
+    var d = drag; drag = null;
+    d.el.classList.remove('is-drag');
+    if (d.nx == null) return;
+    post({ op: 'move', id: d.id, field: { page: d.page, x: d.nx, y: d.ny, w: d.w, h: d.h } })
+      .then(function (r) { if (r.ok) { fields = r.fields; paint(); } });
+  });
+
+  var pv = document.getElementById('fe-preview');
+  if (pv) pv.addEventListener('click', function () {
+    preview = !preview;
+    pv.setAttribute('aria-pressed', preview ? 'true' : 'false');
+    pv.textContent = preview ? 'Edit fields' : 'Preview as employee';
+    stage.classList.toggle('is-preview', preview);
+    paint();
+  });
+
+  // The reader paints pages asynchronously; redraw the overlay as they arrive.
+  var seen = 0;
+  setInterval(function () {
+    var n = pagesEl.querySelectorAll('.pdv-page').length;
+    if (n !== seen) { seen = n; paint(); }
+  }, 400);
+  window.addEventListener('resize', paint);
+})();
+</script>`;
+
+/**
  * The reader, as a script.
  *
  * Canvas per page, rendered lazily and released behind, because a phone holding
@@ -29268,6 +29433,18 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
   // lot of pixels, and past a point they are pixels nobody can see.
   var DPR = Math.min(window.devicePixelRatio || 1, 2);
   var pdf = null, total = 0, rendered = {}, shells = [];
+
+  // READ BEFORE ANYTHING RENDERS. paintFields() is a hoisted declaration and can
+  // be called from the render callback, but the data it reads is a plain var —
+  // assigned further down, it was still undefined when the first page landed,
+  // and the throw was swallowed by the promise chain. The document drew and the
+  // fields silently did not.
+  var placed = [];
+  try { placed = JSON.parse(stage.getAttribute('data-fields') || '[]'); } catch (e) { placed = []; }
+  var wantsSign = stage.getAttribute('data-sign') === '1';
+  var reviewed = stage.getAttribute('data-reviewed') === '1';
+  var mine = {};                       // field id -> what this person put in it
+  placed.forEach(function (f) { if (f.value) mine[f.id] = f.value; });
 
   function widthFor() {
     var w = pagesEl.clientWidth || stage.clientWidth || window.innerWidth;
@@ -29319,7 +29496,16 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
   var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (entries) {
     entries.forEach(function (e) {
       var n = Number(e.target.getAttribute('data-page'));
-      if (e.isIntersecting) { draw(n); draw(n + 1); note(n); }
+      if (!e.isIntersecting) return;
+      // Drawn well ahead of the viewport, so scrolling never lands on a blank
+      // page — but only COUNTED when it is genuinely on screen. The two used
+      // the same signal and the indicator read "Page 6 of 12" while page one
+      // was under the reader's thumb, because page six was being drawn.
+      draw(n); draw(n + 1);
+      var r = e.target.getBoundingClientRect();
+      var onScreen = r.top < window.innerHeight * 0.75 && r.bottom > window.innerHeight * 0.25;
+      if (onScreen) note(n);
+      if (n >= total) markReviewed();
     });
   }, { root: null, rootMargin: '250% 0px 250% 0px', threshold: 0.01 }) : null;
 
@@ -29337,9 +29523,11 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     seen = n;
     clearTimeout(timer);
     // Batched: scrolling a long document should not post on every page.
+    var url = stage.getAttribute('data-progress');
+    if (!url) return;                       // the admin editor posts no progress
     timer = setTimeout(function () {
       try {
-        fetch(stage.getAttribute('data-progress'), {
+        fetch(url, {
           method: 'POST', credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ page: seen, pages: total })
@@ -29360,6 +29548,10 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
       }
       if (!io) { for (var j = 1; j <= total; j++) draw(j); }
       else { draw(1); draw(2); }
+      paintFields();
+      // A one-page document is fully reviewed the moment it renders; waiting
+      // for a scroll that can never happen would lock somebody out of signing.
+      if (total <= 1) markReviewed();
       // Back where they were. Approximate on purpose — landing them exactly on
       // a pixel they were mid-sentence at is not worth the jump it causes.
       var start = Number(stage.getAttribute('data-start') || 1);
@@ -29374,6 +29566,17 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
       if (failEl) failEl.hidden = false;
     });
 
+  // REPAINT WHEN THE PAGES CHANGE, rather than once at a moment that has to be
+  // exactly right. Pages arrive asynchronously and are released and redrawn as
+  // the reader scrolls; a single call after load is one ordering assumption
+  // away from fields that never appear, which is precisely what happened.
+  var lastCount = -1;
+  setInterval(function () {
+    var n = pagesEl.querySelectorAll('.pdv-page').length;
+    var haveOv = pagesEl.querySelectorAll('.pdf-ov').length;
+    if (n !== lastCount || (placed.length && n && !haveOv)) { lastCount = n; paintFields(); }
+  }, 400);
+
   // Re-render at the new width on rotate. Debounced, because iOS fires this
   // repeatedly through the animation.
   var rz = null;
@@ -29385,6 +29588,183 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
       var top = Math.max(1, seen);
       draw(top); draw(top + 1);
     }, 250);
+  });
+
+  // --- fields drawn over the pages -----------------------------------------
+  //
+  // Percentages, not pixels. Each field is positioned inside its page box, so
+  // the same numbers place it correctly on a phone, a tablet and a desktop
+  // without anything being recalculated on the server.
+
+  function fieldEls(page) {
+    var host = pagesEl.querySelector('[data-page="' + page + '"]');
+    if (!host) return null;
+    var ov = host.querySelector('.pdf-ov');
+    if (!ov) { ov = document.createElement('div'); ov.className = 'pdf-ov'; host.appendChild(ov); }
+    return ov;
+  }
+
+  function paintFields() {
+    Array.prototype.forEach.call(pagesEl.querySelectorAll('.pdf-ov'), function (o) { o.innerHTML = ''; });
+    placed.forEach(function (f) {
+      var ov = fieldEls(f.page);
+      if (!ov) return;
+      var val = mine[f.id];
+      var el = document.createElement(val || !wantsSign ? 'div' : 'button');
+      if (el.tagName === 'BUTTON') el.type = 'button';
+      el.className = 'pdf-f pdf-f-' + f.kind
+        + (val ? ' is-done' : (reviewed ? ' is-open' : ' is-locked'));
+      el.style.left = (f.x * 100) + '%';
+      el.style.top = (f.y * 100) + '%';
+      el.style.width = (f.w * 100) + '%';
+      el.style.height = (f.h * 100) + '%';
+      el.setAttribute('data-field', f.id);
+      el.setAttribute('data-kind', f.kind);
+      if (val) {
+        el.innerHTML = '<span class="pdf-v' + (f.kind === 'signature' ? ' pdf-v-sig' : '') + '"></span>';
+        el.firstChild.textContent = val;
+      } else {
+        el.innerHTML = '<span class="pdf-p"></span>';
+        el.firstChild.textContent = (f.kind === 'date' ? 'Date' : 'Sign here');
+        if (el.tagName === 'BUTTON') {
+          el.setAttribute('aria-label', (f.kind === 'date' ? 'Date field' : 'Signature field')
+            + (reviewed ? '' : ' — read to the end first'));
+        }
+      }
+      ov.appendChild(el);
+    });
+    fitValues();
+    refreshBar();
+  }
+
+  /**
+   * Shrink a rendered value until it fits its box.
+   *
+   * A signature that reads "Esther Qu…" is not a signature. The box was placed
+   * by a manager against a printed line; the name that goes in it is whatever
+   * the person is called, and the two have no reason to agree. So the type
+   * scales to the box rather than the box being trusted — measured from the
+   * page height, so it scales with the document on every screen.
+   */
+  function fitValues() {
+    Array.prototype.forEach.call(pagesEl.querySelectorAll('.pdf-v'), function (v) {
+      var box = v.parentNode;
+      var h = box.clientHeight || 0;
+      if (!h) return;
+      var size = h * (v.classList.contains('pdf-v-sig') ? 0.74 : 0.5);
+      v.style.fontSize = size + 'px';
+      // A handful of steps, not a binary search: the range is small and this
+      // runs on every repaint.
+      for (var i = 0; i < 12 && v.scrollWidth > v.clientWidth && size > 6; i++) {
+        size = size * 0.9;
+        v.style.fontSize = size + 'px';
+      }
+    });
+  }
+
+  function requiredLeft() {
+    return placed.filter(function (f) { return f.required && !mine[f.id]; }).length;
+  }
+
+  function refreshBar() {
+    var t = document.getElementById('pdv-bar-t');
+    var go = document.getElementById('pdv-done-btn');
+    if (!t || !go) return;
+    if (!reviewed) {
+      t.textContent = 'Read to the end to sign';
+      go.disabled = true;
+      return;
+    }
+    var left = requiredLeft();
+    if (left) {
+      t.innerHTML = '';
+      t.appendChild(document.createTextNode('Reviewed ✓ · ' + left + ' field'
+        + (left === 1 ? '' : 's') + ' to fill'));
+      go.disabled = true;
+    } else {
+      t.textContent = 'Ready to submit';
+      go.disabled = false;
+    }
+  }
+
+  // The gate. Reaching the last page opens the fields — and the server checks
+  // the same thing again at submit, from its own record of what was seen.
+  function markReviewed() {
+    if (reviewed) return;
+    reviewed = true;
+    var note = document.getElementById('pdv-reviewed');
+    if (note) note.hidden = false;
+    paintFields();
+  }
+
+  var sigSheet = document.getElementById('pdv-sig-sheet');
+  var sigName = document.getElementById('pdv-sig-name');
+  var sigPrev = document.getElementById('pdv-sig-prev');
+  var pendingField = null;
+
+  if (sigName && sigPrev) {
+    sigName.addEventListener('input', function () { sigPrev.textContent = sigName.value; });
+  }
+
+  pagesEl.addEventListener('click', function (ev) {
+    var f = ev.target.closest && ev.target.closest('.pdf-f');
+    if (!f || !wantsSign) return;
+    var id = Number(f.getAttribute('data-field'));
+    if (mine[id]) return;
+    if (!reviewed) {
+      // Said quietly, next to the thing they tapped, rather than in a modal
+      // that has to be dismissed before they can carry on reading.
+      var tip = document.getElementById('pdv-tip');
+      if (tip) {
+        tip.textContent = 'Please review the full document before signing.';
+        tip.hidden = false;
+        clearTimeout(tip._t);
+        tip._t = setTimeout(function () { tip.hidden = true; }, 2600);
+      }
+      return;
+    }
+    if (f.getAttribute('data-kind') === 'date') {
+      // Nothing to type. The real value comes from the server at submit; this
+      // is a placeholder so they can see the field is handled.
+      mine[id] = 'On signing';
+      paintFields();
+      return;
+    }
+    pendingField = id;
+    if (sigSheet) {
+      sigSheet.hidden = false;
+      document.documentElement.style.overflow = 'hidden';
+      if (sigName) { sigName.focus(); sigName.select(); }
+    }
+  });
+
+  var sigOk = document.getElementById('pdv-sig-ok');
+  if (sigOk) sigOk.addEventListener('click', function () {
+    var name = (sigName && sigName.value || '').trim();
+    if (!name) { if (sigName) sigName.focus(); return; }
+    if (pendingField) mine[pendingField] = name;
+    // Signing fills every date field too — nobody should have to tap a date.
+    placed.forEach(function (f) { if (f.kind === 'date' && !mine[f.id]) mine[f.id] = 'On signing'; });
+    pendingField = null;
+    if (sigSheet) sigSheet.hidden = true;
+    document.documentElement.style.overflow = '';
+    paintFields();
+  });
+
+  var fin = document.getElementById('pdv-fin');
+  var doneBtn = document.getElementById('pdv-done-btn');
+  if (doneBtn && fin) doneBtn.addEventListener('click', function () {
+    var vals = {};
+    placed.forEach(function (f) { if (f.kind !== 'date' && mine[f.id]) vals[f.id] = mine[f.id]; });
+    var first = placed.filter(function (f) { return f.kind === 'signature' && mine[f.id]; })[0];
+    document.getElementById('pdv-fin-name').value = first ? mine[first.id] : '';
+    document.getElementById('pdv-fin-fields').value = JSON.stringify(vals);
+    fin.hidden = false;
+    document.documentElement.style.overflow = 'hidden';
+  });
+  if (fin) fin.addEventListener('submit', function () {
+    var g = document.getElementById('pdv-fin-go');
+    if (g) { g.disabled = true; g.textContent = 'Submitting…'; }
   });
 
   // --- signing ---
@@ -29526,6 +29906,20 @@ app.get('/portal/documents/:id', (req, res) => {
   // taps back through a list to reach the second.
   const queue = DOCS.forEmployee(emp.id).filter((d) => d.kind === 'sign' && !d.signature && d.id !== doc.id);
   const ack = doc.ack_text || DOCS.DEFAULT_ACK;
+  // The fields, and whatever is already in them. A signed document sends its
+  // values so the signature and date render exactly where they were placed —
+  // reopening it later shows the document as signed, not a blank form.
+  const placed = DOCS.fieldsFor(v.id);
+  const filled = new Map(DOCS.valuesFor(v.id, emp.id).map((x) => [x.field_id, x.value]));
+  const fieldsOnPage = placed.map((f) => ({
+    id: f.id, kind: f.kind, page: f.page, x: f.x, y: f.y, w: f.w, h: f.h,
+    required: !!f.required,
+    value: DOCS.renderValue(f, filled.get(f.id), sig, TC.zone()),
+  }));
+  // A required document with fields signs THROUGH the fields. One with none is
+  // a document nobody has laid out yet, and it keeps the acknowledgment panel —
+  // which is what every document created before this existed still uses.
+  const hasFields = placed.length > 0;
 
   res.send(portalPage(doc.title, `
     ${portalTop({ href: '/portal/documents', label: 'Documents' }, doc.title)}
@@ -29543,7 +29937,11 @@ app.get('/portal/documents/:id', (req, res) => {
 
       <div class="pdv-stage" id="pdv-stage" data-src="/portal/documents/${doc.id}/file"
            data-ver="${v.id}" data-start="${view ? view.last_page : 1}"
-           data-progress="/portal/documents/${doc.id}/progress">
+           data-progress="/portal/documents/${doc.id}/progress"
+           data-sign="${needsSign ? '1' : '0'}"
+           data-reviewed="${DOCS.reviewComplete(v.id, emp.id) ? '1' : '0'}"
+           data-name="${esc(emp.name)}"
+           data-fields='${esc(JSON.stringify(fieldsOnPage))}'>
         <div class="pdv-load" id="pdv-load"><span class="pdv-spin" aria-hidden="true"></span>
           <span>Loading document…</span></div>
         <div class="pdv-pages" id="pdv-pages" aria-label="Document pages"></div>
@@ -29554,8 +29952,50 @@ app.get('/portal/documents/:id', (req, res) => {
         </div>
       </div>
       <div class="pdv-count" id="pdv-count" hidden aria-live="polite"></div>
+      <div class="pdv-tip" id="pdv-tip" hidden role="status"></div>
+      <div class="pdv-reviewed" id="pdv-reviewed"${
+  needsSign && hasFields && !DOCS.reviewComplete(v.id, emp.id) ? '' : ' hidden'}>
+        <span aria-hidden="true">✓</span> Document reviewed — you can sign now
+      </div>
 
-      ${needsSign ? `<div class="pdv-bar" id="pdv-bar">
+      ${needsSign && hasFields ? `<div class="pdv-bar" id="pdv-bar">
+        <span class="pdv-bar-t" id="pdv-bar-t">Read to the end to sign</span>
+        <button type="button" class="tc-btn tc-btn-go" id="pdv-done-btn" disabled>Complete &amp; submit</button>
+      </div>
+
+      ${/* The field sheet: one signature, typed. Not a drawing pad, not an
+           upload — a name they confirm, rendered into the box the manager
+           placed, with the audit keeping the text they actually typed. */''}
+      <div class="pdv-sheet" id="pdv-sig-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="pdv-sig-h">
+        <div class="pdv-scrim" data-pdv-close></div>
+        <div class="pdv-panel">
+          <h2 id="pdv-sig-h" class="pdv-sh-h">Add your signature</h2>
+          <label class="pdv-f"><span>Full name</span>
+            <input id="pdv-sig-name" value="${esc(emp.name)}" maxlength="120" autocomplete="name"></label>
+          <p class="pdv-sig-prev" id="pdv-sig-prev" aria-live="polite">${esc(emp.name)}</p>
+          <p class="pdv-sh-note">Your typed name is used as your electronic signature.</p>
+          <button type="button" class="tc-btn tc-btn-go tc-btn-big" id="pdv-sig-ok">Add signature</button>
+          <button type="button" class="tc-btn" data-pdv-close>Cancel</button>
+        </div>
+      </div>
+
+      ${/* The final act, still explicit. Filling the fields is not submitting. */''}
+      <form class="pdv-sheet" id="pdv-fin" hidden method="post"
+            action="/portal/documents/${doc.id}/sign" role="dialog" aria-modal="true">
+        <div class="pdv-scrim" data-pdv-close></div>
+        <div class="pdv-panel">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="version_id" value="${v.id}">
+          <input type="hidden" name="agree" value="1">
+          <input type="hidden" name="full_name" id="pdv-fin-name" value="">
+          <input type="hidden" name="fields" id="pdv-fin-fields" value="">
+          <h2 class="pdv-sh-h">Submit this document</h2>
+          <p class="pdv-sh-p">${esc(ack)}</p>
+          <button class="tc-btn tc-btn-go tc-btn-big" type="submit" id="pdv-fin-go">Complete &amp; submit</button>
+          <button type="button" class="tc-btn" data-pdv-close>Back</button>
+        </div>
+      </form>`
+    : needsSign ? `<div class="pdv-bar" id="pdv-bar">
         <span class="pdv-bar-t">Requires your acknowledgment</span>
         <button type="button" class="tc-btn tc-btn-go" data-pdv-sign>Review &amp; sign</button>
       </div>
@@ -29631,6 +30071,37 @@ app.post('/portal/documents/:id/sign', (req, res) => {
   if (req.body.agree !== '1') return back('Tick the box to acknowledge before submitting.', true);
   const name = String(req.body.full_name || '').trim();
   if (!name) return back('Enter your full name.', true);
+
+  // EVERY RULE RE-ASKED HERE, from the server's own records.
+  //
+  // The page disables its button until the last page has been seen and the
+  // fields are filled. That is courtesy, not enforcement — a POST can be made
+  // by anything. So the gate is asked again from doc_views, and the required
+  // fields are checked against what is actually stored for this version. A
+  // request that skipped the reading is refused however it was made.
+  const placed = DOCS.fieldsFor(v.id);
+  if (placed.length) {
+    if (!DOCS.reviewComplete(v.id, emp.id)) {
+      return back('Read through to the last page before signing.', true);
+    }
+    let sent = {};
+    try { sent = JSON.parse(req.body.fields || '{}') || {}; } catch { sent = {}; }
+    const missing = placed.filter((f) => f.required && f.kind !== 'date'
+      && !String(sent[String(f.id)] || '').trim());
+    if (missing.length) return back('Fill in every field before submitting.', true);
+    try {
+      const { fresh } = DOCS.sign({
+        versionId: v.id, employeeId: emp.id, employeeName: name,
+        ackText: doc.ack_text || DOCS.DEFAULT_ACK,
+        values: sent,
+        ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null,
+        userAgent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
+      });
+      return back(fresh ? 'Signed. Thank you.' : 'That was already signed — nothing was filed twice.');
+    } catch (e) {
+      return back(e.message || 'Could not record that. Try again.', true);
+    }
+  }
   try {
     const { fresh } = DOCS.sign({
       versionId: v.id, employeeId: emp.id, employeeName: name,
@@ -29643,6 +30114,115 @@ app.post('/portal/documents/:id/sign', (req, res) => {
     return back(fresh ? 'Signed. Thank you.' : 'That was already signed — nothing was filed twice.');
   } catch (e) {
     return back(e.message || 'Could not record that. Try again.', true);
+  }
+});
+
+// --- admin: placing the fields ---------------------------------------------
+
+/**
+ * The field editor. A workspace, not a modal.
+ *
+ * The PDF is rendered large, fields are absolutely positioned over it in
+ * PERCENTAGES of the page box, and dragging writes those percentages back. The
+ * page box is the only thing that knows pixels; everything stored is a fraction,
+ * so the same placement lands correctly on a phone.
+ */
+app.get('/documents/:id/fields', (req, res, next) => {
+  if (!/^\d+$/.test(String(req.params.id))) return next();
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).end();
+  const v = req.query.v ? DOCS.versionById(req.query.v) : DOCS.currentVersion(d.id);
+  if (!v || v.document_id !== d.id) return res.status(404).send('No version to place fields on.');
+  const fields = DOCS.fieldsFor(v.id);
+  const locked = DOCS.fieldLocked(v.id);
+
+  res.send(layout(`Fields · ${d.title}`, `
+    ${flash(req)}
+    <div class="fe-shell">
+      <header class="fe-bar">
+        <a class="fe-back" href="/documents/${d.id}">&larr; ${esc(d.title)}</a>
+        <div class="fe-mid">
+          <span class="fe-ver">Version ${esc(v.version)}</span>
+          ${locked ? '<span class="fe-lock">Signed — fields are fixed</span>' : ''}
+        </div>
+        <div class="fe-acts">
+          <button type="button" class="bs-btn-sm" id="fe-preview" aria-pressed="false">Preview as employee</button>
+          <a class="bs-btn-sm bs-btn-go" href="/documents/${d.id}">Done</a>
+        </div>
+      </header>
+
+      <div class="fe-body">
+        <aside class="fe-side">
+          ${locked ? `<div class="fe-note">
+            <b>This version has been signed</b>
+            <p>Its fields describe where somebody's signature actually sits, so they cannot move.
+              To change the layout, upload a new version — the signed one stays exactly as it is.</p>
+          </div>` : `<div class="fe-tools">
+            <p class="fe-hint">Pick a field, then click the page where it goes.</p>
+            <button type="button" class="fe-tool" data-tool="signature">
+              <span class="fe-tool-i" aria-hidden="true">✎</span>
+              <span><b>Signature</b><i>Where they sign their name</i></span></button>
+            <button type="button" class="fe-tool" data-tool="date">
+              <span class="fe-tool-i" aria-hidden="true">▤</span>
+              <span><b>Date</b><i>Filled in automatically when they sign</i></span></button>
+          </div>`}
+          <div class="fe-list" id="fe-list">
+            <h2 class="fe-h">Placed <span id="fe-count">${fields.length}</span></h2>
+            <div id="fe-items"></div>
+            <p class="fe-hint" id="fe-none"${fields.length ? ' hidden' : ''}>Nothing placed yet.
+              A required document with no fields still works — the employee signs with the
+              acknowledgment panel instead.</p>
+          </div>
+        </aside>
+
+        <main class="fe-stage" id="pdv-stage" data-doc="${d.id}" data-ver="${v.id}"
+              data-locked="${locked ? '1' : '0'}"
+              data-src="/documents/${d.id}/file?v=${v.id}"
+              data-fields='${esc(JSON.stringify(fields.map((f) => ({ id: f.id, kind: f.kind,
+    page: f.page, x: f.x, y: f.y, w: f.w, h: f.h }))))}'>
+          <div class="fe-load" id="pdv-load"><span class="pdv-spin" aria-hidden="true"></span><span>Loading document…</span></div>
+          <div class="fe-pages" id="pdv-pages"></div>
+        </main>
+      </div>
+    </div>
+    ${pdfViewerScript()}
+    ${fieldEditorScript(csrfFor(req))}`));
+});
+
+/** Place, move and remove — all refused server-side once anything is signed. */
+app.post('/documents/:id/fields', express.json(), (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).json({ ok: false });
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).json({ ok: false });
+  const v = DOCS.versionById(req.body && req.body.version_id);
+  if (!v || v.document_id !== d.id) return res.status(400).json({ ok: false, err: 'Unknown version.' });
+  // The client draws whatever it likes; this decides. A signed version's layout
+  // is history, and history is not editable by a drag.
+  if (DOCS.fieldLocked(v.id)) {
+    return res.status(409).json({ ok: false, err: 'This version has been signed, so its fields cannot move.' });
+  }
+  const b = req.body;
+  try {
+    if (b.op === 'add') {
+      const id = DOCS.addField(v.id, b.field || {});
+      return res.json({ ok: true, id, fields: DOCS.fieldsFor(v.id) });
+    }
+    if (b.op === 'move') {
+      const row = db.prepare('SELECT version_id FROM doc_fields WHERE id = ?').get(b.id);
+      if (!row || row.version_id !== v.id) return res.status(404).json({ ok: false });
+      DOCS.moveField(b.id, b.field || {});
+      return res.json({ ok: true, fields: DOCS.fieldsFor(v.id) });
+    }
+    if (b.op === 'remove') {
+      const row = db.prepare('SELECT version_id FROM doc_fields WHERE id = ?').get(b.id);
+      if (!row || row.version_id !== v.id) return res.status(404).json({ ok: false });
+      DOCS.removeField(b.id);
+      return res.json({ ok: true, fields: DOCS.fieldsFor(v.id) });
+    }
+    return res.status(400).json({ ok: false, err: 'Unknown operation.' });
+  } catch (e) {
+    return res.status(400).json({ ok: false, err: e.message });
   }
 });
 
