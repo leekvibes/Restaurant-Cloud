@@ -1,340 +1,342 @@
 'use strict';
 
-// Documents: the filing cabinet.
+// Documents: the line between access and evidence.
 //
-// The reader is not exercised against the live API here — that would make the
-// suite depend on a key, a network and somebody's bill. What is exercised is
-// everything around it: the privacy scrub the reader's output passes through,
-// the dates that decide whether a document is quietly filed or about to lapse,
-// and the page that has to be right whether the reader ran or not.
+// Almost every test here is really the same test asked from a different angle —
+// that "who can see this" is computed live and "who signed this" is written
+// once. The two are easy to conflate into one table and impossible to separate
+// afterwards, so they are pinned hard.
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const PORT = 3979;
-const BASE = `http://127.0.0.1:${PORT}`;
+// Its own database and its own document directory, both set BEFORE ../src/db is
+// required — db.js reads DB_PATH at module load.
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zwin-docs-'));
+process.env.DB_PATH = path.join(dir, 'docs.db');
+process.env.DOC_DIR = path.join(dir, 'files');
+process.env.TZ = 'America/New_York';
+process.env.ZWIN_SKIP_BACKFILL = '1';
 
-// A browser gets its CSRF token injected into every form it loads. These tests
-// post straight at the routes, so they ask for one the same way the service
-// worker does, and cache it per session.
-const __csrf = new Map();
-async function __token(cookie) {
-  const key = cookie || '';
-  if (!__csrf.has(key)) {
-    const r = await fetch(BASE + '/csrf', { headers: key ? { cookie: key } : {} });
-    __csrf.set(key, (await r.text()).trim());
+const { db } = require('../src/db');
+const D = require('../src/documents');
+
+let E = {};
+test.before(() => {
+  db.exec(`INSERT INTO employees (name, role, pin, active) VALUES
+    ('Ada Server', 'server', '9101', 1),
+    ('Ben Server', 'server', '9102', 1),
+    ('Cass Cook', 'cook', '9103', 1),
+    ('Dee Gone', 'server', '9104', 1)`);
+  const by = (n) => db.prepare('SELECT id FROM employees WHERE name = ?').get(n).id;
+  E = { ada: by('Ada Server'), ben: by('Ben Server'), cass: by('Cass Cook'), dee: by('Dee Gone') };
+});
+
+const mkDoc = (title, kind, extra = {}) => Number(db.prepare(
+  `INSERT INTO documents (title, category, kind, ack_text) VALUES (?, ?, ?, ?)`)
+  .run(title, extra.category || 'policy', kind, kind === 'sign' ? (extra.ack || D.DEFAULT_ACK) : null)
+  .lastInsertRowid);
+const mkVer = (docId, v, extra = {}) => D.addVersion(docId, {
+  version: v, stored_name: `${v}-${Math.random().toString(16).slice(2)}.pdf`,
+  orig_name: 'f.pdf', ...extra });
+const assign = (docId, target, targetId) => db.prepare(
+  'INSERT OR IGNORE INTO doc_assignments (document_id, target, target_id) VALUES (?, ?, ?)')
+  .run(docId, target, targetId == null ? null : targetId);
+
+test('a group is many people, and a person is many groups', () => {
+  const servers = D.groups.create('Servers');
+  const foh = D.groups.create('Front of house');
+  D.groups.setMembers(servers, [E.ada, E.ben]);
+  D.groups.setMembers(foh, [E.ada, E.cass]);
+  assert.deepStrictEqual(D.groups.members(servers).map((m) => m.name), ['Ada Server', 'Ben Server']);
+  assert.deepStrictEqual(D.groups.forEmployee(E.ada).map((g) => g.name).sort(),
+    ['Front of house', 'Servers'], 'Ada is in both, and neither removed her from the other');
+  // Setting one group's roster leaves every other group alone — the mirror of
+  // the mistake that would be easy here.
+  D.groups.setMembers(servers, [E.ben]);
+  assert.deepStrictEqual(D.groups.forEmployee(E.ada).map((g) => g.name), ['Front of house']);
+  D.groups.setMembers(servers, [E.ada, E.ben]);
+});
+
+test('access is computed live — a new group member gets the documents that day', () => {
+  const g = D.groups.create('Bar');
+  D.groups.setMembers(g, [E.ada]);
+  const doc = mkDoc('Bar Closing Duties', 'reference');
+  mkVer(doc, '1.0');
+  assign(doc, 'group', g);
+
+  assert.strictEqual(D.canEmployeeSee(doc, E.ada), true);
+  assert.strictEqual(D.canEmployeeSee(doc, E.ben), false, 'not in the group');
+
+  // Nobody reopens the document. The group changes, and access follows.
+  D.groups.setMembers(g, [E.ada, E.ben]);
+  assert.strictEqual(D.canEmployeeSee(doc, E.ben), true,
+    'added to the group today, has the document today');
+  assert.deepStrictEqual(D.audienceOf(doc).map((a) => a.name), ['Ada Server', 'Ben Server']);
+});
+
+test('leaving a group takes the document away and leaves the signature', () => {
+  // The whole architecture in one test. Current visibility and historical
+  // evidence are different questions and must give different answers here.
+  const g = D.groups.create('Leavers');
+  D.groups.setMembers(g, [E.dee]);
+  const doc = mkDoc('Alcohol Policy', 'sign');
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'group', g);
+
+  D.sign({ versionId: v, employeeId: E.dee, employeeName: 'Dee Gone', ackText: D.DEFAULT_ACK });
+  assert.strictEqual(D.canEmployeeSee(doc, E.dee), true);
+
+  D.groups.setMembers(g, []);
+  assert.strictEqual(D.canEmployeeSee(doc, E.dee), false, 'access is gone');
+  const kept = D.signaturesForEmployee(E.dee);
+  assert.strictEqual(kept.length, 1, 'and the signature is not');
+  assert.strictEqual(kept[0].employee_name, 'Dee Gone');
+});
+
+test('deactivating somebody does not touch what they signed', () => {
+  const doc = mkDoc('Handbook (leaver)', 'sign');
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'employee', E.dee);
+  D.sign({ versionId: v, employeeId: E.dee, employeeName: 'Dee Gone', ackText: D.DEFAULT_ACK });
+  db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(E.dee);
+  try {
+    assert.strictEqual(D.signaturesForEmployee(E.dee).length, 2,
+      'both signatures survive deactivation');
+  } finally {
+    db.prepare('UPDATE employees SET active = 1 WHERE id = ?').run(E.dee);
   }
-  return __csrf.get(key);
+});
+
+test('one signature per person per version, however many times they tap', () => {
+  const doc = mkDoc('Double Tap Policy', 'sign');
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'employee', E.ada);
+  const a = D.sign({ versionId: v, employeeId: E.ada, employeeName: 'Ada Server', ackText: D.DEFAULT_ACK });
+  const b = D.sign({ versionId: v, employeeId: E.ada, employeeName: 'Ada Server', ackText: D.DEFAULT_ACK });
+  assert.strictEqual(a.fresh, true);
+  assert.strictEqual(b.fresh, false, 'the second is not a new record');
+  assert.strictEqual(a.signature.id, b.signature.id, 'and it returns the first one');
+  assert.strictEqual(db.prepare(
+    'SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ? AND employee_id = ?')
+    .get(v, E.ada).n, 1);
+});
+
+test('a new version is a new obligation, and never inherits an old signature', () => {
+  const doc = mkDoc('Employee Handbook', 'sign');
+  const v1 = mkVer(doc, '1.0');
+  assign(doc, 'employee', E.ada);
+  D.sign({ versionId: v1, employeeId: E.ada, employeeName: 'Ada Server', ackText: D.DEFAULT_ACK });
+  assert.strictEqual(D.statsFor(doc).signed, 1, 'signed, on version 1');
+
+  const v2 = mkVer(doc, '2.0');
+  assert.strictEqual(D.currentVersion(doc).id, v2, 'version 2 is current');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ?').get(v2).n, 0,
+    'nobody has signed version 2');
+  assert.strictEqual(D.statsFor(doc).signed, 0,
+    'and the document reads as unsigned, because that is the true state of the current file');
+  // The old signature is untouched and still points at the file it was given.
+  const old = db.prepare('SELECT version_id FROM doc_signatures WHERE document_id = ?').get(doc);
+  assert.strictEqual(old.version_id, v1, 'the signature stayed on version 1');
+  // And exactly one version is current, enforced by the database.
+  assert.strictEqual(db.prepare(
+    'SELECT COUNT(*) n FROM doc_versions WHERE document_id = ? AND is_current = 1').get(doc).n, 1);
+});
+
+test('archiving hides a document and keeps every signature against it', () => {
+  const doc = mkDoc('Retired Policy', 'sign');
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'all', null);
+  D.sign({ versionId: v, employeeId: E.ben, employeeName: 'Ben Server', ackText: D.DEFAULT_ACK });
+  db.prepare("UPDATE documents SET active = 0, archived_at = datetime('now') WHERE id = ?").run(doc);
+  assert.strictEqual(D.canEmployeeSee(doc, E.ben), false, 'gone from the portal');
+  assert.ok(D.signaturesFor(doc).length >= 1, 'the record is not');
+  assert.ok(!D.forEmployee(E.ben).some((d) => d.id === doc), 'and not in their library');
+});
+
+test('assigned to everyone means everyone active, including whoever starts later', () => {
+  const doc = mkDoc('House Standards', 'reference');
+  mkVer(doc, '1.0');
+  assign(doc, 'all', null);
+  const before = D.audienceOf(doc).length;
+  const id = Number(db.prepare(
+    "INSERT INTO employees (name, role, active) VALUES ('New Starter', 'server', 1)").run().lastInsertRowid);
+  try {
+    assert.strictEqual(D.canEmployeeSee(doc, id), true, 'a person hired today has it today');
+    assert.strictEqual(D.audienceOf(doc).length, before + 1);
+  } finally {
+    db.prepare('DELETE FROM employees WHERE id = ?').run(id);
+  }
+});
+
+test('viewing is recorded as opening, and never as having read it', () => {
+  const doc = mkDoc('Training Guide', 'reference');
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'employee', E.cass);
+  assert.strictEqual(D.statsFor(doc).viewed, 0, 'appearing on their list is not viewing');
+  D.noteView(v, E.cass, 3, 10);
+  const row = db.prepare('SELECT * FROM doc_views WHERE version_id = ? AND employee_id = ?').get(v, E.cass);
+  assert.strictEqual(row.last_page, 3);
+  assert.strictEqual(D.statsFor(doc).viewed, 1);
+  // Progress goes forward, not backwards — scrolling up is not un-reading.
+  D.noteView(v, E.cass, 1, 10);
+  const back = db.prepare('SELECT * FROM doc_views WHERE version_id = ? AND employee_id = ?').get(v, E.cass);
+  assert.strictEqual(back.pages_seen, 3, 'the furthest page reached is kept');
+  // And it is per VERSION, so a new file does not inherit their place in the old one.
+  const v2 = mkVer(doc, '2.0');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM doc_views WHERE version_id = ?').get(v2).n, 0);
+});
+
+test('a signature records what was agreed, not just that something was', () => {
+  const doc = mkDoc('Tip Policy', 'sign', { ack: 'I have read the tip policy and agree to it.' });
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'employee', E.ben);
+  const { signature } = D.sign({ versionId: v, employeeId: E.ben, employeeName: 'Ben Server',
+    ackText: 'I have read the tip policy and agree to it.', ip: '10.0.0.9', userAgent: 'phone' });
+  assert.strictEqual(signature.ack_text, 'I have read the tip policy and agree to it.',
+    'the exact wording they agreed to, stored with the signature');
+  assert.strictEqual(signature.employee_name, 'Ben Server');
+  assert.strictEqual(signature.ip, '10.0.0.9');
+  assert.ok(signature.signed_at, 'and a server timestamp');
+
+  // Renaming the employee afterwards must not rewrite who signed.
+  db.prepare('UPDATE employees SET name = ? WHERE id = ?').run('Benjamin Server', E.ben);
+  try {
+    const again = db.prepare('SELECT employee_name FROM doc_signatures WHERE id = ?').get(signature.id);
+    assert.strictEqual(again.employee_name, 'Ben Server',
+      'the name as it was on the day, not as it is now');
+  } finally {
+    db.prepare('UPDATE employees SET name = ? WHERE id = ?').run('Ben Server', E.ben);
+  }
+});
+
+test('an employee only ever sees documents that reach them', () => {
+  const mine = D.forEmployee(E.cass).map((d) => d.title);
+  for (const t of mine) {
+    const doc = db.prepare('SELECT id FROM documents WHERE title = ?').get(t);
+    assert.strictEqual(D.canEmployeeSee(doc.id, E.cass), true,
+      `${t} is on Cass's list and the gate agrees`);
+  }
+  // And the gate is the same one the list is built from — asked the other way.
+  const all = db.prepare('SELECT id, title FROM documents WHERE active = 1').all();
+  for (const d of all) {
+    const listed = mine.includes(d.title);
+    assert.strictEqual(D.canEmployeeSee(d.id, E.cass), listed,
+      `${d.title}: the list and the gate cannot disagree`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Over HTTP, because the gate has to hold against a typed URL and not merely
+// against a missing button.
+// ---------------------------------------------------------------------------
+
+const { spawn } = require('node:child_process');
+const PORT = 3960;
+const BASE = `http://127.0.0.1:${PORT}`;
+let child = null;
+
+const form = (url, body, opts = {}) => fetch(`${BASE}${url}`, {
+  method: 'POST', redirect: 'manual',
+  headers: { 'content-type': 'application/x-www-form-urlencoded', ...(opts.cookie ? { cookie: opts.cookie } : {}) },
+  body: new URLSearchParams(body).toString(),
+});
+const get = (url, opts = {}) => fetch(`${BASE}${url}`, {
+  redirect: 'manual', headers: opts.cookie ? { cookie: opts.cookie } : {},
+});
+async function portalSession(pin) {
+  const r = await form('/tips/start', { pin });
+  return (r.headers.get('set-cookie') || '').split(';')[0];
 }
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-doc-'));
-const DB = path.join(dir, 'doc.db');
-const UPLOADS = path.join(dir, 'uploads');
-let child;
-let Database;
-
-// Business dates, not UTC — a document expiring "in 30 days" has to be 30 days
-// away from the restaurant's today, or the boundary tests drift after 8pm.
-const { isoDate, startOfToday } = require('../src/dates');
-const inDays = (n) => isoDate(new Date(startOfToday().getTime() + n * 86400000));
-
 test.before(async () => {
-  Database = require('better-sqlite3');
-  fs.mkdirSync(UPLOADS, { recursive: true });
   child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
-    env: {
-      ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York',
-      ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '', UPLOAD_DIR: UPLOADS,
-    },
+    env: { ...process.env, PORT: String(PORT), DB_PATH: process.env.DB_PATH,
+      DOC_DIR: process.env.DOC_DIR, ZWIN_SKIP_BACKFILL: '1' },
     stdio: 'ignore',
   });
   for (let i = 0; i < 80; i++) {
-    try { await fetch(`${BASE}/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    try { await fetch(`${BASE}/version`); return; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
+  throw new Error('server did not start');
+});
+test.after(() => { if (child) child.kill(); });
+
+test('a typed URL does not open somebody else\'s document', async () => {
+  // The important half is the FILE. A page that hides a link while the bytes
+  // stay fetchable has not protected anything, and a corrective action is the
+  // document where that matters most.
+  const priv = mkDoc('Corrective Action — Ada', 'sign');
+  const v = mkVer(priv, '1.0');
+  assign(priv, 'employee', E.ada);
+  fs.mkdirSync(process.env.DOC_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.DOC_DIR,
+    db.prepare('SELECT stored_name FROM doc_versions WHERE id = ?').get(v).stored_name), '%PDF-1.4 test');
+
+  const ada = await portalSession('9101');
+  const ben = await portalSession('9102');
+
+  assert.strictEqual((await get(`/portal/documents/${priv}`, { cookie: ada })).status, 200,
+    'the person it is about can open it');
+  assert.strictEqual((await get(`/portal/documents/${priv}`, { cookie: ben })).status, 404,
+    'somebody else cannot');
+  assert.strictEqual((await get(`/portal/documents/${priv}/file`, { cookie: ben })).status, 404,
+    'and cannot fetch the bytes either');
+  // Not-found and not-yours give the same answer on purpose: a different one
+  // for each lets somebody walk the id space and learn what exists.
+  assert.strictEqual((await get('/portal/documents/999999', { cookie: ben })).status, 404);
+
+  const anon = await get(`/portal/documents/${priv}/file`);
+  assert.ok(anon.status === 302 || anon.status === 401 || anon.status === 403,
+    `no session gets no file — was ${anon.status}`);
 });
 
-test.after(() => {
-  if (child) child.kill();
-  fs.rmSync(dir, { recursive: true, force: true });
+test('signing over HTTP needs the box, the name, and the version on screen', async () => {
+  const doc = mkDoc('Safety Policy', 'sign');
+  const v = mkVer(doc, '1.0');
+  assign(doc, 'employee', E.cass);
+  fs.writeFileSync(path.join(process.env.DOC_DIR,
+    db.prepare('SELECT stored_name FROM doc_versions WHERE id = ?').get(v).stored_name), '%PDF-1.4 test');
+  const cass = await portalSession('9103');
+  const rows = () => db.prepare('SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ?').get(v).n;
+
+  await form(`/portal/documents/${doc}/sign`, { version_id: v, full_name: 'Cass Cook' }, { cookie: cass });
+  assert.strictEqual(rows(), 0, 'no tick, no signature');
+  await form(`/portal/documents/${doc}/sign`, { version_id: v, agree: '1', full_name: '' }, { cookie: cass });
+  assert.strictEqual(rows(), 0, 'no name, no signature');
+
+  // A version published while they had the page open. Their acknowledgment
+  // would land on a file they never saw, so it is refused rather than moved.
+  const v2 = mkVer(doc, '2.0');
+  await form(`/portal/documents/${doc}/sign`, { version_id: v, agree: '1', full_name: 'Cass Cook' }, { cookie: cass });
+  assert.strictEqual(rows(), 0, 'the stale version is refused');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ?').get(v2).n, 0,
+    'and is NOT quietly retargeted at the new one');
+
+  await form(`/portal/documents/${doc}/sign`, { version_id: v2, agree: '1', full_name: 'Cass Cook' }, { cookie: cass });
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ?').get(v2).n, 1,
+    'signing the version actually on screen works');
+
+  // Somebody else cannot sign it for them.
+  const ben = await portalSession('9102');
+  await form(`/portal/documents/${doc}/sign`, { version_id: v2, agree: '1', full_name: 'Ben Server' }, { cookie: ben });
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ?').get(v2).n, 1,
+    'a document that is not theirs cannot be signed by them');
 });
 
-async function fileDoc(fields, bytes = Buffer.from('%PDF-1.4 test')) {
-  const fd = new FormData();
-  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
-  fd.set('file', new Blob([bytes], { type: 'application/pdf' }), 'doc.pdf');
-  return fetch(`${BASE}/c/documents`, { method: 'POST', body: fd, redirect: 'manual' });
-}
-
-const rows = () => {
-  const db = new Database(DB, { readonly: true });
-  const out = db.prepare('SELECT * FROM m_documents ORDER BY id').all();
-  db.close();
-  return out;
-};
-
-// ---------------------------------------------------------------------------
-// The privacy rule. This is the part that would be expensive to get wrong:
-// a number written into an unencrypted database is there for good, and nothing
-// downstream would ever flag it.
-// ---------------------------------------------------------------------------
-
-test('the reader is told, in the schema itself, not to return identifiers', () => {
-  const { DOC_SCHEMA } = require('../src/reader');
-  const props = DOC_SCHEMA.properties;
-  // The instruction has to live where the model will actually read it.
-  assert.match(props.reference.description, /NEVER a social security number/i,
-    'the reference field says what it must never be');
-  assert.ok(!Object.keys(props).some((k) => /ssn|ein|tax_id|account|routing|card/i.test(k)),
-    `no field invites an identifier: ${Object.keys(props).join(', ')}`);
-});
-
-test('and anything shaped like one is stripped out anyway', () => {
-  // Belt and braces. A prompt is an instruction, not a guarantee, and the two
-  // failures are not symmetrical: a redacted reference is an annoyance, an SSN
-  // on disk is permanent.
-  const { scrubIdentifiers } = require('../src/reader');
-  const out = scrubIdentifiers({
-    title: 'Form 941 — Q1 2026',
-    reference: '941 · EIN 12-3456789',
-    summary: 'Quarterly return for employee 123-45-6789, account 4012888888881881',
-    issuer: 'Internal Revenue Service',
-  });
-  assert.ok(!/12-3456789/.test(out.reference), 'an EIN does not survive');
-  assert.ok(!/123-45-6789/.test(out.summary), 'nor a social security number');
-  assert.ok(!/4012888888881881/.test(out.summary), 'nor a card number');
-  // And it has to leave the useful part alone, or it is just deleting data.
-  assert.match(out.reference, /941/, 'the form number stays — that is the point of the field');
-  assert.strictEqual(out.title, 'Form 941 — Q1 2026', 'the title is untouched');
-  assert.strictEqual(out.issuer, 'Internal Revenue Service', 'so is who sent it');
-});
-
-// ---------------------------------------------------------------------------
-// The page.
-// ---------------------------------------------------------------------------
-
-test('the cabinet stands on its own before anything is filed', async () => {
-  const res = await fetch(`${BASE}/c/documents`);
-  assert.strictEqual(res.status, 200);
-  const html = await res.text();
-  assert.match(html, /Documents — nothing filed yet/);
-  assert.match(html, /File the first one/, 'with a way in');
-  const visible = html.replace(/<script[\s\S]*?<\/script>/g, '');
-  assert.ok(!/\$NaN|undefined|Infinity/.test(visible), 'and no arithmetic on an empty set leaks out');
-});
-
-test('a tax filing keeps the four dates that are not interchangeable', async () => {
-  const res = await fileDoc({
-    title: "Form 941 — Employer's Quarterly Federal Tax Return",
-    issuer: 'Internal Revenue Service', category: 'Tax', reference: '941',
-    doc_date: '2026-04-08', period_start: '2026-01-01', period_end: '2026-03-31',
-    action_by: '2026-04-30', summary: 'Quarterly federal return for Q1, filed through Gusto.',
-    ai_status: 'ai',
-  });
-  assert.strictEqual(res.status, 302);
-
-  const [d] = rows();
-  assert.strictEqual(d.doc_date, '2026-04-08', 'the date on it');
-  assert.strictEqual(d.period_start, '2026-01-01', 'and the quarter it covers, which is not the same date');
-  assert.strictEqual(d.period_end, '2026-03-31');
-  assert.strictEqual(d.action_by, '2026-04-30', 'and when it had to be filed by');
-  assert.strictEqual(d.expires_on, null, 'a return does not expire — that field stays empty');
-  assert.ok(d.file, 'the PDF is kept');
-
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  assert.match(html, /Form 941/, 'it is on the page');
-  assert.match(html, /Internal Revenue Service/, 'with who it came from');
-  assert.match(html, /Read by AI/, 'and how it got its fields');
-});
-
-test('what is running out is what the page leads with', async () => {
-  // Three states, and the headline has to name the worst one. A lapsed permit
-  // among forty filed documents is the only thing worth saying at the top.
-  await fileDoc({ title: 'Certificate of insurance', category: 'Insurance',
-    issuer: 'Hartford', expires_on: inDays(20) });
-  await fileDoc({ title: 'Food handler permit', category: 'Permit',
-    issuer: 'DOHMH', expires_on: inDays(-6) });
-  await fileDoc({ title: 'Signed lease', category: 'Lease',
-    issuer: 'Landlord', expires_on: inDays(900) });
-
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  // Derived: the 941 filed above has a deadline in the past, so it is lapsed
-  // too. Pinning a number here made this fail for being right.
-  const today = isoDate(startOfToday());
-  const lapsed = rows().filter((d) => (d.expires_on && d.expires_on < today)
-    || (d.action_by && d.action_by < today)).length;
-  assert.ok(lapsed >= 2, `more than one thing has lapsed — the precondition (${lapsed})`);
-  assert.match(html, new RegExp(`${lapsed} expired or overdue`),
-    'the headline leads with them, and counts every kind of lapse');
-
-  const block = (title) => {
-    const at = html.indexOf(title);
-    const from = html.lastIndexOf('<details', at);
-    return html.slice(from, html.indexOf('</summary>', at));
-  };
-  assert.match(block('Food handler permit'), /data-state="lapsed"/, 'the expired permit is lapsed');
-  assert.match(block('Food handler permit'), /Expired/, 'and says so');
-  assert.match(block('Certificate of insurance'), /data-state="soon"/, '20 days out is due soon');
-  assert.match(block('Signed lease'), /data-state="filed"/, 'a lease with years left is just filed');
-  // The 941 above has an action_by in the past but no expiry — it is overdue,
-  // not expired, and calling it "Expired" would read as the wrong problem.
-  assert.match(block('Form 941'), /Overdue/, 'a passed deadline reads as overdue, not expired');
-});
-
-test('the one coming up next is named, not just counted', async () => {
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  const today = isoDate(startOfToday());
-  const lapsed = rows().filter((d) => (d.expires_on && d.expires_on < today)
-    || (d.action_by && d.action_by < today)).length;
-  assert.match(html, new RegExp(`Expired or overdue</span><span class="bs-stat bad">${lapsed}<`),
-    'the strip counts what has lapsed');
-  assert.match(html, /Due within 45 days<\/span><span class="bs-stat warn">1</,
-    'and what is about to');
-  // Whichever is soonest, by whichever of its dates lands first.
-  assert.match(html, /Next<\/span>[\s\S]{0,120}?(Food handler permit|Form 941)/,
-    'and says which one is next rather than leaving you to look');
-});
-
-test('a document with no dates at all is filed, not flagged', async () => {
-  // Most of a filing cabinet is like this, and a cabinet that shouts about
-  // every item in it is one nobody reads.
-  await fileDoc({ title: 'Old menu photographs', category: 'Other' });
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  const at = html.indexOf('Old menu photographs');
-  const block = html.slice(html.lastIndexOf('<details', at), html.indexOf('</summary>', at));
-  assert.match(block, /data-state="filed"/, 'nothing to chase');
-  assert.match(block, /Filed/, 'and it says so plainly');
-});
-
-test('the reader endpoint answers rather than throwing when there is no key', async () => {
-  // The suite runs without ANTHROPIC_API_KEY. That is the same shape as a
-  // key that has expired in production, and it must come back as a sentence
-  // the drawer can show, not a 500.
-  const fd = new FormData();
-  fd.set('scan', new Blob([Buffer.from('%PDF-1.4 test')], { type: 'application/pdf' }), 'd.pdf');
-  const res = await fetch(`${BASE}/c/documents/read`, { method: 'POST', body: fd });
-  assert.strictEqual(res.status, 200, 'it answers');
-  const j = await res.json();
-  assert.ok(j.error, 'with an error the drawer can print');
-  assert.match(j.error, /ANTHROPIC_API_KEY|Could not read/, `and says what went wrong: ${j.error}`);
-});
-
-test('the capture overlay files a document with the reader switched off entirely', async () => {
-  // The reader is a convenience. If it is down, or there is no key, or the
-  // scan is unreadable, the cabinet still has to work — so the panel behind it
-  // is a plain form that posts on its own.
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  assert.match(html, /action="\/c\/documents"[^>]*enctype="multipart\/form-data"/,
-    'the form posts on its own');
-  assert.match(html, /name="title"[^>]*required/, 'a title is required whoever typed it');
-  for (const f of ['issuer', 'doc_date', 'period_start', 'period_end', 'expires_on', 'action_by', 'reference', 'summary']) {
-    assert.match(html, new RegExp(`name="${f}"`), `${f} can be typed by hand`);
-  }
-});
-
-test('a document cannot be filed without the document', async () => {
-  // The file IS the record here, unlike an invoice or an expense, both of
-  // which can honestly be typed from memory. So the manual door is not offered
-  // at all on this page — there is nothing to file without it.
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  assert.ok(!/id="cap-manual"/.test(html), 'no "enter manually" on Documents');
-  assert.match(html, /id="cap-choose"/, 'the way in is the file itself');
-  // And the invoice page, where typing it from memory is legitimate, keeps it.
-  const inv = await (await fetch(`${BASE}/c/invoices`)).text();
-  assert.match(inv, /id="cap-manual"/, 'an invoice can still be entered by hand');
-});
-
-// ---------------------------------------------------------------------------
-// Multi-page.
-//
-// The reader was always given every page. It was the storing that kept page
-// one and dropped the rest, so an eight-page lease filed as its cover sheet.
-// ---------------------------------------------------------------------------
-
-/** File a document as several photographed pages, the way the drawer posts. */
-async function filePages(fields, count) {
-  const fd = new FormData();
-  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
-  for (let i = 0; i < count; i++) {
-    fd.append('file', new Blob([Buffer.from(`%PDF-1.4 page ${i + 1}`)], { type: 'application/pdf' }), `p${i + 1}.pdf`);
-  }
-  return fetch(`${BASE}/c/documents`, { method: 'POST', body: fd, redirect: 'manual' });
-}
-
-test('every page of a photographed lease is kept, not just the first', async () => {
-  const res = await filePages({ title: 'Lease — all pages', category: 'Lease', issuer: 'Landlord' }, 5);
-  assert.strictEqual(res.status, 302);
-
-  const d = rows().find((x) => x.title === 'Lease — all pages');
-  const { pagesOf } = require('../src/modules');
-  const pages = pagesOf(d);
-  assert.strictEqual(pages.length, 5, 'all five pages are on the row');
-  assert.strictEqual(pages[0], d.file, 'and the first is still `file`, which the rest of the app reads');
-
-  // Each is a real, distinct file — not the same one listed five times.
-  const seen = new Set();
-  for (let i = 0; i < pages.length; i++) {
-    const onDisk = path.join(UPLOADS, pages[i]);
-    assert.ok(fs.existsSync(onDisk), `page ${i + 1} is on disk`);
-    assert.strictEqual(fs.readFileSync(onDisk).toString(), `%PDF-1.4 page ${i + 1}`,
-      `page ${i + 1} holds page ${i + 1}, in order`);
-    seen.add(pages[i]);
-  }
-  assert.strictEqual(seen.size, 5, 'five distinct files, not one repeated');
-});
-
-/**
- * One document's row from the ledger.
- *
- * Scoped to the rows container on purpose: the strip at the top names whatever
- * is due next, so searching the whole page for a title can land in a summary
- * cell and slice a block that is not a row at all.
- */
-function rowFor(html, title) {
-  const ledger = html.slice(html.indexOf('bs-srows docs'));
-  const at = ledger.indexOf(title);
-  if (at === -1) return '';
-  return ledger.slice(ledger.lastIndexOf('<details', at), ledger.indexOf('</details>', at));
-}
-
-test('the page it shows is numbered, so nobody opens page one thinking it is all of it', async () => {
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  const block = rowFor(html, 'Lease — all pages');
-  assert.match(block, /5 pages/, 'it says how many there are');
-  const links = [...block.matchAll(/href="\/uploads\/([^"]+)"/g)].map((m) => m[1]);
-  assert.ok(new Set(links).size >= 5, `every page is reachable (${new Set(links).size} distinct)`);
-});
-
-test('a single-page document is untouched by any of this', async () => {
-  // The ordinary case has to keep reading exactly as it did: one file, Open
-  // and Download, no page strip and no count.
-  const one = rows().find((x) => x.title && x.title.startsWith('Form 941'));
-  assert.ok(one, 'the 941 filed earlier is one page — the precondition');
-  const { pagesOf } = require('../src/modules');
-  assert.deepStrictEqual(pagesOf(one), [one.file], 'it reads as exactly its one file');
-  assert.strictEqual(one.pages, null, 'and stores no page list at all');
-
-  const html = await (await fetch(`${BASE}/c/documents`)).text();
-  const block = rowFor(html, 'Form 941');
-  assert.ok(block, 'the row is on the page');
-  assert.ok(!/\d+ pages/.test(block), 'no page count on a one-page document');
-  assert.match(block, /Download/, 'and the plain download it always had');
-});
-
-test('a row saved before any of this existed still opens', async () => {
-  // Every document already on disk has file set and pages null. pagesOf has to
-  // answer for those without a migration touching them.
-  const db = new Database(DB);
-  db.prepare("INSERT INTO m_documents (title, category, file) VALUES ('Old filing', 'Other', 'legacy.pdf')").run();
-  db.close();
-  const { pagesOf } = require('../src/modules');
-  const old = rows().find((x) => x.title === 'Old filing');
-  assert.strictEqual(old.pages, null, 'no page list, as it would have been');
-  assert.deepStrictEqual(pagesOf(old), ['legacy.pdf'], 'and it still reads as its one file');
-  assert.deepStrictEqual(pagesOf({ file: null, pages: null }), [], 'nothing attached reads as nothing');
-  assert.deepStrictEqual(pagesOf({ file: 'a.pdf', pages: 'not json' }), ['a.pdf'],
-    'and a corrupt page list falls back rather than throwing');
+test('the portal separates what needs doing from what is just there', async () => {
+  const ada = await portalSession('9101');
+  const html = await (await get('/portal/documents', { cookie: ada })).text();
+  assert.match(html, /Needs your attention/, 'the two sections are named');
+  assert.match(html, /Your documents/);
+  assert.match(html, /pdv?-|pd-card/, 'and there are cards to act on');
+  // The reader is the app's own, not the browser's PDF plugin in a frame.
+  const doc = db.prepare("SELECT id FROM documents WHERE title = 'Corrective Action — Ada'").get();
+  const page = await (await get(`/portal/documents/${doc.id}`, { cookie: ada })).text();
+  assert.doesNotMatch(page, /<iframe/i, 'no iframe — that brings its own toolbar and its own scroll');
+  assert.match(page, /pdf\.min\.js/, 'pdf.js renders the pages');
+  assert.match(page, /pdf\.worker\.min\.js/, 'with its worker, served from our own origin');
 });

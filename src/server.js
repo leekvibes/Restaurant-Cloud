@@ -27,6 +27,9 @@ const TC = require('./timeclock');
 // no work row, no service, nothing Payroll aggregates. See test/scheduler for
 // the invariant that holds it to that.
 const SCH = require('./scheduler');
+// Requiring it creates the doc_* tables, the way scheduler.js and timeclock.js
+// create their own.
+const DOCS = require('./documents');
 // Requiring it creates the four cal_* tables, the way scheduler.js and
 // timeclock.js create their own.
 const CAL = require('./calendar');
@@ -168,6 +171,8 @@ const CSRF_OPEN = new Set(['/login', '/tips/start', '/webhook/benugin']);
  * that fails the build if a route grows a multer without appearing here.
  */
 const CSRF_UPLOAD = [
+  /^\/documents$/,                 // adding a document (its PDF)
+  /^\/documents\/[^/]+\/version$/, // and replacing it with a new version
   /^\/shifts\/[^/]+\/read-report$/,
   /^\/c\/expenses\/read$/,
   /^\/c\/documents\/read$/,
@@ -3517,6 +3522,7 @@ function portalTabForRoute(pathname) {
 /** What More holds. Utility screens only — never a tab's own area. */
 const portalMoreItems = (shape) => [
   { href: '/portal/notifications', label: 'Notifications' },
+  { href: '/portal/documents', label: 'Documents' },
   { href: '/portal/requests', label: 'My requests' },
   { href: '/portal/specials', label: 'Specials & 86 board' },
   { href: '/portal/stock', label: 'Report out of stock' },
@@ -10087,17 +10093,57 @@ function eprPayroll(req, e) {
 }
 
 /** Documents — the shell, with nothing behind it yet, and it says so. */
+/**
+ * This person's documents. A VIEW, not a second copy.
+ *
+ * Everything here is read through the same access rule and the same signature
+ * table the Documents module uses, so a row cannot say something the document's
+ * own page disagrees with. It answers one question — where does this person
+ * stand — which on a staff page is the question being asked.
+ *
+ * Signed rows are listed even when the document no longer reaches them: leaving
+ * a group removes access and never removes evidence, and this is where somebody
+ * comes looking for the evidence.
+ */
 function eprDocuments(req, e) {
+  const live = DOCS.forEmployee(e.id);
+  const signed = DOCS.signaturesForEmployee(e.id);
+  const liveIds = new Set(live.map((d) => d.id));
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+
+  const row = (title, category, state, href, sub) => `
+    <a class="bs-lr dsig-r" href="${href}">
+      <span class="dsig-who"><b>${esc(title)}</b><i>${esc(category)}${sub ? ` · ${esc(sub)}` : ''}</i></span>
+      <span class="dsig-st"><i class="tcm-tag ${state.k}">${esc(state.t)}</i></span>
+      <span class="bs-lr-go">›</span>
+    </a>`;
+
+  const rows = live.map((d) => {
+    const st = docStatus(d);
+    const map = { done: 'ok', seen: 'ok', late: 'bad', soon: 'warn', todo: 'warn', new: '' };
+    return row(d.title, DOCS.catName(d.category),
+      { k: map[st.key] || '', t: st.label }, `/documents/${d.id}`,
+      d.signature ? `Signed ${String(d.signature.signed_at).slice(0, 10)}`
+        : d.due_on ? `Due ${d.due_on}${d.due_on < today ? '' : ''}` : '');
+  });
+
+  // Anything they signed that they can no longer reach — the record outliving
+  // the access, which is the whole point of keeping the two apart.
+  const past = signed.filter((sg) => !liveIds.has(sg.document_id))
+    .map((sg) => row(sg.title, DOCS.catName(sg.category), { k: 'ok', t: 'Signed' },
+      `/documents/${sg.document_id}/signature/${sg.id}`,
+      `Version ${sg.version} · ${String(sg.signed_at).slice(0, 10)} · no longer assigned`));
+
   return `
     <section class="epr-card">
       <h2 class="epr-h">Documents</h2>
-      <p class="epr-hint">Employee files, company documents to sign, and signed copies.</p>
-      <div class="epr-soon">
-        <b>Not built yet</b>
-        <p>This is where ${esc(e.name)}'s documents will live — files you upload, documents that
-          need a signature, and the signed copies with the date they were sent, seen and signed.</p>
-        <p class="epr-hint">Nothing is stored here today. The tab is here so the shape is settled before it is built.</p>
-      </div>
+      <p class="epr-hint">What ${esc(e.name)} has been given, and what they have signed.
+        Assign documents from <a class="bs-act" href="/documents">Documents</a>.</p>
+      ${rows.length ? `<div class="bs-lrows">${rows.join('')}</div>`
+    : '<p class="epr-hint">Nothing is assigned to them yet.</p>'}
+      ${past.length ? `<h2 class="epr-h" style="margin-top:18px">Earlier signatures</h2>
+        <p class="epr-hint">Signed while they were assigned. Kept whatever changed afterwards.</p>
+        <div class="bs-lrows">${past.join('')}</div>` : ''}
     </section>`;
 }
 
@@ -27471,6 +27517,1029 @@ app.post('/c/incidents/:id/followup', (req, res) => {
   if (newDue) { sets.push('follow_up_due=@due'); vals.due = newDue; }
   if (sets.length) db.prepare(`UPDATE m_incidents SET ${sets.join(', ')} WHERE id=@id`).run(vals);
   res.redirect(`/c/incidents/${id}?msg=` + encodeURIComponent('Follow-up added.'));
+});
+
+// ===========================================================================
+// DOCUMENTS
+// ===========================================================================
+//
+// Files are served by a ROUTE, never by express.static.
+//
+// The invoice uploads are mounted static behind the admin gate, which is fine
+// for a photographed receipt and wrong for a corrective action: portal sessions
+// are not admin sessions, so an employee could not read their own handbook
+// through that mount, and anything that made it readable to them would make
+// every invoice readable too. So employee documents get their own directory and
+// two gated routes — one that asks "is this an admin?", one that asks "is this
+// document assigned to you?" — and neither can be satisfied by knowing a URL.
+const docUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 * 1024 * 1024 } });
+
+/** The bytes, once somebody has been allowed to have them. */
+function sendDocFile(res, version, { download = false } = {}) {
+  const full = DOCS.path.join(DOCS.DOC_DIR, version.stored_name);
+  if (!DOCS.fs.existsSync(full)) {
+    return res.status(404).send('That file is no longer on disk.');
+  }
+  res.setHeader('Content-Type', version.mime || 'application/pdf');
+  // inline, so the in-app viewer can render it; attachment only when the
+  // employee actually asked to keep a copy and the document allows it.
+  const name = String(version.orig_name || 'document.pdf').replace(/[^\w.\- ]+/g, '_');
+  res.setHeader('Content-Disposition',
+    `${download ? 'attachment' : 'inline'}; filename="${name}"`);
+  // Private: this is one person's document, and a shared cache holding it would
+  // undo the gate above.
+  res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+  return res.sendFile(full);
+}
+
+const docStatus = (d) => {
+  if (d.signature) return { key: 'done', label: 'Completed' };
+  if (d.kind !== 'sign') return d.view ? { key: 'seen', label: 'Viewed' } : { key: 'new', label: 'Not viewed' };
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  if (d.due_on && d.due_on < today) return { key: 'late', label: 'Overdue' };
+  if (d.due_on && d.due_on <= addDays(today, 3)) return { key: 'soon', label: 'Due soon' };
+  return d.view ? { key: 'seen', label: 'Started' } : { key: 'todo', label: 'Not started' };
+};
+
+// --- admin: the library ----------------------------------------------------
+
+app.get('/documents', (req, res) => {
+  if (!navAllowed('/documents')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const tab = ['all', 'signing', 'done', 'archived'].includes(req.query.tab) ? req.query.tab : 'all';
+  const qs = String(req.query.q || '').trim().toLowerCase();
+  const rows = db.prepare(`SELECT * FROM documents ORDER BY active DESC, title`).all()
+    .map((d) => ({ ...d, stats: DOCS.statsFor(d.id) }));
+  const match = (d) => !qs || d.title.toLowerCase().includes(qs)
+    || String(d.description || '').toLowerCase().includes(qs)
+    || DOCS.catName(d.category).toLowerCase().includes(qs);
+  const live = rows.filter((d) => d.active);
+  const shown = (tab === 'archived' ? rows.filter((d) => !d.active)
+    : tab === 'signing' ? live.filter((d) => d.kind === 'sign' && d.stats.pending > 0)
+      : tab === 'done' ? live.filter((d) => d.kind === 'sign' && d.stats.pending === 0 && d.stats.assigned > 0)
+        : live).filter(match);
+  const w = canWrite();
+
+  const pill = (n, label, tone) => (n
+    ? `<span class="dl-pill${tone ? ' ' + tone : ''}">${n} ${esc(label)}</span>` : '');
+  const card = (d) => {
+    const st = d.stats;
+    const who = DOCS.assignmentsFor(d.id).map((a) => (a.target === 'all' ? 'Everyone'
+      : a.target === 'group' ? (DOCS.groups.get(a.target_id) || {}).name || 'a group'
+        : (q.employee.get(a.target_id) || {}).name || 'someone')).filter(Boolean);
+    return `<a class="dl-card${d.active ? '' : ' is-off'}" href="/documents/${d.id}">
+      <div class="dl-top">
+        <h2 class="dl-title">${esc(d.title)}</h2>
+        <span class="dl-kind${d.kind === 'sign' ? ' sign' : ''}">${d.kind === 'sign' ? 'Signature' : 'Reference'}</span>
+      </div>
+      <p class="dl-meta">${esc(DOCS.catName(d.category))}${st.version ? ` · Version ${esc(st.version.version)}` : ' · No file yet'}
+        ${who.length ? ` · ${esc(who.slice(0, 3).join(', '))}${who.length > 3 ? ` +${who.length - 3}` : ''}` : ' · Not assigned'}</p>
+      <div class="dl-nums">
+        <span class="dl-pill">${st.assigned} assigned</span>
+        ${d.kind === 'sign'
+    ? pill(st.signed, 'completed', 'ok') + pill(st.pending, 'pending', st.overdue ? 'bad' : 'warn')
+    : pill(st.viewed, 'viewed', 'ok') + pill(Math.max(0, st.assigned - st.viewed), 'not viewed', '')}
+        ${st.overdue ? `<span class="dl-pill bad">${st.overdue} overdue</span>` : ''}
+      </div>
+    </a>`;
+  };
+
+  const tabs = [['all', 'All documents', live.length],
+    ['signing', 'Needs signatures', live.filter((d) => d.kind === 'sign' && d.stats.pending > 0).length],
+    ['done', 'Completed', live.filter((d) => d.kind === 'sign' && d.stats.pending === 0 && d.stats.assigned > 0).length],
+    ['archived', 'Archived', rows.filter((d) => !d.active).length]];
+
+  res.send(layout('Documents', `
+    ${flash(req)}
+    <div class="bs-page">
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">Documents</h1>
+          <p class="bs-subline">Handbooks, policies, duties and training — assigned to everyone, to a group,
+            or to one person, and read in the app rather than downloaded.</p>
+        </div>
+        <div class="bs-head-acts">
+          <a class="bs-btn-sm" href="/documents/groups">Groups</a>
+          ${w ? '<a class="bs-btn-sm bs-btn-go" href="/documents/new">+ Add a document</a>' : ''}
+        </div>
+      </div>
+      <nav class="rst-tabs">
+        ${tabs.map(([k, label, n]) => `<a class="rst-tab${k === tab ? ' on' : ''}"
+          href="/documents?tab=${k}">${esc(label)} <b>${n}</b></a>`).join('')}
+      </nav>
+      <form class="dl-search" method="get" action="/documents">
+        <input type="hidden" name="tab" value="${esc(tab)}">
+        <input type="search" name="q" value="${esc(req.query.q || '')}" placeholder="Search documents">
+        <button class="bs-btn-sm" type="submit">Search</button>
+        ${qs ? `<a class="bs-btn-sm" href="/documents?tab=${tab}">Clear</a>` : ''}
+      </form>
+      ${shown.length ? `<div class="dl-grid">${shown.map(card).join('')}</div>`
+    : `<div class="bs-blank"><b>${qs ? 'Nothing matches that' : tab === 'archived' ? 'Nothing archived' : 'No documents yet'}</b>
+        <span>${qs ? 'Try a different word.' : tab === 'archived'
+    ? 'Archived documents keep every signature against them.'
+    : 'Upload a handbook, a cleaning list or a policy and choose who it goes to.'}</span>
+        ${!qs && tab !== 'archived' && w ? '<a class="bs-act" href="/documents/new">Add your first document</a>' : ''}</div>`}
+    </div>`));
+});
+
+// --- admin: adding one ------------------------------------------------------
+
+const docAssignPicker = (req, sel = {}) => {
+  const gs = DOCS.groups.all();
+  const emps = q.allEmployees.all();
+  return `
+    <fieldset class="du-assign">
+      <legend>Who gets it</legend>
+      <label class="du-r"><input type="radio" name="target" value="all"${sel.target === 'all' || !sel.target ? ' checked' : ''}>
+        <span><b>Everyone</b><i>Every active employee, including anybody who starts later.</i></span></label>
+      <label class="du-r"><input type="radio" name="target" value="group"${sel.target === 'group' ? ' checked' : ''}>
+        <span><b>A group</b><i>Members are read live — add somebody to the group next week and they get it.</i></span></label>
+      <div class="du-sub">
+        ${gs.length ? `<select name="group_id" class="bs-sel">
+          ${gs.map((g) => `<option value="${g.id}">${esc(g.name)} (${g.members})</option>`).join('')}
+        </select>` : '<p class="inc-hint">No groups yet — <a class="bs-act" href="/documents/groups">make one</a>.</p>'}
+      </div>
+      <label class="du-r"><input type="radio" name="target" value="employee"${sel.target === 'employee' ? ' checked' : ''}>
+        <span><b>Specific people</b><i>For an agreement, a notice, anything meant for one person.</i></span></label>
+      <div class="du-sub du-people">
+        ${emps.map((e) => `<label class="tca-p"><input type="checkbox" name="emp" value="${e.id}">
+          <span>${esc(e.name)}</span></label>`).join('')}
+      </div>
+    </fieldset>`;
+};
+
+app.get('/documents/new', (req, res) => {
+  if (!navAllowed('/documents')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  if (!canWrite()) return res.redirect('/documents?err=1&msg=' + encodeURIComponent('Your account is view-only.'));
+  res.send(layout('Add a document', `
+    ${flash(req)}
+    <div class="bs-page du-page">
+      <a class="bs-back" href="/documents">&larr; Documents</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">Add a document</h1>
+        <p class="bs-subline">A PDF, who it goes to, and whether it has to be signed.</p>
+      </div></div>
+      <form class="bs-panel du-form" method="post" action="/documents" enctype="multipart/form-data">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <label class="du-f"><span>Title</span>
+          <input name="title" required maxlength="120" placeholder="Employee Handbook" autofocus></label>
+        <label class="du-f"><span>Description <i>optional</i></span>
+          <input name="description" maxlength="300" placeholder="What this covers, in a line"></label>
+        <div class="du-row">
+          <label class="du-f"><span>Category</span>
+            <select name="category">${DOCS.CATEGORIES.map(([v, l]) =>
+    `<option value="${v}">${esc(l)}</option>`).join('')}</select></label>
+          <label class="du-f"><span>Version</span>
+            <input name="version" value="1.0" maxlength="20"></label>
+        </div>
+        <fieldset class="du-assign">
+          <legend>What it is</legend>
+          <label class="du-r"><input type="radio" name="kind" value="reference" checked>
+            <span><b>Reference</b><i>Read whenever they need it. Cleaning duties, SOPs, training.</i></span></label>
+          <label class="du-r"><input type="radio" name="kind" value="sign">
+            <span><b>Requires acknowledgment</b><i>They have to open it and sign. Handbooks, policies, agreements.</i></span></label>
+          <div class="du-sub">
+            <label class="du-f"><span>What they are agreeing to</span>
+              <input name="ack_text" maxlength="300" placeholder="${esc(DOCS.DEFAULT_ACK)}"></label>
+            <label class="du-f"><span>Due by <i>optional</i></span>
+              <input type="date" name="due_on"></label>
+          </div>
+        </fieldset>
+        ${docAssignPicker(req)}
+        <label class="du-f"><span>The file <i>PDF</i></span>
+          <input type="file" name="file" accept="application/pdf,image/png,image/jpeg" required></label>
+        <label class="tcs-check"><input type="checkbox" name="allow_download" value="1" checked>
+          <span>Let employees download a copy</span></label>
+        <div class="bs-form-acts">
+          <button class="bs-btn bs-btn-go" type="submit">Add document</button>
+          <a class="bs-act" href="/documents">Cancel</a>
+        </div>
+      </form>
+    </div>`));
+});
+
+app.post('/documents', docUpload.single('file'), csrfBody, (req, res) => {
+  if (!navAllowed('/documents')) return res.status(403).end();
+  if (!canWrite()) return res.redirect('/documents?err=1&msg=' + encodeURIComponent('Your account is view-only.'));
+  const b = req.body;
+  const title = String(b.title || '').trim();
+  if (!title) return res.redirect('/documents/new?err=1&msg=' + encodeURIComponent('Give the document a title.'));
+  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+    return res.redirect('/documents/new?err=1&msg=' + encodeURIComponent('Choose a file to upload.'));
+  }
+  const okTypes = ['application/pdf', 'image/png', 'image/jpeg'];
+  if (!okTypes.includes(req.file.mimetype)) {
+    return res.redirect('/documents/new?err=1&msg='
+      + encodeURIComponent('That file type is not supported. Upload a PDF, or a PNG or JPG.'));
+  }
+  try {
+    // The file lands on disk BEFORE the row, and the row names it. The other
+    // order can leave a document pointing at nothing, which the viewer would
+    // discover in front of an employee.
+    const sha = DOCS.crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+    const ext = req.file.mimetype === 'application/pdf' ? '.pdf'
+      : req.file.mimetype === 'image/png' ? '.png' : '.jpg';
+    const stored = `${Date.now()}-${DOCS.crypto.randomBytes(8).toString('hex')}${ext}`;
+    DOCS.fs.writeFileSync(DOCS.path.join(DOCS.DOC_DIR, stored), req.file.buffer);
+
+    const id = db.transaction(() => {
+      const docId = Number(db.prepare(`INSERT INTO documents
+        (title, description, category, kind, allow_download, ack_text, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(title, String(b.description || '').trim() || null,
+          DOCS.CATEGORIES.some(([v]) => v === b.category) ? b.category : 'other',
+          b.kind === 'sign' ? 'sign' : 'reference',
+          b.allow_download === '1' ? 1 : 0,
+          b.kind === 'sign' ? (String(b.ack_text || '').trim() || DOCS.DEFAULT_ACK) : null,
+          (req.user && req.user.name) || 'Owner').lastInsertRowid);
+      DOCS.addVersion(docId, {
+        version: String(b.version || '1.0').trim() || '1.0',
+        stored_name: stored, orig_name: req.file.originalname, mime: req.file.mimetype,
+        bytes: req.file.buffer.length, sha256: sha,
+        due_on: MX.isDate(b.due_on) ? b.due_on : null,
+        created_by: (req.user && req.user.name) || 'Owner',
+      });
+      applyDocAssignment(docId, b);
+      return docId;
+    })();
+    return res.redirect(`/documents/${id}?msg=` + encodeURIComponent('Added.'));
+  } catch (e) {
+    return res.redirect('/documents/new?err=1&msg=' + encodeURIComponent(e.message || 'Could not add that document.'));
+  }
+});
+
+/** Assignment rows from the form. Replaces whatever was there. */
+function applyDocAssignment(docId, b) {
+  db.prepare('DELETE FROM doc_assignments WHERE document_id = ?').run(docId);
+  const ins = db.prepare(`INSERT OR IGNORE INTO doc_assignments (document_id, target, target_id)
+    VALUES (?, ?, ?)`);
+  if (b.target === 'group' && b.group_id) ins.run(docId, 'group', Number(b.group_id));
+  else if (b.target === 'employee') {
+    for (const e of [].concat(b.emp || []).map(Number).filter(Boolean)) ins.run(docId, 'employee', e);
+  } else ins.run(docId, 'all', null);
+}
+
+// --- admin: one document ----------------------------------------------------
+
+app.get('/documents/:id', (req, res, next) => {
+  if (!/^\d+$/.test(String(req.params.id))) return next();
+  if (!navAllowed('/documents')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such document</h1></div>'));
+  const st = DOCS.statsFor(d.id);
+  const versions = DOCS.versionsOf(d.id);
+  const audience = DOCS.audienceOf(d.id);
+  const cur = st.version;
+  const sigs = cur ? new Map(db.prepare(`SELECT * FROM doc_signatures
+     WHERE version_id = ? AND voided_at IS NULL`).all(cur.id).map((r) => [r.employee_id, r])) : new Map();
+  const views = cur ? new Map(db.prepare('SELECT * FROM doc_views WHERE version_id = ?')
+    .all(cur.id).map((r) => [r.employee_id, r])) : new Map();
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const w = canWrite();
+
+  const personRow = (p) => {
+    const sg = sigs.get(p.id); const vw = views.get(p.id);
+    const state = sg ? { k: 'ok', t: `Signed ${TC.stamp(sg.signed_at)}` }
+      : d.kind !== 'sign' ? (vw ? { k: 'ok', t: `Viewed ${TC.stamp(vw.last_at)}` } : { k: '', t: 'Not viewed' })
+        : cur && cur.due_on && cur.due_on < today ? { k: 'bad', t: `Overdue — due ${cur.due_on}` }
+          : vw ? { k: 'warn', t: 'Opened, not signed' } : { k: 'warn', t: 'Not started' };
+    return `<div class="bs-lr dsig-r">
+      <span class="dsig-who"><b>${esc(p.name)}</b></span>
+      <span class="dsig-st"><i class="tcm-tag ${state.k}">${esc(state.t)}</i></span>
+      ${sg ? `<a class="bs-act dsig-go" href="/documents/${d.id}/signature/${sg.id}">Record</a>` : '<span></span>'}
+    </div>`;
+  };
+
+  res.send(layout(d.title, `
+    ${flash(req)}
+    <div class="bs-page">
+      <a class="bs-back" href="/documents">&larr; Documents</a>
+      <div class="bs-head">
+        <div class="bs-headwrap">
+          <h1 class="bs-headline">${esc(d.title)}${d.active ? '' : ' <span class="dl-kind">Archived</span>'}</h1>
+          <p class="bs-subline">${esc(DOCS.catName(d.category))}${cur ? ` · Version ${esc(cur.version)}` : ''}
+            ${d.description ? ` · ${esc(d.description)}` : ''}</p>
+        </div>
+        <div class="bs-head-acts">
+          ${cur ? `<a class="bs-btn-sm" href="/documents/${d.id}/file" target="_blank" rel="noopener">Open the file</a>` : ''}
+          ${w ? `<a class="bs-btn-sm" href="/documents/${d.id}/edit">Edit</a>` : ''}
+        </div>
+      </div>
+
+      <section class="bs-panel bs-strip">
+        <div class="bs-strip-c"><span class="bs-strip-l">Assigned</span><span class="bs-stat">${st.assigned}</span></div>
+        ${d.kind === 'sign'
+    ? `<div class="bs-strip-c"><span class="bs-strip-l">Completed</span><span class="bs-stat ok">${st.signed}</span></div>
+       <div class="bs-strip-c"><span class="bs-strip-l">Pending</span><span class="bs-stat${st.pending ? ' warn' : ''}">${st.pending}</span></div>
+       <div class="bs-strip-c"><span class="bs-strip-l">Overdue</span><span class="bs-stat${st.overdue ? ' bad' : ''}">${st.overdue}</span></div>`
+    : `<div class="bs-strip-c"><span class="bs-strip-l">Viewed</span><span class="bs-stat ok">${st.viewed}</span></div>
+       <div class="bs-strip-c"><span class="bs-strip-l">Not viewed</span><span class="bs-stat">${Math.max(0, st.assigned - st.viewed)}</span></div>
+       <div class="bs-strip-c"><span class="bs-strip-l">Type</span><span class="bs-stat">Reference</span></div>`}
+      </section>
+
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">${d.kind === 'sign' ? 'Who has signed' : 'Who has opened it'}</span>
+          <span class="bs-sec-note">${audience.length} ${audience.length === 1 ? 'person' : 'people'}</span></div>
+        ${audience.length ? `<div class="bs-lrows">${audience.map(personRow).join('')}</div>`
+    : '<p class="inc-hint">Nobody is assigned yet. Edit the document to choose who gets it.</p>'}
+      </section>
+
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">Versions</span></div>
+        <p class="inc-hint">A new version is a new file and a new obligation. Signatures stay on the
+          version they were given — uploading version 2 never makes it look as though anybody signed it.</p>
+        <div class="bs-lrows">
+          ${versions.map((v) => {
+    const n = db.prepare('SELECT COUNT(*) n FROM doc_signatures WHERE version_id = ? AND voided_at IS NULL').get(v.id).n;
+    return `<div class="bs-lr dsig-r">
+            <span class="dsig-who"><b>Version ${esc(v.version)}</b>
+              <i>${esc(TC.stamp(v.created_at))}${v.due_on ? ` · due ${esc(v.due_on)}` : ''}</i></span>
+            <span class="dsig-st">${v.is_current ? '<i class="tcm-tag on">current</i>' : ''}
+              ${n ? `<i class="tcm-tag">${n} signed</i>` : ''}</span>
+            <a class="bs-act dsig-go" href="/documents/${d.id}/file?v=${v.id}" target="_blank" rel="noopener">Open</a>
+          </div>`;
+  }).join('')}
+        </div>
+        ${w ? `<form class="du-newver" method="post" action="/documents/${d.id}/version" enctype="multipart/form-data">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <label class="du-f"><span>New version</span><input name="version" placeholder="2.0" required maxlength="20"></label>
+          <label class="du-f"><span>File</span><input type="file" name="file" accept="application/pdf,image/png,image/jpeg" required></label>
+          ${d.kind === 'sign' ? `<label class="tcs-check"><input type="checkbox" name="resign" value="1" checked>
+            <span>Everyone has to sign this one too</span></label>` : ''}
+          <button class="bs-btn-sm" type="submit">Upload new version</button>
+        </form>` : ''}
+      </section>
+
+      ${w ? `<div class="bs-danger">
+        <form method="post" action="/documents/${d.id}/${d.active ? 'archive' : 'restore'}">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <button class="bs-act${d.active ? ' danger' : ''}" type="submit"
+            onsubmit="return true">${d.active ? 'Archive this document' : 'Restore this document'}</button>
+        </form>
+        <p class="inc-hint">Archiving takes it out of everybody's portal and keeps every signature against it.</p>
+      </div>` : ''}
+    </div>`));
+});
+
+/** The file, for an admin. Any version, including archived ones. */
+app.get('/documents/:id/file', (req, res, next) => {
+  if (!/^\d+$/.test(String(req.params.id))) return next();
+  if (!navAllowed('/documents')) return res.status(403).end();
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).end();
+  const v = req.query.v ? DOCS.versionById(req.query.v) : DOCS.currentVersion(d.id);
+  if (!v || v.document_id !== d.id) return res.status(404).send('No such version.');
+  return sendDocFile(res, v, { download: req.query.dl === '1' });
+});
+
+app.post('/documents/:id/version', docUpload.single('file'), csrfBody, (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).end();
+  if (!req.file || !req.file.buffer.length) {
+    return res.redirect(`/documents/${d.id}?err=1&msg=` + encodeURIComponent('Choose a file.'));
+  }
+  try {
+    const sha = DOCS.crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+    const ext = req.file.mimetype === 'application/pdf' ? '.pdf'
+      : req.file.mimetype === 'image/png' ? '.png' : '.jpg';
+    const stored = `${Date.now()}-${DOCS.crypto.randomBytes(8).toString('hex')}${ext}`;
+    DOCS.fs.writeFileSync(DOCS.path.join(DOCS.DOC_DIR, stored), req.file.buffer);
+    DOCS.addVersion(d.id, {
+      version: String(req.body.version || '').trim() || 'next',
+      stored_name: stored, orig_name: req.file.originalname, mime: req.file.mimetype,
+      bytes: req.file.buffer.length, sha256: sha,
+      due_on: MX.isDate(req.body.due_on) ? req.body.due_on : null,
+      created_by: (req.user && req.user.name) || 'Owner',
+    });
+    // Nothing else to do for a re-sign: signatures are keyed on the version, so
+    // a new one starts unsigned by construction. The checkbox is there because
+    // NOT requiring it is the case that would need work, and it is not built.
+    return res.redirect(`/documents/${d.id}?msg=`
+      + encodeURIComponent('New version uploaded. Earlier signatures stay on the version they were given.'));
+  } catch (e) {
+    return res.redirect(`/documents/${d.id}?err=1&msg=` + encodeURIComponent(e.message || 'Upload failed.'));
+  }
+});
+
+app.post('/documents/:id/archive', (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  db.prepare("UPDATE documents SET active = 0, archived_at = datetime('now') WHERE id = ?").run(req.params.id);
+  res.redirect('/documents?msg=' + encodeURIComponent('Archived. Every signature against it is kept.'));
+});
+app.post('/documents/:id/restore', (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  db.prepare('UPDATE documents SET active = 1, archived_at = NULL WHERE id = ?').run(req.params.id);
+  res.redirect(`/documents/${req.params.id}?msg=` + encodeURIComponent('Back in use.'));
+});
+
+/** One completed record, as evidence. Nothing on this page is editable. */
+app.get('/documents/:id/signature/:sid', (req, res) => {
+  if (!navAllowed('/documents')) return res.status(403).end();
+  const sg = db.prepare(`SELECT s.*, v.version, v.sha256, d.title FROM doc_signatures s
+     JOIN doc_versions v ON v.id = s.version_id
+     JOIN documents d ON d.id = s.document_id
+    WHERE s.id = ? AND s.document_id = ?`).get(req.params.sid, req.params.id);
+  if (!sg) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such record</h1></div>'));
+  const fact = (k, v) => `<div class="inc-fact"><span>${k}</span><b>${v}</b></div>`;
+  res.send(layout('Signed record', `
+    <div class="bs-page">
+      <a class="bs-back" href="/documents/${req.params.id}">&larr; ${esc(sg.title)}</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">Signed record</h1>
+        <p class="bs-subline">What was agreed, by whom, and when. This record cannot be edited —
+          if it is wrong it is voided and a fresh acknowledgment is asked for.</p>
+      </div></div>
+      <section class="bs-panel">
+        <div class="inc-facts">
+          ${fact('Document', esc(sg.title))}
+          ${fact('Version', esc(sg.version))}
+          ${fact('Signed by', esc(sg.employee_name))}
+          ${fact('Signed at', esc(TC.stamp(sg.signed_at)))}
+          ${fact('Method', sg.method === 'typed' ? 'Typed name and acknowledgment' : esc(sg.method))}
+          ${sg.ip ? fact('From', esc(sg.ip)) : ''}
+        </div>
+        <div class="bs-sec-h"><span class="bs-kicker">What they agreed to</span></div>
+        <p class="dsig-ack">${esc(sg.ack_text)}</p>
+        ${sg.sha256 ? `<p class="inc-hint">File fingerprint (SHA-256) <code>${esc(sg.sha256.slice(0, 32))}…</code>
+          — the exact file they were shown.</p>` : ''}
+        <p><a class="bs-act" href="/documents/${req.params.id}/file?v=${sg.version_id}" target="_blank" rel="noopener">Open the version they signed</a></p>
+      </section>
+    </div>`));
+});
+
+// --- admin: groups ----------------------------------------------------------
+
+app.get('/documents/groups', (req, res) => {
+  if (!navAllowed('/documents')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const gs = DOCS.groups.all({ includeArchived: true });
+  const w = canWrite();
+  res.send(layout('Document groups', `
+    ${flash(req)}
+    <div class="bs-page">
+      <a class="bs-back" href="/documents">&larr; Documents</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">Groups</h1>
+        <p class="bs-subline">Who a document goes to. Membership is read live, so somebody added to
+          Servers next week gets every active Server document that day — without anyone reopening it.</p>
+      </div></div>
+      ${w ? `<form class="bs-panel dg-new" method="post" action="/documents/groups">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <label class="du-f"><span>New group</span>
+          <input name="name" placeholder="Servers" required maxlength="60"></label>
+        <button class="bs-btn-sm" type="submit">Create</button>
+      </form>` : ''}
+      ${gs.length ? `<div class="bs-lrows">${gs.map((g) => `
+        <a class="bs-lr dsig-r${g.active ? '' : ' is-off'}" href="/documents/groups/${g.id}">
+          <span class="dsig-who"><b>${esc(g.name)}</b>
+            <i>${g.members} ${g.members === 1 ? 'person' : 'people'}${g.active ? '' : ' · archived'}</i></span>
+          <span class="dsig-st">${DOCS.groups.members(g.id).slice(0, 4).map((m) =>
+    `<i class="tcm-tag">${esc(m.name.split(' ')[0])}</i>`).join('')}</span>
+          <span class="bs-lr-go">›</span>
+        </a>`).join('')}</div>`
+    : '<div class="bs-blank"><b>No groups yet</b><span>A group is how a document reaches Servers, or the kitchen, or the training team.</span></div>'}
+    </div>`));
+});
+
+app.post('/documents/groups', (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  try {
+    const id = DOCS.groups.create(req.body.name);
+    res.redirect(`/documents/groups/${id}?msg=` + encodeURIComponent('Group made. Add people to it.'));
+  } catch (e) {
+    res.redirect('/documents/groups?err=1&msg=' + encodeURIComponent(e.message));
+  }
+});
+
+app.get('/documents/groups/:id', (req, res) => {
+  if (!navAllowed('/documents')) return res.status(403).send(layout('Not your area', '<div class="bs-page"><h1>Not your area</h1></div>'));
+  const g = DOCS.groups.get(req.params.id);
+  if (!g) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such group</h1></div>'));
+  const on = new Set(DOCS.groups.memberIds(g.id));
+  const staff = q.allEmployees.all();
+  const docs = db.prepare(`SELECT d.id, d.title, d.kind FROM documents d
+     JOIN doc_assignments a ON a.document_id = d.id
+    WHERE a.target = 'group' AND a.target_id = ? AND d.active = 1 ORDER BY d.title`).all(g.id);
+  const w = canWrite();
+  res.send(layout(g.name, `
+    ${flash(req)}
+    <div class="bs-page">
+      <a class="bs-back" href="/documents/groups">&larr; Groups</a>
+      <div class="bs-head">
+        <div class="bs-headwrap"><h1 class="bs-headline">${esc(g.name)}</h1>
+          <p class="bs-subline">${on.size} ${on.size === 1 ? 'person' : 'people'} · ${docs.length} document${docs.length === 1 ? '' : 's'}</p></div>
+      </div>
+      <form class="bs-panel" method="post" action="/documents/groups/${g.id}">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <label class="du-f"><span>Name</span>
+          <input name="name" value="${esc(g.name)}" maxlength="60" ${w ? '' : 'disabled'}></label>
+        <div class="bs-sec-h"><span class="bs-kicker">Who is in it</span></div>
+        <p class="inc-hint">Taking somebody out removes their access to this group's documents from now on.
+          Anything they already signed stays exactly as it is — that is a record of what happened, not a permission.</p>
+        <div class="tca-grid">
+          ${staff.map((e) => `<label class="tca-p${on.has(e.id) ? ' on' : ''}">
+            <input type="checkbox" name="emp" value="${e.id}"${on.has(e.id) ? ' checked' : ''}${w ? '' : ' disabled'}>
+            <span>${esc(e.name)}</span>
+            <i>${esc(DOCS.groups.forEmployee(e.id).filter((x) => x.id !== g.id).map((x) => x.name).join(' · ') || 'no other group')}</i>
+          </label>`).join('')}
+        </div>
+        ${w ? `<div class="bs-form-acts"><button class="bs-btn bs-btn-go" type="submit">Save group</button>
+          <a class="bs-act" href="/documents/groups">Cancel</a></div>` : ''}
+      </form>
+      ${docs.length ? `<section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">Documents this group gets</span></div>
+        <div class="bs-lrows">${docs.map((d) => `<a class="bs-lr dsig-r" href="/documents/${d.id}">
+          <span class="dsig-who"><b>${esc(d.title)}</b><i>${d.kind === 'sign' ? 'Requires signing' : 'Reference'}</i></span>
+          <span class="bs-lr-go">›</span></a>`).join('')}</div>
+      </section>` : ''}
+    </div>`));
+});
+
+app.post('/documents/groups/:id', (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  const g = DOCS.groups.get(req.params.id);
+  if (!g) return res.status(404).end();
+  try {
+    if (String(req.body.name || '').trim()) DOCS.groups.rename(g.id, req.body.name);
+    // setMembers, scoped to THIS group. The mirror mistake — looping over groups
+    // for one person — would take everybody here off every other group they are in.
+    DOCS.groups.setMembers(g.id, [].concat(req.body.emp || []).map(Number).filter(Boolean));
+    res.redirect(`/documents/groups/${g.id}?msg=` + encodeURIComponent('Saved.'));
+  } catch (e) {
+    res.redirect(`/documents/groups/${g.id}?err=1&msg=` + encodeURIComponent(e.message));
+  }
+});
+
+// --- admin: editing a document ----------------------------------------------
+
+app.get('/documents/:id/edit', (req, res, next) => {
+  if (!/^\d+$/.test(String(req.params.id))) return next();
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).end();
+  const a = DOCS.assignmentsFor(d.id);
+  const target = a.length ? a[0].target : 'all';
+  const chosen = new Set(a.filter((x) => x.target === 'employee').map((x) => x.target_id));
+  const gid = (a.find((x) => x.target === 'group') || {}).target_id;
+  const gs = DOCS.groups.all();
+  const emps = q.allEmployees.all();
+  res.send(layout(`Edit ${d.title}`, `
+    ${flash(req)}
+    <div class="bs-page du-page">
+      <a class="bs-back" href="/documents/${d.id}">&larr; ${esc(d.title)}</a>
+      <div class="bs-head"><div class="bs-headwrap"><h1 class="bs-headline">Edit document</h1>
+        <p class="bs-subline">Details and who it reaches. The file itself is changed by uploading a new version.</p></div></div>
+      <form class="bs-panel du-form" method="post" action="/documents/${d.id}/edit">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <label class="du-f"><span>Title</span><input name="title" value="${esc(d.title)}" required maxlength="120"></label>
+        <label class="du-f"><span>Description</span><input name="description" value="${esc(d.description || '')}" maxlength="300"></label>
+        <div class="du-row">
+          <label class="du-f"><span>Category</span><select name="category">${DOCS.CATEGORIES.map(([v, l]) =>
+    `<option value="${v}"${v === d.category ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+          <label class="du-f"><span>Acknowledgment wording</span>
+            <input name="ack_text" value="${esc(d.ack_text || '')}" maxlength="300"
+              placeholder="${esc(DOCS.DEFAULT_ACK)}" ${d.kind === 'sign' ? '' : 'disabled'}></label>
+        </div>
+        <fieldset class="du-assign">
+          <legend>Who gets it</legend>
+          <label class="du-r"><input type="radio" name="target" value="all"${target === 'all' ? ' checked' : ''}>
+            <span><b>Everyone</b></span></label>
+          <label class="du-r"><input type="radio" name="target" value="group"${target === 'group' ? ' checked' : ''}>
+            <span><b>A group</b></span></label>
+          <div class="du-sub">${gs.length ? `<select name="group_id" class="bs-sel">${gs.map((g) =>
+    `<option value="${g.id}"${g.id === gid ? ' selected' : ''}>${esc(g.name)} (${g.members})</option>`).join('')}</select>`
+    : '<p class="inc-hint">No groups yet.</p>'}</div>
+          <label class="du-r"><input type="radio" name="target" value="employee"${target === 'employee' ? ' checked' : ''}>
+            <span><b>Specific people</b></span></label>
+          <div class="du-sub du-people">${emps.map((e) => `<label class="tca-p${chosen.has(e.id) ? ' on' : ''}">
+            <input type="checkbox" name="emp" value="${e.id}"${chosen.has(e.id) ? ' checked' : ''}>
+            <span>${esc(e.name)}</span></label>`).join('')}</div>
+        </fieldset>
+        <label class="tcs-check"><input type="checkbox" name="allow_download" value="1"${d.allow_download ? ' checked' : ''}>
+          <span>Let employees download a copy</span></label>
+        <div class="bs-form-acts"><button class="bs-btn bs-btn-go" type="submit">Save</button>
+          <a class="bs-act" href="/documents/${d.id}">Cancel</a></div>
+      </form>
+    </div>`));
+});
+
+app.post('/documents/:id/edit', (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).end();
+  const b = req.body;
+  db.transaction(() => {
+    db.prepare(`UPDATE documents SET title = ?, description = ?, category = ?,
+       allow_download = ?, ack_text = ? WHERE id = ?`)
+      .run(String(b.title || d.title).trim(), String(b.description || '').trim() || null,
+        DOCS.CATEGORIES.some(([v]) => v === b.category) ? b.category : d.category,
+        b.allow_download === '1' ? 1 : 0,
+        d.kind === 'sign' ? (String(b.ack_text || '').trim() || DOCS.DEFAULT_ACK) : null, d.id);
+    applyDocAssignment(d.id, b);
+  })();
+  res.redirect(`/documents/${d.id}?msg=` + encodeURIComponent('Saved.'));
+});
+
+/**
+ * The reader, as a script.
+ *
+ * Canvas per page, rendered lazily and released behind, because a phone holding
+ * sixty full-resolution bitmaps stops being a phone. Width comes from the
+ * container so the document fills the screen at a readable size with nobody
+ * pinching, and the pages sit in the PAGE's scroll rather than their own —
+ * a scroll container inside a scroll container is the thing that makes an
+ * embedded PDF feel broken on a phone.
+ */
+const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
+<script>
+(function () {
+  var stage = document.getElementById('pdv-stage');
+  if (!stage || !window.pdfjsLib) { return; }
+  var pagesEl = document.getElementById('pdv-pages');
+  var loadEl = document.getElementById('pdv-load');
+  var failEl = document.getElementById('pdv-fail');
+  var countEl = document.getElementById('pdv-count');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/vendor/pdf.worker.min.js';
+
+  // Cap the backing store. Retina times a full-width page on a big phone is a
+  // lot of pixels, and past a point they are pixels nobody can see.
+  var DPR = Math.min(window.devicePixelRatio || 1, 2);
+  var pdf = null, total = 0, rendered = {}, shells = [];
+
+  function widthFor() {
+    var w = pagesEl.clientWidth || stage.clientWidth || window.innerWidth;
+    return Math.max(240, Math.min(w, 1100));
+  }
+
+  function shell(n) {
+    var d = document.createElement('div');
+    d.className = 'pdv-page';
+    d.setAttribute('data-page', String(n));
+    d.setAttribute('role', 'img');
+    d.setAttribute('aria-label', 'Page ' + n + ' of ' + total);
+    return d;
+  }
+
+  function draw(n) {
+    if (rendered[n] || !pdf) return;
+    rendered[n] = true;
+    pdf.getPage(n).then(function (page) {
+      var host = shells[n - 1];
+      if (!host) return;
+      var base = page.getViewport({ scale: 1 });
+      var scale = widthFor() / base.width;
+      var vp = page.getViewport({ scale: scale });
+      var cv = document.createElement('canvas');
+      cv.width = Math.floor(vp.width * DPR);
+      cv.height = Math.floor(vp.height * DPR);
+      cv.style.width = '100%';
+      cv.style.height = 'auto';
+      host.style.aspectRatio = '';
+      host.innerHTML = '';
+      host.appendChild(cv);
+      page.render({ canvasContext: cv.getContext('2d', { alpha: false }),
+        viewport: page.getViewport({ scale: scale * DPR }) });
+    }).catch(function () { rendered[n] = false; });
+  }
+
+  function release(n) {
+    var host = shells[n - 1];
+    if (!host || !rendered[n]) return;
+    // Keep the box the right height so releasing a page does not make the
+    // document jump under the reader's thumb.
+    var h = host.getBoundingClientRect().height;
+    if (h) host.style.height = h + 'px';
+    host.innerHTML = '';
+    rendered[n] = false;
+  }
+
+  var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      var n = Number(e.target.getAttribute('data-page'));
+      if (e.isIntersecting) { draw(n); draw(n + 1); note(n); }
+    });
+  }, { root: null, rootMargin: '250% 0px 250% 0px', threshold: 0.01 }) : null;
+
+  // Far outside the window, let it go.
+  var far = ('IntersectionObserver' in window) ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) release(Number(e.target.getAttribute('data-page')));
+    });
+  }, { root: null, rootMargin: '600% 0px 600% 0px', threshold: 0 }) : null;
+
+  var seen = 0, timer = null;
+  function note(n) {
+    if (countEl) { countEl.hidden = false; countEl.textContent = 'Page ' + n + ' of ' + total; }
+    if (n <= seen) return;
+    seen = n;
+    clearTimeout(timer);
+    // Batched: scrolling a long document should not post on every page.
+    timer = setTimeout(function () {
+      try {
+        fetch(stage.getAttribute('data-progress'), {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ page: seen, pages: total })
+        });
+      } catch (err) { /* progress is a convenience, never a blocker */ }
+    }, 1200);
+  }
+
+  pdfjsLib.getDocument({ url: stage.getAttribute('data-src'), withCredentials: true })
+    .promise.then(function (doc) {
+      pdf = doc; total = doc.numPages;
+      if (loadEl) loadEl.hidden = true;
+      for (var i = 1; i <= total; i++) {
+        var sh = shell(i);
+        pagesEl.appendChild(sh);
+        shells.push(sh);
+        if (io) io.observe(sh); if (far) far.observe(sh);
+      }
+      if (!io) { for (var j = 1; j <= total; j++) draw(j); }
+      else { draw(1); draw(2); }
+      // Back where they were. Approximate on purpose — landing them exactly on
+      // a pixel they were mid-sentence at is not worth the jump it causes.
+      var start = Number(stage.getAttribute('data-start') || 1);
+      if (start > 1 && shells[start - 1]) {
+        setTimeout(function () {
+          shells[start - 1].scrollIntoView({ block: 'start' });
+        }, 60);
+      }
+    })
+    .catch(function () {
+      if (loadEl) loadEl.hidden = true;
+      if (failEl) failEl.hidden = false;
+    });
+
+  // Re-render at the new width on rotate. Debounced, because iOS fires this
+  // repeatedly through the animation.
+  var rz = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(rz);
+    rz = setTimeout(function () {
+      for (var n in rendered) if (rendered[n]) { rendered[n] = false; }
+      shells.forEach(function (h) { h.style.height = ''; });
+      var top = Math.max(1, seen);
+      draw(top); draw(top + 1);
+    }, 250);
+  });
+
+  // --- signing ---
+  var sheet = document.getElementById('pdv-sheet');
+  var agree = document.getElementById('pdv-agree');
+  var submit = document.getElementById('pdv-submit');
+  function openSheet() {
+    if (!sheet) return;
+    sheet.hidden = false;
+    document.documentElement.style.overflow = 'hidden';
+    var f = sheet.querySelector('input[name=full_name]');
+    if (f) f.focus();
+  }
+  function closeSheet() {
+    if (!sheet) return;
+    sheet.hidden = true;
+    document.documentElement.style.overflow = '';
+  }
+  document.addEventListener('click', function (ev) {
+    if (ev.target.closest && ev.target.closest('[data-pdv-sign]')) { ev.preventDefault(); openSheet(); }
+    if (ev.target.closest && ev.target.closest('[data-pdv-close]')) { ev.preventDefault(); closeSheet(); }
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && sheet && !sheet.hidden) closeSheet();
+  });
+  // The button stays dead until the box is ticked, so Sign is never something
+  // a thumb can hit on the way past.
+  if (agree && submit) {
+    agree.addEventListener('change', function () { submit.disabled = !agree.checked; });
+  }
+  var form = document.getElementById('pdv-form');
+  if (form && submit) {
+    form.addEventListener('submit', function () {
+      submit.disabled = true;
+      submit.textContent = 'Submitting…';
+    });
+  }
+})();
+</script>`;
+
+// ===========================================================================
+// THE EMPLOYEE PORTAL SIDE
+// ===========================================================================
+
+/** The one gate. Every portal document route asks this and nothing else. */
+function portalDoc(req, res) {
+  const who = requirePortal(req, res);
+  if (!who) return null;
+  const d = DOCS.byId(req.params.id);
+  // Not found and not-yours are the SAME answer on purpose. A different message
+  // for each would let somebody walk the id space and learn which documents
+  // exist and who they belong to, which is most of what a corrective action
+  // discloses before anybody reads it.
+  if (!d || !DOCS.canEmployeeSee(d.id, who.emp.id)) {
+    res.status(404).send(portalPage('Not found', `
+      ${portalTop({ href: '/portal/documents', label: 'Documents' }, 'Not found')}
+      <div class="pt-body">
+        <div class="pd-empty"><b>That document is not available</b>
+          <span>It may have been archived, or it was never assigned to you.</span>
+          <a class="tc-btn tc-btn-go" href="/portal/documents">Back to documents</a></div>
+      </div>`));
+    return null;
+  }
+  return { emp: who.emp, doc: d };
+}
+
+app.get('/portal/documents', (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const mine = DOCS.forEmployee(who.emp.id);
+  const needs = mine.filter((d) => d.kind === 'sign' && !d.signature);
+  const rest = mine.filter((d) => !(d.kind === 'sign' && !d.signature));
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+
+  const card = (d) => {
+    const st = docStatus(d);
+    const due = d.due_on
+      ? (d.due_on < today ? `Overdue — was due ${niceDate(d.due_on)}`
+        : `Due ${niceDate(d.due_on)}`) : '';
+    return `<a class="pd-card pd-${st.key}" href="/portal/documents/${d.id}">
+      <span class="pd-c-b">
+        <b>${esc(d.title)}</b>
+        <i>${esc(DOCS.catName(d.category))}${d.signature
+    ? ` · Signed ${niceDate(String(d.signature.signed_at).slice(0, 10))}` : due ? ` · ${esc(due)}` : ''}</i>
+      </span>
+      <span class="pd-c-s"><i class="pd-tag pd-tag-${st.key}">${esc(st.label)}</i></span>
+    </a>`;
+  };
+
+  res.send(portalPage('Documents', `
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Documents')}
+    <div class="pt-body pd-body">
+      ${needs.length ? `<section class="pd-sec pd-sec-need">
+        <h2 class="pd-h">Needs your attention <span class="pd-count">${needs.length}</span></h2>
+        <div class="pd-cards">${needs.map(card).join('')}</div>
+      </section>` : `<section class="pd-sec">
+        <div class="pd-clear"><span class="pd-tick" aria-hidden="true">✓</span>
+          <b>You're all caught up</b>
+          <span>Nothing needs signing right now.</span></div>
+      </section>`}
+
+      <section class="pd-sec">
+        <h2 class="pd-h">Your documents</h2>
+        ${rest.length ? `<div class="pd-cards">${rest.map(card).join('')}</div>`
+    : '<p class="pd-none">No documents have been shared with you yet.</p>'}
+      </section>
+    </div>`));
+});
+
+/**
+ * THE READER.
+ *
+ * pdf.js rendering to canvas, one canvas per page, lazily — not an <iframe>
+ * around the browser's own viewer, which brings its own toolbar, its own
+ * scroll container inside ours, and on iOS its own gestures. A phone ends up
+ * with two scrollbars and a document the width of a postage stamp.
+ *
+ * Pages are rendered as they approach the viewport and released behind, so a
+ * sixty-page handbook does not put sixty full-resolution bitmaps in memory on a
+ * phone. Width is measured from the container, so it fills the screen without
+ * anybody pinching.
+ */
+app.get('/portal/documents/:id', (req, res) => {
+  const ctx = portalDoc(req, res);
+  if (!ctx) return;
+  const { emp, doc } = ctx;
+  const v = DOCS.currentVersion(doc.id);
+  if (!v) {
+    return res.send(portalPage(doc.title, `
+      ${portalTop({ href: '/portal/documents', label: 'Documents' }, doc.title)}
+      <div class="pt-body"><div class="pd-empty"><b>Nothing to read yet</b>
+        <span>This document has no file on it. Your manager will add one.</span></div></div>`));
+  }
+  const sig = db.prepare(`SELECT * FROM doc_signatures
+     WHERE version_id = ? AND employee_id = ? AND voided_at IS NULL`).get(v.id, emp.id);
+  const view = db.prepare('SELECT * FROM doc_views WHERE version_id = ? AND employee_id = ?').get(v.id, emp.id);
+  const needsSign = doc.kind === 'sign' && !sig;
+  // What to offer NEXT, so finishing one required document does not mean three
+  // taps back through a list to reach the second.
+  const queue = DOCS.forEmployee(emp.id).filter((d) => d.kind === 'sign' && !d.signature && d.id !== doc.id);
+  const ack = doc.ack_text || DOCS.DEFAULT_ACK;
+
+  res.send(portalPage(doc.title, `
+    ${portalTop({ href: '/portal/documents', label: 'Documents' }, doc.title)}
+    <div class="pt-body pdv-body">
+      <div class="pdv-head">
+        <h1 class="pdv-title">${esc(doc.title)}</h1>
+        <p class="pdv-meta">${esc(DOCS.catName(doc.category))} · Version ${esc(v.version)}${
+  doc.allow_download ? ` · <a class="pdv-dl" href="/portal/documents/${doc.id}/file?dl=1">Download</a>` : ''}</p>
+      </div>
+
+      ${sig ? `<div class="pdv-done">
+        <span class="pdv-done-t"><span aria-hidden="true">✓</span> Completed</span>
+        <span class="pdv-done-s">Signed by ${esc(sig.employee_name)} · ${esc(TC.stamp(sig.signed_at))}</span>
+      </div>` : ''}
+
+      <div class="pdv-stage" id="pdv-stage" data-src="/portal/documents/${doc.id}/file"
+           data-ver="${v.id}" data-start="${view ? view.last_page : 1}"
+           data-progress="/portal/documents/${doc.id}/progress">
+        <div class="pdv-load" id="pdv-load"><span class="pdv-spin" aria-hidden="true"></span>
+          <span>Loading document…</span></div>
+        <div class="pdv-pages" id="pdv-pages" aria-label="Document pages"></div>
+        <div class="pdv-fail" id="pdv-fail" hidden>
+          <b>This document could not be displayed</b>
+          <span>It may still be uploading, or the file may be damaged.</span>
+          ${doc.allow_download ? `<a class="tc-btn" href="/portal/documents/${doc.id}/file?dl=1">Download it instead</a>` : ''}
+        </div>
+      </div>
+      <div class="pdv-count" id="pdv-count" hidden aria-live="polite"></div>
+
+      ${needsSign ? `<div class="pdv-bar" id="pdv-bar">
+        <span class="pdv-bar-t">Requires your acknowledgment</span>
+        <button type="button" class="tc-btn tc-btn-go" data-pdv-sign>Review &amp; sign</button>
+      </div>
+
+      <div class="pdv-sheet" id="pdv-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="pdv-sh-h">
+        <div class="pdv-scrim" data-pdv-close></div>
+        <form class="pdv-panel" method="post" action="/portal/documents/${doc.id}/sign" id="pdv-form">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="version_id" value="${v.id}">
+          <h2 id="pdv-sh-h" class="pdv-sh-h">Acknowledgment</h2>
+          <p class="pdv-sh-p">${esc(ack)}</p>
+          <label class="pdv-f"><span>Your full name</span>
+            <input name="full_name" value="${esc(emp.name)}" required maxlength="120" autocomplete="name"></label>
+          <label class="pdv-chk">
+            <input type="checkbox" name="agree" value="1" required id="pdv-agree">
+            <span>I acknowledge and agree.</span>
+          </label>
+          <button class="tc-btn tc-btn-go tc-btn-big" type="submit" id="pdv-submit" disabled>Sign &amp; submit</button>
+          <button type="button" class="tc-btn" data-pdv-close>Not yet</button>
+        </form>
+      </div>` : ''}
+
+      ${sig && queue.length ? `<div class="pdv-next">
+        <span>${queue.length} more ${queue.length === 1 ? 'document needs' : 'documents need'} signing</span>
+        <a class="tc-btn tc-btn-go" href="/portal/documents/${queue[0].id}">Next document</a>
+      </div>` : ''}
+      ${sig && !queue.length ? `<div class="pdv-next">
+        <a class="tc-btn" href="/portal/documents">Back to documents</a></div>` : ''}
+    </div>
+    ${pdfViewerScript()}`));
+});
+
+/** The file, for the employee it belongs to. The same gate as the page. */
+app.get('/portal/documents/:id/file', (req, res) => {
+  const ctx = portalDoc(req, res);
+  if (!ctx) return;
+  const v = req.query.v ? DOCS.versionById(req.query.v) : DOCS.currentVersion(ctx.doc.id);
+  if (!v || v.document_id !== ctx.doc.id) return res.status(404).send('No such version.');
+  // A version they SIGNED stays readable even if it is no longer current —
+  // that is the copy they agreed to, and taking it away would leave them
+  // acknowledging something they can no longer see.
+  const download = req.query.dl === '1';
+  if (download && !ctx.doc.allow_download) return res.status(403).send('Downloads are turned off for this document.');
+  return sendDocFile(res, v, { download });
+});
+
+/** How far they got. Operational, never used as evidence of reading. */
+app.post('/portal/documents/:id/progress', express.json(), (req, res) => {
+  const who = requirePortal(req, res);
+  if (!who) return;
+  const d = DOCS.byId(req.params.id);
+  if (!d || !DOCS.canEmployeeSee(d.id, who.emp.id)) return res.status(404).json({ ok: false });
+  const v = DOCS.currentVersion(d.id);
+  if (!v) return res.status(404).json({ ok: false });
+  DOCS.noteView(v.id, who.emp.id, req.body && req.body.page, req.body && req.body.pages);
+  return res.json({ ok: true });
+});
+
+app.post('/portal/documents/:id/sign', (req, res) => {
+  const ctx = portalDoc(req, res);
+  if (!ctx) return;
+  const { emp, doc } = ctx;
+  const v = DOCS.currentVersion(doc.id);
+  const back = (m, err) => res.redirect(`/portal/documents/${doc.id}?`
+    + (err ? 'err=' : 'ok=') + encodeURIComponent(m));
+  if (doc.kind !== 'sign') return back('That document does not need signing.', true);
+  if (!v || String(req.body.version_id) !== String(v.id)) {
+    // The version moved while they had the page open. Their acknowledgment
+    // would land on a file they never saw, so it is refused rather than
+    // quietly retargeted.
+    return back('A newer version was published while you had this open. Open it again and review that one.', true);
+  }
+  if (req.body.agree !== '1') return back('Tick the box to acknowledge before submitting.', true);
+  const name = String(req.body.full_name || '').trim();
+  if (!name) return back('Enter your full name.', true);
+  try {
+    const { fresh } = DOCS.sign({
+      versionId: v.id, employeeId: emp.id, employeeName: name,
+      ackText: doc.ack_text || DOCS.DEFAULT_ACK,
+      // The server's clock, the server's view of who this is. A client-sent
+      // date is a field somebody can type anything into.
+      ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null,
+      userAgent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
+    });
+    return back(fresh ? 'Signed. Thank you.' : 'That was already signed — nothing was filed twice.');
+  } catch (e) {
+    return back(e.message || 'Could not record that. Try again.', true);
+  }
 });
 
 mountModules(app, csrfBody);
