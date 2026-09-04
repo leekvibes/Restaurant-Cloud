@@ -28296,9 +28296,31 @@ const fieldEditorScript = (token) => `<script>
   // dragging is what a hand expects from a palette, and it was the first thing
   // looked for.
   var carry = null;
+
+  /**
+   * Put everything back, from any exit.
+   *
+   * A drag that ended anywhere unexpected — off the window, cancelled by the
+   * browser, interrupted by a scroll — used to leave the ghost on screen, the
+   * crosshair on the pages and the carried tool still set, so the next click went
+   * into the drag instead of the button it was aimed at. Done and Preview stopped
+   * responding and the only way out was the browser's own tab bar.
+   */
+  function dropCarry() {
+    if (!carry) return null;
+    var c = carry;
+    carry = null;
+    if (c.ghost && c.ghost.parentNode) c.ghost.parentNode.removeChild(c.ghost);
+    if (!tool) stage.classList.remove('is-placing');
+    return c;
+  }
+  document.addEventListener('pointercancel', dropCarry);
+  window.addEventListener('blur', dropCarry);
+
   document.addEventListener('pointerdown', function (ev) {
     var t = ev.target.closest && ev.target.closest('[data-tool]');
     if (!t || locked || preview) return;
+    dropCarry();
     carry = { kind: t.getAttribute('data-tool'), from: t };
     var ghost = document.createElement('div');
     ghost.className = 'fe-ghost fe-f-' + carry.kind;
@@ -28316,10 +28338,8 @@ const fieldEditorScript = (token) => `<script>
     carry.moved = true;
   });
   document.addEventListener('pointerup', function (ev) {
-    if (!carry) return;
-    var c = carry; carry = null;
-    if (c.ghost && c.ghost.parentNode) c.ghost.parentNode.removeChild(c.ghost);
-    stage.classList.remove('is-placing');
+    var c = dropCarry();
+    if (!c) return;
     // A press with no movement is a click, and the click handler below owns it.
     if (!c.moved) return;
     var host = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -28340,6 +28360,10 @@ const fieldEditorScript = (token) => `<script>
   document.addEventListener('click', function (ev) {
     var t = ev.target.closest && ev.target.closest('[data-tool]');
     if (t) {
+      // Switching from Date back to Signature is a switch, not a second toggle.
+      // Only the SAME tool clicked twice disarms — otherwise picking the other
+      // one left nothing armed and the crosshair still on, so the next click
+      // placed nothing and the toolbar looked stuck.
       var want = t.getAttribute('data-tool');
       tool = (tool === want) ? null : want;
       Array.prototype.forEach.call(document.querySelectorAll('[data-tool]'), function (b) {
@@ -28405,6 +28429,16 @@ const fieldEditorScript = (token) => `<script>
     if (d.nx == null) return;
     post({ op: 'move', id: d.id, field: { page: d.page, x: d.nx, y: d.ny, w: d.w, h: d.h } })
       .then(function (r) { if (r.ok) { fields = r.fields; paint(); } });
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Escape') return;
+    dropCarry();
+    tool = null;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tool]'), function (b) {
+      b.classList.remove('on');
+    });
+    stage.classList.remove('is-placing');
   });
 
   var pv = document.getElementById('fe-preview');
