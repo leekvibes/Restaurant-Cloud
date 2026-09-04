@@ -3715,11 +3715,17 @@ test('2D-1: Timesheet is still easy to find without a tab', async () => {
 test('2D-1: More holds the utility screens and nothing aspirational', async () => {
   const cookie = await signIn('3111');
   const html = await text('/portal', { cookie });
-  const sheet = (html.match(/id="pt-more-sheet"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/) || [''])[0];
+  const sheet = (html.match(/id="pt-more-sheet"[\s\S]*?<\/nav>[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/) || [''])[0];
   assert.ok(sheet, 'the More sheet is on the page');
   assert.match(sheet, /role="dialog" aria-modal="true"/, 'a dialog, not a dropdown');
-  assert.match(sheet, /<h2 class="pt-nav-h" id="pt-more-h">More<\/h2>/, 'with a heading');
+  // It is a drawer now, and it names itself after the person rather than after
+  // the button that opened it — "Esther" is a better accessible name for
+  // somebody's own menu than "More". What the assertion protects is that it HAS
+  // an accessible name and that the name is really on the element it points at.
+  assert.match(sheet, /aria-labelledby="pt-more-h"/, 'with an accessible name');
+  assert.match(sheet, /id="pt-more-h"/, 'that points at something real');
   assert.match(sheet, /class="pt-nav-x"[^>]*aria-label="Close"/, 'and a close control');
+  assert.match(sheet, /class="pt-dr-out"[^>]*href="\/portal\/out"/, 'the way out is in the drawer');
   // Documents moved from the second list to the first. It was excluded because
   // it was aspirational — a link to a page that did not exist — and the rule
   // this test protects is "nothing aspirational", not "never documents". It is

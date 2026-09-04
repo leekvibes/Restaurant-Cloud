@@ -1942,3 +1942,53 @@ body.bare {
   font-style: italic; color: var(--pt-ink); min-height: 54px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pdv-sh-note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--pt-muted); }
+
+/* ===========================================================================
+   THE PORTAL DRAWER
+   Who you are, where you can go, and the way out — in that order, which is the
+   order somebody opening a menu is asking about.
+   =========================================================================== */
+.pt-drawer .pt-nav-scrim { position: absolute; inset: 0; background: rgba(16,20,26,.45); }
+.pt-drawer-panel { position: absolute; inset: 0 auto 0 0; z-index: 1;
+  display: flex; flex-direction: column; width: min(86vw, 330px);
+  background: var(--pt-card, #fff);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* Slides from the left. Reduced-motion users get it without the slide. */
+  animation: ptdrawer .22s cubic-bezier(.2,.7,.3,1); }
+@keyframes ptdrawer { from { transform: translateX(-100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .pt-drawer-panel { animation: none; } }
+
+.pt-dr-me { display: flex; align-items: center; gap: 13px;
+  padding: calc(20px + env(safe-area-inset-top, 0px)) 18px 18px;
+  border-bottom: 1px solid var(--pt-hair); }
+/* A literal colour, not a token. --pt-field is the near-white a form input sits
+   on, so the circle vanished into the panel behind it and left a bare initial
+   floating on the left. */
+.pt-dr-av { display: grid; place-items: center; width: 46px; height: 46px; flex: none;
+  border-radius: 50%; background: #9aa79d; color: #fff;
+  font-size: 16px; font-weight: 700; letter-spacing: .02em; }
+.pt-dr-id { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.pt-dr-id b { font-size: 17px; font-weight: 680; color: var(--pt-ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pt-dr-id i { font-style: normal; font-size: 13px; color: var(--pt-muted); }
+.pt-dr-me .pt-nav-x { flex: none; }
+
+.pt-dr-links { flex: 1; overflow-y: auto; padding: 4px 0; }
+.pt-dr-links a { display: flex; align-items: center; gap: 14px; padding: 15px 18px;
+  color: var(--pt-ink); text-decoration: none; }
+/* Hairlines between rows, not around them — the screenshot's rhythm, and it
+   keeps the list reading as one column rather than a stack of cards. */
+.pt-dr-links a + a { box-shadow: inset 0 1px 0 var(--pt-hair); }
+.pt-dr-links a:active { background: var(--pt-field); }
+.pt-dr-i { display: grid; place-items: center; width: 22px; height: 22px; flex: none;
+  color: var(--pt-ink); }
+.pt-dr-i svg { width: 20px; height: 20px; }
+.pt-dr-l { flex: 1; font-size: 16px; font-weight: 620; }
+.pt-dr-go { flex: none; font-size: 19px; line-height: 1; color: var(--pt-muted); }
+
+.pt-dr-foot { display: grid; justify-items: center; gap: 10px;
+  padding: 18px 18px 22px; border-top: 1px solid var(--pt-hair); }
+.pt-dr-out { display: inline-flex; align-items: center; gap: 9px;
+  font-size: 16px; font-weight: 660; color: var(--pt-green, #1a7a3c); text-decoration: none; }
+.pt-dr-out:active { opacity: .7; }
+.pt-dr-ver { font-size: 12px; color: var(--pt-muted); }
