@@ -3356,18 +3356,23 @@ function portalWho(emp) {
  * Per-request: set on every portal request before the page renders.
  */
 let portalShape = null;
+// The person, for the drawer header. Same mechanism as portalShape: the shell
+// renders without a `who`, so requirePortal records it as it resolves it.
+let portalMe = null;
 
 function requirePortal(req, res) {
   const emp = portalUser(req);
   if (emp) {
     const who = portalWho(emp);
     portalShape = who.shape;
+    portalMe = { name: emp.name, role: who.roleName };
     // Anybody on the clock keeps their session, on ANY portal request rather
     // than the three routes that used to do it. A shift is not 45 minutes long.
     if (TC.q.active.get(emp.id)) setPortalCookie(req, res, emp.id);
     return who;
   }
   portalShape = null;
+  portalMe = null;
   // "Nothing you sent was lost" was true for a GET and a lie for a POST. The
   // POST body is gone the moment this redirect goes out, so a clock-out tapped
   // against a dead session vanished — and the sentence told the person it had
@@ -3532,6 +3537,18 @@ const portalMoreItems = (shape) => [
   { href: '/portal/out', label: 'Sign out' },
 ];
 
+// Line icons for the drawer, keyed by destination. Drawn rather than emoji:
+// emoji render in colour and at the mercy of the platform's own idea of size,
+// and a row of them next to grey labels reads as a sticker sheet.
+const PT_MORE_ICON = {
+  '/portal/notifications': '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 3a4.5 4.5 0 0 0-4.5 4.5c0 3-1.2 4-1.2 4h11.4s-1.2-1-1.2-4A4.5 4.5 0 0 0 10 3Z"/><path d="M8.4 14.5a1.8 1.8 0 0 0 3.2 0"/></svg>',
+  '/portal/documents': '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 2.5h6l4 4v11H5z"/><path d="M11 2.5v4h4"/></svg>',
+  '/portal/requests': '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4.5h12M4 10h12M4 15.5h7"/></svg>',
+  '/portal/specials': '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2.5 12.2 7l5 .7-3.6 3.5.9 4.9L10 13.8 5.5 16l.9-4.9L2.8 7.7l5-.7z"/></svg>',
+  '/portal/stock': '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 6.5 10 3l7 3.5v7L10 17l-7-3.5z"/><path d="M3 6.5 10 10l7-3.5M10 10v7"/></svg>',
+  '/portal/tips': '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 3v14"/><path d="M13 6.2A3 3 0 0 0 10.5 5h-1a2.5 2.5 0 0 0 0 5h1a2.5 2.5 0 0 1 0 5h-1A3 3 0 0 1 7 13.8"/></svg>',
+};
+
 /** A small padlock, drawn rather than typed — emoji render in colour. */
 const PT_LOCK = '<svg class="pt-tab-lock" viewBox="0 0 10 12" aria-hidden="true" focusable="false">'
   + '<path d="M2.6 5V3.4a2.4 2.4 0 0 1 4.8 0V5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
@@ -3584,9 +3601,44 @@ function portalTabs(path) {
 
   return `
     <nav class="pt-tabs" aria-label="Sections">${bar}</nav>
-    ${sheet('pt-more-sheet', 'More',
-      `<div class="pt-nav-links">${portalMoreItems(portalShape)
-        .map((i) => `<a href="${i.href}">${esc(i.label)}</a>`).join('')}</div>`, 'pt-more-h')}
+    ${(() => {
+    // A DRAWER, not a list in a box.
+    //
+    // The old More sheet was six underlined links with no sense of whose portal
+    // this is. This is the shape a phone app uses for the same job: who you are
+    // at the top, the destinations under it with room to tap, and the way out
+    // at the bottom where it cannot be hit by accident.
+    const me = portalMe || { name: 'Signed in', role: '' };
+    const parts = String(me.name || '').trim().split(/\s+/);
+    const initials = ((parts[0] || '')[0] || '') + ((parts[1] || '')[0] || '');
+    const items = portalMoreItems(portalShape).filter((i) => i.href !== '/portal/out');
+    return `
+    <div class="pt-nav pt-drawer" id="pt-more-sheet" hidden>
+      <div class="pt-nav-scrim" data-portal-close></div>
+      <div class="pt-drawer-panel" role="dialog" aria-modal="true" aria-labelledby="pt-more-h">
+        <div class="pt-dr-me">
+          <span class="pt-dr-av" aria-hidden="true">${esc(initials.toUpperCase() || '·')}</span>
+          <span class="pt-dr-id">
+            <b id="pt-more-h">${esc(me.name)}</b>
+            ${me.role ? `<i>${esc(me.role)}</i>` : ''}
+          </span>
+          <button type="button" class="pt-nav-x" data-portal-close aria-label="Close">✕</button>
+        </div>
+        <nav class="pt-dr-links" aria-label="More">
+          ${items.map((i) => `<a href="${i.href}">
+            <span class="pt-dr-i" aria-hidden="true">${PT_MORE_ICON[i.href] || '•'}</span>
+            <span class="pt-dr-l">${esc(i.label)}</span>
+            <span class="pt-dr-go" aria-hidden="true">›</span>
+          </a>`).join('')}
+        </nav>
+        <div class="pt-dr-foot">
+          <a class="pt-dr-out" href="/portal/out">
+            <span aria-hidden="true">⇥</span> Log out</a>
+          <span class="pt-dr-ver">Version ${esc(BUILD)}</span>
+        </div>
+      </div>
+    </div>`;
+  })()}
     ${locked.map((t) => sheet(`pt-locked-${t.key}`, t.lockedTitle || t.label,
       `<p class="pt-nav-p">${esc(t.lockedMessage || '')}</p>
        <button type="button" class="tc-btn tc-btn-go tc-btn-big" data-portal-close>Got it</button>`,
@@ -27828,6 +27880,31 @@ app.get('/documents/:id', (req, res, next) => {
         </div>
       </div>
 
+      ${(() => {
+    if (!cur || d.kind !== 'sign' || !w || DOCS.fieldsFor(cur.id).length) return '';
+    // A SIGNED VERSION CANNOT BE LAID OUT, so it must not be offered. The prompt
+    // and the editor disagreed for a moment: the card said "place fields" and
+    // the editor it led to said the layout was fixed, which reads as the button
+    // being broken rather than as the version being finished.
+    if (DOCS.fieldLocked(cur.id)) {
+      return `<div class="dfe-cta is-locked">
+        <div class="dfe-cta-t">
+          <b>Version ${esc(cur.version)} has been signed, so its layout is fixed</b>
+          <span>Fields describe where somebody's signature sits, so they cannot be added or moved
+            after the fact. Upload a new version below to place a signature and date on it —
+            the signed one stays exactly as it is.</span>
+        </div>
+      </div>`;
+    }
+    return `<div class="dfe-cta">
+      <div class="dfe-cta-t">
+        <b>No signature fields placed yet</b>
+        <span>Put a signature and a date where they belong on the page and the employee signs in the
+          document itself. Without them they get a plain acknowledgment panel instead.</span>
+      </div>
+      <a class="bs-btn bs-btn-go" href="/documents/${d.id}/fields">Place fields</a>
+    </div>`;
+  })()}
       <section class="bs-panel bs-strip">
         <div class="bs-strip-c"><span class="bs-strip-l">Assigned</span><span class="bs-stat">${st.assigned}</span></div>
         ${d.kind === 'sign'
@@ -28213,6 +28290,51 @@ const fieldEditorScript = (token) => `<script>
       }).join('');
     }
   }
+
+  // DRAG A TOOL ONTO THE PAGE. The click-then-click path stays — it is the one
+  // that works with a keyboard and on a trackpad without a firm press — but
+  // dragging is what a hand expects from a palette, and it was the first thing
+  // looked for.
+  var carry = null;
+  document.addEventListener('pointerdown', function (ev) {
+    var t = ev.target.closest && ev.target.closest('[data-tool]');
+    if (!t || locked || preview) return;
+    carry = { kind: t.getAttribute('data-tool'), from: t };
+    var ghost = document.createElement('div');
+    ghost.className = 'fe-ghost fe-f-' + carry.kind;
+    ghost.textContent = carry.kind === 'date' ? 'Date signed' : 'Signature';
+    document.body.appendChild(ghost);
+    carry.ghost = ghost;
+    ghost.style.left = ev.clientX + 'px';
+    ghost.style.top = ev.clientY + 'px';
+    stage.classList.add('is-placing');
+  });
+  document.addEventListener('pointermove', function (ev) {
+    if (!carry) return;
+    carry.ghost.style.left = ev.clientX + 'px';
+    carry.ghost.style.top = ev.clientY + 'px';
+    carry.moved = true;
+  });
+  document.addEventListener('pointerup', function (ev) {
+    if (!carry) return;
+    var c = carry; carry = null;
+    if (c.ghost && c.ghost.parentNode) c.ghost.parentNode.removeChild(c.ghost);
+    stage.classList.remove('is-placing');
+    // A press with no movement is a click, and the click handler below owns it.
+    if (!c.moved) return;
+    var host = document.elementFromPoint(ev.clientX, ev.clientY);
+    host = host && host.closest ? host.closest('.pdv-page') : null;
+    if (!host || !pagesEl.contains(host)) return;
+    var box = host.getBoundingClientRect();
+    var w2 = c.kind === 'date' ? 0.22 : 0.34, h2 = 0.055;
+    var fx = Math.min(Math.max(((ev.clientX - box.left) / box.width) - w2 / 2, 0), 1 - w2);
+    var fy = Math.min(Math.max(((ev.clientY - box.top) / box.height) - h2 / 2, 0), 1 - h2);
+    post({ op: 'add', field: { kind: c.kind, page: Number(host.getAttribute('data-page')),
+      x: fx, y: fy, w: w2, h: h2 } }).then(function (r) {
+      if (r.ok) { fields = r.fields; paint(); }
+      else if (r.err) alert(r.err);
+    });
+  });
 
   // Placing: pick a tool, click the page.
   document.addEventListener('click', function (ev) {
@@ -29053,7 +29175,9 @@ app.get('/documents/:id/fields', (req, res, next) => {
           ${locked ? `<div class="fe-note">
             <b>This version has been signed</b>
             <p>Its fields describe where somebody's signature actually sits, so they cannot move.
-              To change the layout, upload a new version — the signed one stays exactly as it is.</p>
+              To lay one out, upload a new version — the signed one stays exactly as it is, with
+              its signatures attached to it.</p>
+            <a class="bs-btn-sm" href="/documents/${d.id}">Upload a new version</a>
           </div>` : `<div class="fe-tools">
             <p class="fe-hint">Pick a field, then click the page where it goes.</p>
             <button type="button" class="fe-tool" data-tool="signature">
