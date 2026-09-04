@@ -6774,4 +6774,64 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .svc-pick { width: 100%; }
   .esu-ovrow .esu-sel { flex: 1 1 100%; }
   .esu-sum-g { grid-template-columns: 1fr; gap: 2px; }
+/* ===========================================================================
+   DOCUMENTS (admin)
+   =========================================================================== */
+.dl-search { display: flex; gap: 8px; margin: 14px 0 4px; }
+.dl-search input[type=search] { flex: 1; max-width: 340px; }
+.dl-grid { display: grid; gap: 12px; margin-top: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.dl-card { display: flex; flex-direction: column; gap: 8px; padding: 16px 17px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--panel);
+  text-decoration: none; color: inherit; }
+.dl-card:hover { border-color: var(--ink); }
+.dl-card.is-off { background: var(--paper); }
+.dl-card.is-off .dl-title { color: var(--muted); }
+.dl-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.dl-title { margin: 0; font-size: 16px; font-weight: 650; color: var(--headline); letter-spacing: -.01em; }
+.dl-kind { flex: none; padding: 2px 8px; border-radius: 20px; background: var(--paper);
+  font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.dl-kind.sign { background: rgba(37,99,235,.1); color: #2563eb; }
+.dl-meta { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.dl-nums { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+.dl-pill { padding: 3px 9px; border-radius: 20px; border: 1px solid var(--rule);
+  font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.dl-pill.ok { border-color: rgba(22,163,74,.3); color: #16a34a; }
+.dl-pill.warn { border-color: rgba(180,83,9,.3); color: #b45309; }
+.dl-pill.bad { border-color: rgba(185,28,28,.35); color: #b91c1c; }
+
+.du-page { max-width: 780px; }
+.du-form { display: flex; flex-direction: column; gap: 14px; }
+.du-f { display: block; }
+.du-f > span { display: block; margin-bottom: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.du-f > span i { font-style: normal; font-weight: 500; color: var(--muted); }
+.du-f input, .du-f select { width: 100%; }
+.du-row { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+.du-assign { margin: 0; padding: 14px 16px; border: 1px solid var(--rule); border-radius: 11px; }
+.du-assign legend { padding: 0 6px; font-size: 12.5px; font-weight: 650; color: var(--ink); }
+.du-r { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; cursor: pointer; }
+.du-r b { display: block; font-size: 14px; color: var(--ink); }
+.du-r i { display: block; font-style: normal; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.du-sub { padding: 4px 0 8px 26px; }
+.du-people { display: grid; gap: 6px; max-height: 260px; overflow: auto;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.du-newver { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.dg-new { display: flex; gap: 10px; align-items: flex-end; }
+
+.dsig-r { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; }
+.dsig-r.is-off { opacity: .6; }
+.dsig-who b { display: block; font-size: 14px; color: var(--ink); }
+.dsig-who i { font-style: normal; font-size: 12px; color: var(--muted); }
+.dsig-st { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.dsig-go { white-space: nowrap; }
+.dsig-ack { margin: 8px 0 14px; padding: 13px 15px; border-left: 3px solid var(--rule);
+  background: var(--paper); font-size: 14px; line-height: 1.6; color: var(--body); }
+.bs-danger { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.bs-danger .bs-act.danger { color: var(--danger, #b91c1c); }
+
+@media (max-width: 720px) {
+  .du-row { grid-template-columns: 1fr; }
+  .dsig-r { grid-template-columns: 1fr auto; }
+  .dsig-go { grid-column: 1 / -1; }
 }

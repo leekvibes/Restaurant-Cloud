@@ -3720,12 +3720,16 @@ test('2D-1: More holds the utility screens and nothing aspirational', async () =
   assert.match(sheet, /role="dialog" aria-modal="true"/, 'a dialog, not a dropdown');
   assert.match(sheet, /<h2 class="pt-nav-h" id="pt-more-h">More<\/h2>/, 'with a heading');
   assert.match(sheet, /class="pt-nav-x"[^>]*aria-label="Close"/, 'and a close control');
+  // Documents moved from the second list to the first. It was excluded because
+  // it was aspirational — a link to a page that did not exist — and the rule
+  // this test protects is "nothing aspirational", not "never documents". It is
+  // a real screen now, and a utility screen, which is what More is for.
   for (const keep of ['/portal/notifications', '/portal/requests', '/portal/specials',
-    '/portal/stock', '/portal/out']) {
+    '/portal/stock', '/portal/documents', '/portal/out']) {
     assert.ok(sheet.includes(`href="${keep}"`), `${keep} stays in More`);
   }
   for (const no of ['/portal/timesheet', '/portal/schedule', '/portal/account',
-    '/portal/documents', '/portal/help', '/portal/settings']) {
+    '/portal/help', '/portal/settings']) {
     assert.ok(!sheet.includes(`href="${no}"`), `${no} is not in More`);
   }
   assert.ok(!/<details/.test(html), 'the <details> menu is gone entirely');

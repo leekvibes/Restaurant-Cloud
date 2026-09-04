@@ -43,7 +43,7 @@ const AREAS = [
   // The portal's manager side sits with Staff: it is about the people, and
   // anybody trusted with the roster is the person who posts the board and
   // answers what the floor has run out of.
-  { key: 'staff',     label: 'Staff',           paths: ['/employees', '/staff-portal', '/timeclock'] },
+  { key: 'staff',     label: 'Staff',           paths: ['/employees', '/staff-portal', '/timeclock', '/documents'] },
   { key: 'settings',  label: 'Settings & users', paths: ['/settings', '/policy', '/positions', '/email', '/users'] },
 ];
 
@@ -108,6 +108,10 @@ const SECTIONS = [
     ['/timeclock', 'shifts', 'Time clock', '#b45309', 'staff'],
     ['/staff-portal', 'tips', 'Portal', '#1a7a3c', 'staff'],
     ['/employees', 'staff', 'Staff', '#2563eb', 'staff'],
+    // "Employee documents", not "Documents" — /c/documents already exists and is
+    // the business paperwork tracker (leases, tax, permits). Two identical
+    // labels in one sidebar is a coin toss every time somebody goes looking.
+    ['/documents', 'documents', 'Employee documents', '#0f766e', 'staff'],
     ['/positions', 'positions', 'Positions', '#7c3aed', 'settings'],
     ['/policy', 'policy', 'Tip-out policy', '#0891b2', 'settings'],
   ] },

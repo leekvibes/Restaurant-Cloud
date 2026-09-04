@@ -1769,3 +1769,137 @@ body.bare {
   border-radius: 10px; background: var(--pt-field); }
 .tcc-mgr .tcc-field { margin: 0; }
 .tcc-mgr-why { margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--pt-muted); }
+
+/* A CLOSED SHIFT — sent out, everyone paid on it, nothing left to change.
+   Rendered as a button rather than a link so it cannot navigate, and coloured
+   so it reads as shut before it is tapped rather than after. Red is reserved
+   in this app for a state somebody has to act on; here the action is asking a
+   manager, which the toast says. */
+.st-pick--shut, .st-ch--shut {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; text-align: left; font: inherit; cursor: pointer;
+  border: 1px solid var(--pt-red, #b91c1c);
+  background: color-mix(in srgb, var(--pt-red, #b91c1c) 6%, transparent);
+}
+.st-pick--shut .st-pick-b b, .st-ch--shut .st-ch-b b { color: var(--pt-red, #b91c1c); }
+.st-pick--shut .st-pick-b i, .st-ch--shut .st-ch-b i { color: var(--pt-red, #b91c1c); opacity: .85; }
+.st-pick-lock { font-size: 13px; line-height: 1; opacity: .7; }
+/* The card at the top of the form, when the shift it names is closed. */
+.st-now.is-shut { border-color: var(--pt-red, #b91c1c);
+  background: color-mix(in srgb, var(--pt-red, #b91c1c) 6%, transparent); }
+.st-now.is-shut .st-now-k { color: var(--pt-red, #b91c1c); }
+
+/* ===========================================================================
+   DOCUMENTS (employee portal)
+   Mobile first, and the reader is the point. Phones are what this runs on.
+   =========================================================================== */
+.pd-body { padding-bottom: 26px; }
+.pd-sec { margin: 0 0 26px; }
+.pd-h { display: flex; align-items: center; gap: 9px; margin: 0 0 12px;
+  font-size: 13px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--pt-muted); }
+.pd-count { display: inline-grid; place-items: center; min-width: 21px; height: 21px;
+  padding: 0 6px; border-radius: 11px; background: var(--pt-red, #b91c1c);
+  color: #fff; font-size: 12px; font-weight: 700; letter-spacing: 0; }
+.pd-cards { display: grid; gap: 9px; }
+.pd-card { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 15px 16px; border: 1px solid var(--pt-line); border-radius: 13px;
+  background: var(--pt-card, #fff); text-decoration: none; color: inherit; }
+.pd-c-b { display: grid; gap: 3px; min-width: 0; }
+.pd-c-b b { font-size: 15.5px; font-weight: 650; color: var(--pt-ink); line-height: 1.3; }
+.pd-c-b i { font-style: normal; font-size: 12.5px; color: var(--pt-muted); }
+.pd-c-s { flex: none; }
+.pd-tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-style: normal;
+  font-size: 11.5px; font-weight: 650; white-space: nowrap; }
+.pd-tag-done { background: rgba(22,163,74,.12); color: #15803d; }
+.pd-tag-seen { background: rgba(22,163,74,.10); color: #15803d; }
+.pd-tag-todo, .pd-tag-soon { background: rgba(180,83,9,.12); color: #b45309; }
+.pd-tag-late { background: rgba(185,28,28,.12); color: #b91c1c; }
+.pd-tag-new  { background: var(--pt-field); color: var(--pt-muted); }
+/* A document needing a signature carries the weight on the card, not only in
+   a word — the whole row should read as "this one" from across the screen. */
+.pd-card.pd-todo, .pd-card.pd-soon { border-color: rgba(180,83,9,.35); }
+.pd-card.pd-late { border-color: rgba(185,28,28,.4); }
+.pd-clear { display: grid; justify-items: center; gap: 5px; padding: 26px 18px;
+  border: 1px solid var(--pt-line); border-radius: 13px; text-align: center; }
+.pd-tick { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%;
+  background: rgba(22,163,74,.12); color: #15803d; font-size: 19px; }
+.pd-clear b { font-size: 15.5px; color: var(--pt-ink); }
+.pd-clear span { font-size: 13px; color: var(--pt-muted); }
+.pd-none { font-size: 13.5px; color: var(--pt-muted); }
+.pd-empty { display: grid; gap: 8px; justify-items: center; padding: 40px 20px; text-align: center; }
+.pd-empty b { font-size: 16px; color: var(--pt-ink); }
+.pd-empty span { font-size: 13.5px; color: var(--pt-muted); }
+
+/* --- the reader --------------------------------------------------------- */
+.pdv-body { padding-bottom: 108px; }   /* room for the sign bar */
+.pdv-head { margin-bottom: 14px; }
+.pdv-title { margin: 0 0 3px; font-size: 20px; font-weight: 680; letter-spacing: -.02em;
+  line-height: 1.25; color: var(--pt-ink); }
+.pdv-meta { margin: 0; font-size: 12.5px; color: var(--pt-muted); }
+.pdv-dl { color: var(--pt-blue); }
+.pdv-done { display: grid; gap: 2px; padding: 13px 15px; margin-bottom: 14px;
+  border-radius: 12px; background: rgba(22,163,74,.10); }
+.pdv-done-t { font-size: 14.5px; font-weight: 650; color: #15803d; }
+.pdv-done-s { font-size: 12.5px; color: #15803d; opacity: .85; }
+
+/* ONE scroll — the page's. The pages sit in normal document flow rather than in
+   a box with its own scrollbar, which is what makes an embedded PDF feel like a
+   website inside a website on a phone. */
+/* `hidden` HAS TO WIN over the display rules below.
+   A class selector setting `display` outranks the [hidden] attribute, so
+   `el.hidden = true` on any of these did nothing at all: the loading spinner sat
+   there under a rendered page, and — much worse — the signing sheet was open
+   from the moment the document loaded, before anybody had read a word of it. */
+.pdv-load[hidden], .pdv-fail[hidden], .pdv-count[hidden], .pdv-sheet[hidden] { display: none !important; }
+
+.pdv-stage { position: relative; }
+.pdv-pages { display: grid; gap: 10px; }
+.pdv-page { position: relative; width: 100%; aspect-ratio: 1 / 1.294;  /* A4-ish, until measured */
+  background: var(--pt-field); border: 1px solid var(--pt-line); border-radius: 8px;
+  overflow: hidden; }
+.pdv-page canvas { display: block; width: 100%; height: auto; }
+.pdv-load, .pdv-fail { display: grid; justify-items: center; gap: 9px; padding: 46px 20px;
+  text-align: center; color: var(--pt-muted); font-size: 13.5px; }
+.pdv-fail b { font-size: 15.5px; color: var(--pt-ink); }
+.pdv-spin { width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--pt-line); border-top-color: var(--pt-blue); animation: pdvspin .8s linear infinite; }
+@keyframes pdvspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pdv-spin { animation: none; } }
+.pdv-count { position: sticky; bottom: 96px; width: max-content; margin: 10px auto 0;
+  padding: 5px 12px; border-radius: 20px; background: rgba(20,24,30,.78); color: #fff;
+  font-size: 12px; font-weight: 600; pointer-events: none; }
+
+/* The action, pinned but never over the text — the body has padding for it. */
+.pdv-bar { position: fixed; left: 0; right: 0; bottom: var(--pt-tabh, 62px); z-index: 40;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 16px calc(11px + env(safe-area-inset-bottom, 0px));
+  background: var(--pt-card, #fff); border-top: 1px solid var(--pt-line); }
+.pdv-bar-t { font-size: 13px; font-weight: 600; color: var(--pt-ink); }
+.pdv-next { display: grid; gap: 9px; justify-items: center; margin-top: 22px;
+  padding-top: 18px; border-top: 1px solid var(--pt-hair); text-align: center; }
+.pdv-next span { font-size: 13.5px; color: var(--pt-muted); }
+
+.pdv-sheet { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; }
+.pdv-scrim { position: absolute; inset: 0; background: rgba(16,20,26,.5); }
+.pdv-panel { position: relative; width: 100%; max-height: 88vh; overflow: auto;
+  display: grid; gap: 13px; padding: 22px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+  background: var(--pt-card, #fff); border-radius: 18px 18px 0 0; }
+.pdv-sh-h { margin: 0; font-size: 18px; font-weight: 680; color: var(--pt-ink); }
+.pdv-sh-p { margin: 0; padding: 13px 15px; border-radius: 10px; background: var(--pt-field);
+  font-size: 14px; line-height: 1.6; color: var(--pt-body, var(--pt-ink)); }
+.pdv-f > span { display: block; margin-bottom: 5px; font-size: 12.5px; font-weight: 600; color: var(--pt-ink); }
+.pdv-f input { width: 100%; }
+.pdv-chk { display: flex; gap: 11px; align-items: flex-start; padding: 4px 0;
+  font-size: 14.5px; color: var(--pt-ink); cursor: pointer; }
+.pdv-chk input { width: 21px; height: 21px; flex: none; margin-top: 1px; }
+.pdv-panel button[disabled] { opacity: .45; }
+
+@media (min-width: 760px) {
+  /* Desktop is a reading column, not a PDF stretched across a monitor. */
+  .pdv-pages { max-width: 780px; margin: 0 auto; }
+  .pdv-head, .pdv-done, .pdv-next { max-width: 780px; margin-left: auto; margin-right: auto; }
+  .pdv-panel { max-width: 460px; margin: auto; border-radius: 16px; }
+  .pdv-sheet { align-items: center; justify-content: center; }
+  .pdv-bar { justify-content: center; gap: 20px; }
+}
