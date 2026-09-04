@@ -159,3 +159,47 @@ test('a document with no fields still signs the old way', () => {
   assert.ok(r.signature.id, 'it signs');
   assert.strictEqual(D.valuesFor(v, emp).length, 0, 'with no field values');
 });
+
+test('the review gate has more than one way to open, because one was not enough', () => {
+  // It used to depend solely on an IntersectionObserver entry for the last
+  // page. When that did not arrive the reader was left with locked fields, a
+  // disabled button and no way forward — having genuinely read the document.
+  // The server's own record is the authority now, and it is asked on the way
+  // through rather than only at submit.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /reviewed: DOCS\.reviewComplete\(v\.id, who\.emp\.id\)/,
+    'the progress route reports the verdict');
+  assert.match(src, /if \(j && j\.reviewed\) markReviewed\(\);/,
+    'and the page acts on it');
+  assert.match(src, /atEnd\) \{ markReviewed\(\);/,
+    'reaching the bottom counts too');
+});
+
+test('signing lands on a receipt, not back on the document', () => {
+  // Redirecting onto the document with a toast looked identical to the page
+  // they had just been on, so submitting read as the form resetting.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /res\.redirect\(`\/portal\/documents\/\$\{doc\.id\}\/done`\)/,
+    'the field path lands on the receipt');
+  assert.match(src, /app\.get\('\/portal\/documents\/:id\/done'/, 'which exists');
+  // And it refuses to claim a signature that is not there.
+  assert.match(src, /if \(!sig\) return res\.redirect\(`\/portal\/documents\/\$\{doc\.id\}`\)/,
+    'an unsigned document has no receipt to show');
+});
+
+test('a signed document reopens read-only, with the values in place', () => {
+  const { id, v } = mkDoc('sign', 2);
+  const sig = D.addField(v, { kind: 'signature', page: 2, x: 0.2, y: 0.7 });
+  const dte = D.addField(v, { kind: 'date', page: 2, x: 0.6, y: 0.7 });
+  D.noteView(v, emp, 2, 2);
+  const { signature } = D.sign({ versionId: v, employeeId: emp, employeeName: 'Ada Reader',
+    ackText: 'I acknowledge.', values: { [sig]: 'Ada Reader' } });
+
+  // What the portal and the admin record both render, through one function.
+  const filled = new Map(D.valuesFor(v, emp).map((x) => [x.field_id, x.value]));
+  const shown = D.fieldsFor(v).map((f) => D.renderValue(f, filled.get(f.id), signature, 'America/New_York'));
+  assert.deepStrictEqual(shown.filter(Boolean).length, 2, 'both fields have a value to draw');
+  assert.ok(shown.includes('Ada Reader'), 'the signature');
+  assert.ok(shown.some((x) => /^\d{2}\/\d{2}\/\d{4}$/.test(x)), 'and the date');
+  assert.strictEqual(id > 0, true);
+});

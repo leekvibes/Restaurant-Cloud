@@ -28021,6 +28021,15 @@ app.get('/documents/:id/signature/:sid', (req, res) => {
     WHERE s.id = ? AND s.document_id = ?`).get(req.params.sid, req.params.id);
   if (!sg) return res.status(404).send(layout('Not found', '<div class="bs-page"><h1>No such record</h1></div>'));
   const fact = (k, v) => `<div class="inc-fact"><span>${k}</span><b>${v}</b></div>`;
+  // What went into the boxes, resolved the same way the employee's own copy
+  // resolves it — one function, so the two renderings cannot disagree about
+  // what somebody signed.
+  const filledIn = new Map(db.prepare(`SELECT field_id, value FROM doc_field_values
+     WHERE signature_id = ?`).all(sg.id).map((x) => [x.field_id, x.value]));
+  const signedFields = DOCS.fieldsFor(sg.version_id).map((f) => ({
+    id: f.id, kind: f.kind, page: f.page, x: f.x, y: f.y, w: f.w, h: f.h,
+    required: !!f.required, value: DOCS.renderValue(f, filledIn.get(f.id), sg, TC.zone()),
+  }));
   res.send(layout('Signed record', `
     <div class="bs-page">
       <a class="bs-back" href="/documents/${req.params.id}">&larr; ${esc(sg.title)}</a>
@@ -28042,9 +28051,27 @@ app.get('/documents/:id/signature/:sid', (req, res) => {
         <p class="dsig-ack">${esc(sg.ack_text)}</p>
         ${sg.sha256 ? `<p class="inc-hint">File fingerprint (SHA-256) <code>${esc(sg.sha256.slice(0, 32))}…</code>
           — the exact file they were shown.</p>` : ''}
-        <p><a class="bs-act" href="/documents/${req.params.id}/file?v=${sg.version_id}" target="_blank" rel="noopener">Open the version they signed</a></p>
+        <p><a class="bs-act" href="/documents/${req.params.id}/file?v=${sg.version_id}" target="_blank" rel="noopener">Download the version they signed</a></p>
       </section>
-    </div>`));
+
+      ${/* THE DOCUMENT AS THEY LEFT IT. The record above is the evidence; this
+           is what it looked like — the same file, with their signature and the
+           date rendered in the boxes they were placed in. Read-only by
+           construction: this page emits no signing controls at all, so there is
+           nothing here to click even before permissions are considered. */''}
+      <section class="bs-panel">
+        <div class="bs-sec-h"><span class="bs-kicker">The signed document</span></div>
+        <div class="pdv-stage dsig-view" id="pdv-stage"
+             data-src="/documents/${req.params.id}/file?v=${sg.version_id}"
+             data-sign="0" data-reviewed="1"
+             data-fields='${esc(JSON.stringify(signedFields))}'>
+          <div class="fe-load" id="pdv-load"><span class="pdv-spin" aria-hidden="true"></span>
+            <span>Loading document…</span></div>
+          <div class="fe-pages" id="pdv-pages"></div>
+        </div>
+      </section>
+    </div>
+    ${pdfViewerScript()}`));
 });
 
 // --- admin: groups ----------------------------------------------------------
@@ -28583,9 +28610,17 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
           method: 'POST', credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ page: seen, pages: total })
-        });
-      } catch (err) { /* progress is a convenience, never a blocker */ }
-    }, 1200);
+        }).then(function (r) { return r.json(); }).then(function (j) {
+          // THE SERVER IS THE AUTHORITY on whether this has been read, and it
+          // says so in the reply. The observer firing for the last page used to
+          // be the only thing that could open the gate — and when it did not
+          // fire, the reader was left with locked fields, a disabled button and
+          // nothing they could do about it. Now the same answer the submit
+          // route will give is asked for on the way through.
+          if (j && j.reviewed) markReviewed();
+        }).catch(function () { /* progress is a convenience, never a blocker */ });
+      } catch (err) { /* same */ }
+    }, 900);
   }
 
   pdfjsLib.getDocument({ url: stage.getAttribute('data-src'), withCredentials: true })
@@ -28628,6 +28663,16 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     var haveOv = pagesEl.querySelectorAll('.pdf-ov').length;
     if (n !== lastCount || (placed.length && n && !haveOv)) { lastCount = n; paintFields(); }
   }, 400);
+
+  // Reaching the bottom counts too. An observer entry for the final page can be
+  // missed — coalesced, or never delivered because the page was released — and
+  // "I read it and it will not let me sign" is the worst possible outcome here.
+  window.addEventListener('scroll', function () {
+    if (reviewed || !placed.length) return;
+    var doc = document.documentElement;
+    var atEnd = (window.innerHeight + window.scrollY) >= (doc.scrollHeight - 120);
+    if (atEnd) { markReviewed(); note(total || 1); }
+  }, { passive: true });
 
   // Re-render at the new width on rotate. Debounced, because iOS fires this
   // repeatedly through the animation.
@@ -29005,8 +29050,12 @@ app.get('/portal/documents/:id', (req, res) => {
       </div>
       <div class="pdv-count" id="pdv-count" hidden aria-live="polite"></div>
       <div class="pdv-tip" id="pdv-tip" hidden role="status"></div>
+      ${/* Hidden until it is TRUE. This was inverted, so the banner said
+           "Document reviewed" to somebody who had just opened the file — and
+           then the fields stayed locked underneath it, which reads as the app
+           contradicting itself. */''}
       <div class="pdv-reviewed" id="pdv-reviewed"${
-  needsSign && hasFields && !DOCS.reviewComplete(v.id, emp.id) ? '' : ' hidden'}>
+  needsSign && hasFields && DOCS.reviewComplete(v.id, emp.id) ? '' : ' hidden'}>
         <span aria-hidden="true">✓</span> Document reviewed — you can sign now
       </div>
 
@@ -29103,7 +29152,10 @@ app.post('/portal/documents/:id/progress', express.json(), (req, res) => {
   const v = DOCS.currentVersion(d.id);
   if (!v) return res.status(404).json({ ok: false });
   DOCS.noteView(v.id, who.emp.id, req.body && req.body.page, req.body && req.body.pages);
-  return res.json({ ok: true });
+  // The same question the submit route asks, answered from the same record, so
+  // the page never believes it may sign when the server will refuse — or, worse,
+  // believes it may not when the server would allow it.
+  return res.json({ ok: true, reviewed: DOCS.reviewComplete(v.id, who.emp.id) });
 });
 
 app.post('/portal/documents/:id/sign', (req, res) => {
@@ -29149,7 +29201,7 @@ app.post('/portal/documents/:id/sign', (req, res) => {
         ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null,
         userAgent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
       });
-      return back(fresh ? 'Signed. Thank you.' : 'That was already signed — nothing was filed twice.');
+      return res.redirect(`/portal/documents/${doc.id}/done`);
     } catch (e) {
       return back(e.message || 'Could not record that. Try again.', true);
     }
@@ -29163,10 +29215,60 @@ app.post('/portal/documents/:id/sign', (req, res) => {
       ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null,
       userAgent: String(req.headers['user-agent'] || '').slice(0, 300) || null,
     });
-    return back(fresh ? 'Signed. Thank you.' : 'That was already signed — nothing was filed twice.');
+    return res.redirect(`/portal/documents/${doc.id}/done`);
   } catch (e) {
     return back(e.message || 'Could not record that. Try again.', true);
   }
+});
+
+/**
+ * THE RECEIPT.
+ *
+ * Submitting used to redirect back onto the document with a toast, and a toast
+ * is not an answer to "did that work?" — the page looked identical to the one
+ * they had just been on, so it read as the form resetting. This is a screen: it
+ * says what was signed, by whom, and when, it offers the copy, and it points at
+ * whatever is next rather than leaving them to find their way back.
+ */
+app.get('/portal/documents/:id/done', (req, res) => {
+  const ctx = portalDoc(req, res);
+  if (!ctx) return;
+  const { emp, doc } = ctx;
+  const v = DOCS.currentVersion(doc.id);
+  const sig = v && db.prepare(`SELECT * FROM doc_signatures
+     WHERE version_id = ? AND employee_id = ? AND voided_at IS NULL`).get(v.id, emp.id);
+  // Nothing signed? Then this page is a lie, and the document is the honest
+  // place to be.
+  if (!sig) return res.redirect(`/portal/documents/${doc.id}`);
+  const when = new Date(String(sig.signed_at).replace(' ', 'T') + 'Z');
+  const fmt = (o) => { try { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: TC.zone() }).format(when); } catch { return ''; } };
+  const queue = DOCS.forEmployee(emp.id).filter((d) => d.kind === 'sign' && !d.signature && d.id !== doc.id);
+
+  res.send(portalPage('Signed', `
+    ${portalTop({ href: '/portal/documents', label: 'Documents' }, 'Signed')}
+    <div class="pt-body pdd-body">
+      <div class="pdd-mark" aria-hidden="true">✓</div>
+      <h1 class="pdd-h">Completed</h1>
+      <p class="pdd-sub">${esc(doc.title)} has been signed and sent to your manager.</p>
+
+      <dl class="pdd-facts">
+        <div><dt>Signed by</dt><dd>${esc(sig.employee_name)}</dd></div>
+        <div><dt>Date</dt><dd>${esc(fmt({ month: 'long', day: 'numeric', year: 'numeric' }))}</dd></div>
+        <div><dt>Time</dt><dd>${esc(fmt({ hour: 'numeric', minute: '2-digit' }))}</dd></div>
+        <div><dt>Version</dt><dd>${esc(v.version)}</dd></div>
+      </dl>
+
+      <p class="pdd-ack">${esc(sig.ack_text)}</p>
+
+      <div class="pdd-acts">
+        <a class="tc-btn tc-btn-go tc-btn-big" href="/portal/documents/${doc.id}">View the signed document</a>
+        ${doc.allow_download
+    ? `<a class="tc-btn" href="/portal/documents/${doc.id}/file?dl=1">Download a copy</a>` : ''}
+        ${queue.length
+    ? `<a class="tc-btn" href="/portal/documents/${queue[0].id}">Next document (${queue.length} left)</a>`
+    : '<a class="tc-btn" href="/portal/documents">Back to documents</a>'}
+      </div>
+    </div>`));
 });
 
 // --- admin: placing the fields ---------------------------------------------
