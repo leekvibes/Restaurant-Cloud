@@ -6910,3 +6910,21 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .fe-ghost.fe-f-date { border-color: #7c3aed; background: rgba(124,58,237,.16); color: #6d28d9; }
 .dfe-cta.is-locked { border-color: rgba(180,83,9,.3); background: rgba(180,83,9,.05); }
 .fe-note .bs-btn-sm { margin-top: 10px; display: inline-block; }
+
+/* --- the pages, in the ADMIN editor --------------------------------------
+   These rules exist in staff.css for the portal reader and were never written
+   here, so in the field editor .pdv-page was position: static — and the field
+   overlay, absolutely positioned, anchored itself to a distant ancestor
+   instead. Every field landed at the top of the page rather than where it was
+   dropped, and moved further as the document scrolled. */
+.bs .pdv-page { position: relative; width: 100%; aspect-ratio: 1 / 1.294;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 8px;
+  overflow: hidden; }
+.bs .pdv-page canvas { display: block; width: 100%; height: auto; }
+.bs .pdv-pages { display: grid; gap: 14px; }
+
+/* [hidden] IS ONE ATTRIBUTE SELECTOR and loses to any class that sets display.
+   staff.css hit this and says so; the admin sheet never got the same rule, so
+   `loadEl.hidden = true` did nothing and the editor sat on "Loading document…"
+   over a document that had finished loading. */
+.bs [hidden] { display: none !important; }
