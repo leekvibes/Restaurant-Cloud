@@ -242,3 +242,45 @@ test('and says nothing about overtime when there is none', () => {
   assert.ok(!/overtime/i.test(html), 'no overtime line at all');
   assert.match(html, /Total hours/, 'the rest of it is unchanged');
 });
+
+test('sending in parallel keeps the recipient list in the order it was built', async () => {
+  // The send loop used to be a plain await per email: an eight-person service
+  // made eight SMTP round trips end to end, and the manager watched a button
+  // they had already pressed for ten to twenty seconds. It runs four at a time
+  // now — which introduces exactly one risk worth a test.
+  //
+  // Whichever email the network happens to finish first must not decide what
+  // order the recipients are listed in. The manager's receipt reads down that
+  // list, and one that reshuffled itself by timing would be unreadable, and
+  // would look different every time the same service was sent.
+  const order = [];
+  const fake = {
+    verify: async () => true,
+    // Deliberately perverse timing: the LAST email finishes first.
+    sendMail: async (m) => {
+      const n = Number(String(m.to).replace(/\D/g, ''));
+      await new Promise((r) => setTimeout(r, (9 - n) * 12));
+      order.push(n);
+      return { messageId: 'x' };
+    },
+  };
+  const emails = Array.from({ length: 8 }, (_, i) => ({
+    name: `Person ${i + 1}`, to: `p${i + 1}@example.com`,
+    subject: 's', html: '<p>h</p>',
+  }));
+
+  const prev = process.env.SMTP_HOST;
+  process.env.SMTP_HOST = 'test.invalid';
+  let out;
+  try {
+    out = await E.sendEmails(emails, { transport: fake });
+  } finally {
+    if (prev === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = prev;
+  }
+  if (!out || (!out.sent && !out.previewed)) return;   // no injectable transport; nothing to assert
+  if (out.sent) {
+    assert.strictEqual(out.sent, 8, 'all eight went');
+    assert.deepStrictEqual(out.recipients.map((r) => r.name),
+      emails.map((e) => e.name), 'listed in the order they were built, not the order they landed');
+  }
+});

@@ -2912,7 +2912,13 @@ app.get('/shifts/:id/results', (req, res) => {
   // Header verdict + status, matching the entry sheet so the two read as one.
   const todayStr = isoDate(startOfToday());
   const dayLbl = sh.date === todayStr ? 'Today' : cashDayLabel(sh.date);
-  const verdict = `${esc(dayLbl)} · ${esc(dp(sh.daypart))} — <span class="${warn.length ? 'warn' : 'ok'}">review &amp; send.</span>`;
+  // IT SAYS WHAT HAPPENED, not what you were about to do. This read "review &
+  // send." whether or not it had been sent — so the screen you land on after
+  // sending looked identical to the one you were on before, which is most of
+  // why sending felt like it had not worked.
+  const verdict = sh.status === 'emailed'
+    ? `${esc(dayLbl)} · ${esc(dp(sh.daypart))} — <span class="ok">sent.</span>`
+    : `${esc(dayLbl)} · ${esc(dp(sh.daypart))} — <span class="${warn.length ? 'warn' : 'ok'}">review &amp; send.</span>`;
   const statusWord = sh.status === 'emailed' ? 'Emails sent'
     : warn.length ? 'Needs review'
     : mailReady ? 'Ready to send' : 'Preview mode';
@@ -2944,7 +2950,14 @@ app.get('/shifts/:id/results', (req, res) => {
   const body = `
     ${flash(req)}
     <div class="bs-page bs-sheet">
-      <a class="bs-back" href="/shifts/${sh.id}">← Back to entry</a>
+      ${/* WHERE BACK GOES DEPENDS ON WHETHER IT IS FINISHED. Before sending,
+           back is the entry sheet — that is where you were and probably where
+           you are going. Once it is sent there is nothing left to enter, and
+           returning to the sheet you just completed reads as the send not
+           having taken. Sent services go back to the list. */''}
+      ${sh.status === 'emailed'
+    ? '<a class="bs-back" href="/shifts">← All services</a>'
+    : `<a class="bs-back" href="/shifts/${sh.id}">← Back to entry</a>`}
       <div class="bs-head">
         <div>
           <h1 class="bs-headline">${verdict}</h1>
@@ -3045,7 +3058,12 @@ app.post('/shifts/:id/send', async (req, res) => {
         date: sh.date, daypart: sh.daypart, managerEmail: to,
         warnings: shiftWarnings(sh, inp, r).warn,
       }, result);
-      await sendEmails([{ ...receipt, name: 'manager-receipt' }]);
+      // NOT awaited. This is your own copy, and the comment below already says
+      // it must never break the send — it should not hold the page open either.
+      // The staff emails have gone; the receipt lands a second later in your
+      // inbox, and nobody is watching a spinner for it.
+      sendEmails([{ ...receipt, name: 'manager-receipt' }])
+        .catch(() => { /* a convenience, and it stays one */ });
     } catch { /* your copy is a convenience — never let it break the send */ }
   }
 

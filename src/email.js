@@ -461,8 +461,17 @@ async function sendTest(to) {
  * Send (or, if no mail is configured, preview) the emails.
  * Returns { sent, previewed, files, errors }.
  */
-async function sendEmails(emails) {
-  const t = transport();
+/**
+ * @param opts.transport  a stand-in for the real SMTP transport, for tests.
+ *
+ * A seam, not a feature. The send loop runs four at a time now, and the one
+ * thing that can go wrong with that — the recipient list coming out in whatever
+ * order the network happened to finish — cannot be tested against a real
+ * server, because a real server is fast and consistent and would pass either
+ * way. The test hands in a transport where the LAST email finishes FIRST.
+ */
+async function sendEmails(emails, opts = {}) {
+  const t = opts.transport || transport();
   const from = fromAddress();
   const out = { sent: 0, previewed: 0, files: [], errors: [], recipients: [] };
 
@@ -489,15 +498,42 @@ async function sendEmails(emails) {
     return out;
   }
 
-  for (const e of emails) {
-    if (!e.to) { out.errors.push(`${e.name}: no email on file`); continue; }
-    try {
-      await t.sendMail({ from, to: e.to, subject: e.subject, html: e.html });
-      out.sent++;
-      out.recipients.push({ name: e.name, to: e.to });
-    } catch (err) {
-      out.errors.push(`${e.name}: ${friendlyMailError(err)}`);
+  // A FEW AT A TIME, not one after another.
+  //
+  // This was a plain await in a loop, so an eight-person service made eight SMTP
+  // round trips end to end before the browser heard anything back — ten to
+  // twenty seconds of a manager looking at a button they had already pressed,
+  // wondering whether it had worked.
+  //
+  // Four at once rather than all of them: providers rate-limit and will start
+  // refusing a burst, and a refusal here is somebody not being told what they
+  // earned. Four is enough to make it feel immediate on any real service.
+  //
+  // Results are written back BY INDEX, so the recipient list stays in the order
+  // the emails were built regardless of which finished first — the manager's
+  // receipt reads down it, and a list that reshuffled itself by network timing
+  // would be unreadable.
+  const LANES = 4;
+  const done = new Array(emails.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next; next += 1;
+      if (i >= emails.length) return;
+      const e = emails[i];
+      if (!e.to) { done[i] = { err: `${e.name}: no email on file` }; continue; }
+      try {
+        await t.sendMail({ from, to: e.to, subject: e.subject, html: e.html });
+        done[i] = { ok: { name: e.name, to: e.to } };
+      } catch (err) {
+        done[i] = { err: `${e.name}: ${friendlyMailError(err)}` };
+      }
     }
+  };
+  await Promise.all(Array.from({ length: Math.min(LANES, emails.length) }, worker));
+  for (const d of done) {
+    if (!d) continue;
+    if (d.ok) { out.sent += 1; out.recipients.push(d.ok); } else out.errors.push(d.err);
   }
   return out;
 }
