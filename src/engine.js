@@ -55,6 +55,12 @@ function poolRecipients(support, among) {
   const eligible = support.filter((p) => p.tipEligible !== false);
   if (among === 'kitchen') return eligible.filter((p) => p.role === 'kitchen');
   if (among === 'foh') return eligible.filter((p) => ['busser', 'barista'].includes(p.role));
+  // A single role by name — "bartenders pool their own tips together" — which
+  // the three fixed groups above could not express.
+  if (among && among !== 'all_support') {
+    const named = eligible.filter((p) => p.role === among);
+    if (named.length) return named;
+  }
   return eligible; // all_support
 }
 
@@ -88,6 +94,7 @@ function runShift(shift, rules) {
   const rolePools = {}; // role -> cents
   const roleSplit = {}; // role -> split method
   const skippedPots = {}; // role -> cents servers kept because nobody worked it
+  const transfers = [];   // pot -> pot movements, for the receipt to explain
   const serverPayouts = [];
 
   for (const s of servers) {
@@ -105,6 +112,7 @@ function runShift(shift, rules) {
     };
 
     for (const r of tipoutRules) {
+      if (r.from) continue;              // paid by another role, not by the server
       if (r.base === 'remaining') continue;
       const amt = pctOf(baseValue(s, r.base), r.percent);
       if (charge(r.recipient, amt)) directSum += amt;
@@ -114,6 +122,7 @@ function runShift(shift, rules) {
     // busser correctly takes 13% of the larger pot on a night with no barista.
     const remaining = totalTips - directSum;
     for (const r of tipoutRules) {
+      if (r.from) continue;
       if (r.base !== 'remaining') continue;
       charge(r.recipient, pctOf(Math.max(remaining, 0), r.percent));
       roleSplit[r.recipient] = r.split;
@@ -128,6 +137,40 @@ function runShift(shift, rules) {
       cardTips: s.cardTips, cashTips: s.cashTips, totalTips,
       tipouts, tipoutTotal, tipsKept: totalTips - tipoutTotal,
     });
+  }
+
+  // A TIP-OUT THAT COMES OUT OF ANOTHER ROLE'S POT.
+  //
+  // "Bartenders tip out barbacks 3% of bar sales" is not the servers paying the
+  // barback — it is the bartender paying them, out of the 10% the servers
+  // already handed over. The distinction is invisible on a night when both
+  // roles are worked and decides the money on a night when one is not:
+  //
+  //   split into two server-paid rules (7% + 3%)  →  no barback, and the
+  //     SERVERS keep the 3%. The bartender is docked for somebody who never
+  //     came in.
+  //   taken from the bartender's pot (this)       →  no barback, and the
+  //     bartender keeps the whole 10%, which is what the policy says.
+  //
+  // Servers pay the same either way. This only decides where it lands.
+  //
+  // Applied AFTER the server tip-outs, because it moves money that only exists
+  // once those have been charged, and clamped to what is actually in the pot —
+  // a transfer can redistribute a pot, never invent one.
+  for (const r of tipoutRules) {
+    if (!r.from) continue;
+    if (!staffedRoles.has(r.recipient)) continue;   // nobody to hand it to: it stays put
+    const available = rolePools[r.from] || 0;
+    if (available <= 0) continue;
+    const base = r.base === 'pot'
+      ? available                                    // a share of what they were tipped
+      : servers.reduce((a, sv) => a + pctOf(baseValue(sv, r.base), r.percent), 0);
+    const amt = Math.min(r.base === 'pot' ? pctOf(available, r.percent) : base, available);
+    if (amt <= 0) continue;
+    rolePools[r.from] -= amt;
+    rolePools[r.recipient] = (rolePools[r.recipient] || 0) + amt;
+    roleSplit[r.recipient] = r.split || 'hours';
+    transfers.push({ from: r.from, to: r.recipient, cents: amt });
   }
 
   // Distribute each role's pool among the people working that role.
@@ -219,7 +262,7 @@ function runShift(shift, rules) {
 
   return {
     servers: serverPayouts, support: supportResult,
-    pots: rolePools, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
+    pots: rolePools, transfers, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
     skippedPots: Object.entries(skippedPots).filter(([, c]) => c > 0).map(([role, cents]) => ({ role, cents })),
     reconciliation: { totalTipsCollected, totalKept, totalPots, balanced: totalTipsCollected === totalKept + totalPots },
   };

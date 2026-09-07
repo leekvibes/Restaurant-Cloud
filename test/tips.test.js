@@ -1763,3 +1763,78 @@ test('the portal will not file tips for somebody who is not clocked in', async (
     db.prepare("SELECT COUNT(*) n FROM shifts WHERE date = '2029-03-17'").get().n, 0,
     'not on the night they typed, and not on any other');
 });
+
+test('a tip-out paid by another role comes out of THEIR pot, not the servers', () => {
+  // "Bartenders tip out barbacks 3% of bar sales" is the bartender paying, out
+  // of the 10% the servers already handed over. Modelling it as two server-paid
+  // rules (7% + 3%) gives the same money on a night both roles are worked and
+  // the WRONG money on a night the barback is off: the servers would keep the
+  // 3% and the bartender would be docked for somebody who never came in.
+  const { runShift } = require('../src/engine');
+  const rules = [
+    { type: 'tipout', recipient: 'busser', percent: 2.5, base: 'total_sales', split: 'hours' },
+    { type: 'tipout', recipient: 'bartender', percent: 10, base: 'alcohol', split: 'hours' },
+    { type: 'tipout', recipient: 'barback', percent: 3, base: 'alcohol', split: 'hours', from: 'bartender' },
+  ];
+  const servers = [{ employeeId: 1, name: 'A', hours: 6, food: 3600, coffee: 0, alcohol: 2000,
+    cardTips: 920, cashTips: 160 }];
+  const bar = { employeeId: 3, name: 'Bt', role: 'bartender', hours: 7 };
+  const bus = { employeeId: 4, name: 'Bu', role: 'busser', hours: 6 };
+  const bb = { employeeId: 5, name: 'Bb', role: 'barback', hours: 5 };
+
+  const both = runShift({ servers, support: [bar, bus, bb], pool: {} }, rules);
+  assert.strictEqual(both.pots.bartender, 14000, 'bartender keeps 7% of alcohol');
+  assert.strictEqual(both.pots.barback, 6000, 'barback gets the 3%');
+  assert.deepStrictEqual(both.transfers, [{ from: 'bartender', to: 'barback', cents: 6000 }]);
+
+  const alone = runShift({ servers, support: [bar, bus], pool: {} }, rules);
+  assert.strictEqual(alone.pots.bartender, 20000,
+    'with no barback the bartender keeps the whole 10%');
+  assert.strictEqual(alone.pots.barback, undefined, 'and no pot is opened for nobody');
+
+  // THE POINT: the server pays the same either way. Who is on tonight decides
+  // where it lands, never what it costs them.
+  assert.strictEqual(both.reconciliation.totalKept, alone.reconciliation.totalKept,
+    'the server is charged identically whether or not a barback worked');
+  assert.ok(both.reconciliation.balanced && alone.reconciliation.balanced, 'and both balance');
+});
+
+test('a transfer can redistribute a pot and never invent one', () => {
+  // Clamped to what is actually there. A percentage bigger than the pot — a
+  // typo, or a night with almost no alcohol — must not push a pot negative and
+  // conjure money for the recipient.
+  const { runShift } = require('../src/engine');
+  const rules = [
+    { type: 'tipout', recipient: 'bartender', percent: 1, base: 'alcohol', split: 'hours' },
+    { type: 'tipout', recipient: 'barback', percent: 90, base: 'alcohol', split: 'hours', from: 'bartender' },
+  ];
+  const r = runShift({
+    servers: [{ employeeId: 1, name: 'A', hours: 5, food: 100, coffee: 0, alcohol: 1000,
+      cardTips: 200, cashTips: 0 }],
+    support: [{ employeeId: 2, name: 'Bt', role: 'bartender', hours: 5 },
+      { employeeId: 3, name: 'Bb', role: 'barback', hours: 5 }],
+    pool: {},
+  }, rules);
+  assert.ok(r.pots.bartender >= 0, 'the source pot never goes negative');
+  assert.strictEqual(r.pots.bartender + r.pots.barback, 1000, 'and the two still sum to the 1%');
+  assert.strictEqual(r.reconciliation.balanced, true);
+});
+
+test('one role can pool its own tips without the rest of the house', () => {
+  // "Bartenders pool tips together." The three fixed groups — kitchen, foh,
+  // all_support — could not say that.
+  const { runShift } = require('../src/engine');
+  const r = runShift({
+    servers: [],
+    support: [
+      { employeeId: 1, name: 'Bt A', role: 'bartender', hours: 8, cashTips: 200 },
+      { employeeId: 2, name: 'Bt B', role: 'bartender', hours: 4, cashTips: 100 },
+      { employeeId: 3, name: 'Busser', role: 'busser', hours: 6 },
+    ],
+    pool: {},
+  }, [{ type: 'pool', source: 'jar', split: 'hours', among: 'bartender', payout: 'weekly_cash' }]);
+  const by = Object.fromEntries(r.support.map((p) => [p.name, p.cashTotal]));
+  assert.strictEqual(by['Busser'], 0, 'the busser is not in the bar pool');
+  assert.strictEqual(by['Bt A'] + by['Bt B'], 30000, 'the bar keeps all of it');
+  assert.ok(by['Bt A'] > by['Bt B'], 'split by hours, 8 against 4');
+});
