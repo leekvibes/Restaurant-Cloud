@@ -384,3 +384,85 @@ A busser receiving $8.00 instead of $14.00 because they clocked in at 10:00 is
 correct and looks like a bug. Every tip-out figure needs its derivation on the
 screen next to it — *2% of $400 rung between 10:00 and 15:00, while you were
 on* — or the first week will be spent re-checking arithmetic by hand.
+
+---
+
+## Part 8 — The final policy, and why there is no time machinery in it
+
+**Decided 2026-09-07.** Time-based allocation is **dropped**, on Malek's call,
+and the call is right: there is no record of when a tip was earned, so every
+design in Part 7 was machinery for approximating a fact the data does not
+contain. Changing the rule beats approximating the unknown.
+
+### The operating shape it comes from
+
+| | |
+|---|---|
+| 07:00–11:00 | A barista works the bar — breakfast and coffee. Somebody sitting at the bar who tips them, tips **them**. |
+| ~09:00–10:00 | The busser arrives. |
+| 11:00 | Alcohol service starts; the bartender takes the bar. |
+
+The barista's whole window is before alcohol exists, and mostly before the
+busser. That is the only staggered relationship in the building — and taking
+the barista out of the tip-out chain removes it, rather than modelling it.
+
+**Everyone else overlaps fully.** The daytime bartender starts after the busser
+is already on. At dinner everyone clocks in together. So no other rule needs to
+know what time anything happened.
+
+### DAY SERVICE
+
+Direct-service earners — keep their own tips, pay the tip-outs below:
+**server, barista, bartender.**
+
+| Tip-out | Rate | Base | Paid by |
+|---|---|---|---|
+| Busser | 2% | total sales | server, **bartender** |
+| Barista | 1.5% | coffee | server, bartender |
+| Bartender | 10% | alcohol | server |
+| Kitchen | — | — | **nobody** |
+
+The barista **pays nothing** and still **receives** 1.5% of everyone else's
+coffee. Both sides, deliberately.
+
+### EVENING SERVICE
+
+| Tip-out | Rate | Base | Paid by |
+|---|---|---|---|
+| Busser | 2% | total sales | server |
+| Bartender | 10% | alcohol | server |
+| Barista | 1.5% | coffee | server, **bartender** |
+| Barback | 3% | the bartender's own sales | **bartender** |
+| Kitchen | — | — | **nobody** |
+
+**The evening bartender does NOT pay the busser. The day bartender does.** That
+is deliberate and it is the single most confusable line in this document — in
+three months it will look like a bug. It is not.
+
+### The register pool
+
+To-go card **and** to-go cash from the jar, shared between the **barista and
+bartender who actually worked that service**. Not kitchen, not servers, not
+bussers — the busser is paid by the 2%, not from the pool.
+
+### What this costs
+
+A busser gets nothing from coffee rung between their arrival (~09:00–10:00) and
+11:00 — roughly two hours of breakfast trade. Accepted knowingly. If it ever
+matters, the simple version is: a barista pays the busser only if the barista
+clocked in *after* the busser, which is one comparison of two clock-in times and
+needs no sales timing.
+
+### What is left to build
+
+- `paidBy` on a rule. Omitted means everybody, so every stored policy keeps its
+  meaning untouched.
+- Direct-service earners: `shiftInputs` stops deciding on the literal string
+  `server`. Barista and bartender become earners who keep their own tips.
+- Somebody on both sides of the ledger — barista and bartender both pay and
+  receive in the same service. The engine and the emails are not shaped for it.
+- Register pool: a group of two roles.
+- Kitchen out of the rules, and off `kind = support`.
+- Four money types kept visibly separate wherever a figure is shown.
+
+**No new table. No sales segments. No migration. No historical risk.**
