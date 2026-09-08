@@ -222,3 +222,43 @@ work, and it makes the common case right without inventing a schema in a week.
 5. **Register/to-go tips have no separate input today.** The jar and to-go card
    figures exist; is "register tips" the same as the existing to-go card, or a
    third thing to capture?
+
+---
+
+## Part 6 — Decisions, 2026-09-07
+
+Answers to Part 5, from Malek, verbatim in substance:
+
+1. **A bartender does NOT pay the busser 2%.** They tip out the barback only,
+   based on bar sales.
+2. **A bartender DOES pay the barista 1.5% of coffee sales.**
+3. **The barback keeps 3%.**
+4. **"Bar sales" means that bartender's own sales for the day — not just
+   alcohol.** Food and coffee rung at the bar count.
+5. **The register pool is to-go card AND to-go cash from the jar.**
+6. **All tip-outs are to be based on clock times.**
+
+### What those answers change
+
+**Rules now need to know WHO PAYS them.** This is the structural consequence and
+it is easy to miss. Today every rule is charged to every direct earner. After
+these answers the matrix is:
+
+| Rule | Server pays | Bartender pays | Barista pays |
+|---|---|---|---|
+| Busser 2% of total sales | yes | **no** | yes |
+| Bartender 10% of alcohol | yes | — | yes |
+| Barista 1.5% of coffee | yes | **yes** | — |
+| Barback 3% of bar sales | no | **yes** | no |
+
+A rule therefore needs a `paidBy` alongside its recipient. The engine has no
+such concept — it loops earners and applies every rule to each.
+
+**The barback tip-out is not a pot transfer after all.** It is 3% of the
+bartender's OWN sales, so the bartender pays it the way a server pays theirs.
+The `from:` mechanism built on 2026-09-05 is not what this needs. It stays
+useful, but this rule does not use it.
+
+**A bartender is a payer and a recipient in the same service.** They receive 10%
+of servers' alcohol and pay out to the barback and the barista. Nothing in the
+engine or the emails is shaped for somebody on both sides of the ledger.
