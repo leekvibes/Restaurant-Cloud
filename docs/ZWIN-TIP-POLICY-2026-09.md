@@ -262,3 +262,125 @@ useful, but this rule does not use it.
 **A bartender is a payer and a recipient in the same service.** They receive 10%
 of servers' alcohol and pay out to the barback and the barista. Nothing in the
 engine or the emails is shaped for somebody on both sides of the ledger.
+
+---
+
+## Part 7 — How to build the time-aware half
+
+**Status: DESIGN. Not built.** Written 2026-09-07 after Malek confirmed
+time-awareness is essential for day service.
+
+### The idea
+
+**Do not ask anybody to invent time periods. The punches already contain them.**
+
+Every moment a tip-out recipient clocks in or out is a boundary. Between two
+boundaries the set of people an earner owes is constant, so that span is one
+block and needs one number. Nothing else is a boundary — a second barista
+arriving changes nothing about who the first barista owes.
+
+That filter is what makes this usable. *Measured on a realistic day service —
+Barista A 07:00–15:00, Barista B 08:00–14:00, Busser 10:00–16:00, Bartender
+11:00–19:00:*
+
+| | |
+|---|---|
+| Every punch boundary | **7 blocks** — unusable |
+| Boundaries that change who Barista A owes | **3 blocks** — 07:00–10:00 (owes nobody), 10:00–11:00 (busser), 11:00–15:00 (busser + bartender) |
+
+And the case that matters most for the opening:
+
+| | |
+|---|---|
+| Dinner, everyone clocked in together | **1 block — no question asked at all** |
+
+A service where everybody starts together behaves exactly as it does today. The
+form does not change, nothing extra is typed, and the arithmetic is identical.
+Only a genuinely staggered service asks, and then two or three times.
+
+### The one real choice: ask, or compute
+
+Sales could be apportioned automatically by time overlap and never ask anyone.
+It costs nothing and is sometimes badly wrong. *Measured — barista rings $700
+across 07:00–15:00, busser present for 62.5% of that:*
+
+| Shape of the day | Automatic | Actual | Gap |
+|---|---|---|---|
+| Even | $8.75 | $8.00 | $0.75 |
+| Morning rush | $8.75 | $4.00 | **$4.75** |
+| Slow start | $8.75 | $11.60 | $2.85 |
+| Everything late | $8.75 | $13.00 | **$4.25** |
+| **Dinner, all together** | — | — | **$0.00, always** |
+
+A café morning IS lopsided — that is the shape of the business — so automatic
+allocation is wrong in exactly the case day service will hit every day.
+
+**So: pre-fill automatically, let it be corrected.** The blocks arrive filled in
+by time proportion and must sum to the total. Accepting the pre-fill is
+defensible; fixing a lopsided morning is one edit. The lazy path is reasonable
+rather than silently wrong, which is the failure this design exists to avoid.
+
+### What gets built
+
+**One new table.** `server_sales` stays exactly as it is — it remains the total
+and the whole of history. Segments are additive:
+
+```
+sales_segments
+  shift_id, employee_id, seq,
+  starts_at, ends_at,
+  food_cents, coffee_cents, alcohol_cents,
+  card_tips_cents, cash_tips_cents
+```
+
+No segments for a service means the old behaviour, unchanged. That is what makes
+every historical service safe without a migration, and what lets this ship on a
+Wednesday without touching Tuesday.
+
+**The engine loops segments.** For each earner: for each segment, work out who
+was on during it from the punches, and charge only those rules. Sum the charges.
+Everything downstream — pools, reconciliation, emails — works on the totals it
+already works on.
+
+**Pool splits weight by overlapping minutes**, not shift hours. Two bartenders,
+one on at 11:00 and one at 13:00, sharing a pool earned 13:00–16:00, split it
+3h against 3h — not 5h against 3h.
+
+### The rule matrix, which is the other half
+
+Independent of time, and needed first. A rule gains `paidBy`:
+
+```json
+{ "type":"tipout", "recipient":"busser",    "percent":2,   "base":"total_sales",
+  "paidBy":["server","barista"] }
+{ "type":"tipout", "recipient":"bartender", "percent":10,  "base":"alcohol",
+  "paidBy":["server","barista"] }
+{ "type":"tipout", "recipient":"barista",   "percent":1.5, "base":"coffee",
+  "paidBy":["server","bartender"] }
+{ "type":"tipout", "recipient":"barback",   "percent":3,   "base":"total_sales",
+  "paidBy":["bartender"] }
+```
+
+Omitting `paidBy` means everybody, so every existing policy keeps its meaning
+and no stored rule needs rewriting.
+
+### Order of work, against the dates
+
+| By | What | Why then |
+|---|---|---|
+| **Sep 11** | Rule matrix, direct-service earners, kitchen out, register pool | Friends & family is a live rehearsal with real punches and no money at stake |
+| **Sep 14** | Fixes from what the 11th showed | Media night is the second free rehearsal |
+| **Sep 15–16** | **Change nothing.** Run it. | First real service and grand opening |
+| **Sep 17** | Time blocks | The first day a bar and a coffee counter run together — the first day time-awareness changes a number |
+
+Dinner needs the rule matrix and does not need time blocks: everyone clocks in
+together, so every service is one block and the two designs agree to the penny.
+Day service needs both, and its deadline is six days later. The order falls out
+of the operation rather than being imposed on it.
+
+### What has to be visible, or it will not be trusted
+
+A busser receiving $8.00 instead of $14.00 because they clocked in at 10:00 is
+correct and looks like a bug. Every tip-out figure needs its derivation on the
+screen next to it — *2% of $400 rung between 10:00 and 15:00, while you were
+on* — or the first week will be spent re-checking arithmetic by hand.
