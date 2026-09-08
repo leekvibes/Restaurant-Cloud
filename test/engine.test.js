@@ -403,8 +403,14 @@ test('the SQL wage rate resolves exactly like shiftInputs does', () => {
 
   const compare = (id, msg) => {
     const inp = shiftInputs(id);
-    // shiftInputs already zeroes salaried people, so this sums the same set.
-    const viaJs = [...inp.servers, ...inp.support]
+    // inp.people, not the two lists concatenated. A bartender is in BOTH now —
+    // they earn directly and they receive — so walking both counts their wage
+    // twice. This test found that in the labour figure before anybody saw it on
+    // a screen, which is exactly its job; it then found it in itself.
+    //
+    // shiftInputs already zeroes salaried people, so this sums the same set the
+    // SQL does: one row per person who worked.
+    const viaJs = inp.people
       .reduce((a, p) => a + Math.round(toCents(p.hourlyRate || 0) * (p.hours || 0)), 0);
     assert.strictEqual(wageOf.get(id).cents, viaJs, msg);
   };

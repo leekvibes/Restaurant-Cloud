@@ -532,6 +532,12 @@ const w = {
 };
 
 /** Assemble the exact input shape engine.runShift() expects, in DOLLARS. */
+// Direct earners who are ALSO tip-out recipients. A bartender takes 9% of the
+// servers' alcohol and a barista 1.5% of their coffee, while both keep what
+// their own guests tip them. A server is never on the receiving side, which is
+// why they are not in here.
+const DIRECT_ALSO_RECEIVES = new Set(['bartender', 'barista']);
+
 function shiftInputs(shiftId) {
   const workRows = w.workForShift.all(shiftId);
   const sales = new Map(w.salesForShift.all(shiftId).map((r) => [r.employee_id, r]));
@@ -564,12 +570,30 @@ function shiftInputs(shiftId) {
         }
       }
     }
-    if (row.role === 'server') {
+    // WHO EARNS DIRECTLY, and who receives — and the two are no longer
+    // opposites.
+    //
+    // This used to be `row.role === 'server'`, one literal string, and it is
+    // what pooled a barista's tips with the whole house: anybody who was not
+    // called 'server' went into support and had their tips taken off them. A
+    // bartender working the bar and a barista working the counter serve guests
+    // and keep what they are tipped, exactly as a server does.
+    //
+    // A bartender is BOTH. They keep their own bar tips and they receive 9% of
+    // the servers' alcohol, so they appear in both lists — once as somebody who
+    // earns and pays, once as somebody who is paid. The engine reconciles it:
+    // their own tips are collected from them and their pot share is paid to
+    // them, and the books balance because those are different pieces of money.
+    const kind = kinds[row.role];
+    const earnsDirect = kind === 'server';
+    const canReceive = kind !== 'server' || DIRECT_ALSO_RECEIVES.has(row.role);
+    if (earnsDirect) {
       const sr = sales.get(row.employee_id) || {};
       servers.push({
         employeeId: row.employee_id,
         name: row.name,
         email: row.email,
+        role: row.role,
         hours: row.hours,
         hourlyRate: rateCents / 100,
         salaried,
@@ -581,9 +605,11 @@ function shiftInputs(shiftId) {
         cashEnteredBy: sr.cash_entered_by || null,
         hoursSource: row.hours_source || null,
       });
-    } else {
-      // Support staff can report tips too (a barista ringing people up, a
-      // busser handed cash). Those get pooled — see the engine.
+    }
+    if (canReceive) {
+      // What they may be PAID. Their own reported tips are deliberately not
+      // carried here for a direct earner — those are already counted on the
+      // earning side, and pooling them again would pay the same money twice.
       const sr = sales.get(row.employee_id) || {};
       support.push({
         employeeId: row.employee_id,
@@ -593,8 +619,8 @@ function shiftInputs(shiftId) {
         hours: row.hours,
         hourlyRate: rateCents / 100,
         salaried,
-        cashTips: (sr.cash_tips_cents || 0) / 100,
-        cardTips: (sr.card_tips_cents || 0) / 100,
+        cashTips: earnsDirect ? 0 : (sr.cash_tips_cents || 0) / 100,
+        cardTips: earnsDirect ? 0 : (sr.card_tips_cents || 0) / 100,
         // A trainee is on the clock but out of every pool — their hours must
         // not dilute the split for the people actually earning tips.
         tipEligible: kinds[row.role] !== 'non_tipped',
@@ -609,7 +635,22 @@ function shiftInputs(shiftId) {
     togoCash: (sh.pool_togo_cents || 0) / 100, // legacy column, folds into cash
     togoCard: (sh.pool_togo_card_cents || 0) / 100,
   };
-  return { servers, support, pool };
+  // EVERYONE ON THE SHIFT, ONCE.
+  //
+  // A bartender is in both lists — they earn directly and they receive — so
+  // anything that walks both to answer "who was on?" now counts them twice.
+  // Labour cost did exactly that and came out $161.50 high on one shift, which
+  // is the sort of error that reads as a wage bug rather than a tips one.
+  // Anything summing or listing people uses this; only the tip engine wants the
+  // two sides apart.
+  const seen = new Set();
+  const people = [];
+  for (const p of [...servers, ...support]) {
+    if (seen.has(p.employeeId)) continue;
+    seen.add(p.employeeId);
+    people.push(p);
+  }
+  return { servers, support, people, pool };
 }
 
 module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };

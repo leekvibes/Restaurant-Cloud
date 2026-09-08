@@ -60,7 +60,7 @@ function salesAndLabor(from, to) {
     const total = shiftTotalSales(sh);
     serverSales += rung;
     if (total > 0) { sales += total; shiftsWithTotal++; } else { sales += rung; shiftsWithout++; }
-    for (const p of [...inp.servers, ...inp.support]) labor += Math.round(toCents(p.hourlyRate || 0) * (p.hours || 0));
+    for (const p of inp.people) labor += Math.round(toCents(p.hourlyRate || 0) * (p.hours || 0));
   }
   return { sales, labor, serverSales, shiftsWithTotal, shiftsWithout };
 }
@@ -144,8 +144,8 @@ function aggregatePayroll(from, to, opts = {}) {
 
   for (const sh of shifts) {
     const inp = shiftInputs(sh.id);
-    const rateMap = new Map([...inp.servers, ...inp.support].map((p) => [p.employeeId, p.hourlyRate || 0]));
-    for (const p of [...inp.servers, ...inp.support]) if (p.email) emails.set(p.employeeId, p.email);
+    const rateMap = new Map(inp.people.map((p) => [p.employeeId, p.hourlyRate || 0]));
+    for (const p of inp.people) if (p.email) emails.set(p.employeeId, p.email);
     const r = runShift(inp, policyForShift(sh));
     const wk = weekKey(sh.date);
 

@@ -55,11 +55,17 @@ function poolRecipients(support, among) {
   const eligible = support.filter((p) => p.tipEligible !== false);
   if (among === 'kitchen') return eligible.filter((p) => p.role === 'kitchen');
   if (among === 'foh') return eligible.filter((p) => ['busser', 'barista'].includes(p.role));
-  // A single role by name — "bartenders pool their own tips together" — which
-  // the three fixed groups above could not express.
+  // Named roles — one, or a list. "Bartenders pool their own tips together",
+  // and "the register pot is shared by whoever was working the bar or the
+  // counter", neither of which the three fixed groups above could express.
+  //
+  // An empty result is returned as empty rather than falling back to everybody:
+  // a pot for baristas on a night with no barista must go to the orphan list
+  // for somebody to decide about, not quietly to the whole house — least of all
+  // to the busser, who is paid by a percentage precisely so they are not in it.
   if (among && among !== 'all_support') {
-    const named = eligible.filter((p) => p.role === among);
-    if (named.length) return named;
+    const want = new Set(Array.isArray(among) ? among : [among]);
+    return eligible.filter((p) => want.has(p.role));
   }
   return eligible; // all_support
 }
@@ -73,8 +79,14 @@ function runShift(shift, rules) {
   const tipoutRules = rules.filter((r) => r.type === 'tipout');
   const poolRules = rules.filter((r) => r.type === 'pool');
 
+  // `servers` is every DIRECT-SERVICE earner — somebody who serves guests,
+  // keeps what they are tipped, and pays the tip-outs their role owes. It is
+  // no longer only the position called 'server': a bartender working the bar
+  // and a barista working the counter are the same shape of thing, and calling
+  // them support was what pooled their tips with the house.
   const servers = (shift.servers || []).map((s) => ({
-    employeeId: s.employeeId, name: s.name, hours: Number(s.hours) || 0,
+    employeeId: s.employeeId, name: s.name, role: s.role || 'server',
+    hours: Number(s.hours) || 0,
     food: toCents(s.food), coffee: toCents(s.coffee), alcohol: toCents(s.alcohol),
     cardTips: toCents(s.cardTips), cashTips: toCents(s.cashTips),
   }));
@@ -97,6 +109,23 @@ function runShift(shift, rules) {
   const transfers = [];   // pot -> pot movements, for the receipt to explain
   const serverPayouts = [];
 
+  /**
+   * Does this earner pay this rule?
+   *
+   * A rule with no `paidBy` is paid by everybody, which is what every policy
+   * written before today means and why none of them had to be rewritten.
+   *
+   * Naming payers is what the Palm policy needs: a server pays the busser 2%
+   * and a bartender does not; a bartender pays the barback and a server does
+   * not. Before this, a rule was charged to every direct earner alike and the
+   * two could not be told apart.
+   */
+  const paysThis = (earner, r) => {
+    if (!r.paidBy) return true;
+    const who = Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy];
+    return who.includes(earner.role || 'server');
+  };
+
   for (const s of servers) {
     const totalTips = s.cardTips + s.cashTips;
     const tipouts = {}; // role -> cents (this server)
@@ -112,7 +141,12 @@ function runShift(shift, rules) {
     };
 
     for (const r of tipoutRules) {
-      if (r.from) continue;              // paid by another role, not by the server
+      if (r.from) continue;              // paid out of another role's pot, not by an earner
+      if (!paysThis(s, r)) continue;     // not this earner's rule
+      // Never to yourself. A bartender pays the barback, and a rule that also
+      // named bartenders as recipients would otherwise have them tipping
+      // themselves — money round in a circle, and a pot that cannot be split.
+      if (r.recipient === (s.role || 'server')) continue;
       if (r.base === 'remaining') continue;
       const amt = pctOf(baseValue(s, r.base), r.percent);
       if (charge(r.recipient, amt)) directSum += amt;
@@ -123,6 +157,8 @@ function runShift(shift, rules) {
     const remaining = totalTips - directSum;
     for (const r of tipoutRules) {
       if (r.from) continue;
+      if (!paysThis(s, r)) continue;
+      if (r.recipient === (s.role || 'server')) continue;
       if (r.base !== 'remaining') continue;
       charge(r.recipient, pctOf(Math.max(remaining, 0), r.percent));
       roleSplit[r.recipient] = r.split;
@@ -132,7 +168,7 @@ function runShift(shift, rules) {
     for (const role of Object.keys(tipouts)) rolePools[role] = (rolePools[role] || 0) + tipouts[role];
 
     serverPayouts.push({
-      employeeId: s.employeeId, name: s.name, role: 'server', hours: s.hours,
+      employeeId: s.employeeId, name: s.name, role: s.role || 'server', hours: s.hours,
       sales: { food: s.food, coffee: s.coffee, alcohol: s.alcohol },
       cardTips: s.cardTips, cashTips: s.cashTips, totalTips,
       tipouts, tipoutTotal, tipsKept: totalTips - tipoutTotal,

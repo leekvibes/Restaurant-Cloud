@@ -1971,7 +1971,7 @@ app.get('/shifts/:id', (req, res) => {
   const r = runShift(inp, policyForShift(sh));
   const { warn, notes } = shiftWarnings(sh, inp, r);
   const staff = q.nonManagerList.all();
-  const people = [...inp.servers, ...inp.support];
+  const people = inp.people;
   // Anybody on this service whose punch the sweep closed. Read once per page
   // rather than per card, and marked on the nightly close too because that is
   // where the hours are signed off — a made-up clock-out has to be visible at
@@ -2780,7 +2780,7 @@ app.post('/shifts/:id/read-report', reportUpload.array('photos', 12), csrfBody, 
 // ---------------------------------------------------------------------------
 function peopleMap(inp) {
   const m = new Map();
-  for (const p of [...inp.servers, ...inp.support]) m.set(p.employeeId, { email: p.email, hourlyRate: p.hourlyRate, salaried: p.salaried });
+  for (const p of inp.people) m.set(p.employeeId, { email: p.email, hourlyRate: p.hourlyRate, salaried: p.salaried });
   return m;
 }
 
@@ -2822,14 +2822,14 @@ function shiftWarnings(sh, inp, r) {
   }
   // A figure without a punch behind it is the other half of the same problem:
   // the money arrived on this service and the hours went somewhere else.
-  const tipsNoPunch = [...inp.servers, ...inp.support]
+  const tipsNoPunch = inp.people
     .filter((p) => (p.cashTips || p.cardTips || p.food || p.coffee || p.alcohol) && !TC.hasPunch(sh.id, p.employeeId))
     .map((p) => p.name);
   if (tipsNoPunch.length) {
     warn.push('Reported here but never clocked in on this service: ' + tipsNoPunch.join(', ')
       + '. If they clocked in elsewhere, their hours are on that shift instead.');
   }
-  const missingEmail = [...inp.servers, ...inp.support].filter((p) => !p.email).map((p) => p.name);
+  const missingEmail = inp.people.filter((p) => !p.email).map((p) => p.name);
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
   const noCash = inp.servers.filter((sv) => !sv.cashEnteredBy).map((sv) => sv.name);
   if (noCash.length) warn.push('Cash tips not entered yet for: ' + noCash.join(', ') + '. They can add them on the cash-tip page.');
@@ -2852,7 +2852,7 @@ app.get('/shifts/:id/results', (req, res) => {
   // Per-person send. Someone not receiving theirs shouldn't mean re-sending to
   // everybody — and showing the address inline is how you spot the typo that
   // caused it in the first place.
-  const emailOf = new Map([...inp.servers, ...inp.support].map((p) => [p.employeeId, p.email]));
+  const emailOf = new Map(inp.people.map((p) => [p.employeeId, p.email]));
   // The send row lives on each person's card: their address (so a typo is
   // caught by eye), a preview of the exact email, and a per-person send — one
   // bounce shouldn't mean re-sending to the whole shift. On a phone the actions
@@ -3038,7 +3038,7 @@ app.post('/shifts/:id/send', async (req, res) => {
   // Tell each person on the shift, on their portal, that their pay is ready —
   // the same moment the email goes out. Their own event, so only they see it.
   const shiftLabel = whenOf(sh.date, sh.daypart);
-  for (const p of [...inp.servers, ...inp.support]) {
+  for (const p of inp.people) {
     if (p.employeeId) PORTAL.notify('earnings', `Your pay for ${shiftLabel} is ready`,
       { employeeId: p.employeeId, href: `/portal/earnings/${sh.id}` });
   }
@@ -10518,7 +10518,7 @@ function periodIssues(from, to, rows) {
   for (const sh of shifts) {
     const inp = shiftInputs(sh.id);
     const where = `${sh.date} ${dp(sh.daypart)}`;
-    for (const p of [...inp.servers, ...inp.support]) {
+    for (const p of inp.people) {
       if (!Number(p.hours) && !p.salaried) zeroHours.push(`${p.name} (${where})`);
     }
     for (const sv of inp.servers) {
