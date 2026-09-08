@@ -9597,7 +9597,6 @@ app.get('/employees', (req, res) => {
     inactive: 'Nobody has been deactivated.',
   }[tab];
 
-  const roles = [...allRoles(), 'manager'];
   const body = `
     ${flash(req)}
     <div class="bs-page">
@@ -9609,7 +9608,7 @@ app.get('/employees', (req, res) => {
       </div>
       <div class="bs-head-acts">
         <a class="bs-btn-sm" href="/positions">Positions</a>
-        ${w ? '<a class="bs-btn" href="#add">+ Add employee</a>' : ''}
+        ${w ? '<a class="bs-btn" href="/employees/new">+ Add employee</a>' : ''}
       </div></div>
 
       <div class="bs-panel rst">
@@ -9631,20 +9630,17 @@ app.get('/employees', (req, res) => {
         </div>
       </div>
 
-      ${w ? `<h2 id="add" class="rst-h2">Add employee</h2>
-      <p class="sub">The essentials only &mdash; positions, extra wages and schedules are set on their profile afterwards.</p>
-      <form method="post" action="/employees" class="bs-panel rst-add">
-        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-        <div class="rst-add-g">
-          <label>Name <input name="name" required autocomplete="off"></label>
-          <label>Primary position <select name="role">${roles.map((r) => `<option value="${r}">${posName(r)}</option>`).join('')}</select></label>
-          <label>Email <input name="email" type="email" placeholder="for their pay summary"></label>
-          <label>4-digit PIN <input name="pin" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="for the staff portal"></label>
-          <label>Pay type <select name="pay_type"><option value="hourly">Hourly</option><option value="salary">Salary</option></select></label>
-          <label>Hourly wage <input name="rate" type="number" step="0.01" min="0" placeholder="0.00"></label>
-        </div>
-        <button class="bs-btn" type="submit">Create employee</button>
-      </form>` : ''}
+      ${/* The form that was here asked for six fields and left ten on the
+           profile, so every hire was create-then-go-and-finish-it. It is a
+           setup page of its own now — positions, schedules, per-position and
+           per-schedule rates, overtime and the PIN, written in one
+           transaction. This is the door to it, not a second copy of it. */''}
+      ${w ? `<a class="rst-cta" href="/employees/new" id="add">
+        <span class="rst-cta-p" aria-hidden="true">+</span>
+        <span class="rst-cta-t"><b>Add employee</b>
+          <i>Name, positions, schedules, pay and portal access &mdash; set up in one go.</i></span>
+        <span class="rst-cta-go" aria-hidden="true">&rsaquo;</span>
+      </a>` : ''}
     </div>
     <script>
       function rstFilter() {
@@ -9701,31 +9697,781 @@ function pinTaken(pin, exceptId) {
   return q.employeeByPin.get(clean, exceptId || 0) || null;
 }
 
-app.post('/employees', (req, res) => {
-  const { name, role, email, pin, rate, pos_id, pay_type } = req.body;
-  if (!name || !role) return res.redirect('/employees?err=1&msg=' + encodeURIComponent('Name and role required.'));
-  const pinErr = badPin(pin);
-  if (pinErr) return res.redirect('/employees?err=1&msg=' + encodeURIComponent(pinErr));
-  const clash = pinTaken(pin, 0);
-  if (clash) {
-    return res.redirect('/employees?err=1&msg=' + encodeURIComponent(
-      // Never the PIN itself. This message becomes a query string, and a staff
-      // PIN is a whole credential on its own — /tips/start takes the PIN alone
-      // and hands back a portal session. Printed here it went into the address
-      // bar, into browser history on the office machine, and into whatever the
-      // host logs, paired with the name of the person it belongs to.
-      `${clash.name} already uses that PIN. Give ${name.trim()} a different one — staff sign in to the tips page with their PIN, so it has to be unique.`));
+/**
+ * The schedules somebody is on, said the way a person would say it.
+ *
+ * "Day Service · Evening Service" is a list of records; "Day + Evening Service"
+ * is a sentence. Where every name ends in the same word — which is what happens
+ * the moment somebody names their schedules consistently — it is said once at
+ * the end. Where they do not, the full names are joined and nothing clever
+ * happens, because a schedule called "Brunch" must not come out as "Brunc".
+ */
+function svcPhrase(slugs) {
+  const names = (slugs || []).map((sl) => SERVICES.nameOf(sl)).filter(Boolean);
+  if (!names.length) return '';
+  if (names.length === 1) return names[0];
+  const tail = names[0].split(' ').pop();
+  const sharesTail = tail.length > 2 && names.every((n) => n.split(' ').length > 1 && n.split(' ').pop() === tail);
+  if (!sharesTail) return names.join(' + ');
+  const heads = names.map((n) => n.split(' ').slice(0, -1).join(' '));
+  return heads.slice(0, -1).join(' + ') + ' + ' + heads[heads.length - 1] + ' ' + tail;
+}
+
+/**
+ * What the profile header says under somebody's name.
+ *
+ * The PRIMARY position and where they work, and nothing else. It used to print
+ * every position they hold beside every schedule they are on, so a bartender
+ * who also busses and covers the counter read
+ * "Bartender · Busser · Barista  ·  Day Service · Evening Service" — six facts
+ * in a line whose job is to say who this is. The secondary positions are on the
+ * pay tab, which is where somebody goes when they want them.
+ */
+function headerLine(e, slugs) {
+  const job = posName(e.role);
+  const where = svcPhrase(slugs);
+  const extras = q.rolesForEmployee.all(e.id).filter((r) => r.role !== e.role).length;
+  const bits = [];
+  if (job) bits.push(esc(job) + (extras ? ` <i class="epr-plus" title="Also works other positions">+${extras}</i>` : ''));
+  if (where) bits.push(esc(where));
+  else bits.push('<b class="epr-warn">No schedule</b>');
+  return bits.join(' <span class="epr-dot">&middot;</span> ');
+}
+
+// ---------------------------------------------------------------------------
+// ADD EMPLOYEE — a setup flow, not a row in a table.
+//
+// The old form asked for six things and left ten on the profile: which
+// schedules, extra positions, a rate per position, a rate for one schedule,
+// overtime, salary. Every hire meant creating a stub and then editing it, and
+// the two screens disagreed about what a new employee even was — the create
+// path put everybody on every schedule whether or not that was true.
+//
+// This writes into EXACTLY the same tables the profile edits, through the same
+// functions: SERVICES.setForEmployee, q.setRole, WAGES.setWage, OT.setExempt.
+// There is no second employee model and no second pay system. What is new is
+// the front door, and that the whole thing is one transaction.
+//
+// Laid out as four sections rather than four pages. A wizard would make the
+// common case — name, position, schedule, rate — into five clicks and four
+// screens; stacked sections with everything past the essentials folded away
+// keep it to one screen and one submit, and the summary rail on the right is
+// the review step, live, rather than a page you arrive at having forgotten
+// what you typed.
+// ---------------------------------------------------------------------------
+
+const SETUP_STEPS = [
+  ['1', 'Employee', 'Who they are'],
+  ['2', 'Role &amp; service', 'What they do, and where'],
+  ['3', 'Pay', 'What they earn'],
+  ['4', 'Access', 'The staff portal and time clock'],
+];
+
+/**
+ * The setup page's behaviour. Progressive enhancement throughout: with the
+ * script blocked the form still posts every field and the server still
+ * validates and saves the lot — what is lost is the folding, the live summary
+ * and being told about a clash before submitting rather than after.
+ *
+ * No backticks and no bare \d below. This string is built inside a template
+ * literal, where a backtick ends the page and a backslash escape is eaten
+ * before the browser ever sees it.
+ */
+function setupScript() {
+  return `<scr` + `ipt>
+(function () {
+  var form = document.getElementById('esu-form');
+  if (!form) return;
+  var $ = function (id) { return document.getElementById(id); };
+  var money = function (c) { return '$' + (c / 100).toFixed(2); };
+  var cents = function (v) {
+    var n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.]/g, ''));
+    return isFinite(n) && n > 0 ? Math.round(n * 100) : 0;
+  };
+  var esc = function (t) {
+    var d = document.createElement('div'); d.textContent = String(t == null ? '' : t);
+    return d.innerHTML;
+  };
+  var checked = function (sel) {
+    return Array.prototype.slice.call(form.querySelectorAll(sel)).filter(function (i) { return i.checked; });
+  };
+
+  // Typed rates survive a position being unticked and re-ticked. Rebuilding the
+  // rows from scratch each time is what keeps them honest against the position
+  // list; remembering the numbers is what stops that being infuriating.
+  var kept = {};
+
+  function primary() {
+    var r = form.querySelector('input[name=role]:checked');
+    return r ? { slug: r.value, name: r.getAttribute('data-name') } : null;
   }
-  const made = q.addEmployee.run({
-    name: name.trim(), role, email: (email || '').trim() || null,
-    pin: (pin || '').trim() || null, hourly_rate_cents: toCents(rate), pos_id: (pos_id || '').trim() || null,
-    pay_type: pay_type === 'salary' ? 'salary' : 'hourly', salary_cents: toCents(req.body.salary),
+  function extras() {
+    var p = primary();
+    return checked('#f-also input[name=also]').map(function (i) {
+      return { slug: i.value, name: i.getAttribute('data-name') };
+    }).filter(function (x) { return !p || x.slug !== p.slug; });
+  }
+  function svcs() {
+    return checked('#f-svc input[name=svc]').map(function (i) {
+      return { slug: i.value, name: i.getAttribute('data-name') };
+    });
+  }
+  function isSalary() {
+    var r = form.querySelector('input[name=pay_type]:checked');
+    return !!r && r.value === 'salary';
+  }
+
+  // A position cannot be its own alternate. Ticking it as "also" and then
+  // choosing it as primary would post the same slug twice, which the server
+  // rejects — so the chip simply stands down instead.
+  function syncAlso() {
+    var p = primary();
+    Array.prototype.forEach.call(form.querySelectorAll('#f-also .esu-chip--alt'), function (lab) {
+      var on = !!p && lab.getAttribute('data-slug') === p.slug;
+      lab.hidden = on;
+      if (on) { var b = lab.querySelector('input'); if (b) b.checked = false; }
+    });
+  }
+
+  function syncRates() {
+    var wrap = $('prate-wrap'), rows = $('prate-rows');
+    if (!wrap || !rows) return;
+    var all = [];
+    var p = primary();
+    if (p) all.push(p);
+    extras().forEach(function (x) { all.push(x); });
+    Array.prototype.forEach.call(rows.querySelectorAll('input'), function (i) {
+      if (i.value) kept[i.getAttribute('data-slug')] = i.value;
+    });
+    // One position has no "per position" question to answer — the base rate is
+    // already the rate for it, and a second box saying the same thing invites
+    // somebody to fill in one and not the other.
+    wrap.hidden = all.length < 2;
+    rows.innerHTML = '';
+    all.forEach(function (x) {
+      var d = document.createElement('div');
+      d.className = 'esu-rate esu-rate--pos';
+      d.innerHTML = '<div class="esu-rate-l"><b>' + esc(x.name) + '</b>'
+        + (p && x.slug === p.slug ? '<i>Primary</i>' : '') + '</div>'
+        + '<div class="esu-rate-i"><span>$</span><input name="prate_' + esc(x.slug) + '"'
+        + ' data-slug="' + esc(x.slug) + '" type="number" step="0.01" min="0" inputmode="decimal"'
+        + ' placeholder="base rate" value="' + esc(kept[x.slug] || '') + '"><span class="esu-per">/hr</span></div>';
+      rows.appendChild(d);
+    });
+  }
+
+  function ovRow() {
+    var jobs = [];
+    var p = primary(); if (p) jobs.push(p);
+    extras().forEach(function (x) { jobs.push(x); });
+    var mine = svcs();
+    var d = document.createElement('div');
+    d.className = 'esu-ovrow';
+    d.innerHTML = '<select name="ov_role" class="esu-sel">'
+      + jobs.map(function (j) { return '<option value="' + esc(j.slug) + '">' + esc(j.name) + '</option>'; }).join('')
+      + '</select><select name="ov_svc" class="esu-sel">'
+      + mine.map(function (m) { return '<option value="' + esc(m.slug) + '">' + esc(m.name) + '</option>'; }).join('')
+      + '</select><span class="esu-rate-i"><span>$</span>'
+      + '<input name="ov_rate" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00">'
+      + '<span class="esu-per">/hr</span></span>'
+      + '<button type="button" class="esu-x" aria-label="Remove this rate">&times;</button>';
+    d.querySelector('.esu-x').addEventListener('click', function () { d.remove(); sync(); });
+    return d;
+  }
+
+  // The role and schedule lists on an existing override row are rebuilt when
+  // the ones above change, keeping the current pick if it is still offered. An
+  // override naming a schedule they are no longer on is a rate that pays
+  // nobody, and the server refuses it — better that it cannot be posted.
+  function syncOv() {
+    var rows = $('ov-rows'); if (!rows) return;
+    var mine = svcs();
+    var jobs = []; var p = primary(); if (p) jobs.push(p);
+    extras().forEach(function (x) { jobs.push(x); });
+    var need = $('ov-need'), add = $('ov-add');
+    if (need) need.hidden = mine.length > 0;
+    if (add) add.disabled = mine.length === 0;
+    Array.prototype.forEach.call(rows.children, function (row) {
+      var rs = row.querySelector('select[name=ov_role]');
+      var ss = row.querySelector('select[name=ov_svc]');
+      if (rs) {
+        var was = rs.value;
+        rs.innerHTML = jobs.map(function (j) { return '<option value="' + esc(j.slug) + '">' + esc(j.name) + '</option>'; }).join('');
+        if (jobs.some(function (j) { return j.slug === was; })) rs.value = was;
+      }
+      if (ss) {
+        var wasS = ss.value;
+        ss.innerHTML = mine.map(function (m) { return '<option value="' + esc(m.slug) + '">' + esc(m.name) + '</option>'; }).join('');
+        if (mine.some(function (m) { return m.slug === wasS; })) ss.value = wasS;
+      }
+    });
+  }
+
+  function summary() {
+    var out = $('esu-sum'); if (!out) return;
+    var name = (form.name.value || '').trim();
+    if (!name) { out.innerHTML = '<p class="esu-none">Fill in a name to begin.</p>'; return; }
+    var p = primary(), ex = extras(), mine = svcs(), sal = isSalary();
+    var h = '<p class="esu-sum-name">' + esc(name) + '</p>';
+    var em = (form.email.value || '').trim();
+    if (em) h += '<p class="esu-sum-em">' + esc(em) + '</p>';
+
+    h += '<div class="esu-sum-g"><span>Positions</span><div>'
+      + (p ? '<b>' + esc(p.name) + '</b> <i>primary</i>' : '<i>none chosen</i>')
+      + (ex.length ? '<br>' + ex.map(function (x) { return esc(x.name); }).join(', ') : '')
+      + '</div></div>';
+
+    h += '<div class="esu-sum-g"><span>Schedules</span><div>'
+      + (mine.length ? mine.map(function (m) { return esc(m.name); }).join('<br>')
+        : '<b class="esu-warn-in">On no schedule</b>')
+      + '</div></div>';
+
+    var pay = '';
+    if (sal) {
+      var sc = cents(form.salary ? form.salary.value : 0);
+      pay = '<b>Salary</b><br>' + (sc ? money(sc) + ' per period' : '<i>no amount yet</i>');
+    } else {
+      var base = cents(form.rate ? form.rate.value : 0);
+      pay = '<b>Hourly</b><br>' + (base ? money(base) + '/hr base' : '<i>no base rate yet</i>');
+      Array.prototype.forEach.call(form.querySelectorAll('#prate-rows input'), function (i) {
+        var c = cents(i.value);
+        if (!c) return;
+        var lab = i.closest('.esu-rate').querySelector('b');
+        pay += '<br>' + esc(lab ? lab.textContent : i.getAttribute('data-slug')) + ' ' + money(c) + '/hr';
+      });
+      Array.prototype.forEach.call(form.querySelectorAll('.esu-ovrow'), function (row) {
+        var c = cents(row.querySelector('input[name=ov_rate]').value);
+        if (!c) return;
+        var rs = row.querySelector('select[name=ov_role]');
+        var ss = row.querySelector('select[name=ov_svc]');
+        pay += '<br>' + esc(rs.options[rs.selectedIndex] ? rs.options[rs.selectedIndex].text : '')
+          + ' on ' + esc(ss.options[ss.selectedIndex] ? ss.options[ss.selectedIndex].text : '')
+          + ' ' + money(c) + '/hr';
+      });
+      var ot = form.ot_eligible;
+      pay += '<br><i>Overtime ' + (ot && ot.value === '1' ? 'eligible' : 'exempt') + '</i>';
+    }
+    h += '<div class="esu-sum-g"><span>Pay</span><div>' + pay + '</div></div>';
+
+    var pin = (form.pin.value || '').trim();
+    h += '<div class="esu-sum-g"><span>Portal</span><div>'
+      + (pin.length === 4 ? 'PIN set' : pin ? '<b class="esu-warn-in">PIN incomplete</b>' : '<i>No PIN &mdash; no portal access</i>')
+      + '</div></div>';
+    out.innerHTML = h;
+  }
+
+  function sync() {
+    var sal = isSalary();
+    if ($('pay-hourly')) $('pay-hourly').hidden = sal;
+    if ($('pay-salary')) $('pay-salary').hidden = !sal;
+    var p = primary();
+    if ($('pin-mgr')) $('pin-mgr').hidden = !(p && p.slug === 'manager');
+    if ($('svc-none')) $('svc-none').hidden = svcs().length > 0;
+    syncAlso(); syncRates(); syncOv(); summary();
+  }
+
+  var addBtn = $('ov-add');
+  if (addBtn) addBtn.addEventListener('click', function () {
+    var rows = $('ov-rows');
+    if (!rows || !svcs().length) return;
+    rows.appendChild(ovRow());
+    sync();
   });
-  // On every schedule to begin with, so somebody hired on a Tuesday can clock
-  // in on the Tuesday — and so their checkboxes say what is actually true.
-  // Their manager unticks what does not apply.
-  try { SERVICES.addToAll(Number(made.lastInsertRowid)); } catch { /* schedules not seeded yet */ }
-  res.redirect('/employees?msg=' + encodeURIComponent(`${name} added.`));
+
+  form.addEventListener('input', sync);
+  form.addEventListener('change', sync);
+
+  // --- validation, said where the mistake is ---------------------------------
+  function mark(field, msg) {
+    var lab = field.closest('.esu-f') || field.closest('.esu-rate') || field.parentNode;
+    var old = lab.querySelector('.esu-err--live');
+    if (old) old.remove();
+    lab.classList.toggle('is-bad', !!msg);
+    field.setAttribute('aria-invalid', msg ? 'true' : 'false');
+    if (msg) {
+      var p = document.createElement('p');
+      p.className = 'esu-err esu-err--live';
+      p.textContent = msg;
+      lab.appendChild(p);
+    }
+  }
+  var nameF = $('f-name'), emailF = $('f-email'), pinF = $('f-pin');
+  if (nameF) nameF.addEventListener('blur', function () {
+    mark(nameF, nameF.value.trim() ? '' : 'A name is needed.');
+  });
+  if (emailF) emailF.addEventListener('blur', function () {
+    var v = emailF.value.trim();
+    mark(emailF, !v || /^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(v) ? '' : 'That does not look like an email address.');
+  });
+
+  // Uniqueness cannot be known in the browser without shipping every PIN into
+  // the page source, so it is asked of the server as it is typed — behind the
+  // same manager auth as the rest of this page.
+  var pinT = null;
+  if (pinF) {
+    pinF.addEventListener('input', function () {
+      pinF.value = pinF.value.replace(/[^0-9]/g, '').slice(0, 4);
+      if (pinT) clearTimeout(pinT);
+      var v = pinF.value;
+      if (!v) { mark(pinF, ''); return; }
+      if (v.length !== 4) { mark(pinF, 'A PIN is exactly four digits.'); return; }
+      mark(pinF, '');
+      pinT = setTimeout(function () {
+        fetch('/employees/pin-check?pin=' + encodeURIComponent(v), { headers: { accept: 'application/json' } })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (pinF.value !== v) return;
+            mark(pinF, d && d.free === false
+              ? (d.who || 'Somebody') + ' already uses that PIN.' : '');
+          })
+          .catch(function () { /* the server checks again on submit */ });
+      }, 250);
+    });
+  }
+
+  form.addEventListener('submit', function (ev) {
+    var stop = false;
+    if (nameF && !nameF.value.trim()) { mark(nameF, 'A name is needed.'); stop = true; }
+    if (pinF && pinF.value && pinF.value.length !== 4) { mark(pinF, 'A PIN is exactly four digits.'); stop = true; }
+    if (!isSalary()) {
+      var anyRate = cents(form.rate.value) > 0
+        || Array.prototype.some.call(form.querySelectorAll('#prate-rows input'), function (i) { return cents(i.value) > 0; });
+      if (!anyRate) { mark(form.rate, 'An hourly employee needs a rate. Set the base rate, or one per position.'); stop = true; }
+    } else if (!cents(form.salary.value)) {
+      mark(form.salary, 'A salaried employee needs a salary.'); stop = true;
+    }
+    if (stop) {
+      ev.preventDefault();
+      var bad = form.querySelector('[aria-invalid=\"true\"]');
+      if (bad) { bad.focus(); bad.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    }
+  });
+
+  sync();
+})();
+</scr` + `ipt>`;
+}
+
+function employeeSetupPage(req, opts = {}) {
+  const v = opts.vals || {};
+  const errs = opts.errs || {};
+  const positionList = positions.active.all().filter((p) => p.slug !== 'issue-retired');
+  const services = SERVICES.all();
+  const primary = v.role || (positionList[0] || {}).slug || '';
+  // Absent means "not answered yet" and defaults to every schedule, which is
+  // what the old create path did unconditionally. Present-but-empty is a
+  // manager who has deliberately unticked them all, and is left alone.
+  const pickedSvcs = v.svc ? v.svc : services.map((x) => x.slug);
+  const also = v.also || [];
+  const isSalary = v.pay_type === 'salary';
+  const err = (k) => (errs[k] ? `<p class="esu-err" id="e-${k}">${esc(errs[k])}</p>` : '');
+  const bad = (k) => (errs[k] ? ' is-bad' : '');
+  const val = (x) => esc(x == null ? '' : String(x));
+
+  const step = (n, title, sub, inner) => `
+    <section class="esu-step">
+      <header class="esu-sh">
+        <span class="esu-n" aria-hidden="true">${n}</span>
+        <div><h2 class="esu-h">${title}</h2><p class="esu-sub">${sub}</p></div>
+      </header>
+      <div class="esu-body">${inner}</div>
+    </section>`;
+
+  const body = `
+    ${flash(req)}
+    <div class="bs-page esu">
+      <a class="bs-back" href="/employees">&larr; Staff</a>
+      <div class="bs-head"><div class="bs-headwrap">
+        <h1 class="bs-headline">New employee</h1>
+        <p class="bs-subline">Set them up once. Everything here is editable afterwards on their profile.</p>
+      </div></div>
+
+      ${Object.keys(errs).length ? `<div class="esu-top-err" role="alert">
+        <b>${Object.keys(errs).length} thing${Object.keys(errs).length === 1 ? '' : 's'} to fix</b>
+        <span>Nothing was saved &mdash; your entries are still below.</span>
+      </div>` : ''}
+
+      <form method="post" action="/employees" class="esu-form" id="esu-form" novalidate>
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="flow" value="setup">
+        <div class="esu-cols">
+          <div class="esu-main">
+
+            ${step(...SETUP_STEPS[0], `
+              <div class="esu-grid">
+                <label class="esu-f esu-f--wide${bad('name')}">
+                  <span>Full name</span>
+                  <input name="name" id="f-name" value="${val(v.name)}" autocomplete="off" autofocus
+                    ${errs.name ? 'aria-invalid="true" aria-describedby="e-name"' : ''}>
+                  ${err('name')}
+                </label>
+                <label class="esu-f esu-f--wide${bad('email')}">
+                  <span>Email <i>optional</i></span>
+                  <input name="email" id="f-email" type="email" value="${val(v.email)}"
+                    placeholder="for their pay summary"
+                    ${errs.email ? 'aria-invalid="true" aria-describedby="e-email"' : ''}>
+                  ${err('email')}
+                </label>
+              </div>
+              <details class="esu-more"${v.pos_id || v.active === '0' ? ' open' : ''}>
+                <summary>More details</summary>
+                <div class="esu-grid">
+                  <label class="esu-f"><span>Benugin / POS ID <i>optional</i></span>
+                    <input name="pos_id" value="${val(v.pos_id)}" placeholder="matches them to POS reports"></label>
+                  <label class="esu-f"><span>Status</span>
+                    <select name="active">
+                      <option value="1"${v.active === '0' ? '' : ' selected'}>Active</option>
+                      <option value="0"${v.active === '0' ? ' selected' : ''}>Inactive &mdash; set up now, start later</option>
+                    </select></label>
+                </div>
+              </details>`)}
+
+            ${step(...SETUP_STEPS[1], `
+              <div class="esu-lab">Primary position</div>
+              <p class="esu-note">Their default job &mdash; what the roster and their profile header show.</p>
+              <div class="esu-radios${bad('role')}" id="f-primary">
+                ${positionList.concat([{ slug: 'manager', name: 'Manager' }]).map((p) => `
+                  <label class="esu-chip">
+                    <input type="radio" name="role" value="${esc(p.slug)}"${p.slug === primary ? ' checked' : ''}
+                      data-name="${esc(p.name)}">
+                    <span>${esc(p.name)}</span>
+                  </label>`).join('')}
+              </div>
+              ${err('role')}
+
+              <div class="esu-lab esu-lab--2">Also works as <i>optional</i></div>
+              <p class="esu-note">Extra positions they can be scheduled and clock in as. Each can carry its own rate below.</p>
+              <div class="esu-radios" id="f-also">
+                ${positionList.map((p) => `
+                  <label class="esu-chip esu-chip--alt" data-slug="${esc(p.slug)}">
+                    <input type="checkbox" name="also" value="${esc(p.slug)}"${also.includes(p.slug) ? ' checked' : ''}
+                      data-name="${esc(p.name)}">
+                    <span>${esc(p.name)}</span>
+                  </label>`).join('')}
+              </div>
+
+              <div class="esu-lab esu-lab--2">Schedules</div>
+              <p class="esu-note">Where they can be scheduled and clocked in. Nothing else can see them.</p>
+              <div class="svc-picks${bad('svc')}" id="f-svc">
+                ${services.map((sv) => `<label class="svc-pick">
+                  <input type="checkbox" name="svc" value="${esc(sv.slug)}"${pickedSvcs.includes(sv.slug) ? ' checked' : ''}
+                    data-name="${esc(sv.name)}">
+                  <span>${esc(sv.name)}</span></label>`).join('')}
+              </div>
+              <p class="esu-warn" id="svc-none" hidden>On no schedule, they cannot be scheduled or clock in anywhere.
+                That is allowed &mdash; tick one later on their profile when they start.</p>
+              ${err('svc')}`)}
+
+            ${step(...SETUP_STEPS[2], `
+              <div class="esu-seg" role="radiogroup" aria-label="Pay type">
+                <label class="esu-segb"><input type="radio" name="pay_type" value="hourly"${isSalary ? '' : ' checked'}><span>Hourly</span></label>
+                <label class="esu-segb"><input type="radio" name="pay_type" value="salary"${isSalary ? ' checked' : ''}><span>Salary</span></label>
+              </div>
+
+              <div class="esu-pay" id="pay-hourly"${isSalary ? ' hidden' : ''}>
+                <div class="esu-rate${bad('rate')}">
+                  <div class="esu-rate-l"><b>Base rate</b><i>Used for any position without a rate of its own</i></div>
+                  <div class="esu-rate-i"><span>$</span>
+                    <input name="rate" id="f-rate" type="number" step="0.01" min="0" inputmode="decimal"
+                      value="${val(v.rate)}" placeholder="0.00"><span class="esu-per">/hr</span></div>
+                </div>
+                ${err('rate')}
+
+                <div id="prate-wrap" class="esu-prates" hidden>
+                  <div class="esu-lab esu-lab--2">Rate per position <i>optional</i></div>
+                  <p class="esu-note">Leave one blank and it falls back to the base rate.</p>
+                  <div id="prate-rows"></div>
+                </div>
+
+                <div class="esu-ov">
+                  <div class="esu-lab esu-lab--2">Different rate on one schedule <i>optional</i></div>
+                  <p class="esu-note">Wins over the base and position rates, on that schedule only.</p>
+                  <div id="ov-rows"></div>
+                  <button type="button" class="esu-add" id="ov-add">+ Add a schedule rate</button>
+                  <p class="esu-warn" id="ov-need" hidden>Pick a schedule above first &mdash; a rate can only be set
+                    for a schedule they are on.</p>
+                </div>
+
+                <div class="esu-rate esu-rate--ot">
+                  <div class="esu-rate-l"><b>Overtime</b><i>Only applies when weekly overtime is on in Payroll</i></div>
+                  <select name="ot_eligible" class="esu-sel">
+                    <option value="1"${v.ot_eligible === '' ? '' : ' selected'}>Eligible</option>
+                    <option value=""${v.ot_eligible === '' ? ' selected' : ''}>Exempt</option>
+                  </select>
+                </div>
+                <p class="esu-note esu-note--foot">Rates start today. Nothing they work before today is priced from them.</p>
+              </div>
+
+              <div class="esu-pay" id="pay-salary"${isSalary ? '' : ' hidden'}>
+                <div class="esu-rate${bad('salary')}">
+                  <div class="esu-rate-l"><b>Salary</b><i>Per pay period, as payroll runs it</i></div>
+                  <div class="esu-rate-i"><span>$</span>
+                    <input name="salary" id="f-salary" type="number" step="0.01" min="0" inputmode="decimal"
+                      value="${val(v.salary)}" placeholder="0.00"></div>
+                </div>
+                ${err('salary')}
+                <p class="esu-note esu-note--foot">Salaried staff carry no hourly rate and are left out of hourly
+                  wage cost on Performance and Payroll. Their hours are still tracked.</p>
+              </div>`)}
+
+            ${step(...SETUP_STEPS[3], `
+              <div class="esu-grid">
+                <label class="esu-f${bad('pin')}">
+                  <span>4-digit PIN <i>optional</i></span>
+                  <input name="pin" id="f-pin" inputmode="numeric" maxlength="4" autocomplete="off"
+                    value="${val(v.pin)}" placeholder="0000"
+                    ${errs.pin ? 'aria-invalid="true" aria-describedby="e-pin"' : ''}>
+                  ${err('pin')}
+                  <p class="esu-hint" id="pin-live">Used for Staff Portal and Time Clock access. Four digits,
+                    and no two people can share one.</p>
+                </label>
+              </div>
+              <p class="esu-note" id="pin-mgr" hidden>A manager does not sign in to the staff portal. Their PIN is
+                what they type at a time clock to let somebody start a shift they are not scheduled on, and their
+                name is recorded on that punch.</p>`)}
+
+          </div>
+
+          <aside class="esu-side">
+            <div class="esu-sum">
+              <div class="esu-sum-h"><span class="esu-n" aria-hidden="true">5</span>
+                <div><h2 class="esu-h">Review</h2><p class="esu-sub">Before you create them</p></div></div>
+              <div class="esu-sum-b" id="esu-sum">
+                <p class="esu-none">Fill in a name to begin.</p>
+              </div>
+              <button class="bs-btn esu-go" type="submit">Create employee</button>
+              <a class="esu-cancel" href="/employees">Cancel</a>
+            </div>
+          </aside>
+        </div>
+      </form>
+    </div>
+    ${setupScript()}`;
+  return layout('New employee', body);
+}
+
+app.get('/employees/new', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  res.send(employeeSetupPage(req));
+});
+
+/**
+ * Is this PIN free? Asked as somebody types, so a clash is known before the
+ * form is submitted rather than after it is thrown away.
+ *
+ * Behind the same manager gate as the page that asks — which already shows
+ * every PIN in plain text on each profile, so this discloses nothing new. It
+ * answers about the PIN it was GIVEN and never lists any.
+ */
+app.get('/employees/pin-check', (req, res) => {
+  if (!canWrite(req)) return res.status(403).json({ free: null });
+  const pin = String(req.query.pin || '').trim();
+  if (!new RegExp(`^\\d{${PIN_LEN}}$`).test(pin)) return res.json({ free: null });
+  const clash = pinTaken(pin, Number(req.query.except) || 0);
+  res.json(clash ? { free: false, who: clash.name } : { free: true });
+});
+
+/** Repeated form fields arrive as an array, a bare string, or not at all. */
+const asList = (v) => (v == null ? [] : (Array.isArray(v) ? v : [v])).map((x) => String(x));
+
+/**
+ * Everything the setup form says, checked in one pass.
+ *
+ * Every error is collected rather than stopping at the first, because sending
+ * somebody back four times to fix four things is how a form gets abandoned.
+ * The same function is the ONLY validation — the browser's copy is a courtesy
+ * that a blocked script or a hand-rolled POST simply does not get.
+ */
+function validateSetup(body) {
+  const errs = {};
+  const strict = body.flow === 'setup';
+  const livePos = new Set(positions.active.all().map((p) => p.slug).concat(['manager']));
+  const liveSvc = new Set(SERVICES.all().map((x) => x.slug));
+
+  const name = String(body.name || '').trim();
+  if (!name) errs.name = 'A name is needed.';
+
+  const email = String(body.email || '').trim();
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) errs.email = 'That does not look like an email address.';
+
+  const role = String(body.role || '');
+  if (!role) errs.role = 'Choose a primary position.';
+  else if (!livePos.has(role)) errs.role = 'That position no longer exists.';
+
+  // Deduped against each other AND against the primary, so a position can never
+  // be written twice — employee_roles is keyed on (employee, role) and the
+  // second write would silently overwrite the first one's rate.
+  const also = [...new Set(asList(body.also))].filter((r) => livePos.has(r) && r !== role);
+
+  // Absent is not the same as empty. The form always posts the key, so absent
+  // means a caller that does not know about schedules — the old contract, which
+  // put people on all of them.
+  const svcGiven = body.svc !== undefined || body.flow === 'setup';
+  const svcs = [...new Set(asList(body.svc))].filter((x) => liveSvc.has(x));
+
+  const salary = body.pay_type === 'salary';
+  const pinErr = badPin(body.pin);
+  if (pinErr) errs.pin = pinErr;
+  else {
+    const clash = pinTaken(body.pin, 0);
+    // Never the PIN itself. A staff PIN is a whole credential — /tips/start
+    // takes it alone and hands back a portal session — and this text has been
+    // through a query string before now.
+    if (clash) errs.pin = `${clash.name} already uses that PIN. Pick a different one.`;
+  }
+
+  // Per-position rates, keyed by the position they belong to.
+  const rates = new Map();
+  for (const slug of [role, ...also]) {
+    if (!slug || slug === 'manager') continue;
+    const c = toCents(body[`prate_${slug}`]);
+    if (c > 0) rates.set(slug, c);
+    if (String(body[`prate_${slug}`] || '').trim().startsWith('-')) errs.rate = 'A wage cannot be negative.';
+  }
+  const base = toCents(body.rate);
+  if (String(body.rate || '').trim().startsWith('-')) errs.rate = 'A wage cannot be negative.';
+
+  // COMPLETENESS IS ASKED OF THE SETUP FORM ONLY.
+  //
+  // "An hourly employee has no rate" is a half-finished setup, not a broken
+  // record — the profile has always allowed one and prompts for it. The setup
+  // page asks because it is the moment somebody has the answer in front of
+  // them; a POST that predates this page has created rate-less staff since the
+  // beginning and must keep doing so. Correctness checks below and above apply
+  // to everything; this one does not.
+  if (strict) {
+    if (salary) {
+      if (toCents(body.salary) <= 0) errs.salary = 'A salaried employee needs a salary.';
+    } else if (base <= 0 && !rates.size) {
+      errs.rate = 'An hourly employee needs a rate. Set the base rate, or one per position.';
+    }
+  }
+
+  // Schedule overrides, three parallel arrays. A row is only kept when all
+  // three answer, and only for a schedule they are actually on — a rate for a
+  // schedule somebody does not work is a row that pays nobody today and starts
+  // paying the moment they are added to it.
+  const ovR = asList(body.ov_role), ovS = asList(body.ov_svc), ovC = asList(body.ov_rate);
+  const held = new Set([role, ...also]);
+  const seenOv = new Set();
+  const overrides = [];
+  for (let i = 0; i < Math.max(ovR.length, ovS.length, ovC.length); i++) {
+    const c = toCents(ovC[i]);
+    if (!c) continue;
+    if (!held.has(ovR[i])) { errs.rate = 'A schedule rate names a position they do not hold.'; continue; }
+    if (!svcs.includes(ovS[i])) { errs.svc = 'A schedule rate names a schedule they are not on.'; continue; }
+    const k = `${ovR[i]}|${ovS[i]}`;
+    if (seenOv.has(k)) continue;      // last one typed would overwrite the first
+    seenOv.add(k);
+    overrides.push({ role: ovR[i], svc: ovS[i], cents: c });
+  }
+  if (salary && overrides.length) overrides.length = 0;
+
+  return {
+    errs,
+    ok: Object.keys(errs).length === 0,
+    v: {
+      name,
+      email: email || null,
+      role,
+      also,
+      svcs,
+      svcGiven,
+      pin: String(body.pin || '').trim() || null,
+      pos_id: String(body.pos_id || '').trim() || null,
+      active: String(body.active || '1') === '0' ? 0 : 1,
+      pay_type: salary ? 'salary' : 'hourly',
+      salary_cents: salary ? toCents(body.salary) : 0,
+      base: salary ? 0 : base,
+      rates: salary ? new Map() : rates,
+      overrides,
+      otExempt: body.ot_eligible !== '1',
+    },
+  };
+}
+
+app.post('/employees', (req, res) => {
+  const { errs, ok, v } = validateSetup(req.body);
+  const setup = req.body.flow === 'setup';
+
+  if (!ok) {
+    // The setup page keeps what was typed and says where each mistake is. The
+    // old inline form and anything posting at this route directly still get the
+    // redirect they have always got — test/tips.test.js pins that contract, and
+    // more to the point a caller that cannot render a form cannot be handed one.
+    if (setup) return res.status(400).send(employeeSetupPage(req, { errs, vals: req.body }));
+    const first = errs.pin || errs.name || errs.role || errs.rate || errs.salary || errs.email
+      || 'Name and role required.';
+    return res.redirect('/employees?err=1&msg=' + encodeURIComponent(first));
+  }
+
+  // ONE TRANSACTION. Six tables move here — employees, employee_services,
+  // employee_roles, wage_history and the overtime flag — and a half-created
+  // employee is worse than none: they appear on the roster, cannot be clocked
+  // in anywhere, and nothing on screen says which half failed.
+  let newId = 0;
+  try {
+    db.transaction(() => {
+      newId = Number(q.addEmployee.run({
+        name: v.name, role: v.role, email: v.email, pin: v.pin,
+        hourly_rate_cents: v.base, pos_id: v.pos_id,
+        pay_type: v.pay_type, salary_cents: v.salary_cents,
+      }).lastInsertRowid);
+      if (!v.active) q.setActive.run({ id: newId, active: 0 });
+
+      // Schedules. setForEmployee is the profile's own writer, so it stamps
+      // svc_set and the two screens cannot disagree about what was decided.
+      // A caller that never mentioned schedules gets the old behaviour: all of
+      // them, so somebody hired on a Tuesday can clock in on the Tuesday.
+      if (v.svcGiven) SERVICES.setForEmployee(newId, v.svcs);
+      else { try { SERVICES.addToAll(newId); } catch { /* schedules not seeded yet */ } }
+
+      // Positions. employee_roles carries the extra positions AND the general
+      // rate for each; clockPositionsFor reads [employees.role, ...these].
+      for (const slug of v.also) {
+        q.setRole.run({ employee_id: newId, role: slug, wage_cents: v.rates.get(slug) || 0 });
+      }
+      if (v.rates.has(v.role)) {
+        q.setRole.run({ employee_id: newId, role: v.role, wage_cents: v.rates.get(v.role) });
+      }
+
+      // Wages, dated from today. Written through the same module the profile
+      // uses, so payroll resolves a new hire's rate by exactly the rule it
+      // resolves everybody else's — and their first raise has a baseline to sit
+      // above instead of an empty history.
+      //
+      // Never EPOCH and never a date the manager picks: this person has no
+      // worked shifts, so "before today" is a question with no meaning, and
+      // offering it is how a routine hire ends up restating history.
+      if (v.pay_type === 'hourly') {
+        const today = isoDate(startOfToday());
+        const by = tcActor(req);
+        if (v.base > 0) WAGES.setWage(newId, null, v.base, today, { by, note: 'set at hire' });
+        for (const [slug, c] of v.rates) WAGES.setWage(newId, slug, c, today, { by, note: 'set at hire' });
+        // Schedule rates live ONLY in the dated history. employee_roles has no
+        // schedule column, so writing one there would make the Evening rate
+        // look like the rate everywhere — the same rule /employees/:id/roles
+        // follows.
+        for (const o of v.overrides) {
+          WAGES.setWage(newId, o.role, o.cents, today, { by, service: o.svc, note: 'set at hire' });
+        }
+      }
+
+      OT.setExempt(newId, v.otExempt);
+    })();
+  } catch (e) {
+    if (setup) {
+      return res.status(500).send(employeeSetupPage(req, {
+        errs: { name: `Nothing was saved — ${e.message}` }, vals: req.body,
+      }));
+    }
+    return res.redirect('/employees?err=1&msg=' + encodeURIComponent(`Nothing was saved — ${e.message}`));
+  }
+
+  const where = v.svcGiven && !v.svcs.length ? ' They are on no schedule yet.'
+    : v.svcGiven ? ` On ${svcPhrase(v.svcs)}.` : '';
+  res.redirect(`/employees?msg=` + encodeURIComponent(`${v.name} added.${where}`)
+    + `&new=${newId}`);
 });
 
 /**
@@ -10122,10 +10868,7 @@ app.get('/employees/:id/edit', (req, res) => {
   }).join('');
 
   // --- what the header says about them ---------------------------------------
-  const held = q.rolesForEmployee.all(e.id).map((r) => posName(r.role));
-  const jobs = [...new Set([posName(e.role), ...held])].filter(Boolean);
-  const sub = [jobs.join(' &middot; '), mine.map((sl) => esc(SERVICES.nameOf(sl))).join(' &middot; ')]
-    .filter(Boolean).join(' &nbsp;·&nbsp; ');
+  const sub = headerLine(e, mine);
 
   // --- left column: who they are, and how they get in -------------------------
   const pinState = e.role === 'manager'
@@ -10219,7 +10962,7 @@ app.get('/employees/:id/edit', (req, res) => {
         <span class="epr-av" style="--pl-c:${avatarHue(e.name)}">${esc(initialsOf(e.name))}</span>
         <div class="epr-id">
           <h1>${esc(e.name)}</h1>
-          <p>${sub || '<span class="muted">No position yet</span>'}</p>
+          <p class="epr-line">${sub}</p>
         </div>
         <span class="epr-state epr-state--${e.active ? 'on' : 'off'}">${e.active ? 'Active' : 'Inactive'}</span>
         ${w ? `<details class="epr-opts">

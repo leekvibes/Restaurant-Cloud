@@ -272,3 +272,188 @@ test('saving the catch-all does not blank the rest of the record', () => {
     assert.ok(fall.includes(`'${f}'`) || fall.includes(`name="${f}"`), `${f} travels with it`);
   }
 });
+
+
+// --- add employee: the setup flow --------------------------------------------
+//
+// The old create path wrote eight fields and left ten on the profile, so every
+// hire was create-then-go-and-finish-it. What these hold is that the flow
+// writes into the SAME tables the profile edits — employees, employee_services,
+// employee_roles, wage_history and the overtime flag — and that a rejected
+// submission writes none of them.
+
+// Repeated keys, not a comma-joined string. `new URLSearchParams({a:[1,2]})`
+// stringifies the array to "1,2" and the server sees one value — which is the
+// opposite of what a browser sends for two ticked boxes of the same name, and
+// exactly the shape these tests exist to exercise.
+const sendForm = (url, body) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(body)) {
+    for (const one of (Array.isArray(v) ? v : [v])) p.append(k, String(one));
+  }
+  return fetch(BASE + url, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: p.toString(),
+  });
+};
+
+const setup = (over) => sendForm('/employees', Object.assign({
+  flow: 'setup', name: 'Setup One', role: 'server', pay_type: 'hourly', rate: '10',
+  svc: 'cafe', ot_eligible: '1',
+}, over || {}));
+const byName = (n) => db.prepare('SELECT * FROM employees WHERE name = ?').get(n);
+const rolesOf = (id) => db.prepare('SELECT role, wage_cents FROM employee_roles WHERE employee_id = ? ORDER BY role').all(id);
+const svcsOf = (id) => db.prepare('SELECT service_slug FROM employee_services WHERE employee_id = ? AND active = 1 ORDER BY service_slug').all(id).map((r) => r.service_slug);
+const wagesOf = (id) => db.prepare(`SELECT role, service_slug, wage_cents, effective_from FROM wage_history
+  WHERE employee_id = ? ORDER BY IFNULL(role, ''), IFNULL(service_slug, '')`).all(id);
+
+test('the roster sends you to a setup page rather than an inline form', async () => {
+  const html = await text('/employees');
+  assert.match(html, /href="\/employees\/new"/, 'the roster links to it');
+  assert.ok(!/<form[^>]*action="\/employees"[^>]*class="bs-panel rst-add"/.test(html),
+    'and the six-field form is gone');
+  const page = await text('/employees/new');
+  for (const s of ['Employee', 'Role &amp; service', 'Pay', 'Access', 'Review']) {
+    assert.ok(page.includes(s), `the ${s} step renders`);
+  }
+});
+
+test('one submission writes the employee, their positions, schedules and dated wages', async () => {
+  const r = await setup({
+    name: 'Molly Setup', email: 'molly.setup@x.test', pin: '4141',
+    also: ['bartender'], svc: ['cafe', 'dinner'],
+    rate: '2.83', prate_bartender: '4.50',
+    ov_role: 'server', ov_svc: 'dinner', ov_rate: '5.00',
+  });
+  assert.strictEqual(r.status, 302, 'it creates');
+  const e = byName('Molly Setup');
+  assert.ok(e, 'the employee exists');
+  assert.strictEqual(e.role, 'server', 'primary position');
+  assert.strictEqual(e.hourly_rate_cents, 283, 'the base rate is the catch-all, as it is on the profile');
+  assert.strictEqual(e.pay_type, 'hourly');
+  assert.strictEqual(e.ot_exempt, 0, 'overtime eligible');
+  assert.strictEqual(e.svc_set, 1, 'schedules were DECIDED, not defaulted');
+
+  assert.deepStrictEqual(svcsOf(e.id), ['cafe', 'dinner'], 'on both schedules');
+  assert.deepStrictEqual(rolesOf(e.id), [{ role: 'bartender', wage_cents: 450 }],
+    'the extra position carries its own rate; the primary falls to the catch-all');
+
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  assert.deepStrictEqual(wagesOf(e.id).map((w) => [w.role, w.service_slug, w.wage_cents, w.effective_from]), [
+    [null, null, 283, today],
+    ['bartender', null, 450, today],
+    ['server', 'dinner', 500, today],
+  ], 'three dated rows, starting today — and the schedule rate lives ONLY here');
+});
+
+test('the wage the payroll resolver returns is the one the flow promised', async () => {
+  // The point of writing through WAGES rather than into a column: the same
+  // most-specific-wins rule prices a new hire as it prices everybody else.
+  const W = require('../src/wages');
+  const e = byName('Molly Setup');
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  assert.strictEqual(W.wageOn(e.id, 'server', today, 'dinner'), 500, 'the Evening rate wins there');
+  assert.strictEqual(W.wageOn(e.id, 'server', today, 'cafe'), 283, 'and nowhere else');
+  assert.strictEqual(W.wageOn(e.id, 'bartender', today, 'dinner'), 450, 'the position rate');
+  assert.strictEqual(W.wageOn(e.id, 'busser', today, 'cafe'), 283, 'a position with no rate falls to the catch-all');
+});
+
+test('a salaried employee gets no hourly rows anywhere', async () => {
+  const r = await setup({ name: 'Sal Setup', role: 'kitchen', pay_type: 'salary',
+    salary: '2400', rate: '99', also: ['server'], prate_server: '20' });
+  assert.strictEqual(r.status, 302);
+  const e = byName('Sal Setup');
+  assert.strictEqual(e.pay_type, 'salary');
+  assert.strictEqual(e.salary_cents, 240000);
+  assert.strictEqual(e.hourly_rate_cents, 0, 'the hourly box is ignored, not stored');
+  assert.deepStrictEqual(rolesOf(e.id).map((x) => x.wage_cents), [0],
+    'the extra position is kept, with no rate');
+  assert.strictEqual(wagesOf(e.id).length, 0, 'and nothing dated — salary does not run through hourly');
+});
+
+test('ticking no schedule is allowed, and is recorded as a decision', async () => {
+  const r = await setup({ name: 'Nowhere Setup', svc: [] });
+  assert.strictEqual(r.status, 302);
+  const e = byName('Nowhere Setup');
+  assert.deepStrictEqual(svcsOf(e.id), [], 'on nothing');
+  assert.strictEqual(e.svc_set, 1, 'deliberately — not "never asked"');
+  assert.match(decodeURIComponent(r.headers.get('location') || ''), /no schedule/i, 'and it says so');
+});
+
+test('a rejected submission writes nothing at all', async () => {
+  const before = db.prepare('SELECT COUNT(*) n FROM employees').get().n;
+  const r = await setup({ name: '', email: 'nope', pin: '99', rate: '' });
+  assert.strictEqual(r.status, 400, 'the form comes back rather than a redirect');
+  const html = await r.text();
+  assert.match(html, /A name is needed/);
+  assert.match(html, /does not look like an email/);
+  assert.match(html, /exactly 4 digits/);
+  assert.match(html, /needs a rate/);
+  assert.match(html, /value="nope"/, 'and what was typed is still there');
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM employees').get().n, before, 'nothing created');
+});
+
+test('a PIN already in use is refused, naming who and not what', async () => {
+  const r = await setup({ name: 'Clash Setup', pin: '6611' });   // Anna's
+  assert.strictEqual(r.status, 400);
+  const html = await r.text();
+  assert.match(html, /Ui Anna already uses that PIN/, 'it says whose it is, so it can be resolved');
+  // The MESSAGE carries no digits. The field does, because it is the manager's
+  // own keystrokes handed back so they need not retype the form — the same
+  // disclosure the profile makes deliberately, and far less than the redirect
+  // this replaces, which put the text in a URL and therefore in history.
+  const msg = html.slice(html.indexOf('already uses that PIN') - 60, html.indexOf('already uses that PIN') + 60);
+  assert.ok(!/\d{4}/.test(msg), 'no PIN in the error text');
+  assert.strictEqual((html.match(/6611/g) || []).length, 1, 'and it appears once: in the box they typed it into');
+  assert.ok(!byName('Clash Setup'), 'nothing created');
+});
+
+test('the live PIN check answers about the PIN it is given, and lists none', async () => {
+  const taken = await (await fetch(`${BASE}/employees/pin-check?pin=6611`)).json();
+  assert.strictEqual(taken.free, false);
+  assert.strictEqual(taken.who, 'Ui Anna');
+  const free = await (await fetch(`${BASE}/employees/pin-check?pin=1010`)).json();
+  assert.strictEqual(free.free, true);
+  const junk = await (await fetch(`${BASE}/employees/pin-check?pin=12`)).json();
+  assert.strictEqual(junk.free, null, 'a malformed PIN is not an answer about anybody');
+});
+
+test('a schedule rate cannot name a schedule they are not on', async () => {
+  // Otherwise it is a rate that pays nobody today and starts paying the moment
+  // somebody adds them to that board.
+  const r = await setup({ name: 'Stray Setup', svc: 'cafe',
+    ov_role: 'server', ov_svc: 'dinner', ov_rate: '9' });
+  assert.strictEqual(r.status, 400);
+  assert.match(await r.text(), /schedule they are not on/);
+  assert.ok(!byName('Stray Setup'), 'nothing created');
+});
+
+test('a position cannot be assigned twice', async () => {
+  const r = await setup({ name: 'Dupe Setup', role: 'server', also: ['server', 'busser'] });
+  assert.strictEqual(r.status, 302, 'the duplicate is dropped, not an error');
+  const e = byName('Dupe Setup');
+  assert.deepStrictEqual(rolesOf(e.id).map((x) => x.role), ['busser'],
+    'the primary is not written a second time');
+});
+
+test('the old POST contract is untouched', async () => {
+  // Anything that posted at this route before this page existed still gets a
+  // redirect, still creates, and still lands on every schedule.
+  const r = await post('/employees', { name: 'Legacy Setup', role: 'server', pin: '3232' });
+  assert.strictEqual(r.status, 302);
+  const e = byName('Legacy Setup');
+  assert.ok(e, 'created with no rate, as it always was');
+  assert.deepStrictEqual(svcsOf(e.id).sort(), SVC.all().map((x) => x.slug).sort(),
+    'and on every schedule, because it never mentioned any');
+});
+
+test('the profile header names the primary position and where they work', async () => {
+  const e = byName('Molly Setup');
+  const html = await text(`/employees/${e.id}/edit`);
+  assert.match(html, /Molly Setup/);
+  assert.match(html, /Day \+ Evening Service/, 'two schedules read as a phrase, not a list');
+  assert.match(html, /epr-plus/, 'the second position is a count, not a name in the header');
+  assert.ok(!/Server[^<]*Bartender/.test(html.slice(html.indexOf('epr-line'), html.indexOf('epr-line') + 300)),
+    'the header does not spell out every position');
+});
