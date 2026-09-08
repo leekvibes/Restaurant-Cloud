@@ -650,7 +650,11 @@ function shiftInputs(shiftId) {
     seen.add(p.employeeId);
     people.push(p);
   }
-  return { servers, support, people, pool };
+  // What the manager changed about THIS service. Lazily required: policy.js
+  // reads this module, so requiring it at the top would be a cycle.
+  let adjustments = [];
+  try { adjustments = require('./policy').adjustmentsFor(shiftId); } catch { adjustments = []; }
+  return { servers, support, people, pool, adjustments };
 }
 
 module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };

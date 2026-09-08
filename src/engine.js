@@ -120,6 +120,27 @@ function runShift(shift, rules) {
    * not. Before this, a rule was charged to every direct earner alike and the
    * two could not be told apart.
    */
+  // What the manager changed about tonight, keyed the way the table names a
+  // rule: who it pays, and who pays it.
+  const adjustments = shift.adjustments || [];
+  const adjustmentFor = (earner, r) => adjustments.find((a) => a.recipient === r.recipient
+    && (!a.paid_by || a.paid_by === (earner.role || 'server'))) || null;
+  // An amount is what the RECIPIENT should end up with, so when several people
+  // pay the same rule it is shared between them rather than charged to each in
+  // full — otherwise "give the busser $40" takes $40 from every server.
+  //
+  // Split by running total rather than by dividing and rounding: $40 across
+  // three servers is 13.33 each, which rounds to $39.99 and hands the busser a
+  // penny less than the figure that was typed. The differences of the running
+  // total always sum to exactly the amount.
+  const payersOf = (r) => {
+    const who = r.paidBy ? (Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy]) : null;
+    return servers.filter((e) => !who || who.includes(e.role || 'server'));
+  };
+  const exactShare = (total, i, n) => (n <= 1 ? total
+    : Math.round((total * (i + 1)) / n) - Math.round((total * i) / n));
+  const adjusted = [];
+
   const paysThis = (earner, r) => {
     if (!r.paidBy) return true;
     const who = Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy];
@@ -148,7 +169,19 @@ function runShift(shift, rules) {
       // themselves — money round in a circle, and a pot that cannot be split.
       if (r.recipient === (s.role || 'server')) continue;
       if (r.base === 'remaining') continue;
-      const amt = pctOf(baseValue(s, r.base), r.percent);
+      const adj = adjustmentFor(s, r);
+      // Off means the rule is not charged, and the earner keeps it — the same
+      // thing that happens when nobody worked the role. Not "the recipient gets
+      // nothing and the money vanishes", which is not a thing money does.
+      if (adj && adj.mode === 'off') { adjusted.push({ role: r.recipient, by: s.role || 'server', mode: 'off' }); continue; }
+      let amt;
+      if (adj && adj.mode === 'amount') {
+        const payers = payersOf(r);
+        const idx = Math.max(0, payers.findIndex((e) => e.employeeId === s.employeeId));
+        amt = Math.max(0, exactShare(Math.max(0, Math.round(adj.cents)), idx, payers.length || 1));
+      } else {
+        amt = pctOf(baseValue(s, r.base), r.percent);
+      }
       if (charge(r.recipient, amt)) directSum += amt;
       roleSplit[r.recipient] = r.split;
     }
@@ -298,7 +331,7 @@ function runShift(shift, rules) {
 
   return {
     servers: serverPayouts, support: supportResult,
-    pots: rolePools, transfers, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
+    pots: rolePools, transfers, adjusted, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
     skippedPots: Object.entries(skippedPots).filter(([, c]) => c > 0).map(([role, cents]) => ({ role, cents })),
     reconciliation: { totalTipsCollected, totalKept, totalPots, balanced: totalTipsCollected === totalKept + totalPots },
   };

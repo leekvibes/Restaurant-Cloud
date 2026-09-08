@@ -89,4 +89,71 @@ function splitJarFromToGoCard() {
 }
 splitJarFromToGoCard();
 
-module.exports = { currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo };
+
+// --- one-off adjustments, for the nights the policy does not fit ------------
+//
+// A rate is a rule about the ordinary night. A busser who arrived at nine, a
+// bartender covering someone else's section, a barback sent home early — those
+// are Tuesday, and a policy edited to accommodate Tuesday is a policy that no
+// longer describes any night.
+//
+// THE PRINCIPLE THAT MAKES THIS SAFE: an adjustment MOVES money, it never edits
+// a number. Reducing the busser's cut hands it back to whoever paid it, so the
+// books still balance and the receipt can still explain itself. There is no way
+// to express "the busser gets less and nobody gets more", because that money
+// would have to come from somewhere and the honest answer is that it does not
+// exist.
+//
+// Scoped to ONE service. It cannot leak into tomorrow, which is the whole
+// difference between this and editing the policy.
+db.exec(`
+CREATE TABLE IF NOT EXISTS shift_tip_adjustments (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  shift_id    INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+  -- Which rule this bends. A rule has no id of its own, so it is named the way
+  -- a person would: who it pays and who pays it.
+  recipient   TEXT NOT NULL,
+  paid_by     TEXT,
+  -- 'off'    — do not charge this rule at all tonight
+  -- 'amount' — charge exactly this many cents instead of the percentage
+  mode        TEXT NOT NULL,
+  cents       INTEGER,
+  reason      TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by  TEXT,
+  UNIQUE(shift_id, recipient, paid_by)
+);
+`);
+
+const adjustmentsFor = (shiftId) => db.prepare(
+  'SELECT * FROM shift_tip_adjustments WHERE shift_id = ? ORDER BY id').all(shiftId);
+
+function setAdjustment(shiftId, { recipient, paidBy, mode, cents, reason, by }) {
+  if (!['off', 'amount'].includes(mode)) throw new Error('An adjustment is either off or an amount.');
+  const c = mode === 'amount' ? Math.max(0, Math.round(Number(cents) || 0)) : null;
+  db.prepare(`INSERT INTO shift_tip_adjustments
+    (shift_id, recipient, paid_by, mode, cents, reason, created_by)
+    VALUES (@shift, @recipient, @paidBy, @mode, @cents, @reason, @by)
+    ON CONFLICT(shift_id, recipient, paid_by) DO UPDATE SET
+      mode = excluded.mode, cents = excluded.cents, reason = excluded.reason,
+      created_by = excluded.created_by, created_at = datetime('now')`)
+    .run({ shift: shiftId, recipient, paidBy: paidBy || null, mode, cents: c,
+      reason: String(reason || '').trim() || null, by: by || null });
+}
+
+const clearAdjustment = (shiftId, recipient, paidBy) => db.prepare(
+  `DELETE FROM shift_tip_adjustments WHERE shift_id = ? AND recipient = ?
+     AND COALESCE(paid_by, '') = COALESCE(?, '')`).run(shiftId, recipient, paidBy || null);
+
+/**
+ * A sent service's adjustments are as fixed as its policy version.
+ *
+ * The money has been allocated and emailed. Changing an adjustment afterwards
+ * would move a figure somebody has already been told, with nothing on any
+ * screen saying the two no longer agree — the same reason a sent service
+ * refuses new sales.
+ */
+const adjustmentsLocked = (sh) => String(sh && sh.status) === 'emailed';
+
+module.exports = {
+  adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked, currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo };

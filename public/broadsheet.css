@@ -6599,3 +6599,23 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .zc-num:focus-visible, .zc-more:focus-visible, .zc-ag-r:focus-visible,
 .zc-cat:focus-visible, .zc-seg a:focus-visible, .zc-tg-d:focus-visible {
   outline:2px solid var(--headline); outline-offset:-2px; }
+
+/* --- one-off tip-out adjustments ----------------------------------------- */
+.tpa-rows { display: grid; gap: 2px; margin-top: 10px; }
+.tpa-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center;
+  gap: 12px; padding: 12px 2px; border-top: 1px solid var(--rule); }
+.tpa-row.is-adj { background: rgba(180,83,9,.05); }
+.tpa-row.is-absent { opacity: .55; }
+.tpa-what b { display: block; font-size: 14.5px; color: var(--ink); }
+.tpa-what i { font-style: normal; font-size: 12px; color: var(--muted); }
+.tpa-note { display: block; margin-top: 3px; font-style: normal; font-size: 12px;
+  font-weight: 600; color: #b45309; }
+.tpa-amt { font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 650; color: var(--ink); }
+.tpa-form { display: flex; gap: 6px; align-items: center; margin: 0; flex-wrap: wrap; }
+.tpa-in { width: 84px; }
+.tpa-why { width: 150px; }
+.tpa-off { color: var(--danger, #b91c1c); }
+@media (max-width: 780px) {
+  .tpa-row { grid-template-columns: 1fr auto; }
+  .tpa-form { grid-column: 1 / -1; }
+}

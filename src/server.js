@@ -14,7 +14,8 @@ const DUPES = require('./dupes');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed, currentPath } = require('./views');
 const { mountModules, MODULES, pagesOf } = require('./modules');
 const PORTAL = require('./portal');
-const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo } = require('./policy');
+const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo,
+  adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const WAGES = require('./wages');
@@ -2986,10 +2987,11 @@ app.get('/shifts/:id/results', (req, res) => {
         ${r.pool.total ? sCell('Jar + to-go pool', money(r.pool.total), `${money(r.pool.cash)} cash · ${money(r.pool.togoCard)} card`) : ''}
       </div>
 
-      <div class="bs-sec-h"><span class="bs-kicker">Servers · ${r.servers.length}</span></div>
+      ${tipoutControls(req, sh, inp, r)}
+      <div class="bs-sec-h"><span class="bs-kicker">Who rang the sales · ${r.servers.length}</span></div>
       <div class="bs-pays">${serverCards || '<p class="bs-clear">Nobody on this shift.</p>'}</div>
 
-      <div class="bs-sec-h"><span class="bs-kicker">Support · ${r.support.length}</span></div>
+      <div class="bs-sec-h"><span class="bs-kicker">Tipped out to · ${r.support.length}</span></div>
       <div class="bs-pays">${supportCards || '<p class="bs-clear">Nobody on this shift.</p>'}</div>
 
       <div class="bs-sendbar">
@@ -3834,10 +3836,27 @@ function earningsFor(empId, limit = 400, offset = 0) {
     // between a missing line and a line that was never charged.
     const detail = { skipped: r.skippedPots || [] };
     if (asServer) {
-      out.push({ shift: sh, kind: 'server', kept: asServer.tipsKept,
+      // BOTH SIDES, for somebody who has both.
+      //
+      // A bartender keeps what their own guests tipped them AND receives 9% of
+      // the servers' alcohol plus their share of the jar. `asServer` alone is
+      // the first half: their email said $690 and this page said $390, which is
+      // the app disagreeing with itself about what somebody earned — and the
+      // page they would check first is this one.
+      const alsoTip = asSupport ? (asSupport.tipShare || 0) : 0;
+      const alsoCash = asSupport ? (asSupport.cashTotal || 0) : 0;
+      const alsoCard = asSupport ? (asSupport.poolCard || 0) : 0;
+      const also = alsoTip + alsoCash + alsoCard;
+      out.push({ shift: sh, kind: 'server', kept: asServer.tipsKept + also,
         collected: asServer.totalTips, tippedOut: asServer.tipoutTotal,
-        cash: asServer.cashTips, toPaycheck: asServer.tipsKept - asServer.cashTips,
-        detail: { ...detail, ...asServer }, ...pay });
+        cash: asServer.cashTips + alsoCash,
+        toPaycheck: (asServer.tipsKept - asServer.cashTips) + alsoTip + alsoCard,
+        detail: { ...detail, ...asServer,
+          // Named separately so the page can show where each part came from
+          // rather than one number nobody can take apart.
+          receivedTipout: alsoTip, receivedCash: alsoCash, receivedCard: alsoCard,
+          receivedTotal: also },
+        ...pay });
     } else if (asSupport) {
       const cash = asSupport.cashTotal || 0;
       const card = asSupport.cardTotal || 0;
@@ -27358,6 +27377,94 @@ app.post('/c/incidents/:id/followup', (req, res) => {
   if (sets.length) db.prepare(`UPDATE m_incidents SET ${sets.join(', ')} WHERE id=@id`).run(vals);
   res.redirect(`/c/incidents/${id}?msg=` + encodeURIComponent('Follow-up added.'));
 });
+
+// --- one-off tip-out adjustments -------------------------------------------
+
+app.post('/shifts/:id/adjust', (req, res) => {
+  if (!navAllowed('/shifts') || !canWrite()) return res.status(403).end();
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  const back = (m, err) => res.redirect(`/shifts/${sh.id}/results?msg=` + encodeURIComponent(m) + (err ? '&err=1' : ''));
+  // A sent service is finished. Its money has been allocated and emailed, and
+  // moving a figure afterwards would change a number somebody has already been
+  // told, with nothing saying the two no longer agree.
+  if (adjustmentsLocked(sh)) return back('That service has been sent, so its tip-outs are fixed.', true);
+  const recipient = String(req.body.recipient || '').trim();
+  if (!recipient) return back('Which tip-out?', true);
+  const paidBy = String(req.body.paid_by || '').trim() || null;
+  try {
+    if (req.body.mode === 'clear') {
+      clearAdjustment(sh.id, recipient, paidBy);
+      return back('Back to the policy rate.');
+    }
+    setAdjustment(sh.id, {
+      recipient, paidBy,
+      mode: req.body.mode === 'off' ? 'off' : 'amount',
+      cents: toCents(req.body.amount),
+      reason: req.body.reason,
+      by: (req.user && req.user.name) || 'Owner',
+    });
+    return back(req.body.mode === 'off'
+      ? 'Not charged tonight — it stays with whoever would have paid it.'
+      : 'Set for tonight only.');
+  } catch (e) {
+    return back(e.message || 'Could not change that.', true);
+  }
+});
+
+/**
+ * The tip-outs on this service, each with a switch and an amount.
+ *
+ * On the review screen rather than the entry sheet, because this is a decision
+ * about money made while looking at the money — and it is the last place before
+ * it goes out.
+ */
+function tipoutControls(req, sh, inp, r) {
+  if (!canWrite()) return '';
+  const rules = policyForShift(sh).filter((x) => x.type === 'tipout');
+  if (!rules.length) return '';
+  const adj = new Map(adjustmentsFor(sh.id).map((a) => [`${a.recipient}|${a.paid_by || ''}`, a]));
+  const locked = adjustmentsLocked(sh);
+  const roleName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
+  const potOf = (role) => r.pots[role] || 0;
+
+  const row = (rule) => {
+    const payers = rule.paidBy ? (Array.isArray(rule.paidBy) ? rule.paidBy : [rule.paidBy]) : null;
+    const key = `${rule.recipient}|${payers ? payers[0] : ''}`;
+    const a = adj.get(key) || adj.get(`${rule.recipient}|`) || null;
+    const worked = inp.support.some((p) => p.role === rule.recipient && p.tipEligible);
+    const paidLabel = payers ? payers.map(roleName).join(' & ') : 'everyone';
+    return `<div class="tpa-row${a ? ' is-adj' : ''}${worked ? '' : ' is-absent'}">
+      <div class="tpa-what">
+        <b>${esc(roleName(rule.recipient))}</b>
+        <i>${esc(rule.percent)}% of ${esc(String(rule.base).replace(/_/g, ' '))} · from ${esc(paidLabel)}</i>
+        ${a ? `<em class="tpa-note">${a.mode === 'off' ? 'Not charged tonight'
+    : `Set to ${money(a.cents / 100)}`}${a.reason ? ` — ${esc(a.reason)}` : ''}</em>` : ''}
+        ${worked ? '' : '<em class="tpa-note">Nobody worked this role, so it is not charged.</em>'}
+      </div>
+      <div class="tpa-amt">${money(potOf(rule.recipient) / 100)}</div>
+      ${locked || !worked ? '' : `<form method="post" action="/shifts/${sh.id}/adjust" class="tpa-form">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="recipient" value="${esc(rule.recipient)}">
+        <input type="hidden" name="paid_by" value="${esc(payers ? payers[0] : '')}">
+        ${a ? `<button class="bs-btn-sm" type="submit" name="mode" value="clear">Use the policy rate</button>`
+    : `<input class="tpa-in" type="text" inputmode="decimal" name="amount" placeholder="${money(potOf(rule.recipient) / 100).replace('$', '')}" aria-label="Amount for ${esc(roleName(rule.recipient))}">
+       <input class="tpa-why" type="text" name="reason" maxlength="60" placeholder="Why?" aria-label="Reason">
+       <button class="bs-btn-sm" type="submit" name="mode" value="amount">Set</button>
+       <button class="bs-btn-sm tpa-off" type="submit" name="mode" value="off">Not tonight</button>`}
+      </form>`}
+    </div>`;
+  };
+
+  return `<section class="bs-panel tpa">
+    <div class="bs-sec-h"><span class="bs-kicker">Tip-outs tonight</span>
+      <span class="bs-sec-note">${locked ? 'Sent — fixed' : 'One service only'}</span></div>
+    <p class="inc-hint">These are the policy rates. Changing one here applies to this service and
+      nothing else — the money always goes back to whoever would have paid it, so the totals still
+      add up. To change it for good, edit the <a class="bs-act" href="/policy?daypart=${esc(sh.daypart)}">tip-out policy</a>.</p>
+    <div class="tpa-rows">${rules.map(row).join('')}</div>
+  </section>`;
+}
 
 mountModules(app, csrfBody);
 

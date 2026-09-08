@@ -1838,3 +1838,60 @@ test('one role can pool its own tips without the rest of the house', () => {
   assert.strictEqual(by['Bt A'] + by['Bt B'], 30000, 'the bar keeps all of it');
   assert.ok(by['Bt A'] > by['Bt B'], 'split by hours, 8 against 4');
 });
+
+test('a one-off adjustment MOVES money — it never makes it disappear', () => {
+  // The whole reason this is safe. Turning a tip-out off hands it back to
+  // whoever would have paid it, so the books still balance and the receipt can
+  // still explain itself. There is deliberately no way to say "the busser gets
+  // less and nobody gets more" — that money would have to come from somewhere,
+  // and the honest answer is that it does not exist.
+  const { runShift } = require('../src/engine');
+  const rules = [{ type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales',
+    split: 'hours', paidBy: ['server'] }];
+  const shift = {
+    servers: [{ employeeId: 1, name: 'A', role: 'server', hours: 7,
+      food: 4000, coffee: 0, alcohol: 1200, cardTips: 900, cashTips: 100 }],
+    support: [{ employeeId: 2, name: 'Bu', role: 'busser', hours: 7 }],
+    pool: {},
+  };
+  const plain = runShift(shift, rules);
+  assert.strictEqual(plain.pots.busser, 10400, '2% of 5200');
+
+  const off = runShift({ ...shift, adjustments: [{ recipient: 'busser', paid_by: null, mode: 'off' }] }, rules);
+  assert.strictEqual(off.pots.busser || 0, 0, 'the busser is not charged');
+  assert.strictEqual(off.reconciliation.totalKept, plain.reconciliation.totalKept + 10400,
+    'and the server keeps exactly what the busser did not get');
+
+  const flat = runShift({ ...shift, adjustments: [{ recipient: 'busser', paid_by: null, mode: 'amount', cents: 4000 }] }, rules);
+  assert.strictEqual(flat.pots.busser, 4000, 'set to $40');
+  assert.strictEqual(flat.reconciliation.totalKept, plain.reconciliation.totalKept + 6400,
+    'and the difference goes back to the server');
+
+  for (const r of [plain, off, flat]) {
+    assert.strictEqual(r.reconciliation.balanced, true, 'every version balances');
+  }
+});
+
+test('a flat amount is shared between payers, not charged to each of them', () => {
+  // "Give the busser $40" means the busser ends up with $40. Charging $40 to
+  // every server would hand them $120 on a three-server night and read as the
+  // override being ignored.
+  const { runShift } = require('../src/engine');
+  const rules = [{ type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales',
+    split: 'hours', paidBy: ['server'] }];
+  const three = ['A', 'B', 'C'].map((n, i) => ({ employeeId: i + 1, name: n, role: 'server',
+    hours: 6, food: 1000, coffee: 0, alcohol: 0, cardTips: 200, cashTips: 0 }));
+  const r = runShift({ servers: three, support: [{ employeeId: 9, name: 'Bu', role: 'busser', hours: 6 }],
+    pool: {}, adjustments: [{ recipient: 'busser', paid_by: null, mode: 'amount', cents: 4000 }] }, rules);
+  assert.strictEqual(r.pots.busser, 4000, 'the busser gets $40, not $120');
+  assert.strictEqual(r.reconciliation.balanced, true);
+});
+
+test('a sent service will not take an adjustment', () => {
+  // Its money has been allocated and emailed. Moving a figure afterwards
+  // changes a number somebody has already been told, with nothing on any screen
+  // saying the two no longer agree.
+  const { adjustmentsLocked } = require('../src/policy');
+  assert.strictEqual(adjustmentsLocked({ status: 'emailed' }), true);
+  assert.strictEqual(adjustmentsLocked({ status: 'open' }), false);
+});
