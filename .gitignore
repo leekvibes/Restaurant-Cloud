@@ -23,3 +23,9 @@ previews/
 
 # design handoff — reference material, not source
 design_handoff_zwin_broadsheet*/
+
+# Reference material dropped into the repo root — policy PDFs, screen
+# recordings. Real documents, not source, and a 96MB .mov has been committed
+# by an over-eager `git add -A` once already.
+*.pdf
+*.mov
