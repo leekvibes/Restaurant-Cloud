@@ -262,7 +262,7 @@ test('the shared pool shows what it holds and who it splits to', async () => {
   assert.match(h, /To-go card[\s\S]{0,160}\$60\.00/);
   // Each support person's take-home, split the way they are paid: card to the
   // paycheck, cash out of the jar.
-  assert.match(h, /Support take-home/, 'the take-home table is there');
+  assert.match(h, /Tipped out to/, 'the take-home table is there');
   assert.match(h, /bs-take-head[\s\S]{0,140}Card[\s\S]{0,60}Cash[\s\S]{0,60}Total/, 'with card / cash / total columns');
   assert.match(h, /Split by hours/i, 'and it still says how it divides');
 });

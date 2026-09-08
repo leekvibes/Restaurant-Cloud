@@ -2314,7 +2314,16 @@ app.get('/shifts/:id', (req, res) => {
       </div>
 
       <div class="bs-strip">
-        ${sCell('Server sales', money(totalSales), `${inp.servers.length} server${inp.servers.length === 1 ? '' : 's'}`)}
+        ${/* "3 servers" was true when only a server could ring a sale. A
+             bartender and a barista serve guests and ring their own now, so the
+             count was calling a bartender a server on the busiest number on the
+             page. It says what it counts. */''}
+        ${sCell('Sales rung', money(totalSales), (() => {
+    const by = {};
+    for (const p2 of inp.servers) by[p2.role || 'server'] = (by[p2.role || 'server'] || 0) + 1;
+    return Object.entries(by).map(([role, n]) => `${n} ${(positions.bySlug.get(role) || {}).name
+      ? String((positions.bySlug.get(role) || {}).name).toLowerCase() + (n === 1 ? '' : 's') : role}`).join(' · ');
+  })())}
         ${sCell('Tips collected', money(totalTips), 'card + cash')}
         ${sCell('Shared pool', money(poolCash + poolCard), `${money(poolCash)} cash · ${money(poolCard)} card`)}
         ${sCell('To sort out', String(warn.length), warn.length ? 'see the rows below' : 'nothing outstanding', warn.length ? 'bad' : 'ok')}
@@ -2423,7 +2432,10 @@ app.get('/shifts/:id', (req, res) => {
             <div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>
           </div>
           ${eligible.length ? `
-            <div class="bs-sec-h bs-split-h"><span class="bs-kicker">Support take-home · ${eligible.length}</span></div>
+            ${/* Not "support" any more: a bartender is tipped out AND earns
+                 directly, so this list is "who was tipped out", which is what it
+                 has always actually been. */''}
+            <div class="bs-sec-h bs-split-h"><span class="bs-kicker">Tipped out to · ${eligible.length}</span></div>
             <div class="bs-take-tbl">${splitRows}</div>`
             : `<p class="bs-clear">Nobody eligible yet — add support staff and the pool will split across them.</p>`}
           ${(poolCash + poolCard) > 0 && !eligible.length

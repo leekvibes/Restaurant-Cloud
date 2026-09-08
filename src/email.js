@@ -162,6 +162,23 @@ function serverEmail(p, ctx) {
   }
   body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: GREEN });
 
+  // THE OTHER SIDE OF THE NIGHT, for somebody who has one.
+  //
+  // A bartender pays the barback out of their own bar sales AND receives 9% of
+  // the servers' alcohol; a barista pays the busser and receives 1.5% of the
+  // servers' coffee. Two numbers going in opposite directions on the same
+  // shift, and showing only the paying half — which is all this email used to
+  // do — reads as a night where they were charged and never paid.
+  const also = ctx.alsoReceived;
+  const alsoTotal = also ? (also.tipShare || 0) + (also.poolCard || 0) + (also.cashTotal || 0) : 0;
+  if (alsoTotal > 0) {
+    body += section('Tipped out to you');
+    if (also.tipShare) body += line('Share of the tip-out pot', '+' + fmt(also.tipShare), { border: false, color: GREEN });
+    if (also.poolCard) body += line('To-go card tips', '+' + fmt(also.poolCard), { color: GREEN });
+    if (also.cashTotal) body += line('To-go cash tips', '+' + fmt(also.cashTotal), { color: GREEN });
+    body += line('Your total for the shift', fmt(p.tipsKept + alsoTotal), { strong: true, color: GREEN });
+  }
+
   // The clarity line: you already took the cash home; here's how it nets out.
   body += section('How this reaches you');
   body += line('Cash you took home tonight', fmt(p.cashTips), { border: false });
@@ -172,10 +189,13 @@ function serverEmail(p, ctx) {
     body += `<div style="margin-top:8px;font-size:12px;color:${MUTED};line-height:1.5">You took home more cash than your net tips (because part funds the kitchen/busser tip-out), so your paycheck is reduced by that difference. Your total is still ${fmt(p.tipsKept)}${wage > 0 ? ' in tips, plus your wage' : ''}.</div>`;
   }
 
-  const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(p.tipsKept)} in tips`;
+  const grand = p.tipsKept + alsoTotal;
+  const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(grand)} in tips`;
   return { to: ctx.email, subject, html: shell('Your shift summary', body, {
-    subline: [p.name, ROLE_LABEL.server, ctx.date, ctx.daypart === 'cafe' ? 'Café' : 'Dinner'].filter(Boolean).join(' · '),
-    hero: { label: 'Tips you keep', value: fmt(p.tipsKept), color: GREEN },
+    // Their OWN role, not always 'Server'. A bartender's email said Server at
+    // the top from the moment they became a direct earner.
+    subline: [p.name, ROLE_LABEL[p.role] || ROLE_LABEL.server, ctx.date, ctx.daypart === 'cafe' ? 'Café' : 'Dinner'].filter(Boolean).join(' · '),
+    hero: { label: alsoTotal > 0 ? 'Your total tips' : 'Tips you keep', value: fmt(grand), color: GREEN },
   }) };
 }
 
@@ -353,11 +373,27 @@ function buildPeriodEmails(rows, meta, people) {
 function buildEmails(results, meta, people) {
   const emails = [];
   const skipped = results.skippedPots || [];
+  // ONE EMAIL PER PERSON, even when they are on both sides of the night.
+  //
+  // A bartender earns directly and receives the servers' 9%, so they appear in
+  // results.servers AND results.support. Sending from both lists would put two
+  // emails in their inbox, each showing half of what they made and neither
+  // adding up — which is worse than either one alone.
+  //
+  // The direct-service email wins because it is the one that reconciles: it
+  // starts from what their own guests tipped them, and what they were tipped
+  // out is carried into it below.
+  const received = new Map(results.support.map((p) => [p.employeeId, p]));
+  const sent = new Set();
   for (const p of results.servers) {
     const info = people.get(p.employeeId) || {};
-    emails.push({ employeeId: p.employeeId, name: p.name, ...serverEmail(p, { ...meta, skipped, email: info.email, hourlyRate: info.hourlyRate, salaried: info.salaried }) });
+    sent.add(p.employeeId);
+    emails.push({ employeeId: p.employeeId, name: p.name,
+      ...serverEmail(p, { ...meta, skipped, email: info.email, hourlyRate: info.hourlyRate,
+        salaried: info.salaried, alsoReceived: received.get(p.employeeId) || null }) });
   }
   for (const p of results.support) {
+    if (sent.has(p.employeeId)) continue;
     const info = people.get(p.employeeId) || {};
     emails.push({ employeeId: p.employeeId, name: p.name, ...supportEmail(p, { ...meta, email: info.email, hourlyRate: info.hourlyRate, salaried: info.salaried }) });
   }
