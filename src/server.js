@@ -6,7 +6,7 @@ try { process.loadEnvFile(require('path').join(__dirname, '..', '.env')); } catc
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
-const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftInputs } = require('./db');
+const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftInputs, keepsOwnCash } = require('./db');
 const { runShift } = require('./engine');
 const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
 const { fmt, toCents } = require('./money');
@@ -2110,48 +2110,35 @@ app.get('/shifts/:id', (req, res) => {
     </section>` : '';
 
   // --- tip pool ----------------------------------------------------------
-  const eligible = r.support.filter((p) => p.tipEligible !== false);
-  const poolSection = `
-    <section class="sect">
-      <div class="sect-h"><h2>${icon('cash')} Shared tip pool</h2></div>
-      <div class="pool">
-        <div class="pool-side">
-          <div class="pool-box pool-cash">
-            <div class="pool-lbl">Cash pool</div>
-            <div class="pool-amt">${money(poolCash)}</div>
-            <div class="pool-parts">
-              <span>You counted <b>${money(toCents(inp.pool.jar))}</b></span>
-              <span>Staff reported <b>${money(poolCash - toCents(inp.pool.jar))}</b></span>
-            </div>
-          </div>
-          <div class="pool-box pool-card">
-            <div class="pool-lbl">To-go card pool</div>
-            <div class="pool-amt">${money(poolCard)}</div>
-            <div class="pool-parts">
-              <span>You counted <b>${money(toCents(inp.pool.togoCard))}</b></span>
-              <span>Staff reported <b>${money(poolCard - toCents(inp.pool.togoCard))}</b></span>
-            </div>
-          </div>
-          <form method="post" action="/shifts/${sh.id}/pool" class="pool-form">
-            <label>Cash you counted <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
-            <label>To-go card you counted <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
-            <button class="btn" type="submit">Save pool</button>
-          </form>
-          <p class="pool-hint">Enter only what <b>you</b> counted — anything staff reported on the tips page is already added above.</p>
-        </div>
-        <div class="pool-dist">
-          <div class="pool-lbl">Where it goes${eligible.length ? ` · split by hours across ${eligible.length}` : ''}</div>
-          ${eligible.length ? `<div class="dist">${eligible.map((p) => `
-            <div class="dist-row">
-              <span class="dist-who">${esc(p.name)}<i>${esc(p.role)} · ${p.hours}h</i></span>
-              <span class="dist-amt">${money(p.poolCash + p.poolCard)}</span>
-            </div>`).join('')}</div>`
-            : '<div class="panel-empty">Nobody eligible on this service yet — add support staff and the pool will split across them.</div>'}
-          ${(poolCash + poolCard) > 0 && !eligible.length
-            ? `<div class="dist-warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</div>` : ''}
-        </div>
-      </div>
-    </section>`;
+  // WHO THE POLICY CAN ACTUALLY PAY.
+  //
+  // This listed everybody who was not explicitly barred, so a kitchen line sat
+  // in the tip-out table at $0.00 — under a heading that says "tipped out to",
+  // on a policy that gives the kitchen nothing. A row of zeroes is not
+  // information; it is the page contradicting the policy, and it was read as
+  // the kitchen being tipped out again.
+  //
+  // Named in a rule, or holding money. Nothing else belongs in this table.
+  const rulesNow = policyForShift(sh) || [];
+  const paidRoles = new Set();
+  for (const rule of rulesNow) {
+    if (rule.type === 'tipout' && rule.recipient) paidRoles.add(rule.recipient);
+    if (rule.type === 'pool') {
+      const among = rule.among;
+      if (Array.isArray(among)) among.forEach((x) => paidRoles.add(x));
+      else if (among && among !== 'all_support' && among !== 'foh') paidRoles.add(among);
+      else r.support.forEach((p) => paidRoles.add(p.role));   // an old open-ended pool
+    }
+  }
+  const eligible = r.support.filter((p) => p.tipEligible !== false
+    && (paidRoles.has(p.role)
+      || (p.tipShare || 0) + (p.cashTotal || 0) + (p.poolCard || 0) > 0));
+  // Does the policy pool anything at all? The evening policy does not -- there
+  // is no cash tip jar at night, so a box asking the manager to count one is an
+  // instruction to do something the policy has no way to pay out. Money already
+  // sitting in a pot keeps its panel either way, so nothing goes quiet.
+  const hasPool = rulesNow.some((x) => x.type === 'pool');
+  const showPool = hasPool || (poolCash + poolCard) > 0;
 
   // =========================================================================
   // BROADSHEET — the shift sheet
@@ -2326,7 +2313,7 @@ app.get('/shifts/:id', (req, res) => {
       ? String((positions.bySlug.get(role) || {}).name).toLowerCase() + (n === 1 ? '' : 's') : role}`).join(' · ');
   })())}
         ${sCell('Tips collected', money(totalTips), 'card + cash')}
-        ${sCell('Shared pool', money(poolCash + poolCard), `${money(poolCash)} cash · ${money(poolCard)} card`)}
+        ${showPool ? sCell('Shared pool', money(poolCash + poolCard), `${money(poolCash)} cash · ${money(poolCard)} card`) : ''}
         ${sCell('To sort out', String(warn.length), warn.length ? 'see the rows below' : 'nothing outstanding', warn.length ? 'bad' : 'ok')}
       </div>
 
@@ -2427,22 +2414,25 @@ app.get('/shifts/:id', (req, res) => {
         </div>
 
         <div class="bs-col">
+          ${showPool ? `
           <div class="bs-sec-h"><span class="bs-kicker">Shared tip pool</span></div>
           <div class="bs-lrows">
             <div class="bs-lrow"><span>Cash pool</span><b class="bs-fig">${money(poolCash)}</b></div>
             <div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>
-          </div>
+          </div>` : ''}
+          ${!hasPool && (poolCash + poolCard) > 0
+            ? `<p class="bs-clear warn">This service's policy has no pool rule, so nothing pays this ${money(poolCash + poolCard)} out. Zero it above, or add a pool rule to the policy.</p>` : ''}
           ${eligible.length ? `
             ${/* Not "support" any more: a bartender is tipped out AND earns
                  directly, so this list is "who was tipped out", which is what it
                  has always actually been. */''}
             <div class="bs-sec-h bs-split-h"><span class="bs-kicker">Tipped out to · ${eligible.length}</span></div>
             <div class="bs-take-tbl">${splitRows}</div>`
-            : `<p class="bs-clear">Nobody eligible yet — add support staff and the pool will split across them.</p>`}
-          ${(poolCash + poolCard) > 0 && !eligible.length
+            : `<p class="bs-clear">Nobody tipped out yet — add the support staff who worked this service.</p>`}
+          ${showPool && (poolCash + poolCard) > 0 && !eligible.length
             ? `<p class="bs-clear warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</p>` : ''}
-          <p class="bs-sheet-note">Card rides the paycheck (to-go card + any tip-out); cash is their cut of the jar, handed over. Split by hours across the support on shift.</p>
-          ${canWrite() ? `<details class="bs-x">
+          <p class="bs-sheet-note">Card rides the paycheck (to-go card + any tip-out); cash is handed over.${hasPool ? ' Split by hours across the support on shift.' : ''}</p>
+          ${canWrite() && showPool ? `<details class="bs-x">
             <summary>Edit what you counted</summary>
             <form method="post" action="/shifts/${sh.id}/pool" class="bs-form">
               <label>Cash you counted <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
@@ -2740,7 +2730,17 @@ app.post('/shifts/:id/hours-reset', (req, res) => {
 });
 
 app.post('/shifts/:id/pool', (req, res) => {
-  s.setPool.run({ id: Number(req.params.id), jar: toCents(req.body.jar), togo_card: toCents(req.body.togo_card) });
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  // The form is hidden on a policy with no pool rule, but a stale tab still has
+  // it. Money saved here would sit in a pot nothing pays out.
+  const jar = toCents(req.body.jar);
+  const togoCard = toCents(req.body.togo_card);
+  if ((jar || togoCard) && !(policyForShift(sh) || []).some((x) => x.type === 'pool')) {
+    return res.redirect(`/shifts/${sh.id}?msg=`
+      + encodeURIComponent('This service runs on a policy with no tip pool, so there is nothing to pay a counted pot out to. Add a pool rule to the policy first.') + '&err=1');
+  }
+  s.setPool.run({ id: Number(req.params.id), jar, togo_card: togoCard });
   res.redirect(`/shifts/${req.params.id}?msg=` + encodeURIComponent('Tip pool saved.'));
 });
 
@@ -4670,6 +4670,44 @@ const TIP_FIELDS = [
 const fieldsFor = (caps) => TIP_FIELDS.filter((f) => caps[f.cap]);
 
 /**
+ * The same fields, worded for what will actually happen to the money.
+ *
+ * "Pooled cash tips — this is not money you keep" is a promise about where
+ * somebody's cash goes, and there are two services where it is simply untrue.
+ * The evening policy has no pool rule at all (no cash tip jar at night; every
+ * penny moves by percentage), so a busser's cash stays theirs. And a bartender
+ * or barista is a DIRECT EARNER under the new policies — they serve, they ring,
+ * they keep what they are tipped — so their cash was never pooled on any
+ * service, day or night, and the form has been telling them otherwise.
+ *
+ * Both answers come from the shift's own pinned policy, the same two reads the
+ * engine makes. Nothing here changes where a penny goes; it changes what the
+ * page says about it, which was the part that was wrong.
+ */
+function fieldsForShift(caps, shiftId, slug) {
+  const fields = fieldsFor(caps);
+  let pools = true;
+  let keeps = false;
+  try {
+    const sh = shiftId ? s.shiftById.get(shiftId) : null;
+    if (sh) {
+      const rules = policyForShift(sh) || [];
+      pools = rules.some((x) => x.type === 'pool');
+      keeps = keepsOwnCash(slug || caps.position, rules);
+    }
+  } catch { pools = true; keeps = false; }
+  if (pools && !keeps) return fields;
+  return fields.map((f) => (f.key !== 'pooled_cash' ? f : {
+    ...f,
+    label: keeps ? 'Cash tips you already took home' : 'Cash tips you were handed',
+    hint: keeps
+      ? 'Cash your own guests tipped you and you have taken home. It stays yours — it is recorded so it can be left out of the tips paid through payroll.'
+      : 'Cash a guest put in your hand on this shift. This service has no tip pool, so it stays yours — it is recorded so the totals are right.',
+    blank: 'Leave blank if you took none.',
+  }));
+}
+
+/**
  * Shifts this person could file against, best answer first.
  *
  * A shift qualifies because THEY are on it — a work row or a punch of their
@@ -5055,7 +5093,7 @@ function tipsWorkspacePage(model, opts = {}) {
     </div>`;
 
   // --- the money ------------------------------------------------------------
-  const fields = caps ? fieldsFor(caps) : [];
+  const fields = caps ? fieldsForShift(caps, selected && selected.id, position) : [];
   const sales = fields.filter((f) => f.group === 'sales');
   const tips = fields.filter((f) => f.group === 'tips');
   const valueFor = (f) => {
@@ -5102,7 +5140,7 @@ function tipsWorkspacePage(model, opts = {}) {
         <span class="tcc-state">Previously submitted</span></div>
       <p class="tcc-big">You already sent a report for this shift.</p>
       <div class="tc-rows">
-        ${(caps && fieldsFor(caps) || []).map((f) => {
+        ${(caps && fieldsForShift(caps, selected && selected.id, position) || []).map((f) => {
     const c = stored.sales ? stored.sales[f.stored] : null;
     const txt = f.triState ? cardStateText(stored.cardState, c) : money(c || 0);
     return `<div class="tc-row"><span>${f.label} on file</span><b>${txt}</b></div>`;
@@ -5560,7 +5598,7 @@ app.get('/portal/tips/receipt/:id', (req, res) => {
           <div class="tc-row"><span>Shift</span><b>${sh ? esc(shiftTitle(sh)) : '—'}</b></div>
           <div class="tc-row"><span>Filing as</span><b>${esc(
     (positions.bySlug.get(row.role) || {}).name || row.role || '—')}</b></div>
-          ${fieldsFor(caps).map(rowFor).join('')}
+          ${fieldsForShift(caps, sh && sh.id, row.role).map(rowFor).join('')}
           ${row.note ? `<div class="tc-row"><span>Note</span><b>${esc(row.note)}</b></div>` : ''}
           <div class="tc-row"><span>Recorded</span><b>${esc(when)}</b></div>
         </div>

@@ -533,3 +533,88 @@ test('hours can be entered and shown as h:mm, and always parse either way', asyn
   await post('/shifts/hours-format', { fmt: 'decimal', back: `/shifts/${ready}` });
   assert.match(await html(`/shifts/${ready}`), /bs-hfmt-b on">7\.5/, 'toggled back to decimal');
 });
+
+// --- no pool rule means no pool box ---------------------------------------
+//
+// "There is no cash tip jar at night, it shouldn't be an option." The evening
+// policy carries no pool rule at all, so a box asking the manager to count a
+// jar is an instruction to do something the policy has no way to pay out.
+
+const asRules = (json) => JSON.parse(json);
+
+test('a service whose policy has no pool rule shows no pool box', async () => {
+  const { review } = module.exports;   // a dinner service
+  const NO_POOL = JSON.stringify([
+    { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+    { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+  ]);
+  const pid = db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('dinner', ?, 'no pool')")
+    .run(NO_POOL).lastInsertRowid;
+  db.prepare('UPDATE shifts SET policy_id = ?, pool_jar_cents = 0, pool_togo_card_cents = 0 WHERE id = ?')
+    .run(pid, review);
+  // Somebody the policy CAN pay, so there is a tip-out table to still be there.
+  db.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, ?, ?)')
+    .run(review, module.exports.people.joseph, 'busser', 6);
+
+  const h = await html(`/shifts/${review}`);
+  assert.ok(!/name="jar"/.test(h), 'no cash-you-counted box');
+  assert.ok(!/name="togo_card"/.test(h), 'no to-go-card box');
+  assert.ok(!/Shared tip pool/.test(h), 'and no pool panel at all');
+  // The tip-out itself is untouched — that is the part that still pays out.
+  assert.match(h, /Tipped out to/, 'the tip-out table is still there');
+  assert.ok(asRules(NO_POOL).length === 2);
+});
+
+test('the pool box comes back the moment the policy pools something', async () => {
+  const { review } = module.exports;
+  const WITH_POOL = JSON.stringify([
+    { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+    { type: 'pool', source: 'jar', split: 'hours', among: ['busser'], payout: 'weekly_cash' },
+  ]);
+  const pid = db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('dinner', ?, 'with pool')")
+    .run(WITH_POOL).lastInsertRowid;
+  db.prepare('UPDATE shifts SET policy_id = ? WHERE id = ?').run(pid, review);
+
+  const h = await html(`/shifts/${review}`);
+  assert.match(h, /name="jar"/, 'the box is back');
+  assert.match(h, /Shared tip pool/);
+});
+
+test('money already counted keeps its panel even with no pool rule', async () => {
+  // Hiding a box is a wording change. Hiding MONEY is a disappearance, so a pot
+  // with something in it stays on the page and says what is wrong with it.
+  const { review } = module.exports;
+  const NO_POOL = JSON.stringify([
+    { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+  ]);
+  const pid = db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('dinner', ?, 'no pool, stray cash')")
+    .run(NO_POOL).lastInsertRowid;
+  db.prepare('UPDATE shifts SET policy_id = ?, pool_jar_cents = 5000 WHERE id = ?').run(pid, review);
+
+  const h = await html(`/shifts/${review}`);
+  assert.match(h, /Shared tip pool/, 'the panel stays');
+  assert.match(h, /\$50\.00/, 'showing the money');
+  assert.match(h, /no pool rule, so nothing pays this/, 'and saying why nothing moves it');
+
+  db.prepare('UPDATE shifts SET pool_jar_cents = 0 WHERE id = ?').run(review);
+});
+
+test('posting a pool figure to a pool-free service is refused', async () => {
+  // The form is gone, but a stale tab still has it.
+  const { review } = module.exports;
+  const post = (url, body) => fetch(BASE + url, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body).toString(),
+  });
+  const bad = await post(`/shifts/${review}/pool`, { jar: '40', togo_card: '0' });
+  assert.strictEqual(bad.status, 302);
+  assert.match(bad.headers.get('location') || '', /err=1/, 'sent back with an error');
+  assert.strictEqual(db.prepare('SELECT pool_jar_cents c FROM shifts WHERE id = ?').get(review).c, 0,
+    'and nothing was written');
+
+  // Zeroing is still allowed — that is how you clear a pot left behind.
+  const ok = await post(`/shifts/${review}/pool`, { jar: '0', togo_card: '0' });
+  assert.strictEqual(ok.status, 302);
+  assert.ok(!/err=1/.test(ok.headers.get('location') || ''), 'clearing is not an error');
+});

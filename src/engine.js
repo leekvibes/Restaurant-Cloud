@@ -51,6 +51,17 @@ function baseValue(server, base) {
  * of the tip system entirely (a trainee, say) — including them would hand them
  * a share AND shrink everyone else's, since the split is weighted by hours.
  */
+/**
+ * Which money buckets a pool rule's `source` names. 'togo'/'togo_cash' are old
+ * names for jar money -- cash, not card; letting them fall through to "both"
+ * made a policy with a separate togo_card rule pay the card money out twice.
+ */
+function bucketsOf(src) {
+  if (src === 'togo_card') return ['card'];
+  if (src === 'jar' || src === 'cash' || src === 'togo' || src === 'togo_cash') return ['cash'];
+  return ['cash', 'card']; // 'jar_togo' / unset
+}
+
 function poolRecipients(support, among) {
   const eligible = support.filter((p) => p.tipEligible !== false);
   if (among === 'kitchen') return eligible.filter((p) => p.role === 'kitchen');
@@ -262,28 +273,31 @@ function runShift(shift, rules) {
   // the same buckets, then get split by hours — nobody keeps their own.
   const pool = shift.pool || {};
   const legacyCash = pool.togoCash != null ? pool.togoCash : pool.togo;
-  // ONLY FROM PEOPLE WHO COULD ALSO RECEIVE.
+  // A PERSON'S REPORTED TIPS ARE SWEPT ONLY INTO A POT THEY COULD BE PAID FROM.
   //
-  // This summed every support row regardless of eligibility, so a trainee —
+  // Two ways that went wrong, and they are the same mistake. A trainee is
   // explicitly out of every pool, precisely so their hours do not dilute it —
-  // had cash they were handed taken off them and given to somebody else, while
-  // being unable to get a penny back. Contributing to a pot you are barred from
-  // is not a rule anybody wrote down; it was the absence of one.
-  const staffCash = support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cashTips), 0);
-  const staffCard = support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cardTips), 0);
+  // yet cash they were handed was taken off them and given to somebody else,
+  // with no way to get a penny back. And the evening policy has no pool rule at
+  // all (there is no cash tip jar at night; every penny moves by percentage) —
+  // yet a busser's reported cash was still swept into "the pool", where the
+  // payout loop below never runs, so it left their total and arrived nowhere.
+  // Contributing to a pot you cannot be paid from is not a rule anybody wrote
+  // down; it was the absence of one. What is not swept stays theirs, below.
+  const pooled = new Set();
+  for (const r of poolRules) for (const b of bucketsOf(r.source)) pooled.add(b);
+  const staffCash = pooled.has('cash')
+    ? support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cashTips), 0) : 0;
+  const staffCard = pooled.has('card')
+    ? support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cardTips), 0) : 0;
+  // Money the manager counted stays on the books either way -- if it is sitting
+  // in a bucket no rule pays out, the sheet should say so, not swallow it.
   const cash = toCents(pool.jar) + toCents(legacyCash) + staffCash;
   const togoCard = toCents(pool.togoCard) + staffCard;
   // Allocate each bucket SEPARATELY even when one rule covers both, so we can
   // tell someone "$X of this was card, $Y was cash out of the jar". Splitting
   // the allocation keeps it penny-exact either way.
-  // 'togo' / 'togo_cash' are old names for jar money — cash, not card. Letting
-  // them fall through to "both buckets" made a policy with a separate
-  // togo_card rule pay the card money out twice.
-  const sourceBuckets = (src) => {
-    if (src === 'togo_card') return [['card', togoCard]];
-    if (src === 'jar' || src === 'cash' || src === 'togo' || src === 'togo_cash') return [['cash', cash]];
-    return [['cash', cash], ['card', togoCard]]; // 'jar_togo' / unset
-  };
+  const sourceBuckets = (src) => bucketsOf(src).map((b) => [b, b === 'card' ? togoCard : cash]);
   const poolShareMap = new Map();  // employeeId -> { <payout>: cents }
   const poolSourceMap = new Map(); // employeeId -> { cash: cents, card: cents }
   const claimed = new Set();       // a bucket may only be paid out once
@@ -318,6 +332,9 @@ function runShift(shift, rules) {
     const bySource = poolSourceMap.get(p.employeeId) || {};
     const poolShare = Object.values(shares).reduce((a, b) => a + b, 0);
     const tipShare = roleShare.get(p.employeeId) || 0;
+    // Tips they reported that no pool rule claimed — see the sweep above.
+    const keptCash = pooled.has('cash') && p.tipEligible ? 0 : p.cashTips;
+    const keptCard = pooled.has('card') && p.tipEligible ? 0 : p.cardTips;
     return {
       employeeId: p.employeeId, name: p.name, role: p.role, hours: p.hours,
       tipShare,                                      // role tip-out → paycheck
@@ -325,10 +342,12 @@ function runShift(shift, rules) {
       poolShares: shares,                            // broken down by payout method
       poolCash: bySource.cash || 0,                  // their cut of the cash jar
       poolCard: bySource.card || 0,                  // their cut of to-go card tips
+      keptCash,                                      // reported cash nothing pooled
+      keptCard,                                      // reported card nothing pooled
       // What they earned tonight, grouped the way they get asked about it:
       // card money rides payroll, jar cash is handed over in person.
-      cardTotal: tipShare + (bySource.card || 0),
-      cashTotal: bySource.cash || 0,
+      cardTotal: tipShare + (bySource.card || 0) + keptCard,
+      cashTotal: (bySource.cash || 0) + keptCash,
     };
   });
 

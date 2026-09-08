@@ -565,6 +565,17 @@ function newModel(rules) {
     || (r.type === 'pool' && Array.isArray(r.among)));
 }
 
+/**
+ * Does somebody working `role` KEEP the cash they are handed on this service?
+ *
+ * The same question shiftInputs answers below when it sorts people into direct
+ * earners and support, asked from outside so the staff form can be worded to
+ * match what will actually happen to the money. Same inputs, same answer.
+ */
+function keepsOwnCash(role, rules) {
+  return newModel(rules) ? DIRECT_ROLES.has(role) : role === 'server';
+}
+
 function shiftInputs(shiftId) {
   const workRows = w.workForShift.all(shiftId);
   // The shift's OWN policy decides how its people are classified. Lazily
@@ -691,4 +702,4 @@ function shiftInputs(shiftId) {
   return { servers, support, people, pool, adjustments };
 }
 
-module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, DB_PATH };
+module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, keepsOwnCash, DB_PATH };

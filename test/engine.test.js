@@ -479,3 +479,90 @@ test('a wage set for a role beats the default when that role is worked', () => {
   assert.strictEqual(row.rate, row.role_rate, 'pays the rate for the role worked');
   assert.notStrictEqual(row.rate, row.deflt, 'not the default rate');
 });
+
+// ---------------------------------------------------------------------------
+// NO POOL RULE MEANS NO POOL — not a pool nobody is paid out of.
+//
+// The evening policy has no cash tip jar, so it carries no pool rule at all.
+// Reported cash was still being swept into "the pool", where the payout loop
+// never runs: it left the person's total and arrived nowhere.
+//
+// (Inputs here are DOLLARS, as everywhere else in this file; results are cents.)
+// ---------------------------------------------------------------------------
+
+const EVENING = [
+  { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+];
+
+test('with no pool rule, cash a support person was handed stays theirs', () => {
+  const r = runShift({
+    servers: [one({ food: 1000, alcohol: 500, cardTips: 200 })],
+    support: [{ employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8, cashTips: 40 }],
+    pool: {},
+  }, EVENING);
+  const bu = r.support[0];
+  assert.strictEqual(r.pool.cash, 0, 'no pool exists to hold it');
+  assert.strictEqual(bu.poolCash, 0, 'nothing was paid out of a pool');
+  assert.strictEqual(bu.keptCash, toCents(40), 'they kept what they were handed');
+  assert.strictEqual(bu.cashTotal, toCents(40), 'and it shows in their cash total');
+  assert.strictEqual(bu.tipShare, toCents(30), '2% of $1500 in sales, untouched by any of this');
+});
+
+test('with a pool rule, the same cash is pooled exactly as before', () => {
+  const withPool = EVENING.concat([{ type: 'pool', source: 'jar', split: 'hours', among: ['busser'], payout: 'weekly_cash' }]);
+  const r = runShift({
+    servers: [one({ food: 1000, alcohol: 500, cardTips: 200 })],
+    support: [{ employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8, cashTips: 40 }],
+    pool: {},
+  }, withPool);
+  const bu = r.support[0];
+  assert.strictEqual(r.pool.cash, toCents(40), 'swept into the jar');
+  assert.strictEqual(bu.keptCash, 0, 'nothing kept back');
+  assert.strictEqual(bu.cashTotal, toCents(40), 'and it comes back as their share');
+});
+
+test('a trainee barred from every pool keeps the cash they were handed', () => {
+  // They were already excluded from FUNDING the pool. Excluded from both sides,
+  // the money simply disappeared out of every total.
+  const r = runShift({
+    servers: [one({ food: 1000, cardTips: 100 })],
+    support: [
+      { employeeId: 'T', name: 'Trainee', role: 'busser', hours: 4, cashTips: 25, tipEligible: false },
+      { employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8 },
+    ],
+    pool: { jar: 0 },
+  }, [{ type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+    { type: 'pool', source: 'jar', split: 'hours', among: 'all_support', payout: 'weekly_cash' }]);
+  const t = r.support.find((p) => p.employeeId === 'T');
+  assert.strictEqual(t.poolCash, 0, 'still out of the pool');
+  assert.strictEqual(t.cashTotal, toCents(25), 'but the cash is still theirs');
+  assert.strictEqual(r.pool.cash, 0, 'and it never diluted anyone else');
+});
+
+test('to-go card money is left alone when only the jar is pooled', () => {
+  const jarOnly = EVENING.concat([{ type: 'pool', source: 'jar', split: 'hours', among: ['busser'], payout: 'weekly_cash' }]);
+  const r = runShift({
+    servers: [one({ food: 1000, cardTips: 100 })],
+    support: [{ employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8, cashTips: 10, cardTips: 30 }],
+    pool: {},
+  }, jarOnly);
+  const bu = r.support[0];
+  assert.strictEqual(r.pool.cash, toCents(10), 'cash pooled');
+  assert.strictEqual(r.pool.togoCard, 0, 'no rule pools card, so nothing was taken');
+  assert.strictEqual(bu.keptCard, toCents(30), 'the card tips stay theirs');
+  assert.strictEqual(bu.cardTotal, bu.tipShare + toCents(30));
+});
+
+test('the books still balance with no pool rule', () => {
+  const r = runShift({
+    servers: [one({ employeeId: 'S1', food: 800, alcohol: 400, cardTips: 180 }),
+      one({ employeeId: 'S2', food: 600, alcohol: 300, cardTips: 140 })],
+    support: [{ employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8, cashTips: 40 },
+      { employeeId: 'BB', name: 'Barback', role: 'barback', hours: 6 }],
+    pool: {},
+  }, EVENING);
+  assert.ok(r.reconciliation.balanced, 'tips collected = kept + pots');
+  assert.strictEqual(r.orphanedPots.length, 0, 'and nothing is stranded');
+});
