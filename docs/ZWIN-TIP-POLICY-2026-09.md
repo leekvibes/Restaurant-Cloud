@@ -466,3 +466,103 @@ needs no sales timing.
 - Four money types kept visibly separate wherever a figure is shown.
 
 **No new table. No sales segments. No migration. No historical risk.**
+
+---
+
+## Part 9 — The build plan, for approval
+
+**Decided 2026-09-07: the PDF numbers are authoritative, and the time-based
+eligibility paragraph is being removed from the policy document.** That removes
+the whole time-segment build. What follows is the entire remaining scope.
+
+### The policy, as it will be entered
+
+**Day service**
+
+| Paid by | To | Rate | Base |
+|---|---|---|---|
+| Server | Busser | 2% | server total sales |
+| Server | Bartender | 9% | server alcohol sales |
+| Server | Barista | 1.5% | server coffee sales |
+| Bartender *or* Barista covering the bar | Busser | 1.5% | their own bar-guest sales |
+
+**Evening service**
+
+| Paid by | To | Rate | Base |
+|---|---|---|---|
+| Server | Busser | 2% | server total sales |
+| Server | Bartender | 9% | server alcohol sales |
+| Bartender | Barback | 3% | the bartender's own bar-guest sales |
+
+Kitchen: nothing, either service. No barista tip-out in the evening — there is
+no barista on it.
+
+### What the audit found
+
+**One engine, and everything reads it.** `runShift` is called from the shift
+sheet, the results/preview screen, the single-employee email preview, both send
+routes, the legacy `/tips` door, the support-tips report and the employee
+portal's earnings — all through `policyForShift(sh)`. *Measured: 13 call sites,
+zero independent calculations.* So the arithmetic change lands everywhere at
+once and there is no second copy to find. This is the single biggest reason the
+scope is small.
+
+**The one structural line.** `db.js:566` decides who pays and who receives with
+`if (row.role === 'server')`. Everything else follows from that string.
+
+### Files that change
+
+| File | Change |
+|---|---|
+| `src/engine.js` | `paidBy` on a rule; direct-service earners beyond `server`; somebody who both pays and receives |
+| `src/db.js` | `shiftInputs` stops keying on the literal `server` |
+| `src/email.js` | the four money types shown separately; a bartender's line has both sides |
+| `src/server.js` | the seven routes below, plus the policy page's help text |
+| `positions` (data) | bartender + barista → direct service; kitchen → non-tipped |
+| `policy_versions` (data) | one new version per service |
+
+### Pages that change visibly
+
+| Page | What changes |
+|---|---|
+| `/shifts/:id` — service entry | who owes what; a bartender/barista now has sales and tip-outs of their own |
+| `/shifts/:id/results` — preview & send | the four money types kept apart; per-rule rows |
+| `/shifts/:id/email/:id` — email preview | same |
+| staff email + manager receipt | a bartender's email shows what they received AND what they paid |
+| `/payroll/support-tips` | baristas and bartenders move out of "support tips" |
+| `/portal/earnings` and `/portal/earnings/:id` | an employee's own breakdown |
+| `/policy` | the rule editor's help text, which still describes the old model |
+
+### Order, and what ships when
+
+**Phase 1 — the calculation.** `paidBy`, direct-service earners, both policies
+entered, kitchen out. Verified by running every closed service through old and
+new code and diffing: byte-identical, or it does not ship. *This is what has to
+be live and rehearsed before the 11th.*
+
+**Phase 2 — the presentation.** Four money types separated on every screen and
+email; the bartender's two-sided line; the derivation shown next to each figure.
+Nothing calculates differently — this is what makes the numbers explicable.
+
+**Phase 3 — the manual controls.** Rule toggles and amount overrides on the
+service sheet, and the to-go pot allocation. After the 16th unless asked for
+sooner; the opening does not depend on them.
+
+### Three decisions still open
+
+**1. "Bar-guest sales" cannot be measured today.** A person has one sales row —
+food, coffee, alcohol — for the whole service. If a bartender rings only bar
+guests then their row IS their bar sales and nothing is needed. If a barista
+rings both counter coffee and bar guests, the policy's "only those bar-guest
+sales" cannot be honoured. The clean fix is **one nullable column**,
+`bar_sales_cents`, entered by whoever worked the bar and defaulting to their
+total when blank. One column, no new table.
+
+**2. The to-go / register pot is not in the signed policy.** It is real money
+that needs a home. Simplest now: it goes to the bartender. The allocation UI is
+Phase 3.
+
+**3. Overrides.** Four were proposed. The principle for all of them: **an
+override moves money, it never edits a number** — reducing the busser's share
+returns it to whoever paid it, so the books still balance and the receipt can
+still explain itself.
