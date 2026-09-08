@@ -1895,3 +1895,77 @@ test('a sent service will not take an adjustment', () => {
   assert.strictEqual(adjustmentsLocked({ status: 'emailed' }), true);
   assert.strictEqual(adjustmentsLocked({ status: 'open' }), false);
 });
+
+test('a settled service is not restated by changing a position kind', () => {
+  // THE INVARIANT THIS SYSTEM CANNOT BEND. A tip-out is calculated against the
+  // policy version pinned to the shift, so editing the rules never changes what
+  // somebody was already paid.
+  //
+  // Position `kind` is not versioned, and it used to decide who earned directly
+  // and who was in a pool — so making a bartender a direct earner and taking
+  // the kitchen out of the pools reached backwards through every closed
+  // service. Measured before it was caught: 69 already-sent services and
+  // $6,187.61 of pool money splitting differently from the emails that had gone
+  // out. A data change had walked straight round the protection.
+  //
+  // The classification is read from the pinned policy now. This asserts the
+  // signal that distinguishes the two models, because if that ever stops being
+  // true the restatement comes back silently.
+  const { policyForShift } = require('../src/policy');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'db.js'), 'utf8');
+  assert.match(src, /function newModel\(rules\)/, 'the model is decided from the rules');
+  assert.match(src, /isNew \? DIRECT_ROLES\.has\(row\.role\) : row\.role === 'server'/,
+    'and an old policy classifies people exactly as it always did');
+  assert.doesNotMatch(src, /const earnsDirect = kind === 'server'/,
+    'never from a position kind, which is global and reaches backwards');
+
+  // An old-shaped rule set names no payer and no pool roles; a new one does.
+  const oldish = [{ type: 'tipout', recipient: 'busser', percent: 13, base: 'remaining' },
+    { type: 'pool', source: 'jar', among: 'all_support' }];
+  const newish = [{ type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', paidBy: ['server'] }];
+  const isNew = (rules) => rules.some((r) => (r.type === 'tipout' && r.paidBy)
+    || (r.type === 'pool' && Array.isArray(r.among)));
+  assert.strictEqual(isNew(oldish), false, 'an old policy is recognised as old');
+  assert.strictEqual(isNew(newish), true, 'and a new one as new');
+  assert.ok(typeof policyForShift === 'function');
+});
+
+test('somebody barred from a pool does not have to pay into it', () => {
+  // A trainee is out of every pool so their hours cannot dilute it. Their cash
+  // was still being swept into the jar and handed to other people, with no way
+  // for them to get any of it back. Contributing to a pot you cannot draw from
+  // is not a rule anybody wrote; it was the absence of one.
+  const { runShift } = require('../src/engine');
+  const r = runShift({
+    servers: [{ employeeId: 1, name: 'S', role: 'server', hours: 6,
+      food: 1000, coffee: 0, alcohol: 0, cardTips: 200, cashTips: 0 }],
+    support: [
+      { employeeId: 2, name: 'Barista', role: 'barista', hours: 6, cashTips: 0, tipEligible: true },
+      { employeeId: 3, name: 'Trainee', role: 'training', hours: 6, cashTips: 5000, tipEligible: false },
+    ],
+    pool: { jar: 0, togoCard: 0 },
+  }, [{ type: 'pool', source: 'jar', split: 'hours', among: ['barista'], payout: 'weekly_cash' }]);
+  assert.strictEqual(r.pool.cash, 0, "the trainee's cash is not swept into the jar");
+  const barista = r.support.find((p) => p.role === 'barista');
+  assert.strictEqual((barista.cashTotal || 0), 0, 'so nobody is handed it');
+});
+
+test("a server's own cash is theirs, and never reaches a pool", () => {
+  // The reported symptom was cash submitted by servers being shared with
+  // bussers. It is not: a direct earner's cash is part of the tips they
+  // collected, they pay their tip-outs out of it, and the rest is theirs.
+  const { runShift } = require('../src/engine');
+  const r = runShift({
+    servers: [{ employeeId: 1, name: 'S', role: 'server', hours: 6,
+      // Dollars going in, cents coming out — the engine's boundary.
+      food: 1000, coffee: 0, alcohol: 0, cardTips: 200, cashTips: 100 }],
+    support: [{ employeeId: 2, name: 'Bu', role: 'busser', hours: 6 }],
+    pool: { jar: 0, togoCard: 0 },
+  }, [{ type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] }]);
+  assert.strictEqual(r.pool.cash, 0, 'the shared jar stays empty');
+  const bu = r.support.find((p) => p.role === 'busser');
+  assert.strictEqual(bu.cashTotal || 0, 0, 'the busser gets nothing from a pool');
+  assert.strictEqual(bu.tipShare, 2000, 'only the 2% tip-out, which is the policy');
+  assert.strictEqual(r.servers[0].totalTips, 30000, '$300 collected, $100 of it cash');
+  assert.strictEqual(r.servers[0].tipsKept, 28000, 'and the server keeps $280 of it');
+});

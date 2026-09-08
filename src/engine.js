@@ -262,8 +262,15 @@ function runShift(shift, rules) {
   // the same buckets, then get split by hours — nobody keeps their own.
   const pool = shift.pool || {};
   const legacyCash = pool.togoCash != null ? pool.togoCash : pool.togo;
-  const staffCash = support.reduce((a, p) => a + p.cashTips, 0);
-  const staffCard = support.reduce((a, p) => a + p.cardTips, 0);
+  // ONLY FROM PEOPLE WHO COULD ALSO RECEIVE.
+  //
+  // This summed every support row regardless of eligibility, so a trainee —
+  // explicitly out of every pool, precisely so their hours do not dilute it —
+  // had cash they were handed taken off them and given to somebody else, while
+  // being unable to get a penny back. Contributing to a pot you are barred from
+  // is not a rule anybody wrote down; it was the absence of one.
+  const staffCash = support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cashTips), 0);
+  const staffCard = support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cardTips), 0);
   const cash = toCents(pool.jar) + toCents(legacyCash) + staffCash;
   const togoCard = toCents(pool.togoCard) + staffCard;
   // Allocate each bucket SEPARATELY even when one rule covers both, so we can

@@ -538,8 +538,42 @@ const w = {
 // why they are not in here.
 const DIRECT_ALSO_RECEIVES = new Set(['bartender', 'barista']);
 
+// Roles that serve guests and keep what they are tipped — UNDER THE NEW MODEL.
+const DIRECT_ROLES = new Set(['server', 'bartender', 'barista']);
+
+/**
+ * WHICH MODEL DOES THIS SERVICE BELONG TO?
+ *
+ * Read from the policy PINNED TO THE SHIFT, never from today's settings, for
+ * exactly the reason the policy is pinned in the first place.
+ *
+ * This was decided by `positions.kind`, and position kind is not versioned —
+ * so making a bartender a direct earner and taking the kitchen out of the pools
+ * reached backwards through every service ever closed. Measured before it was
+ * caught: 69 already-sent services, $6,187.61 of pool money, splitting
+ * differently from the figures that had gone out in people's emails. The rule
+ * that a settled service cannot be restated is the one thing this system cannot
+ * bend, and a data change had walked straight round it.
+ *
+ * The new policies are recognisable without a migration or a new column: they
+ * are the only ones that name who pays a rule, or that name roles in a pool.
+ * An old service has neither and is computed exactly as it always was.
+ */
+function newModel(rules) {
+  if (!Array.isArray(rules)) return false;
+  return rules.some((r) => (r.type === 'tipout' && r.paidBy)
+    || (r.type === 'pool' && Array.isArray(r.among)));
+}
+
 function shiftInputs(shiftId) {
   const workRows = w.workForShift.all(shiftId);
+  // The shift's OWN policy decides how its people are classified. Lazily
+  // required: policy.js reads this module.
+  let isNew = false;
+  try {
+    const shRow = s.shiftById.get(shiftId);
+    isNew = newModel(require('./policy').policyForShift(shRow));
+  } catch { isNew = false; }
   const sales = new Map(w.salesForShift.all(shiftId).map((r) => [r.employee_id, r]));
   const servers = [];
   const support = [];
@@ -585,8 +619,8 @@ function shiftInputs(shiftId) {
     // their own tips are collected from them and their pot share is paid to
     // them, and the books balance because those are different pieces of money.
     const kind = kinds[row.role];
-    const earnsDirect = kind === 'server';
-    const canReceive = kind !== 'server' || DIRECT_ALSO_RECEIVES.has(row.role);
+    const earnsDirect = isNew ? DIRECT_ROLES.has(row.role) : row.role === 'server';
+    const canReceive = !earnsDirect || DIRECT_ALSO_RECEIVES.has(row.role);
     if (earnsDirect) {
       const sr = sales.get(row.employee_id) || {};
       servers.push({
