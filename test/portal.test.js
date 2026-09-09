@@ -171,11 +171,17 @@ test('the way in reads the same whoever opens it', async () => {
 });
 
 test('a server is asked for sales, a barista is not', async () => {
-  // 2F: the sales categories feed tip POOLS, and the engine reads them from
-  // server rows only (shiftInputs branches on role === 'server'). A barista's
-  // sales columns are never read by any calculation, so asking for them
-  // collects a number that goes nowhere. The fields are absent from the HTML
-  // as sent — not hidden by a script a slow phone has yet to run.
+  // The sales categories are read from DIRECT EARNERS, and which roles those
+  // are is now the shift's own policy's answer, not a literal string. Under
+  // these fixtures' policy a barista is support, so their sales columns are
+  // never read and asking for them collects a number that goes nowhere.
+  //
+  // Under the Palm policy a barista rings the counter and is charged 1.5% of
+  // it, so there they ARE asked — see test/tips.test.js, "a barista is asked
+  // for their counter sales". This test holds the other half: the question
+  // does not appear where nothing reads the answer, including when the service
+  // is not yet known. The fields are absent from the HTML as sent — not hidden
+  // by a script a slow phone has yet to run.
   const server = await tipForm(await signIn('5555'));      // one job, and it is server
   const barista = await tipForm(await signIn('3333'));
   for (const f of ['st-food', 'st-coffee', 'st-alcohol']) {

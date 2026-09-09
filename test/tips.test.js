@@ -2006,6 +2006,16 @@ function serviceOn(date, daypart, rules, note, who, role) {
   return id;
 }
 
+/** A barista of our own — Tess holds server + bartender, not the counter. */
+function baristaPin() {
+  const w = new Database(DB);
+  if (!w.prepare("SELECT 1 FROM employees WHERE name = 'Cleo Barista'").get()) {
+    w.prepare("INSERT INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Cleo Barista','barista',1200,1,'2211')").run();
+  }
+  w.close();
+  return '2211';
+}
+
 /** The field labels a signed-in person is shown for one service. */
 async function labelsFor(pin, shiftId, position) {
   const start = await form('/tips/start', { pin });
@@ -2034,14 +2044,51 @@ test('and is NOT asked on a policy that never looks at them', async () => {
   assert.ok(labels.some((l) => /Card tips/.test(l)), 'but they still hand tips in');
 });
 
-test('a barista is never asked for sales, on either policy', async () => {
-  // Deliberate: a barista keeps their tips and the counter is not a second bar.
-  const shNew = serviceOn('2026-10-04', 'cafe', NEW_SHAPE, 'new shape', 'Tess Blake', 'barista');
-  const shOld = serviceOn('2026-10-05', 'cafe', OLD_SHAPE, 'old shape', 'Tess Blake', 'barista');
-  for (const sh of [shNew, shOld]) {
-    const labels = await labelsFor('1470', sh, 'barista');
-    assert.ok(!labels.some((l) => /sales/i.test(l)), `no sales question on service ${sh}`);
-  }
+test('a barista is asked for their counter sales, named as the counter', async () => {
+  // The day policy charges the barista 1.5% of their OWN sales to the busser.
+  // Without this box that rule could never charge one — it was a rule about
+  // nobody. Named for the till so "coffee sales" does not read as the whole
+  // cafe's coffee.
+  const DAY = NEW_SHAPE.concat([
+    { type: 'tipout', recipient: 'busser', percent: 1.5, base: 'total_sales', split: 'hours', paidBy: ['bartender', 'barista'] },
+  ]);
+  const pin = baristaPin();
+  const sh = serviceOn('2026-10-04', 'cafe', DAY, 'new shape', 'Cleo Barista', 'barista');
+  const labels = await labelsFor(pin, sh, 'barista');
+  assert.ok(labels.some((l) => /Counter food sales/.test(l)), 'food, named as the counter');
+  assert.ok(labels.some((l) => /Coffee/.test(l)), 'and the coffee');
+  assert.ok(!labels.some((l) => /Bar food/.test(l)), 'not the bartender wording');
+});
+
+test('a barista is NOT asked on a policy that never looks at their sales', async () => {
+  const pin = baristaPin();
+  const sh = serviceOn('2026-10-05', 'cafe', OLD_SHAPE, 'old shape', 'Cleo Barista', 'barista');
+  const labels = await labelsFor(pin, sh, 'barista');
+  assert.ok(!labels.some((l) => /sales/i.test(l)), 'no sales question at all');
+  assert.ok(labels.some((l) => /Card tips/.test(l)), 'but they still hand tips in');
+});
+
+test('the sales a bartender and a barista hand in are the ones the rules charge', async () => {
+  // The whole point of the two boxes above: a rule that says "1.5% of their own
+  // sales" has to have a number to take 1.5% OF, and until now only a manager
+  // could put one there.
+  const { runShift } = require('../src/engine');
+  const DAY = [
+    { type: 'tipout', recipient: 'busser', percent: 1.5, base: 'total_sales', split: 'hours', paidBy: ['bartender', 'barista'] },
+  ];
+  const r = runShift({
+    servers: [
+      { employeeId: 'BT', name: 'Bar', role: 'bartender', hours: 6, food: 100, coffee: 0, alcohol: 900, cardTips: 0, cashTips: 0 },
+      { employeeId: 'BA', name: 'Counter', role: 'barista', hours: 6, food: 200, coffee: 400, alcohol: 0, cardTips: 0, cashTips: 0 },
+    ],
+    support: [{ employeeId: 'BU', name: 'Busser', role: 'busser', hours: 6 }],
+    pool: {},
+  }, DAY);
+  // 1.5% of $1000 = $15.00, and 1.5% of $600 = $9.00.
+  assert.strictEqual(r.servers.find((p) => p.employeeId === 'BT').tipouts.busser, 1500);
+  assert.strictEqual(r.servers.find((p) => p.employeeId === 'BA').tipouts.busser, 900);
+  assert.strictEqual(r.pots.busser, 2400, 'and the busser pot is the sum of both');
+  assert.ok(r.reconciliation.balanced);
 });
 
 test('what a bartender submits lands where the engine reads it', async () => {

@@ -1966,6 +1966,37 @@ function submissionsPanel(shiftId) {
     <div class="subs">${items}</div>`;
 }
 
+/**
+ * WHO THE POLICY CAN ACTUALLY PAY.
+ *
+ * This listed everybody who was not explicitly barred, so a kitchen line sat in
+ * the tip-out table at $0.00 — under a heading that says "tipped out to", on a
+ * policy that gives the kitchen nothing. A row of zeroes is not information; it
+ * is the page contradicting the policy, and it was read as the kitchen being
+ * tipped out again.
+ *
+ * Named in a rule, or holding money. Nothing else belongs in that table.
+ *
+ * ONE FUNCTION, because there are two pages. It was fixed on the shift sheet
+ * and not on Preview & send, so the same service read "Tipped out to · 5" on
+ * one screen and "· 8" on the next. Two copies of a rule is how that happens.
+ */
+function tippedOutTo(rules, support) {
+  const paid = new Set();
+  for (const rule of (rules || [])) {
+    if (rule.type === 'tipout' && rule.recipient) paid.add(rule.recipient);
+    if (rule.type === 'pool') {
+      const among = rule.among;
+      if (Array.isArray(among)) among.forEach((x) => paid.add(x));
+      else if (among && among !== 'all_support' && among !== 'foh') paid.add(among);
+      else (support || []).forEach((p) => paid.add(p.role));   // an old open-ended pool
+    }
+  }
+  return (support || []).filter((p) => p.tipEligible !== false
+    && (paid.has(p.role)
+      || (p.tipShare || 0) + (p.cashTotal || 0) + (p.poolCard || 0) > 0));
+}
+
 app.get('/shifts/:id', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
@@ -2121,19 +2152,7 @@ app.get('/shifts/:id', (req, res) => {
   //
   // Named in a rule, or holding money. Nothing else belongs in this table.
   const rulesNow = policyForShift(sh) || [];
-  const paidRoles = new Set();
-  for (const rule of rulesNow) {
-    if (rule.type === 'tipout' && rule.recipient) paidRoles.add(rule.recipient);
-    if (rule.type === 'pool') {
-      const among = rule.among;
-      if (Array.isArray(among)) among.forEach((x) => paidRoles.add(x));
-      else if (among && among !== 'all_support' && among !== 'foh') paidRoles.add(among);
-      else r.support.forEach((p) => paidRoles.add(p.role));   // an old open-ended pool
-    }
-  }
-  const eligible = r.support.filter((p) => p.tipEligible !== false
-    && (paidRoles.has(p.role)
-      || (p.tipShare || 0) + (p.cashTotal || 0) + (p.poolCard || 0) > 0));
+  const eligible = tippedOutTo(rulesNow, r.support);
   // Does the policy pool anything at all? The evening policy does not -- there
   // is no cash tip jar at night, so a box asking the manager to count one is an
   // instruction to do something the policy has no way to pay out. Money already
@@ -2904,7 +2923,11 @@ app.get('/shifts/:id/results', (req, res) => {
     </article>`).join('');
 
   const poolLbl = { weekly_cash: 'Pool (weekly cash)', paycheck: 'Pool (paycheck)', nightly_cash: 'Pool (cash tonight)' };
-  const supportCards = r.support.map((p) => {
+  // The same filter the shift sheet uses, from the same function — a kitchen
+  // line at $0.00 under "Tipped out to" says the policy pays them and it does
+  // not. Anyone holding money still appears, whatever their role.
+  const paidOut = tippedOutTo(policyForShift(sh), r.support);
+  const supportCards = paidOut.map((p) => {
     const poolLines = Object.keys(p.poolShares || {}).filter((k) => p.poolShares[k])
       .map((k) => `<div><dt>${poolLbl[k] || 'Pool'}</dt><dd>${money(p.poolShares[k])}</dd></div>`).join('');
     return `
@@ -2992,7 +3015,7 @@ app.get('/shifts/:id/results', (req, res) => {
       <div class="bs-sec-h"><span class="bs-kicker">Who rang the sales · ${r.servers.length}</span></div>
       <div class="bs-pays">${serverCards || '<p class="bs-clear">Nobody on this shift.</p>'}</div>
 
-      <div class="bs-sec-h"><span class="bs-kicker">Tipped out to · ${r.support.length}</span></div>
+      <div class="bs-sec-h"><span class="bs-kicker">Tipped out to · ${paidOut.length}</span></div>
       <div class="bs-pays">${supportCards || '<p class="bs-clear">Nobody on this shift.</p>'}</div>
 
       <div class="bs-sendbar">
@@ -4620,18 +4643,18 @@ function parseMoney(raw) {
  */
 function filingCapabilities(slug) {
   const isServer = slug === 'server';
-  // A BARTENDER RINGS THEIR OWN BAR, so they hand their own sales in.
+  // WHOEVER RINGS THEIR OWN TILL HANDS THEIR OWN SALES IN.
   //
-  // Under the new policy the bar is a till of its own: the bartender's sales
-  // are what the barback's 3% and the busser's cut come out of. Until now
-  // nobody but a manager could enter them, so the one person who knows the
-  // number was the one person with no way to give it — and the tip-out they
-  // owe could not be worked out until somebody typed it in for them.
+  // Under the new policy the bar and the counter are tills of their own: the
+  // bartender's sales are what the barback's 3% comes out of, and the day
+  // policy charges the bartender AND the barista 1.5% of their own sales to
+  // the busser. Until now nobody but a manager could enter either figure, so
+  // the people who knew the number were the only ones with no way to give it —
+  // and a rule that charges a barista could never actually charge one.
   //
-  // Deliberately NOT extended to the barista. A barista keeps their tips and
-  // the counter is not a second bar; asking them for sales would collect a
-  // figure and then have to decide what it meant.
-  const ringsOwn = isServer || slug === 'bartender';
+  // The list is written out rather than derived, because it is a decision
+  // about how this restaurant runs and not something to infer from a slug.
+  const ringsOwn = isServer || slug === 'bartender' || slug === 'barista';
   return {
     position: slug,
     reports_food_sales: ringsOwn,
@@ -4697,10 +4720,13 @@ const fieldsFor = (caps) => TIP_FIELDS.filter((f) => caps[f.cap]);
  * engine makes. Nothing here changes where a penny goes; it changes what the
  * page says about it, which was the part that was wrong.
  */
-const BAR_LABEL = {
-  food: 'Bar food sales',
-  coffee: 'Bar non-alcoholic sales',
-  alcohol: 'Bar alcohol sales',
+// The same three columns, named for the till they were rung on. A bartender
+// asked for "Coffee & beverage sales" reasonably reads that as the whole café.
+const TILL_LABEL = {
+  bartender: { food: 'Bar food sales', coffee: 'Bar non-alcoholic sales', alcohol: 'Bar alcohol sales',
+    hint: 'What you rang at the bar on this shift. The barback and busser percentages come off this.' },
+  barista: { food: 'Counter food sales', coffee: 'Coffee &amp; drink sales', alcohol: 'Alcohol you rang',
+    hint: 'What you rang at the counter on this shift. The busser percentage comes off this.' },
 };
 
 function fieldsForShift(caps, shiftId, slug) {
@@ -4719,21 +4745,25 @@ function fieldsForShift(caps, shiftId, slug) {
     }
   } catch { pools = true; keeps = false; known = false; }
 
-  // A BARTENDER IS ONLY ASKED FOR SALES WHERE THEIR SALES ARE READ.
+  // SALES ARE ONLY ASKED FOR WHERE SALES ARE READ.
   //
-  // Under the older policies a bartender is support, and the engine never
-  // looks at a support row's sales columns — so the form would be collecting
-  // three numbers that no calculation would ever use, which is exactly the
-  // trap filingCapabilities' own comment warns about. The question appears
-  // when, and only when, the service is running a policy that reads it. That
-  // also means this whole feature stays asleep until the new policy is turned
-  // on, with nothing extra to remember.
-  if (who === 'bartender') {
-    if (known && !keeps) fields = fields.filter((f) => f.group !== 'sales');
+  // Under the older policies a bartender and a barista are support, and the
+  // engine never looks at a support row's sales columns — so the form would be
+  // collecting three numbers that no calculation would ever use, which is
+  // exactly the trap filingCapabilities' own comment warns about. The question
+  // appears when, and only when, the service is running a policy that reads
+  // it. That also means this stays asleep until the new policy is turned on,
+  // with nothing extra to remember.
+  // Asked only when we can SEE that this service reads them. Not knowing which
+  // service it is has to mean not asking: the alternative defaults to
+  // collecting three figures on the chance they are wanted, which is the exact
+  // habit this is here to break.
+  if (TILL_LABEL[who]) {
+    if (!(known && keeps)) fields = fields.filter((f) => f.group !== 'sales');
     else fields = fields.map((f) => (f.group !== 'sales' ? f : {
       ...f,
-      label: BAR_LABEL[f.key] || f.label,
-      hint: 'What you rang at the bar on this shift. The barback and busser percentages come off this.',
+      label: TILL_LABEL[who][f.key] || f.label,
+      hint: TILL_LABEL[who].hint,
     }));
   }
 

@@ -122,3 +122,107 @@ test('the engine test for the new shape agrees with the migration guard', () => 
 });
 
 test.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ } });
+
+// ---------------------------------------------------------------------------
+// NO MONEY MOVES BY "SUPPORT" ANY MORE.
+//
+// The old policies pooled the jar across everybody classified as support, and
+// a position's `kind` decided who that was. Under the Palm policy every penny
+// is a named percentage from a named payer to a named recipient, or a pool that
+// names its roles. These hold that line: not that the code CAN express it, but
+// that the policy actually in use does not.
+// ---------------------------------------------------------------------------
+
+const PALM_DAY = [
+  { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'barista', percent: 1.5, base: 'coffee', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'busser', percent: 1.5, base: 'total_sales', split: 'hours', paidBy: ['bartender', 'barista'] },
+  { type: 'pool', source: 'togo_card', split: 'hours', among: ['barista', 'bartender'], payout: 'paycheck' },
+  { type: 'pool', source: 'jar', split: 'hours', among: ['barista'], payout: 'weekly_cash' },
+];
+const PALM_EVENING = [
+  { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+];
+
+const splitsAcrossSupport = (rules) => rules.filter((r) => r.type === 'pool'
+  && !Array.isArray(r.among)
+  && (r.among === 'all_support' || r.among === 'foh' || r.among == null)).length;
+
+test('neither Palm policy splits anything across support as a group', () => {
+  assert.strictEqual(splitsAcrossSupport(PALM_DAY), 0, 'day');
+  assert.strictEqual(splitsAcrossSupport(PALM_EVENING), 0, 'evening');
+  // And every recipient is a role somebody named on purpose.
+  for (const rules of [PALM_DAY, PALM_EVENING]) {
+    for (const r of rules) {
+      if (r.type === 'tipout') assert.ok(r.recipient, 'a tip-out names who gets it');
+      else assert.ok(Array.isArray(r.among) && r.among.length, 'a pool names its roles');
+    }
+  }
+});
+
+test('nobody outside the named roles can receive a penny', () => {
+  const { runShift } = require('../src/engine');
+  const r = runShift({
+    servers: [
+      { employeeId: 'S', name: 'Server', role: 'server', hours: 8, food: 1000, coffee: 100, alcohol: 500, cardTips: 300, cashTips: 0 },
+      { employeeId: 'BT', name: 'Bar', role: 'bartender', hours: 8, food: 100, coffee: 0, alcohol: 800, cardTips: 200, cashTips: 0 },
+    ],
+    // A kitchen line and a host on the clock, in a policy that names neither.
+    support: [
+      { employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8 },
+      { employeeId: 'BB', name: 'Barback', role: 'barback', hours: 8 },
+      { employeeId: 'K', name: 'Cook', role: 'kitchen', hours: 8 },
+      { employeeId: 'H', name: 'Host', role: 'host', hours: 8 },
+    ],
+    pool: { jar: 100, togoCard: 50 },
+  }, PALM_EVENING);
+
+  const got = (id) => r.support.find((p) => p.employeeId === id);
+  for (const id of ['K', 'H']) {
+    const p = got(id);
+    assert.strictEqual(p.tipShare, 0, `${p.role} gets no tip-out`);
+    assert.strictEqual(p.poolCash, 0, `${p.role} gets no cash pool`);
+    assert.strictEqual(p.poolCard, 0, `${p.role} gets no card pool`);
+    assert.strictEqual(p.cardTotal + p.cashTotal, 0, `${p.role} gets nothing at all`);
+  }
+  assert.ok(got('BU').tipShare > 0, 'the busser does');
+  assert.ok(got('BB').tipShare > 0, 'and the barback does');
+  assert.ok(r.reconciliation.balanced, 'and the books balance');
+});
+
+test('a kitchen line on the clock does not dilute anybody else', () => {
+  const { runShift } = require('../src/engine');
+  const shift = (support) => runShift({
+    servers: [{ employeeId: 'S', name: 'S', role: 'server', hours: 8, food: 1000, coffee: 0, alcohol: 0, cardTips: 200, cashTips: 0 }],
+    support, pool: {},
+  }, PALM_EVENING);
+  const alone = shift([{ employeeId: 'BU', name: 'B', role: 'busser', hours: 8 }]);
+  const crowded = shift([
+    { employeeId: 'BU', name: 'B', role: 'busser', hours: 8 },
+    { employeeId: 'K', name: 'K', role: 'kitchen', hours: 8 },
+    { employeeId: 'H', name: 'H', role: 'host', hours: 8 },
+  ]);
+  assert.strictEqual(
+    alone.support.find((p) => p.employeeId === 'BU').tipShare,
+    crowded.support.find((p) => p.employeeId === 'BU').tipShare,
+    'the busser gets the same either way — a pot is split by ROLE, not by whoever is standing there');
+});
+
+test('the day policy charges the bartender and the barista their own 1.5%', () => {
+  // The rule that could not fire until they had somewhere to enter sales.
+  const { runShift } = require('../src/engine');
+  const r = runShift({
+    servers: [
+      { employeeId: 'BT', name: 'Bar', role: 'bartender', hours: 6, food: 100, coffee: 0, alcohol: 900, cardTips: 0, cashTips: 0 },
+      { employeeId: 'BA', name: 'Counter', role: 'barista', hours: 6, food: 200, coffee: 400, alcohol: 0, cardTips: 0, cashTips: 0 },
+    ],
+    support: [{ employeeId: 'BU', name: 'Busser', role: 'busser', hours: 6 }],
+    pool: {},
+  }, PALM_DAY.filter((x) => x.type === 'tipout'));
+  assert.strictEqual(r.servers.find((p) => p.employeeId === 'BT').tipouts.busser, 1500, '1.5% of $1000');
+  assert.strictEqual(r.servers.find((p) => p.employeeId === 'BA').tipouts.busser, 900, '1.5% of $600');
+  assert.strictEqual(r.pots.busser, 2400);
+});

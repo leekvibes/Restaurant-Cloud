@@ -629,7 +629,11 @@ function shiftInputs(shiftId) {
     // earns and pays, once as somebody who is paid. The engine reconciles it:
     // their own tips are collected from them and their pot share is paid to
     // them, and the books balance because those are different pieces of money.
-    const kind = kinds[row.role];
+    // `positions.kind` is deliberately NOT consulted here any more. It used to
+    // be the whole classification, and because kind is not versioned, changing
+    // one reached backwards through every service ever settled. The shift's own
+    // pinned policy decides now; the only thing kind still says is whether
+    // somebody is in a pool at all (below), which is a fact about the job.
     const earnsDirect = isNew ? DIRECT_ROLES.has(row.role) : row.role === 'server';
     const canReceive = !earnsDirect || DIRECT_ALSO_RECEIVES.has(row.role);
     if (earnsDirect) {
