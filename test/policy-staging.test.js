@@ -226,3 +226,57 @@ test('the day policy charges the bartender and the barista their own 1.5%', () =
   assert.strictEqual(r.servers.find((p) => p.employeeId === 'BA').tipouts.busser, 900, '1.5% of $600');
   assert.strictEqual(r.pots.busser, 2400);
 });
+
+// ---------------------------------------------------------------------------
+// A SERVICE ALREADY OPEN WHEN YOU FLIP THE SWITCH.
+//
+// A service locks onto its policy the first time anything touches it — a
+// clock-in, a report, opening its page. So one opened this morning and
+// switched this afternoon keeps this morning's rules, and tonight quietly
+// calculates the old way. Right for anything settled; surprising for tonight.
+// ---------------------------------------------------------------------------
+
+test('an open service keeps the policy it was already stamped with', () => {
+  const live = P.currentForDaypart('dinner');
+  const open = mkShift('2026-11-01', 'dinner', 'open');
+  P.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(open));
+  const stampedWith = db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(open).p;
+  assert.strictEqual(stampedWith, live.id);
+
+  const draft = P.stageRules('dinner', NEW.concat([
+    { type: 'tipout', recipient: 'barista', percent: 1, base: 'coffee', split: 'hours', paidBy: ['server'] },
+  ]), 'later');
+  P.activateStaged(draft.id);
+  assert.strictEqual(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(open).p, stampedWith,
+    'still on the earlier one — which is exactly what has to be visible somewhere');
+});
+
+test('moving open services forward never reaches one that was sent', () => {
+  const live = P.currentForDaypart('dinner');
+  const sent = mkShift('2026-11-02', 'dinner', 'emailed');
+  const open = mkShift('2026-11-03', 'dinner', 'open');
+  // Both stamped with something older than what is live now.
+  db.prepare('UPDATE shifts SET policy_id = 1 WHERE id IN (?, ?)').run(sent, open);
+
+  // The restamp, exactly as the route runs it.
+  const n = db.prepare(`UPDATE shifts SET policy_id = @id
+     WHERE daypart = @dp AND status = 'open' AND policy_id IS NOT NULL AND policy_id <> @id`)
+    .run({ id: live.id, dp: 'dinner' }).changes;
+
+  assert.ok(n >= 1, 'it moved something');
+  assert.strictEqual(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(open).p, live.id,
+    'the open one moved');
+  assert.strictEqual(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(sent).p, 1,
+    'the sent one did not, and cannot — that money went out in somebody\'s email');
+});
+
+test('moving one service type leaves the other where it is', () => {
+  const cafeShift = mkShift('2026-11-04', 'cafe', 'open');
+  db.prepare('UPDATE shifts SET policy_id = 1 WHERE id = ?').run(cafeShift);
+  const live = P.currentForDaypart('dinner');
+  db.prepare(`UPDATE shifts SET policy_id = @id
+     WHERE daypart = 'dinner' AND status = 'open' AND policy_id IS NOT NULL AND policy_id <> @id`)
+    .run({ id: live.id });
+  assert.strictEqual(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(cafeShift).p, 1,
+    'Day Service untouched');
+});

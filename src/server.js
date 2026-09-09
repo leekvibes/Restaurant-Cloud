@@ -13387,27 +13387,48 @@ const roleWord = (x) => RLBL[x] || posName(x) || x;
  * server's total sales" under a rule the servers do not pay is the page
  * describing a policy nobody wrote.
  */
-function payerWord(r) {
-  if (r.from) return `the ${roleWord(r.from).toLowerCase()} pot`;
+/**
+ * The policy, said the way the policy document says it.
+ *
+ * This read "Busser gets 2% of each server's total sales" — recipient first,
+ * which is backwards from how anybody states a tip-out. The signed policy says
+ * "Servers tip out 2% of total sales to Bussers", and so does everyone who
+ * works here. Reading it back in a different order than it was written is how
+ * somebody checks it, nods, and misses that it says something else.
+ *
+ * Who pays is also no longer always the servers — the barback's 3% comes out
+ * of the bar — so the payer is a real part of the sentence rather than an
+ * assumption baked into the wording.
+ */
+const plural = (x) => {
+  const w = roleWord(x);
+  return /s$/i.test(w) ? w : w + 's';
+};
+
+function payerPhrase(r) {
+  if (r.from) return `The ${roleWord(r.from).toLowerCase()} pot pays`;
   const who = r.paidBy ? (Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy]) : ['server'];
-  const names = who.map((x) => `each ${roleWord(x).toLowerCase()}`);
-  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  const names = who.map((x) => plural(x).toLowerCase());
+  const joined = names.length === 1 ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  // Capitalised at the start of the sentence, and only there.
+  return `${joined.charAt(0).toUpperCase()}${joined.slice(1)} tip out`;
 }
 
 function describeRules(rules) {
-  const items = ['Servers keep their own tips.'];
+  const items = ['Servers keep the tips their own guests leave them.'];
   for (const r of rules) {
     if (r.type === 'tipout') {
       const base = BASE[r.base] || r.base;
-      const src = r.from
-        ? `<b>${r.percent}%</b> of ${base}, out of ${payerWord(r)}`
-        : `<b>${r.percent}%</b> of ${payerWord(r)}'s ${base}`;
-      items.push(`<b>${roleWord(r.recipient)}</b> gets ${src}, split <b>${SLBL[r.split] || r.split}</b>.`);
+      const own = r.from ? '' : ' of their own';
+      items.push(`${payerPhrase(r)} <b>${r.percent}%</b>${own} ${base} to the <b>${roleWord(r.recipient).toLowerCase()}</b>`
+        + `, split <b>${SLBL[r.split] || r.split}</b>.`);
     } else {
       const among = Array.isArray(r.among)
-        ? r.among.map((x) => roleWord(x)).join(' + ')
+        ? r.among.map((x) => plural(x).toLowerCase()).join(' and the ')
         : (AMG[r.among] || r.among);
-      items.push(`<b>${SRC[r.source] || r.source}</b> &mdash; pooled, split <b>${SLBL[r.split] || r.split}</b> among <b>${among}</b>, paid <b>${PAY[r.payout] || r.payout}</b>.`);
+      items.push(`<b>${SRC[r.source] || r.source}</b> &mdash; shared by the <b>${among}</b>, split <b>${SLBL[r.split] || r.split}</b>`
+        + `, paid <b>${PAY[r.payout] || r.payout}</b>.`);
     }
   }
   return items;
@@ -14452,6 +14473,46 @@ app.get('/policy', (req, res) => {
   // it. This card is the second decision, taken on purpose, on one service.
   const draft = stagedForDaypart(daypart);
   const otherDrafts = DAYPARTS.filter((d) => d !== daypart && stagedForDaypart(d));
+  // --- services already open, still on the policy before this one ----------
+  //
+  // A service is stamped the FIRST time anything touches it — a manager
+  // opening the page, somebody clocking in, a staff submission. So a service
+  // opened this morning and turned on this afternoon keeps this morning's
+  // policy, and tonight quietly calculates the old way. That is right for
+  // anything settled and surprising for tonight.
+  //
+  // Named rather than fixed silently: moving a service changes what people
+  // are paid for a night some of them have already submitted against, so it
+  // is a decision with the list in front of you. Anything sent is not offered
+  // at all — that money has gone out.
+  const stragglers = cur ? db.prepare(`SELECT sh.id, sh.date, sh.policy_id,
+      (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id) AS people,
+      (SELECT COUNT(*) FROM server_sales v WHERE v.shift_id = sh.id) AS entered
+    FROM shifts sh
+    WHERE sh.daypart = ? AND sh.status = 'open'
+      AND sh.policy_id IS NOT NULL AND sh.policy_id <> ?
+    ORDER BY sh.date DESC`).all(daypart, cur.id) : [];
+  const strandedCard = stragglers.length ? `
+    <div class="card pol-stale">
+      <h2>${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'}
+        still on an earlier policy</h2>
+      <p class="pol-stale-why">A service locks onto a policy the first time anything touches it &mdash;
+        somebody clocking in, a report coming in, or you opening its page. These were touched before the
+        current policy started, so they are still worked out the old way.</p>
+      <ul class="pol-stale-list">
+        ${stragglers.map((x) => `<li><a href="/shifts/${x.id}">${esc(niceDate(x.date))}</a>
+          <i>${x.people} on shift${x.entered ? `, ${x.entered} already reported` : ', nothing reported yet'}</i></li>`).join('')}
+      </ul>
+      ${canWrite(req) ? `<form method="post" action="/policy/restamp" style="margin:0"
+        onsubmit="return confirm('Move ${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'} onto the current policy?\n\nAnything already sent is not touched. These are still open, so nobody has been paid from them yet \u2014 but if people have already reported, their tip-out will be worked out differently from here.')">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="daypart" value="${esc(daypart)}">
+        <button class="btn" type="submit">Move ${stragglers.length === 1 ? 'it' : 'them'} onto the current policy</button>
+      </form>` : ''}
+      <p class="pol-stale-safe">Services already sent are never listed here and cannot be moved &mdash;
+        that money has gone out.</p>
+    </div>` : '';
+
   const draftCard = draft ? `
     <div class="card pol-draft">
       <div class="pol-draft-h">
@@ -14496,6 +14557,7 @@ app.get('/policy', (req, res) => {
     <div class="tabs-row">${tabs}</div>
     ${draftCard}
     ${elsewhere}
+    ${strandedCard}
 
     <div id="view-read">
       <div class="card summary-card">
@@ -14555,6 +14617,28 @@ app.post('/policy/activate', (req, res) => {
   }
   res.redirect(`/policy?daypart=${live.daypart}&msg=` + encodeURIComponent(
     `${dp(live.daypart)} is now on the new policy. Services closed before now keep the policy they were closed under.`));
+});
+
+/**
+ * Move services that are still OPEN onto the policy in force now.
+ *
+ * Scoped three ways and every one of them matters: one service type, status
+ * open only, and only where the stamp differs. A sent service is not reachable
+ * from here by any input — those figures went out in somebody's email and the
+ * one rule this system does not bend is that they stay as they were sent.
+ */
+app.post('/policy/restamp', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  if (!daypart) return res.redirect('/policy?err=1&msg=' + encodeURIComponent('Which service?'));
+  const cur = currentForDaypart(daypart);
+  if (!cur) return res.redirect(`/policy?daypart=${daypart}&err=1&msg=` + encodeURIComponent('No policy in force.'));
+  const n = db.prepare(`UPDATE shifts SET policy_id = @id
+     WHERE daypart = @dp AND status = 'open' AND policy_id IS NOT NULL AND policy_id <> @id`)
+    .run({ id: cur.id, dp: daypart }).changes;
+  res.redirect(`/policy?daypart=${daypart}&msg=` + encodeURIComponent(
+    n ? `${n} open ${dp(daypart)}${n === 1 ? '' : 's'} moved onto the current policy. Nothing already sent was touched.`
+      : 'Nothing to move.'));
 });
 
 app.post('/policy/discard', (req, res) => {

@@ -2649,3 +2649,14 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .pol-draft-f { flex-direction: column; align-items: stretch; gap: 10px; }
   .pol-draft-f .btn { width: 100%; }
 }
+
+/* A service locks onto its policy the first time anything touches it, so one
+   opened this morning and switched this afternoon keeps this morning's rules.
+   Named rather than fixed silently — moving it changes what people are paid. */
+.pol-stale { border-left: 4px solid var(--muted); }
+.pol-stale h2 { margin: 0 0 4px; font-size: 15.5px; }
+.pol-stale-why { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.55; }
+.pol-stale-list { margin: 0 0 14px; padding: 0; list-style: none; }
+.pol-stale-list li { padding: 7px 0; border-top: 1px solid var(--line); font-size: 13.5px; }
+.pol-stale-list li i { font-style: normal; color: var(--muted); margin-left: 8px; font-size: 12.5px; }
+.pol-stale-safe { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
