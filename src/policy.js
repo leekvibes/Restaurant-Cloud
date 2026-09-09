@@ -18,19 +18,40 @@ CREATE TABLE IF NOT EXISTS policy_versions (
 );
 `);
 
+// STAGED: WRITTEN DOWN, NOT YET IN FORCE.
+//
+// A policy change and the day it starts applying are two different decisions,
+// and until now saving one made the other. That is fine for a percentage
+// tweak and wrong for a whole new policy: the rules have to be entered,
+// checked against a real service and slept on before a single shift is priced
+// by them. Without somewhere to put a policy that is finished but not live,
+// the only options were to keep it out of the system entirely or to make it
+// binding the moment it was typed.
+//
+// A staged version is a full version in every respect except that
+// currentForDaypart cannot see it, so no new shift can lock onto it. Making it
+// live is one deliberate act, on one service, dated when it happens.
+const polCols = db.prepare('PRAGMA table_info(policy_versions)').all().map((c) => c.name);
+if (!polCols.includes('staged')) {
+  db.exec('ALTER TABLE policy_versions ADD COLUMN staged INTEGER NOT NULL DEFAULT 0');
+}
+
 const Q = {
-  latest: db.prepare('SELECT * FROM policy_versions WHERE daypart = ? ORDER BY effective_from DESC, id DESC LIMIT 1'),
+  latest: db.prepare('SELECT * FROM policy_versions WHERE daypart = ? AND staged = 0 ORDER BY effective_from DESC, id DESC LIMIT 1'),
+  staged: db.prepare('SELECT * FROM policy_versions WHERE daypart = ? AND staged = 1 ORDER BY id DESC LIMIT 1'),
   byId: db.prepare('SELECT * FROM policy_versions WHERE id = ?'),
-  history: db.prepare('SELECT * FROM policy_versions WHERE daypart = ? ORDER BY effective_from DESC, id DESC'),
-  insert: db.prepare('INSERT INTO policy_versions (daypart, rules_json, note) VALUES (@daypart, @rules_json, @note)'),
+  history: db.prepare('SELECT * FROM policy_versions WHERE daypart = ? AND staged = 0 ORDER BY effective_from DESC, id DESC'),
+  insert: db.prepare('INSERT INTO policy_versions (daypart, rules_json, note, staged) VALUES (@daypart, @rules_json, @note, @staged)'),
   count: db.prepare('SELECT COUNT(*) n FROM policy_versions'),
+  golive: db.prepare("UPDATE policy_versions SET staged = 0, effective_from = datetime('now') WHERE id = ? AND staged = 1"),
+  drop: db.prepare('DELETE FROM policy_versions WHERE id = ? AND staged = 1'),
 };
 
 // First run of the rule-based system: seed defaults, and reset any old policy
 // stamps so shifts re-lock onto the equivalent default rules (same math).
 if (Q.count.get().n === 0) {
   for (const daypart of ['cafe', 'dinner']) {
-    Q.insert.run({ daypart, rules_json: JSON.stringify(defaultRules()), note: 'Initial policy' });
+    Q.insert.run({ daypart, rules_json: JSON.stringify(defaultRules()), note: 'Initial policy', staged: 0 });
   }
   try { db.exec('UPDATE shifts SET policy_id = NULL'); } catch { /* shifts table may be empty */ }
 }
@@ -40,6 +61,48 @@ const parse = (row) => (row ? { ...row, rules: JSON.parse(row.rules_json) } : nu
 const currentForDaypart = (daypart) => parse(Q.latest.get(daypart));
 const byId = (id) => parse(Q.byId.get(id));
 const historyForDaypart = (daypart) => Q.history.all(daypart).map(parse);
+
+/**
+ * Is this the NEW-SHAPE policy — the one where a rule names who pays it, and a
+ * pool names who shares it?
+ *
+ * The same test db.js uses to decide how a service's people are classified.
+ * Kept here, in one place, because three screens and a migration all need the
+ * answer and three copies of it is how they come to disagree.
+ */
+function isNewModel(rules) {
+  if (!Array.isArray(rules)) return false;
+  return rules.some((r) => (r.type === 'tipout' && r.paidBy)
+    || (r.type === 'pool' && Array.isArray(r.among)));
+}
+
+/** The policy written down for this service but not yet in force, if any. */
+const stagedForDaypart = (daypart) => parse(Q.staged.get(daypart));
+
+/**
+ * Put a policy live, on ONE service, now.
+ *
+ * It keeps its identity rather than being copied to a new row, so the history
+ * reads as one version that was drafted and then started — which is what
+ * happened — instead of two that look like a change nobody made.
+ *
+ * Shifts already stamped with another version are not touched and cannot be:
+ * policyForShift reads the id ON THE SHIFT. This decides what the NEXT service
+ * locks onto, and nothing else.
+ */
+function activateStaged(id) {
+  const row = Q.byId.get(id);
+  if (!row || row.staged !== 1) return null;
+  Q.golive.run(id);
+  return parse(Q.byId.get(id));
+}
+
+/** Throw away a draft. Only ever a draft — a live version cannot be deleted. */
+function discardStaged(id) {
+  const row = Q.byId.get(id);
+  if (!row || row.staged !== 1) return false;
+  return Q.drop.run(id).changes > 0;
+}
 
 /** Lock a policy version onto a shift (if unstamped) and return its rule list. */
 function policyForShift(shift) {
@@ -53,14 +116,27 @@ function policyForShift(shift) {
 
 /** Save a new version (effective now). rules = array of rule objects. */
 function saveRules(daypart, rules, note) {
-  Q.insert.run({ daypart, rules_json: JSON.stringify(rules), note: (note || '').trim() || null });
+  Q.insert.run({ daypart, rules_json: JSON.stringify(rules), note: (note || '').trim() || null, staged: 0 });
+}
+
+/**
+ * Save a policy WITHOUT putting it in force. One draft per service: saving
+ * again replaces it, because two competing drafts is not a state anybody could
+ * reason about from a page.
+ */
+function stageRules(daypart, rules, note) {
+  const had = Q.staged.get(daypart);
+  if (had) Q.drop.run(had.id);
+  Q.insert.run({ daypart, rules_json: JSON.stringify(rules), note: (note || '').trim() || null, staged: 1 });
+  return parse(Q.staged.get(daypart));
 }
 
 /** Revert = re-save an old version's rules as the new current version. */
 function revertTo(id, note) {
   const row = byId(id);
   if (!row) return;
-  Q.insert.run({ daypart: row.daypart, rules_json: row.rules_json, note: note || `Reverted to the ${row.effective_from} version` });
+  Q.insert.run({ daypart: row.daypart, rules_json: row.rules_json, staged: 0,
+    note: note || `Reverted to the ${row.effective_from} version` });
 }
 
 // Older policies pooled the cash jar and to-go CARD tips together and paid the
@@ -83,11 +159,72 @@ function splitJarFromToGoCard() {
       rules.push({ ...r, source: 'jar', payout: 'weekly_cash' });
       rules.push({ ...r, source: 'togo_card', payout: 'paycheck' });
     }
-    Q.insert.run({ daypart, rules_json: JSON.stringify(rules),
+    Q.insert.run({ daypart, rules_json: JSON.stringify(rules), staged: 0,
       note: 'To-go card tips now pay on the paycheck; only the cash jar is handed out' });
   }
 }
 splitJarFromToGoCard();
+
+/**
+ * A POLICY THE RUNNING ENGINE CANNOT EVALUATE MUST NOT BE LIVE.
+ *
+ * The Palm policy was entered and saved during the build, which under the old
+ * rules made it current the moment it was typed. Deploying would then have
+ * switched both services onto it on the way past, with nobody deciding to —
+ * and it uses three rule features (who pays a rule, one pot funding another, a
+ * pool naming its roles) that an engine without this release simply ignores.
+ * A policy silently half-applied is worse than either policy.
+ *
+ * So the test is not "is this new" but "can what is running actually work this
+ * out". Anything using those features is put back into draft; everything else
+ * is left exactly as it is. Two guards on top of that:
+ *
+ *   - a version a SETTLED service was priced under is never touched, whatever
+ *     it contains — somebody has been paid under it and that is now history;
+ *   - it runs once, so turning a policy on and redeploying does not turn it
+ *     back off.
+ *
+ * A service still stamped with a staged version keeps it. policyForShift reads
+ * the id on the shift and does not care whether it is staged.
+ */
+function needsNewEngine(rules) {
+  if (!Array.isArray(rules)) return false;
+  return rules.some((r) => r.paidBy || r.from || (r.type === 'pool' && Array.isArray(r.among)));
+}
+
+function stageUnactivatedNewPolicy() {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'policy_staging_2026_09'").get();
+  if (done) return;
+  const settled = db.prepare("SELECT COUNT(*) n FROM shifts WHERE policy_id = ? AND status <> 'open'");
+  for (const row of db.prepare('SELECT id, rules_json FROM policy_versions WHERE staged = 0').all()) {
+    let rules;
+    try { rules = JSON.parse(row.rules_json); } catch { continue; }
+    if (!needsNewEngine(rules)) continue;
+    if (settled.get(row.id).n > 0) continue;
+    db.prepare('UPDATE policy_versions SET staged = 1 WHERE id = ?').run(row.id);
+  }
+  // ONE DRAFT PER SERVICE. The policy was arrived at over several saves, so
+  // staging leaves a stack of superseded attempts behind the newest — and the
+  // moment the newest goes live the one under it surfaces as "a new policy is
+  // waiting", which is a draft nobody wrote pretending to be the next
+  // decision. The superseded ones are removed, and only where nothing at all
+  // points at them: a service stamped with one keeps it, and keeps the row.
+  for (const daypart of ['cafe', 'dinner']) {
+    const drafts = db.prepare(`SELECT id FROM policy_versions
+      WHERE daypart = ? AND staged = 1 ORDER BY id DESC`).all(daypart);
+    for (const old of drafts.slice(1)) {
+      const used = db.prepare('SELECT COUNT(*) n FROM shifts WHERE policy_id = ?').get(old.id).n;
+      if (used === 0) db.prepare('DELETE FROM policy_versions WHERE id = ? AND staged = 1').run(old.id);
+    }
+  }
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('policy_staging_2026_09', '1')
+              ON CONFLICT(key) DO UPDATE SET value = '1'`).run();
+}
+try {
+  db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+  stageUnactivatedNewPolicy();
+} catch { /* settings table not ready on a bare boot; nothing is staged, nothing breaks */ }
+
 
 
 // --- one-off adjustments, for the nights the policy does not fit ------------
@@ -156,4 +293,6 @@ const clearAdjustment = (shiftId, recipient, paidBy) => db.prepare(
 const adjustmentsLocked = (sh) => String(sh && sh.status) === 'emailed';
 
 module.exports = {
-  adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked, currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo };
+  adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked,
+  currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo,
+  stagedForDaypart, stageRules, activateStaged, discardStaged, isNewModel, needsNewEngine };

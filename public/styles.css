@@ -2625,3 +2625,27 @@ a.driver:hover { text-decoration: none; border-color: var(--primary-200); transf
   .sticky-acts { width: 100%; }
   .sticky-acts .btn { flex: 1; justify-content: center; }
 }
+
+/* --- a policy that is written down and not yet in force ----------------------
+   Saving a policy and starting to price shifts by it are two decisions. This
+   card is the second one: deliberately loud, because turning it on changes
+   what people are paid from the next service onwards. */
+.pol-draft { border: 1px solid #b45309; border-left-width: 4px; background: #fffaf3;
+  margin: 16px 0 22px; }
+.pol-draft-h { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.pol-draft-h h2 { margin: 0; font-size: 17px; }
+.pol-draft-tag { display: inline-block; padding: 3px 10px; border-radius: 999px;
+  background: #b45309; color: #fff; font-size: 11px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.pol-draft-note { margin: 6px 0 10px; font-size: 13.5px; color: var(--muted); }
+.pol-draft-f { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+.pol-draft-safe { margin: 12px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+.pol-elsewhere { margin: -8px 0 18px; font-size: 13px; }
+.pol-elsewhere a { color: #b45309; font-weight: 600; }
+.pol-live-tag { display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 999px;
+  background: var(--ok-soft, #dcf3e1); color: var(--ok, #16863a); font-size: 11px; font-weight: 700;
+  letter-spacing: .05em; text-transform: uppercase; vertical-align: middle; }
+@media (max-width: 560px) {
+  .pol-draft-f { flex-direction: column; align-items: stretch; gap: 10px; }
+  .pol-draft-f .btn { width: 100%; }
+}

@@ -15,7 +15,8 @@ const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, 
 const { mountModules, MODULES, pagesOf } = require('./modules');
 const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo,
-  adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked } = require('./policy');
+  adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked,
+  stagedForDaypart, stageRules, activateStaged, discardStaged } = require('./policy');
 const { defaultRules } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const WAGES = require('./wages');
@@ -4619,11 +4620,23 @@ function parseMoney(raw) {
  */
 function filingCapabilities(slug) {
   const isServer = slug === 'server';
+  // A BARTENDER RINGS THEIR OWN BAR, so they hand their own sales in.
+  //
+  // Under the new policy the bar is a till of its own: the bartender's sales
+  // are what the barback's 3% and the busser's cut come out of. Until now
+  // nobody but a manager could enter them, so the one person who knows the
+  // number was the one person with no way to give it — and the tip-out they
+  // owe could not be worked out until somebody typed it in for them.
+  //
+  // Deliberately NOT extended to the barista. A barista keeps their tips and
+  // the counter is not a second bar; asking them for sales would collect a
+  // figure and then have to decide what it meant.
+  const ringsOwn = isServer || slug === 'bartender';
   return {
     position: slug,
-    reports_food_sales: isServer,
-    reports_coffee_sales: isServer,
-    reports_alcohol_sales: isServer,
+    reports_food_sales: ringsOwn,
+    reports_coffee_sales: ringsOwn,
+    reports_alcohol_sales: ringsOwn,
     reports_card_tips: true,
     reports_server_cash_kept: isServer,
     reports_pooled_cash: !isServer,
@@ -4684,18 +4697,46 @@ const fieldsFor = (caps) => TIP_FIELDS.filter((f) => caps[f.cap]);
  * engine makes. Nothing here changes where a penny goes; it changes what the
  * page says about it, which was the part that was wrong.
  */
+const BAR_LABEL = {
+  food: 'Bar food sales',
+  coffee: 'Bar non-alcoholic sales',
+  alcohol: 'Bar alcohol sales',
+};
+
 function fieldsForShift(caps, shiftId, slug) {
-  const fields = fieldsFor(caps);
+  let fields = fieldsFor(caps);
+  const who = slug || caps.position;
   let pools = true;
   let keeps = false;
+  let known = false;
   try {
     const sh = shiftId ? s.shiftById.get(shiftId) : null;
     if (sh) {
       const rules = policyForShift(sh) || [];
       pools = rules.some((x) => x.type === 'pool');
-      keeps = keepsOwnCash(slug || caps.position, rules);
+      keeps = keepsOwnCash(who, rules);
+      known = true;
     }
-  } catch { pools = true; keeps = false; }
+  } catch { pools = true; keeps = false; known = false; }
+
+  // A BARTENDER IS ONLY ASKED FOR SALES WHERE THEIR SALES ARE READ.
+  //
+  // Under the older policies a bartender is support, and the engine never
+  // looks at a support row's sales columns — so the form would be collecting
+  // three numbers that no calculation would ever use, which is exactly the
+  // trap filingCapabilities' own comment warns about. The question appears
+  // when, and only when, the service is running a policy that reads it. That
+  // also means this whole feature stays asleep until the new policy is turned
+  // on, with nothing extra to remember.
+  if (who === 'bartender') {
+    if (known && !keeps) fields = fields.filter((f) => f.group !== 'sales');
+    else fields = fields.map((f) => (f.group !== 'sales' ? f : {
+      ...f,
+      label: BAR_LABEL[f.key] || f.label,
+      hint: 'What you rang at the bar on this shift. The barback and busser percentages come off this.',
+    }));
+  }
+
   if (pools && !keeps) return fields;
   return fields.map((f) => (f.key !== 'pooled_cash' ? f : {
     ...f,
@@ -13295,18 +13336,49 @@ app.get('/cash/:id', (req, res) => {
 // ---------------------------------------------------------------------------
 // Tip-out policy — calm read-only view + rule builder, versioned with history
 // ---------------------------------------------------------------------------
-const RLBL = { kitchen: 'Kitchen', barista: 'Barista', bartender: 'Bartender', busser: 'Busser' };
-const BLBL = { food: "each server's food sales", coffee: "each server's coffee sales", alcohol: "each server's alcohol sales", total_sales: "each server's total sales", total_tips: "each server's total tips", remaining: 'server tips left after other tip-outs' };
+const RLBL = { kitchen: 'Kitchen', barista: 'Barista', bartender: 'Bartender', busser: 'Busser',
+  barback: 'Barback', server: 'Server', host: 'Host' };
+const BASE = { food: 'food sales', coffee: 'coffee sales', alcohol: 'alcohol sales',
+  total_sales: 'total sales', total_tips: 'total tips',
+  remaining: 'tips left after the other tip-outs' };
 const SLBL = { hours: 'by hours worked', even: 'evenly', sales: 'by sales' };
 const SRC = { jar: 'the cash tip jar', togo_card: 'to-go card tips', jar_togo: 'the cash jar + to-go card' };
 const AMG = { all_support: 'all support (kitchen, busser, barista)', kitchen: 'kitchen only', foh: 'busser + barista' };
 const PAY = { weekly_cash: 'weekly, in cash', paycheck: 'on the paycheck', nightly_cash: 'nightly, in cash' };
+const roleWord = (x) => RLBL[x] || posName(x) || x;
+
+/**
+ * WHO PAYS IT, said out loud.
+ *
+ * Every base used to read "each SERVER's ..." because a tip-out could only
+ * come out of a server's sales. It can now name who pays — the barback's 3%
+ * comes out of the BAR, not out of the floor — and this line is the only place
+ * a manager reads the policy back before turning it on. Printing "each
+ * server's total sales" under a rule the servers do not pay is the page
+ * describing a policy nobody wrote.
+ */
+function payerWord(r) {
+  if (r.from) return `the ${roleWord(r.from).toLowerCase()} pot`;
+  const who = r.paidBy ? (Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy]) : ['server'];
+  const names = who.map((x) => `each ${roleWord(x).toLowerCase()}`);
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
 
 function describeRules(rules) {
   const items = ['Servers keep their own tips.'];
   for (const r of rules) {
-    if (r.type === 'tipout') items.push(`<b>${RLBL[r.recipient] || r.recipient}</b> gets <b>${r.percent}%</b> of ${BLBL[r.base] || r.base}, split <b>${SLBL[r.split] || r.split}</b>.`);
-    else items.push(`<b>${SRC[r.source] || r.source}</b> is pooled and split <b>${SLBL[r.split] || r.split}</b> among <b>${AMG[r.among] || r.among}</b>, paid <b>${PAY[r.payout] || r.payout}</b>.`);
+    if (r.type === 'tipout') {
+      const base = BASE[r.base] || r.base;
+      const src = r.from
+        ? `<b>${r.percent}%</b> of ${base}, out of ${payerWord(r)}`
+        : `<b>${r.percent}%</b> of ${payerWord(r)}'s ${base}`;
+      items.push(`<b>${roleWord(r.recipient)}</b> gets ${src}, split <b>${SLBL[r.split] || r.split}</b>.`);
+    } else {
+      const among = Array.isArray(r.among)
+        ? r.among.map((x) => roleWord(x)).join(' + ')
+        : (AMG[r.among] || r.among);
+      items.push(`<b>${SRC[r.source] || r.source}</b> &mdash; pooled, split <b>${SLBL[r.split] || r.split}</b> among <b>${among}</b>, paid <b>${PAY[r.payout] || r.payout}</b>.`);
+    }
   }
   return items;
 }
@@ -14343,6 +14415,43 @@ app.get('/policy', (req, res) => {
   const tabs = DAYPARTS.map((d) => `<a href="/policy?daypart=${d}" class="tab ${d === daypart ? 'active' : ''}">${dp(d)}</a>`).join('');
   const summary = describeRules(rules).map((x) => `<li>${x}</li>`).join('');
 
+  // --- a policy that is written down and not yet in force -------------------
+  //
+  // Saving a policy and starting to price shifts by it are two decisions, and
+  // making them one is how a new policy goes live on the deploy that carried
+  // it. This card is the second decision, taken on purpose, on one service.
+  const draft = stagedForDaypart(daypart);
+  const otherDrafts = DAYPARTS.filter((d) => d !== daypart && stagedForDaypart(d));
+  const draftCard = draft ? `
+    <div class="card pol-draft">
+      <div class="pol-draft-h">
+        <span class="pol-draft-tag">Ready &middot; not live</span>
+        <h2>${dp(daypart)} &mdash; a new policy is waiting</h2>
+      </div>
+      ${draft.note ? `<p class="pol-draft-note">${esc(draft.note)}</p>` : ''}
+      <ol class="plain-list">${describeRules(draft.rules).map((x) => `<li>${x}</li>`).join('')}</ol>
+      <div class="pol-draft-f">
+        <form method="post" action="/policy/activate" style="margin:0"
+          onsubmit="return confirm('Make this the ${esc(dp(daypart))} policy from now on?\n\nEvery service already closed keeps the policy it was closed under — none of them are recalculated. This decides how the NEXT ${esc(dp(daypart))} is worked out.\n\n${esc(DAYPARTS.filter((d) => d !== daypart).map(dp).join(' and '))} is not affected.')">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="id" value="${draft.id}">
+          <button class="btn btn-primary" type="submit">Make this live for ${esc(dp(daypart))}</button>
+        </form>
+        <form method="post" action="/policy/discard" style="margin:0"
+          onsubmit="return confirm('Throw this draft away? The live ${esc(dp(daypart))} policy is not affected.')">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="id" value="${draft.id}">
+          <button class="link-btn" type="submit">Discard draft</button>
+        </form>
+      </div>
+      <p class="pol-draft-safe">Nothing is recalculated. Every service already closed keeps the policy it
+        was closed under &mdash; this only decides how the next one is worked out,
+        and ${esc(DAYPARTS.filter((d) => d !== daypart).map(dp).join(' and '))} stays on ${
+  DAYPARTS.filter((d) => d !== daypart).length === 1 ? 'its own policy' : 'their own policies'}.</p>
+    </div>` : '';
+  const elsewhere = otherDrafts.length ? `<p class="pol-elsewhere">${
+  otherDrafts.map((d) => `<a href="/policy?daypart=${d}">${dp(d)} also has a policy waiting &rsaquo;</a>`).join(' ')}</p>` : '';
+
   const histRows = hist.map((h, i) => `
     <tr${i === 0 ? ' class="row-current"' : ''}>
       <td>${esc(h.effective_from)}${i === 0 ? ' <span class="pill pill-ok">current</span>' : ''}</td>
@@ -14355,6 +14464,8 @@ app.get('/policy', (req, res) => {
     <div class="page-head"><div><h1>Tip-out policy</h1>
       <p class="sub">How tips are shared. Editing applies only to shifts created <b>after</b> you save — past shifts never change, and you can revert anytime.</p></div></div>
     <div class="tabs-row">${tabs}</div>
+    ${draftCard}
+    ${elsewhere}
 
     <div id="view-read">
       <div class="card summary-card">
@@ -14400,6 +14511,29 @@ app.post('/policy/save', (req, res) => {
   if (!Array.isArray(rules) || !rules.length) return res.redirect(`/policy?daypart=${daypart}&err=1&msg=` + encodeURIComponent('Add at least one rule.'));
   saveRules(daypart, rules, req.body.note);
   res.redirect(`/policy?daypart=${daypart}&msg=` + encodeURIComponent(`New ${dp(daypart)} policy saved — applies to shifts from now on.`));
+});
+
+app.post('/policy/activate', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const { byId } = require('./policy');
+  const row = byId(Number(req.body.id));
+  if (!row) return res.redirect('/policy?err=1&msg=' + encodeURIComponent('That draft is gone.'));
+  const live = activateStaged(Number(req.body.id));
+  if (!live) {
+    return res.redirect(`/policy?daypart=${row.daypart}&err=1&msg=`
+      + encodeURIComponent('That policy is already live.'));
+  }
+  res.redirect(`/policy?daypart=${live.daypart}&msg=` + encodeURIComponent(
+    `${dp(live.daypart)} is now on the new policy. Services closed before now keep the policy they were closed under.`));
+});
+
+app.post('/policy/discard', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const { byId } = require('./policy');
+  const row = byId(Number(req.body.id));
+  const gone = discardStaged(Number(req.body.id));
+  res.redirect(`/policy?daypart=${row ? row.daypart : 'dinner'}&msg=`
+    + encodeURIComponent(gone ? 'Draft discarded. The live policy is unchanged.' : 'Nothing to discard.'));
 });
 
 app.post('/policy/revert', (req, res) => {

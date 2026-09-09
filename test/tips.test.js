@@ -1969,3 +1969,101 @@ test("a server's own cash is theirs, and never reaches a pool", () => {
   assert.strictEqual(r.servers[0].totalTips, 30000, '$300 collected, $100 of it cash');
   assert.strictEqual(r.servers[0].tipsKept, 28000, 'and the server keeps $280 of it');
 });
+
+// --- a bartender rings their own bar ---------------------------------------
+//
+// Under the new policy the bar is a till of its own: the bartender's sales are
+// what the barback's 3% comes out of. Until now the one person who knew that
+// number was the one person with no way to hand it in.
+//
+// The question appears ONLY on a service whose policy actually reads it, which
+// is what keeps the whole thing asleep until that policy is turned on.
+
+const Database = require('better-sqlite3');
+const NEW_SHAPE = [
+  { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+];
+const OLD_SHAPE = [{ type: 'tipout', recipient: 'busser', percent: 10, base: 'total_sales', split: 'hours' }];
+
+/**
+ * A service pinned to exactly these rules, with `who` on it.
+ *
+ * Staged, so the LIVE policy is never disturbed — this is about what one
+ * service is stamped with, which is the only thing the form reads. And a work
+ * row, because a service somebody is not on is not one they can file against.
+ */
+function serviceOn(date, daypart, rules, note, who, role) {
+  const w = new Database(DB);
+  const pid = Number(w.prepare("INSERT INTO policy_versions (daypart, rules_json, note, staged) VALUES (?, ?, ?, 1)")
+    .run(daypart, JSON.stringify(rules), note).lastInsertRowid);
+  w.prepare("INSERT INTO shifts (date, daypart, status, policy_id) VALUES (?, ?, 'open', ?)").run(date, daypart, pid);
+  const id = w.prepare('SELECT id FROM shifts WHERE date = ? AND daypart = ?').get(date, daypart).id;
+  const emp = w.prepare('SELECT id FROM employees WHERE name = ?').get(who || 'Tess Blake').id;
+  w.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, ?, 6)')
+    .run(id, emp, role || 'bartender');
+  w.close();
+  return id;
+}
+
+/** The field labels a signed-in person is shown for one service. */
+async function labelsFor(pin, shiftId, position) {
+  const start = await form('/tips/start', { pin });
+  const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+  const r = await fetch(`${BASE}/portal/tips?shift=${shiftId}&position=${position}`, { headers: { cookie } });
+  const html = await r.text();
+  return (html.match(/class="st-lab"[^>]*>([^<]*)/g) || [])
+    .map((x) => x.replace(/.*>/, '').trim());
+}
+
+test('a bartender is asked for their bar sales, on a policy that reads them', async () => {
+  const sh = serviceOn('2026-10-02', 'dinner', NEW_SHAPE, 'new shape');
+  const labels = await labelsFor('1470', sh, 'bartender');   // Tess Blake also bartends
+  assert.ok(labels.some((l) => /Bar alcohol sales/.test(l)), 'alcohol, named as bar');
+  assert.ok(labels.some((l) => /Bar food sales/.test(l)), 'and food');
+  assert.ok(labels.some((l) => /Card tips/.test(l)), 'tips are still asked for');
+});
+
+test('and is NOT asked on a policy that never looks at them', async () => {
+  // The engine reads sales from direct earners only. Under the older policies a
+  // bartender is support, so three boxes here would collect numbers no
+  // calculation would ever use.
+  const sh = serviceOn('2026-10-03', 'dinner', OLD_SHAPE, 'old shape');
+  const labels = await labelsFor('1470', sh, 'bartender');
+  assert.ok(!labels.some((l) => /sales/i.test(l)), 'no sales question at all');
+  assert.ok(labels.some((l) => /Card tips/.test(l)), 'but they still hand tips in');
+});
+
+test('a barista is never asked for sales, on either policy', async () => {
+  // Deliberate: a barista keeps their tips and the counter is not a second bar.
+  const shNew = serviceOn('2026-10-04', 'cafe', NEW_SHAPE, 'new shape', 'Tess Blake', 'barista');
+  const shOld = serviceOn('2026-10-05', 'cafe', OLD_SHAPE, 'old shape', 'Tess Blake', 'barista');
+  for (const sh of [shNew, shOld]) {
+    const labels = await labelsFor('1470', sh, 'barista');
+    assert.ok(!labels.some((l) => /sales/i.test(l)), `no sales question on service ${sh}`);
+  }
+});
+
+test('what a bartender submits lands where the engine reads it', async () => {
+  const sh = serviceOn('2026-10-06', 'dinner', NEW_SHAPE, 'new shape');
+  const start = await form('/tips/start', { pin: '1470' });
+  const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+  const open = await fetch(`${BASE}/portal/tips?shift=${sh}&position=bartender`, { headers: { cookie } });
+  const token = (await open.text()).match(/name="token" value="([^"]+)"/)[1];
+
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token, shift_id: String(sh), position: 'bartender',
+      food: '120', coffee: '30', alcohol: '900', card_tips: '210', cash_tips: '40' }).toString(),
+  });
+  assert.ok([200, 302].includes(res.status), `it was accepted (got ${res.status})`);
+
+  const r = new Database(DB, { readonly: true });
+  const row = r.prepare(`SELECT ss.* FROM server_sales ss JOIN employees e ON e.id = ss.employee_id
+    WHERE ss.shift_id = ? AND e.name = 'Tess Blake'`).get(sh);
+  r.close();
+  assert.ok(row, 'a sales row exists for them');
+  assert.strictEqual(row.alcohol_cents, 90000, 'the bar alcohol landed');
+  assert.strictEqual(row.food_cents, 12000, 'and the bar food');
+});
