@@ -304,7 +304,10 @@ function canEmployeeSee(docId, empId) {
 
 /** Everyone a document currently reaches. The same rule, from the other end. */
 function audienceOf(docId) {
-  return db.prepare(`SELECT DISTINCT e.id, e.name FROM employees e
+  // role/pin/active come along because cannotOpen() needs them, and every
+  // caller that lists this audience wants to say whether each of them can
+  // actually reach the document.
+  return db.prepare(`SELECT DISTINCT e.id, e.name, e.role, e.pin, e.active FROM employees e
      WHERE e.active = 1 AND EXISTS (
        SELECT 1 FROM doc_assignments a
         WHERE a.document_id = @doc
@@ -343,6 +346,47 @@ function forEmployee(empId) {
     view: view.get(r.version_id, empId) || null,
   }));
 }
+
+/**
+ * CAN THIS PERSON ACTUALLY OPEN IT?
+ *
+ * Assigning is not the same as reaching. A document assigned to somebody who
+ * cannot get into the staff portal is filed correctly, listed correctly, and
+ * seen by nobody — and the only thing the app said was "Added."
+ *
+ * Two ways that happens, and both are ordinary:
+ *   a MANAGER does not use the staff portal at all. It is deliberate, and it
+ *     means a document assigned to one has nowhere to appear.
+ *   somebody with NO PIN cannot sign in. The PIN is the whole of portal
+ *     authentication, so no PIN is no portal.
+ *
+ * Returns null when they can, and the reason when they cannot — phrased for a
+ * manager reading a list, because that is the only place it is ever shown.
+ */
+function cannotOpen(emp) {
+  // TWO FORMS, because it is read in two grammars: as a tag in a column beside
+  // somebody's name, and inside a sentence after it. Lowercasing the tag to fit
+  // the sentence turned "No PIN" into "no pin", which is not what the field is
+  // called anywhere else in this app.
+  const no = (tag, after) => ({ tag, after, toString: () => tag });
+  if (!emp) return no('No longer on staff', 'is no longer on staff');
+  if (!emp.active) return no('Not active', 'is not an active employee');
+  if (emp.role === 'manager') {
+    return no('Managers do not use the staff portal', 'does not use the staff portal');
+  }
+  if (!String(emp.pin || '').trim()) {
+    return no('No PIN — cannot sign in to the portal', 'has no PIN, so cannot sign in to the portal');
+  }
+  return null;
+}
+
+/**
+ * The same audience, each with whether they can actually open it.
+ *
+ * Built on audienceOf rather than beside it: a second copy of "who is this
+ * assigned to" is a second answer waiting to disagree with the first.
+ */
+const reachOf = (docId) => audienceOf(docId).map((e) => ({ ...e, blocked: cannotOpen(e) }));
 
 // --- WHO SIGNED WHAT --------------------------------------------------------
 
@@ -583,7 +627,7 @@ function renderValue(field, value, signature, tz) {
 
 module.exports = { DOC_DIR, CATEGORIES, catName, DEFAULT_ACK, renderValue,
   FIELD_KINDS, fieldsFor, addField, moveField, removeField, copyFields,
-  fieldLocked, valuesFor, reviewComplete,
+  fieldLocked, valuesFor, reviewComplete, cannotOpen, reachOf,
   // The routes hash and write the uploaded bytes; handing them the same node
   // built-ins this file already loaded keeps one idea of where documents live.
   crypto, fs, path,

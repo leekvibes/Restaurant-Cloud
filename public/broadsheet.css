@@ -6949,3 +6949,10 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .bs .pdf-v-sig { font-family: 'Snell Roundhand', 'Apple Chancery', 'Segoe Script',
   'Brush Script MT', cursive, serif; font-style: italic; padding-bottom: 2px;
   border-bottom: 1px solid rgba(17,17,17,.35); }
+
+/* Somebody the document cannot reach. Said in the picker before you choose,
+   and on the document afterwards — assigning is not the same as reaching, and
+   "Added." was the only thing the app ever said about the difference. */
+.tca-p.is-off span { color: var(--muted); }
+.tca-no { display: block; font-style: normal; font-size: 11px; color: var(--danger);
+  margin-top: 1px; line-height: 1.3; }

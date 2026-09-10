@@ -338,3 +338,62 @@ test('the jump button cannot shoulder the submit off the screen', () => {
   assert.match(css, /@media \(max-width: 460px\) \{[\s\S]{0,240}?\.pdv-bar \.pdv-bar-t \{ display: none; \}/,
     'on a small phone the status line goes, not one of the buttons');
 });
+
+// ---------------------------------------------------------------------------
+// ASSIGNING IS NOT REACHING.
+//
+// A document assigned to somebody who cannot get into the staff portal is
+// filed correctly, listed correctly, and seen by nobody. The app said "Added."
+// and nothing else — so uploading a handbook, assigning it to yourself and
+// finding nothing on the portal looked like the upload had failed.
+// ---------------------------------------------------------------------------
+
+test('it says who cannot open a document, and why', () => {
+  const D2 = require('../src/documents');
+  const mgr = { id: 1, name: 'Owner', role: 'manager', pin: '1111', active: 1 };
+  const nopin = { id: 2, name: 'Nopin', role: 'server', pin: null, active: 1 };
+  const gone = { id: 3, name: 'Gone', role: 'server', pin: '2222', active: 0 };
+  const fine = { id: 4, name: 'Fine', role: 'server', pin: '3333', active: 1 };
+
+  assert.ok(D2.cannotOpen(mgr), 'a manager has no staff portal to open it in');
+  assert.ok(D2.cannotOpen(nopin), 'and no PIN is no portal — the PIN is the whole of that sign-in');
+  assert.ok(D2.cannotOpen(gone), 'nor somebody no longer active');
+  assert.strictEqual(D2.cannotOpen(fine), null, 'anybody else can');
+
+  // Two grammars: a tag beside a name, and a fragment after one. Lowercasing
+  // the tag to fit the sentence turned "No PIN" into "no pin".
+  assert.match(D2.cannotOpen(nopin).tag, /No PIN/, 'the tag keeps the field its own name');
+  assert.match(D2.cannotOpen(nopin).after, /^has no PIN/, 'and the sentence form follows a name');
+  assert.match(D2.cannotOpen(mgr).after, /^does not use/);
+});
+
+test('the audience carries what deciding that needs', () => {
+  // audienceOf selected id and name only, so cannotOpen saw no role and no PIN
+  // and called everybody inactive — the check silently could not work.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'documents.js'), 'utf8');
+  assert.match(src, /SELECT DISTINCT e\.id, e\.name, e\.role, e\.pin, e\.active FROM employees e/,
+    'the audience query returns what cannotOpen reads');
+  assert.match(src, /const reachOf = \(docId\) => audienceOf\(docId\)\.map/,
+    'and reach is built ON the audience, not beside it — two copies of "who is '
+    + 'this assigned to" is two answers waiting to disagree');
+});
+
+test('a document assigned to nobody who can open it says so on upload', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /Added, but nobody it is assigned to can open it yet/,
+    'the case that started this');
+  assert.match(src, /Added, and \$\{reach\.length - stuck\.length\} of \$\{reach\.length\} can open it/,
+    'and a partial one counts both halves');
+  assert.match(src, /Added — but it is assigned to nobody yet/, 'and assigned to no one at all');
+  assert.match(src, /\+ \(stuck\.length \? '&err=1' : ''\)/,
+    'flagged, not buried in a success message');
+});
+
+test('the picker warns before the choice, and the document page after it', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /const no = DOCS\.cannotOpen\(e\); return `<label class="tca-p\$\{no \? ' is-off' : ''\}"/,
+    'the picker marks them as you choose');
+  assert.match(src, /const state = no \? \{ k: 'bad', t: no\.tag \}/,
+    'and on the document it beats every other state — "Not started" against '
+    + 'somebody with no way to start reads as their fault');
+});

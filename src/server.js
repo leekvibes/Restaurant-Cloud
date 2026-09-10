@@ -28985,8 +28985,14 @@ const docAssignPicker = (req, sel = {}) => {
       <label class="du-r"><input type="radio" name="target" value="employee"${sel.target === 'employee' ? ' checked' : ''}>
         <span><b>Specific people</b><i>For an agreement, a notice, anything meant for one person.</i></span></label>
       <div class="du-sub du-people">
-        ${emps.map((e) => `<label class="tca-p"><input type="checkbox" name="emp" value="${e.id}">
-          <span>${esc(e.name)}</span></label>`).join('')}
+        ${/* Said here, before the choice, and not only afterwards. Ticking
+             somebody who cannot open the portal files the document correctly
+             and shows it to nobody, and "Added." is not the moment to find
+             that out. Still tickable — the record is worth having either
+             way — but never silently. */''}
+        ${emps.map((e) => { const no = DOCS.cannotOpen(e); return `<label class="tca-p${no ? ' is-off' : ''}">
+          <input type="checkbox" name="emp" value="${e.id}">
+          <span>${esc(e.name)}${no ? `<i class="tca-no">${esc(no.tag)}</i>` : ''}</span></label>`; }).join('')}
       </div>
     </fieldset>`;
 };
@@ -29085,7 +29091,18 @@ app.post('/documents', docUpload.single('file'), csrfBody, (req, res) => {
       applyDocAssignment(docId, b);
       return docId;
     })();
-    return res.redirect(`/documents/${id}?msg=` + encodeURIComponent('Added.'));
+    // "Added." was the whole message, and it is true of the row and says
+    // nothing about the point of adding it. If it reaches nobody, that is the
+    // one thing worth knowing at this moment.
+    const reach = DOCS.reachOf(id);
+    const stuck = reach.filter((p) => p.blocked);
+    const msg = !reach.length ? 'Added — but it is assigned to nobody yet. Choose who gets it below.'
+      : stuck.length === reach.length
+        ? `Added, but nobody it is assigned to can open it yet: ${stuck.map((p) => `${p.name} ${p.blocked.after}`).join('; ')}.`
+        : stuck.length
+          ? `Added, and ${reach.length - stuck.length} of ${reach.length} can open it. ${stuck.map((p) => `${p.name} ${p.blocked.after}`).join('; ')}.`
+          : `Added. ${reach.length} ${reach.length === 1 ? 'person' : 'people'} can open it now.`;
+    return res.redirect(`/documents/${id}?msg=` + encodeURIComponent(msg) + (stuck.length ? '&err=1' : ''));
   } catch (e) {
     return res.redirect('/documents/new?err=1&msg=' + encodeURIComponent(e.message || 'Could not add that document.'));
   }
@@ -29122,10 +29139,16 @@ app.get('/documents/:id', (req, res, next) => {
 
   const personRow = (p) => {
     const sg = sigs.get(p.id); const vw = views.get(p.id);
-    const state = sg ? { k: 'ok', t: `Signed ${TC.stamp(sg.signed_at)}` }
-      : d.kind !== 'sign' ? (vw ? { k: 'ok', t: `Viewed ${TC.stamp(vw.last_at)}` } : { k: '', t: 'Not viewed' })
-        : cur && cur.due_on && cur.due_on < today ? { k: 'bad', t: `Overdue — due ${cur.due_on}` }
-          : vw ? { k: 'warn', t: 'Opened, not signed' } : { k: 'warn', t: 'Not started' };
+    // CANNOT OPEN IT beats every other state, because every other state is a
+    // report on what they have done with it and this one says the document has
+    // never been in front of them. "Not started" against somebody with no way
+    // to start reads as their fault.
+    const no = DOCS.cannotOpen(p);
+    const state = no ? { k: 'bad', t: no.tag }
+      : sg ? { k: 'ok', t: `Signed ${TC.stamp(sg.signed_at)}` }
+        : d.kind !== 'sign' ? (vw ? { k: 'ok', t: `Viewed ${TC.stamp(vw.last_at)}` } : { k: '', t: 'Not viewed' })
+          : cur && cur.due_on && cur.due_on < today ? { k: 'bad', t: `Overdue — due ${cur.due_on}` }
+            : vw ? { k: 'warn', t: 'Opened, not signed' } : { k: 'warn', t: 'Not started' };
     return `<div class="bs-lr dsig-r">
       <span class="dsig-who"><b>${esc(p.name)}</b></span>
       <span class="dsig-st"><i class="tcm-tag ${state.k}">${esc(state.t)}</i></span>
