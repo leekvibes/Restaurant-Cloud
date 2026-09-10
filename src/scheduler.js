@@ -30,6 +30,7 @@
 const { db, positions } = require('./db');
 const { isoDate, addDays } = require('./dates');
 const TC = require('./timeclock');
+const SERVICES = require('./services');
 // Read only, and only periodFor(). The pay period owns the definition of a
 // workweek; the scheduler borrows it rather than keeping a second one.
 const P = require('./periods');
@@ -790,7 +791,7 @@ function create(input) {
   // Both stamped from the START of the shift. A shift running to 2am belongs to
   // the night it began on, in both senses — the same rule the clock uses, so a
   // punch against it lands on the same business date.
-  const daypart = DAYPARTS.includes(input.daypart) ? input.daypart : serviceFor(startsAt);
+  const daypart = knownService(input.daypart) ? input.daypart : serviceFor(startsAt);
   const businessDate = businessDateFor(startsAt);
   // Before the transaction, not inside it. A rollback would be correct either
   // way; refusing first means the shift is never half-created in the first
@@ -838,7 +839,7 @@ function edit(id, patch) {
   // Re-stamped only when the START actually moves. An edit to the note or the
   // end time leaves the service alone, and a service-window change elsewhere
   // never reaches an existing shift at all.
-  const daypart = patch.daypart !== undefined && DAYPARTS.includes(patch.daypart) ? patch.daypart
+  const daypart = patch.daypart !== undefined && knownService(patch.daypart) ? patch.daypart
     : (startsAt !== row.starts_at ? serviceFor(startsAt) : row.daypart);
   const businessDate = startsAt !== row.starts_at ? businessDateFor(startsAt) : row.business_date;
   const note = patch.note !== undefined ? (String(patch.note || '').trim() || null) : row.note;
@@ -1541,6 +1542,23 @@ function createSeries(base, repeat = {}) {
 // ---------------------------------------------------------------------------
 
 const DAYPARTS = ['cafe', 'dinner'];
+
+/**
+ * Is this a service a shift can be stamped with?
+ *
+ * DAYPARTS is the pair this restaurant started with, and it is still the list
+ * every caller offers. But a third schedule is creatable from the picker, and
+ * `DAYPARTS.includes(slug)` said no to it — so a shift drawn on that board was
+ * stamped cafe or dinner by the clock instead, saved, and then filtered off the
+ * only board that would have shown it. It looked exactly like a save that had
+ * not happened.
+ *
+ * Archived services count: an old board still holds its shifts, and re-deriving
+ * their service from the clock on the next edit is the retroactive restatement
+ * the daypart stamp exists to prevent.
+ */
+const knownService = (slug) => DAYPARTS.includes(slug)
+  || SERVICES.all({ includeArchived: true }).some((s) => s.slug === slug);
 
 /**
  * Whole days between two ISO dates.

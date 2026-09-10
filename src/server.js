@@ -21692,6 +21692,26 @@ function sbOverlapNote(saved) {
     : ` Heads up — ${who} has ${clash.length} other shifts that overlap this one.`;
 }
 
+/**
+ * SAY IT WHEN THE SHIFT IS NOT ON THE BOARD IN FRONT OF YOU.
+ *
+ * A manager can still choose the other service in the drawer, deliberately or
+ * by reaching for the wrong option, and the board they are looking at filters
+ * it out on arrival. The save worked; the screen shows nothing new. Left to
+ * itself that is indistinguishable from a save that silently failed, and it is
+ * the shape of the bug this whole change came from — so the message names the
+ * schedule the shift went to, rather than leaving a manager to work out for
+ * themselves that it exists somewhere.
+ *
+ * Silent on the all-services board, where every service is already on screen.
+ */
+function sbElsewhere(req, saved) {
+  const board = String((req && req.body && req.body.svc) || '');
+  if (!saved || !board || board === 'all' || saved.daypart === board) return '';
+  return ` It is on ${SERVICES.nameOf(saved.daypart)} — not the ${
+    SERVICES.nameOf(board)} board you are on.`;
+}
+
 /** Which week the board is on, guarding the querystring. */
 function sbWeek(req) {
   const cfg = TC.settings();
@@ -21728,6 +21748,17 @@ const sbBack = (req, res, weekStart, msg, err) => {
 };
 
 /**
+ * A posted value read as a service, or null.
+ *
+ * 'all' is a board, not a service, and must not become a daypart — a shift
+ * stamped 'all' belongs to no schedule and shows on none of them.
+ */
+const svcSlug = (v) => {
+  const s = String(v || '');
+  return s && s !== 'all' && (SERVICES.isActive(s) || SCH.DAYPARTS.includes(s)) ? s : null;
+};
+
+/**
  * Read the drawer's fields into what the domain wants.
  *
  * The form asks for a date and two clock times, because that is how a manager
@@ -21753,9 +21784,13 @@ function sbForm(body) {
     position: String(body.position || '').trim(),
     startsAt: `${date} ${start}`,
     endsAt: `${endDate} ${end}`,
-    // 'auto' lets the service window decide; anything else is a manager override
-    // and is stamped as given.
-    daypart: SCH.DAYPARTS.includes(body.daypart) ? body.daypart : undefined,
+    // A manager override is stamped as given. With nothing given, THE BOARD
+    // ANSWERS before the clock does: a shift drawn on the Day board is a Day
+    // shift even though the drawer opens at 4pm, and letting the start time
+    // decide is what filed it under Evening and hid it from the board that
+    // made it. Only the all-services board — which has no service of its own,
+    // and where the select is `required` — reaches the window at all.
+    daypart: svcSlug(body.daypart) || svcSlug(body.svc) || undefined,
     breaks,
     note: String(body.note || '').trim() || null,
   };
@@ -22248,9 +22283,29 @@ app.get('/schedule', (req, res) => {
   // board is parked on — "today" that moves when you page the board would be a
   // different word.
   const sbView = ['today', 'week'].includes(req.query.v) ? req.query.v : 'auto';
+
+  // EVERY LINK ON THIS BOARD CARRIES THE SERVICE.
+  //
+  // They all dropped it, and /schedule without a service IS the picker — so
+  // paging to next week, or switching between Today and Week, threw the
+  // manager back to "choose a schedule" from a board they were working on.
+  // Reported as the schedule bouncing them out; the same loss also made the
+  // ?v=today list render across BOTH services, because there was no service
+  // left in the URL to scope it by.
+  //
+  // The view rides along too, so paging the week from the Today list does not
+  // silently switch which of the two views comes back.
+  const sbSvcQS = svc ? `&amp;svc=${encodeURIComponent(svc)}` : '';
+  const sbWeekHref = (start) => `/schedule?w=${start}${sbSvcQS}${
+    sbView === 'auto' ? '' : `&amp;v=${sbView}`}`;
   const mToday = serviceToday();
   const mEnd = addDays(mToday, 7);
-  const mRows = SCH.inRange(mToday, mEnd);
+  // Scoped like the grid above it. This read was the one place on the page
+  // that skipped the service filter, so the Day board's Today list counted and
+  // drew the Evening shifts too — "18 shifts" under a header whose own week
+  // showed 8. Same filter, written the same way, rather than a second opinion.
+  const mRows = SCH.inRange(mToday, mEnd)
+    .filter((x) => !svc || svc === 'all' || x.daypart === svc);
 
   // Issues for every week the range touches — the engine is week-scoped and
   // eight days can straddle two. Merged by key, which is why the keys are
@@ -22335,9 +22390,9 @@ app.get('/schedule', (req, res) => {
     <div class="sb-view sb-view--${sbView}">
 
     <nav class="sb-seg" aria-label="Schedule view">
-      <a class="sb-seg-b${sbView === 'today' ? ' on' : ''}" href="/schedule?v=today"
+      <a class="sb-seg-b${sbView === 'today' ? ' on' : ''}" href="/schedule?v=today${sbSvcQS}"
         aria-current="${sbView === 'today' ? 'page' : 'false'}">Today</a>
-      <a class="sb-seg-b${sbView === 'week' ? ' on' : ''}" href="/schedule?v=week&amp;w=${week.start}"
+      <a class="sb-seg-b${sbView === 'week' ? ' on' : ''}" href="/schedule?v=week&amp;w=${week.start}${sbSvcQS}"
         aria-current="${sbView === 'week' ? 'page' : 'false'}">Week</a>
     </nav>
 
@@ -22380,10 +22435,10 @@ app.get('/schedule', (req, res) => {
         </div>` : ''}
         <div class="sb-bar">
           <nav class="sb-nav" aria-label="Week">
-            <a class="sb-btn" href="/schedule?w=${addDays(week.start, -7)}" aria-label="Earlier week">&larr;</a>
+            <a class="sb-btn" href="${sbWeekHref(addDays(week.start, -7))}" aria-label="Earlier week">&larr;</a>
             <span class="sb-range">${esc(TC.dayLabel(week.start))} &ndash; ${esc(TC.dayLabel(week.end))}</span>
-            <a class="sb-btn" href="/schedule?w=${addDays(week.start, 7)}" aria-label="Later week">&rarr;</a>
-            <a class="sb-btn${week.start === thisWeek.start ? ' is-on' : ''}" href="/schedule">This week</a>
+            <a class="sb-btn" href="${sbWeekHref(addDays(week.start, 7))}" aria-label="Later week">&rarr;</a>
+            <a class="sb-btn${week.start === thisWeek.start ? ' is-on' : ''}" href="${sbWeekHref(thisWeek.start)}">This week</a>
           </nav>
           <div class="sb-tools">
             <form method="post" action="/schedule/copy-week" style="margin:0">
@@ -23178,6 +23233,19 @@ app.get('/schedule', (req, res) => {
 
         function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v == null ? '' : v; }
 
+        // THE BOARD YOU ARE ON. Opening the add drawer used to blank the
+        // service select, which read as harmless — it is only a default — but
+        // a blank select posts NO daypart at all, and the server then guessed
+        // the service from the start time. The drawer opens at 4pm, so every
+        // shift added from the Day board was stamped Evening, saved, and then
+        // filtered straight back off the board that made it. "Save Draft and
+        // nothing shows" was that: not a save that failed, a save that landed
+        // on the other schedule.
+        //
+        // Empty only on the all-services board, where there is no board to
+        // inherit from and the select is marked required.
+        var sbSvc = ${JSON.stringify(svc && svc !== 'all' ? svc : '')};
+
         // The mobile list and the grid open the SAME drawer through the same
         // handler — one code path, so the two views cannot drift apart.
         var sbTargets = [document.querySelector('.sb-grid'), document.querySelector('.sbm')];
@@ -23190,7 +23258,7 @@ app.get('/schedule', (req, res) => {
             document.getElementById('sb-pub').hidden = true;
             setVal('sb-emp', add.dataset.emp); setVal('sb-date', add.dataset.d);
             setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
-            setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
+            setVal('sb-daypart', sbSvc); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
             sbPositions(add.dataset.emp, null);
             sbContext(add.dataset.emp, add.dataset.d, null);
             // Two ways out of a new shift, and the drawer says which is which.
@@ -23281,7 +23349,7 @@ app.get('/schedule', (req, res) => {
           document.getElementById('sb-pub').hidden = true;
           setVal('sb-date', mAdd.dataset.d);
           setVal('sb-start', '16:00'); setVal('sb-end', '22:00');
-          setVal('sb-daypart', ''); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
+          setVal('sb-daypart', sbSvc); setVal('sb-brk', ''); setVal('sb-brkpaid', '0'); setVal('sb-note', '');
           sbPositions(document.getElementById('sb-emp').value, null);
           sbContext(document.getElementById('sb-emp').value, mAdd.dataset.d, null);
           document.getElementById('sb-save').textContent = 'Save Draft';
@@ -23360,13 +23428,13 @@ app.post('/schedule/shift', (req, res) => {
       if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already on the schedule.`;
       if (refused) msg += ` ${refused} could not be made (${esc(out.skipped.find((x) => !/already/i.test(x.reason)).reason)}).`;
       if (out.capped) msg += ' That is as far ahead as one repeat goes.';
-      return sbBack(req, res, w, msg + (n ? sbAvailNote(out.made[0]) : ''));
+      return sbBack(req, res, w, msg + (n ? sbElsewhere(req, out.made[0]) + sbAvailNote(out.made[0]) : ''));
     }
 
     const made = SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
     // Saved either way. The warning rides along with the success message and
     // keeps the success styling — it must never read as though the save failed.
-    const note = sbOverlapNote(made) + sbAvailNote(made);
+    const note = sbElsewhere(req, made) + sbOverlapNote(made) + sbAvailNote(made);
     if (req.body.publish !== '1') {
       // Says what happened rather than that something happened. "Added to the
       // plan" left a manager guessing whether the floor had been told.
@@ -23395,7 +23463,7 @@ app.post('/schedule/shift/:id', (req, res) => {
   const w = sbWeekOf(req);
   try {
     const saved = SCH.edit(Number(req.params.id), sbForm(req.body));
-    sbBack(req, res, w, `Shift updated.${sbOverlapNote(saved)}${sbAvailNote(saved)}`);
+    sbBack(req, res, w, `Shift updated.${sbElsewhere(req, saved)}${sbOverlapNote(saved)}${sbAvailNote(saved)}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(req, res, w, e.message, true);

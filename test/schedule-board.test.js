@@ -2383,3 +2383,168 @@ test('picking a schedule in the portal survives every tap after it', async () =>
     SVC.setForEmployee(E.multi, before);
   }
 });
+
+// ===========================================================================
+// WHICH SCHEDULE A NEW SHIFT LANDS ON
+//
+// Reported as "I click Save Draft and nothing shows on the schedule". The save
+// was working every time. The drawer blanked its Service select on open, a
+// blank select posts no field at all, and the server then fell back to reading
+// the service off the START TIME — with the drawer's own 4pm default. So a
+// shift added from the Day board was stamped Evening, saved, and filtered
+// straight back off the board that made it.
+//
+// The board answers before the clock does. These tests are the server half;
+// the drawer half is asserted below and was measured in a browser.
+// ===========================================================================
+
+test('a shift drawn on a board belongs to THAT board, whatever the clock would say', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 2);
+  // 4pm — the drawer's own default, and firmly inside the evening window. The
+  // clock would call this dinner. The board it was drawn on says otherwise.
+  const res = await post('/schedule/shift', {
+    w: wk.start, svc: 'cafe', employee_id: String(E.server), position: 'server',
+    date: day, start: '16:00', end: '22:00', break_minutes: '',
+  });
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  const made = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+  assert.strictEqual(made.daypart, 'cafe', 'stamped with the board, not the hour');
+
+  // The whole point: it is ON the board that made it.
+  const html = await raw(`/schedule?w=${wk.start}&svc=cafe`);
+  assert.ok(html.includes(`data-edit="${made.id}"`), 'and the Day board shows it');
+  db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(made.id);
+});
+
+test('the manager can still send a shift to the other schedule on purpose', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 3);
+  const res = await post('/schedule/shift', {
+    w: wk.start, svc: 'cafe', daypart: 'dinner', employee_id: String(E.server),
+    position: 'server', date: day, start: '16:00', end: '22:00', break_minutes: '',
+  });
+  const f = flashOf(res);
+  assert.strictEqual(f.err, false, f.msg);
+  const made = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+  assert.strictEqual(made.daypart, 'dinner', 'an explicit choice is honoured');
+  // And is TOLD where it went, because the board they are looking at will not
+  // show it — which is the same silence the bug was made of.
+  assert.match(f.msg, /Evening Service/, 'the message names the schedule it landed on');
+  assert.match(f.msg, /not the Day Service board/, 'and the one it did not');
+  db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(made.id);
+});
+
+test('a shift that lands where you are looking says nothing extra', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 4);
+  const res = await post('/schedule/shift', {
+    w: wk.start, svc: 'dinner', daypart: 'dinner', employee_id: String(E.server),
+    position: 'server', date: day, start: '16:00', end: '22:00', break_minutes: '',
+  });
+  const f = flashOf(res);
+  assert.doesNotMatch(f.msg, /not the/, 'no warning about a service you are already on');
+  const made = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+  db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(made.id);
+});
+
+test('the all-services board has no service to inherit, so the clock decides', async () => {
+  const wk = week();
+  const day = dates.addDays(wk.start, 5);
+  const res = await post('/schedule/shift', {
+    w: wk.start, svc: 'all', employee_id: String(E.server), position: 'server',
+    date: day, start: '16:00', end: '22:00', break_minutes: '',
+  });
+  assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+  const made = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+    ORDER BY id DESC LIMIT 1`).get(E.server, day);
+  assert.strictEqual(made.daypart, 'dinner', '4pm on no board in particular is dinner');
+  assert.ok(made.daypart !== 'all', 'and a board is never stored as a service');
+  db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(made.id);
+});
+
+test('the add drawer opens on the service of the board it opened from', async () => {
+  // The defect was one line of client script blanking this select. Asserted on
+  // both boards so a hard-coded slug cannot pass.
+  for (const slug of ['cafe', 'dinner']) {
+    const html = await raw(`/schedule?svc=${slug}`);
+    assert.match(html, new RegExp(`var sbSvc = "${slug}"`), `${slug} board seeds the drawer`);
+    assert.ok(html.includes("setVal('sb-daypart', sbSvc)"), 'and the add path uses it');
+    assert.ok(!html.includes("setVal('sb-daypart', '')"), 'nothing blanks it back out');
+  }
+  const all = await raw('/schedule?svc=all');
+  assert.match(all, /var sbSvc = ""/, 'all-services has none to seed, and asks instead');
+});
+
+test('every link on the board keeps the schedule you are on', async () => {
+  // /schedule with no service IS the picker, so a link that drops it throws a
+  // manager out of the board they were working on. Reported that way, twice.
+  const html = await raw('/schedule?svc=dinner');
+  const links = [...new Set([...html.matchAll(/href="(\/schedule\?[^"]*)"/g)]
+    .map((m) => m[1].replace(/&amp;/g, '&')))];
+  assert.ok(links.length >= 4, `found ${links.length} board links to check`);
+  const naked = links.filter((h) => !/[?&]svc=/.test(h));
+  assert.deepStrictEqual(naked, [], 'no link drops the schedule');
+
+  // And following them really lands on the board rather than the picker.
+  for (const href of links) {
+    const page = await raw(href);
+    if (/[?&]svc=all/.test(href)) continue;                 // all-services is a board too
+    assert.ok(!page.includes('Pick a schedule to plan'), `${href} stays on the board`);
+  }
+});
+
+test('the Today list is scoped to the service, like the grid above it', async () => {
+  const wk = week();
+  const day = today();
+  const mk = (slug) => post('/schedule/shift', {
+    w: wk.start, svc: slug, daypart: slug, employee_id: String(E.server), position: 'server',
+    date: day, start: slug === 'cafe' ? '08:00' : '18:00', end: slug === 'cafe' ? '14:00' : '23:00',
+    break_minutes: '',
+  });
+  await mk('cafe'); await mk('dinner');
+  const rows = db.prepare(`SELECT id, daypart FROM scheduled_shifts
+    WHERE employee_id = ? AND business_date = ?`).all(E.server, day);
+  const byPart = Object.fromEntries(rows.map((r) => [r.daypart, r.id]));
+  try {
+    const cafe = await raw(`/schedule?v=today&svc=cafe`);
+    assert.ok(cafe.includes(`data-edit="${byPart.cafe}"`), 'the Day list has the Day shift');
+    assert.ok(!cafe.includes(`data-edit="${byPart.dinner}"`), 'and not the Evening one');
+
+    const dinner = await raw(`/schedule?v=today&svc=dinner`);
+    assert.ok(dinner.includes(`data-edit="${byPart.dinner}"`), 'and the Evening list has its own');
+    assert.ok(!dinner.includes(`data-edit="${byPart.cafe}"`), 'without the Day shift');
+  } finally {
+    for (const r of rows) db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(r.id);
+  }
+});
+
+test('a third schedule can hold its own shifts, instead of losing them to the pair', async () => {
+  // DAYPARTS is the two services this restaurant started with, and it was the
+  // whole test of whether a service was real. A schedule made from the picker
+  // failed it, so every shift drawn on that board was re-stamped cafe or
+  // dinner by the clock and vanished from the only board that would show it.
+  const SVC = require('../src/services');
+  const wk = week();
+  const day = dates.addDays(wk.start, 1);
+  SVC.create({ slug: 'brunch-board', name: 'Brunch Service', members: [E.server] });
+  try {
+    const res = await post('/schedule/shift', {
+      w: wk.start, svc: 'brunch-board', employee_id: String(E.server), position: 'server',
+      date: day, start: '16:00', end: '22:00', break_minutes: '',
+    });
+    assert.strictEqual(flashOf(res).err, false, flashOf(res).msg);
+    const made = db.prepare(`SELECT * FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?
+      ORDER BY id DESC LIMIT 1`).get(E.server, day);
+    assert.strictEqual(made.daypart, 'brunch-board', 'stamped with the board it was drawn on');
+    const html = await raw(`/schedule?w=${wk.start}&svc=brunch-board`);
+    assert.ok(html.includes(`data-edit="${made.id}"`), 'and that board shows it');
+    db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(made.id);
+  } finally {
+    db.prepare("DELETE FROM services WHERE slug = 'brunch-board'").run();
+    db.prepare("DELETE FROM employee_services WHERE service_slug = 'brunch-board'").run();
+  }
+});
