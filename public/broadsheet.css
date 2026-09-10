@@ -5017,8 +5017,6 @@ body.sb-iss-open .sb-iss { transform: translateX(0); visibility: visible; }
   .tso-panel { transform: none; }
 }
 
-}
-
 /* --- REQUESTS -------------------------------------------------------------
    One place they live. The control that opens it never disappears: with an
    empty queue it still reads "View requests", because a panel that is simply
@@ -6774,6 +6772,8 @@ input[type="date"], input[type="time"], input[type="search"], select {
   .svc-pick { width: 100%; }
   .esu-ovrow .esu-sel { flex: 1 1 100%; }
   .esu-sum-g { grid-template-columns: 1fr; gap: 2px; }
+}
+
 /* ===========================================================================
    DOCUMENTS (admin)
    =========================================================================== */

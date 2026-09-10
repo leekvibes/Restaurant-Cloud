@@ -29643,6 +29643,19 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     return d;
   }
 
+  /**
+   * Drop the rendered canvas, keep everything else on the page.
+   *
+   * A page shell holds the reader's canvas AND, on the editor and the signing
+   * view, an absolutely-positioned overlay of fields belonging to somebody
+   * else's script. The reader owns the canvas and only the canvas.
+   */
+  function clearCanvas(host) {
+    Array.prototype.slice.call(host.children).forEach(function (c) {
+      if (c.tagName === 'CANVAS') host.removeChild(c);
+    });
+  }
+
   function draw(n) {
     if (rendered[n] || !pdf) return;
     rendered[n] = true;
@@ -29658,7 +29671,15 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
       cv.style.width = '100%';
       cv.style.height = 'auto';
       host.style.aspectRatio = '';
-      host.innerHTML = '';
+      // CLEAR WHAT THE READER PUT THERE, AND NOTHING ELSE.
+      //
+      // This was innerHTML = '', which also took the field overlay with it.
+      // The overlay is a sibling of the canvas, added by whoever is placing or
+      // signing fields — so a signature drawn on page 1 vanished the moment
+      // page 1 finished rendering, and the only thing that ever put it back
+      // was placing another field. It read as "nothing appears where I click",
+      // because by the time you looked, nothing was there.
+      clearCanvas(host);
       host.appendChild(cv);
       page.render({ canvasContext: cv.getContext('2d', { alpha: false }),
         viewport: page.getViewport({ scale: scale * DPR }) });
@@ -29672,7 +29693,9 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     // document jump under the reader's thumb.
     var h = host.getBoundingClientRect().height;
     if (h) host.style.height = h + 'px';
-    host.innerHTML = '';
+    // Same here: scrolling a page out of view releases its canvas to save
+    // memory, and used to take the fields with it for good.
+    clearCanvas(host);
     rendered[n] = false;
   }
 
