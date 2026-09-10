@@ -1216,6 +1216,60 @@ test('the day header reads DATE, then people, then shifts', async () => {
   assert.match(css, /font-variant-numeric:tabular-nums/, 'metrics line up column to column');
 });
 
+// ---------------------------------------------------------------------------
+// WHAT A DAY OF THE PLAN COSTS.
+//
+// byDate has carried the same cost figures as byEmployee all along; only the
+// employee row was printing them. A manager could see what Sandra costs for the
+// week and not what Thursday costs, which is the question you ask while moving
+// a shift from one column to another.
+// ---------------------------------------------------------------------------
+
+test('a day header prices the day, the same way a row prices the week', async () => {
+  const html = await text('/schedule');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  // Same figures, same rules, same words. A manager reading $612 under Thursday
+  // and $340 beside Sandra has to be able to assume the two were worked out the
+  // same way, so they are literally the same wording.
+  assert.match(src, /Planned wages for this day at straight time\. No overtime, no tips\./,
+    'the day says what it counted');
+  assert.match(src, /const dayCost = \(s\) => \{/, 'and it is one function, not a second sum');
+  assert.match(src, /if \(!showPay \|\| !s\.n\) return '';/,
+    'hidden from anyone who cannot see payroll, and absent on an empty day');
+
+  // The two honest silences, kept from the employee row.
+  assert.match(src, /t\.costedCount \? sbUSD\(t\.costCents\) : '&mdash;'/,
+    'a day where nothing could be priced shows a dash, not $0');
+  assert.match(src, /t\.unratedCount && t\.costedCount \? ' sb-pay--part' : ''/,
+    'and one where some shifts have no wage marks itself as a floor');
+
+  // If the board has anything on it, the rows and the columns of the same grid
+  // must agree — they are two sums of one set of shifts.
+  const days = (html.match(/class="sb-pay sb-dh-pay[^"]*"[^>]*>\$([\d,]+)</g) || [])
+    .map((x) => Number(/\$([\d,]+)</.exec(x)[1].replace(/,/g, '')));
+  const emps = (html.match(/<u class="sb-pay(?![^"]*sb-dh-pay)[^"]*"[^>]*>\$([\d,]+)</g) || [])
+    .map((x) => Number(/\$([\d,]+)</.exec(x)[1].replace(/,/g, '')));
+  if (days.length && emps.length) {
+    const a = days.reduce((x, y) => x + y, 0);
+    const b = emps.reduce((x, y) => x + y, 0);
+    // Each figure is rounded to the dollar for display, so the two sums may
+    // differ by less than one dollar per figure. Anything more is a real
+    // disagreement between the rows and the columns.
+    assert.ok(Math.abs(a - b) <= days.length + emps.length,
+      `days sum to ${a} and employees to ${b} — the same shifts, counted twice`);
+  }
+});
+
+test('the day cost sits where the week cost sits, and does not squash the date', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  // Pushed right on the people line, which is where .sb-pay sits on a row —
+  // so the eye finds both in the same column whichever way it is scanning.
+  assert.match(css, /\.sb-dh-pay \{ margin-left:auto; \}/, 'right-aligned on its line');
+  assert.match(css, /\.sb-dh-line \{ display:flex;/, 'sharing the line rather than adding one');
+  assert.match(css, /\.sb-dh--none \.sb-dh-pay/, 'and stepping back on a day with nobody on it');
+});
+
 // ===========================================================================
 // Phase 6 checkpoint 1 — the sch_availability setting.
 //

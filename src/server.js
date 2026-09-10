@@ -21827,7 +21827,34 @@ app.get('/schedule', (req, res) => {
   const dayStat = (d) => {
     const t = totals.byDate[d] || { paidMinutes: 0, count: 0 };
     const people = new Set(shifts.filter((s) => s.business_date === d).map((s) => s.employee_id)).size;
-    return { h: sbHours(t.paidMinutes), n: t.count, p: people };
+    // The whole bucket, not three fields off it. byDate has carried the same
+    // cost figures as byEmployee all along; only the row was printing them.
+    return { h: sbHours(t.paidMinutes), n: t.count, p: people, t };
+  };
+
+  /**
+   * What a day of this plan costs, said exactly as a person's week is said.
+   *
+   * Same bucket shape, same rules, same wording — because a manager reading
+   * $612 under Thursday and $340 beside Sandra has to be able to assume the
+   * two were worked out the same way. They are: straight time on planned
+   * hours, no overtime, no tips.
+   *
+   * The two honest silences are kept as well. A day where nothing could be
+   * priced shows a dash rather than $0, which beside eleven scheduled hours
+   * reads as a bug. A day where SOME shifts have no wage on file carries the
+   * "+" marker, because the figure is a floor and not the number.
+   */
+  const dayCost = (s) => {
+    if (!showPay || !s.n) return '';
+    const t = s.t;
+    const why = t.salariedCount && !t.unratedCount
+      ? 'Salaried staff carry no hourly cost. '
+      : t.unratedCount ? `No wage on file for ${t.unratedCount} of these shifts, so this is lower than the real cost. Set it under Staff. `
+        : '';
+    return `<u class="sb-pay sb-dh-pay${t.unratedCount && t.costedCount ? ' sb-pay--part' : ''}"
+      title="${esc(why)}Planned wages for this day at straight time. No overtime, no tips.">${
+  t.costedCount ? sbUSD(t.costCents) : '&mdash;'}</u>`;
   };
   const dow = (d) => TC.dayLabel(d).split(',')[0];
   const md = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8))}`;
@@ -22258,7 +22285,7 @@ app.get('/schedule', (req, res) => {
               <div class="sb-emp sb-corner">Who</div>
               ${days.map((d, di) => { const s = dayStat(d); return `<div class="sb-dh${d === today ? ' is-today' : ''}${s.p ? '' : ' sb-dh--none'}">
                 <em>${esc(dow(d))} ${md(d)}${d === today ? ' <span class="sb-today">TODAY</span>' : ''}</em>
-                <b>${s.p} ${s.p === 1 ? 'person' : 'people'}</b>
+                <span class="sb-dh-line"><b>${s.p} ${s.p === 1 ? 'person' : 'people'}</b>${dayCost(s)}</span>
                 <i>${s.n} shift${s.n === 1 ? '' : 's'} &middot; ${s.h}h</i>
                 ${/* Copy this day onto the next one. Offered only where there is
                      something to copy AND somewhere to copy it to, so the header

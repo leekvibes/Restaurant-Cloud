@@ -4506,6 +4506,16 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .sb-dh em { display:block; font-style:normal; font-size:13.5px; font-weight:680;
   letter-spacing:-.015em; color:var(--headline); white-space:nowrap; line-height:1.2; }
 .sb-dh b { display:block; font-size:11px; font-weight:600; color:var(--body); margin-top:1px; }
+/* The people count and the day's cost share one line — the count reads left,
+   the money right, matching where it sits on an employee row so the eye finds
+   both in the same column whichever way it is scanning. The count keeps its
+   own <b>: the cost is not part of "6 people". */
+.sb-dh-line { display:flex; align-items:baseline; gap:6px; }
+.sb-dh-line b { margin-top:0; }
+.sb-dh-pay { margin-left:auto; }
+/* Nothing priced on this day. The dash carries no emphasis, because it is the
+   absence of a figure rather than a figure of nothing. */
+.sb-dh--none .sb-dh-pay { color:var(--muted); font-weight:500; }
 .sb-dh i { display:block; font-style:normal; font-family:var(--mono); font-size:10px;
   font-weight:400; color:var(--muted); margin-top:0; letter-spacing:-.02em;
   white-space:nowrap; min-height:1.3em; font-variant-numeric:tabular-nums; }
