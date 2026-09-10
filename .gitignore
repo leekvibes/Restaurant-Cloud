@@ -29,3 +29,6 @@ design_handoff_zwin_broadsheet*/
 # by an over-eager `git add -A` once already.
 *.pdf
 *.mov
+
+# A stray SQLite file a script wrote when DB_PATH was empty. Never a real file.
+undefined

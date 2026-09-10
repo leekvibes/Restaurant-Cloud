@@ -833,7 +833,11 @@ test('the three Schedule sections are present, in the locked order', async () =>
   assert.ok(nav, 'the section nav rendered');
   const labels = [...nav.matchAll(/<span>([^<]+)<\/span>/g)].map((m) => m[1]);
   assert.deepStrictEqual(labels, ['Only me', 'Everyone', 'My availability']);
-  assert.match(nav, /class="ps-t on"[^>]*href="\/portal\/schedule\?v=me"/, 'Only me is the default');
+  // The href carries the chosen schedule now — every link on this page does,
+  // because one that did not sent a two-schedule employee back to the picker on
+  // every tap. What is asserted is that "Only me" is the one marked current,
+  // not the exact query string, so adding another parameter cannot fail this.
+  assert.match(nav, /class="ps-t on"[^>]*href="\/portal\/schedule\?v=me(&|")/, 'Only me is the default');
 });
 
 test('publishing writes nothing to time, work, payroll or services', async () => {
