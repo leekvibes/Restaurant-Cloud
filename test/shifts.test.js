@@ -594,7 +594,7 @@ test('money already counted keeps its panel even with no pool rule', async () =>
   const h = await html(`/shifts/${review}`);
   assert.match(h, /Shared tip pool/, 'the panel stays');
   assert.match(h, /\$50\.00/, 'showing the money');
-  assert.match(h, /no pool rule, so nothing pays this/, 'and saying why nothing moves it');
+  assert.match(h, /no rule pays out/, 'and saying why nothing moves it');
 
   db.prepare('UPDATE shifts SET pool_jar_cents = 0 WHERE id = ?').run(review);
 });
@@ -617,4 +617,50 @@ test('posting a pool figure to a pool-free service is refused', async () => {
   const ok = await post(`/shifts/${review}/pool`, { jar: '0', togo_card: '0' });
   assert.strictEqual(ok.status, 302);
   assert.ok(!/err=1/.test(ok.headers.get('location') || ''), 'clearing is not an error');
+});
+
+
+test('the two pots are gated separately, because they are two pots', async () => {
+  // A day policy can pool the cash jar and leave to-go card with whoever rang
+  // it. Asking the manager to count both would put money in a bucket nothing
+  // pays out — the same defect as the night jar, one pot over.
+  const { review } = module.exports;
+  const JAR_ONLY = JSON.stringify([
+    { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+    { type: 'pool', source: 'jar', split: 'hours', among: ['busser'], payout: 'weekly_cash' },
+  ]);
+  const pid = db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('dinner', ?, 'jar only')")
+    .run(JAR_ONLY).lastInsertRowid;
+  db.prepare('UPDATE shifts SET policy_id = ?, pool_jar_cents = 0, pool_togo_card_cents = 0 WHERE id = ?')
+    .run(pid, review);
+
+  const h = await html(`/shifts/${review}`);
+  assert.match(h, /name="jar"/, 'the pot it DOES pool is asked for');
+  assert.ok(!/name="togo_card"/.test(h), 'the pot it does not is not');
+  assert.match(h, /Cash pool/, 'and only that one is shown');
+  assert.ok(!/To-go card/.test(h));
+
+  const post = (url, body) => fetch(BASE + url, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body).toString(),
+  });
+  const okJar = await post(`/shifts/${review}/pool`, { jar: '40' });
+  assert.ok(!/err=1/.test(okJar.headers.get('location') || ''), 'the jar saves');
+  assert.strictEqual(db.prepare('SELECT pool_jar_cents c FROM shifts WHERE id = ?').get(review).c, 4000);
+
+  const badCard = await post(`/shifts/${review}/pool`, { jar: '40', togo_card: '25' });
+  assert.match(badCard.headers.get('location') || '', /err=1/, 'to-go card is refused');
+  assert.strictEqual(db.prepare('SELECT pool_togo_card_cents c FROM shifts WHERE id = ?').get(review).c, 0,
+    'and nothing was written');
+  assert.strictEqual(db.prepare('SELECT pool_jar_cents c FROM shifts WHERE id = ?').get(review).c, 4000,
+    'nor was the good half half-applied');
+
+  // A form that only sends the pot it pools must not blank the other one.
+  db.prepare('UPDATE shifts SET pool_togo_card_cents = 500 WHERE id = ?').run(review);
+  await post(`/shifts/${review}/pool`, { jar: '60' });
+  assert.strictEqual(db.prepare('SELECT pool_togo_card_cents c FROM shifts WHERE id = ?').get(review).c, 500,
+    'an absent box leaves what is on file alone');
+
+  db.prepare('UPDATE shifts SET pool_jar_cents = 0, pool_togo_card_cents = 0 WHERE id = ?').run(review);
 });

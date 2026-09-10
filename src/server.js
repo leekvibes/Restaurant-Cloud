@@ -17,7 +17,7 @@ const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo,
   adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked,
   stagedForDaypart, stageRules, activateStaged, discardStaged } = require('./policy');
-const { defaultRules } = require('./engine');
+const { defaultRules, bucketsOf } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const WAGES = require('./wages');
 const SERVICES = require('./services');
@@ -2157,8 +2157,18 @@ app.get('/shifts/:id', (req, res) => {
   // is no cash tip jar at night, so a box asking the manager to count one is an
   // instruction to do something the policy has no way to pay out. Money already
   // sitting in a pot keeps its panel either way, so nothing goes quiet.
-  const hasPool = rulesNow.some((x) => x.type === 'pool');
-  const showPool = hasPool || (poolCash + poolCard) > 0;
+  // PER BUCKET, not all-or-nothing.
+  //
+  // The two boxes are two different pots. A day policy that pools the cash jar
+  // and leaves to-go card with whoever rang it has a rule for one and not the
+  // other — asking the manager to count both would put money in a bucket
+  // nothing pays out, which is the same defect as the night jar, one pot over.
+  const poolsCash = rulesNow.some((x) => x.type === 'pool' && bucketsOf(x.source).includes('cash'));
+  const poolsCard = rulesNow.some((x) => x.type === 'pool' && bucketsOf(x.source).includes('card'));
+  const hasPool = poolsCash || poolsCard;
+  const showCash = poolsCash || poolCash > 0;
+  const showCard = poolsCard || poolCard > 0;
+  const showPool = showCash || showCard;
 
   // =========================================================================
   // BROADSHEET — the shift sheet
@@ -2437,11 +2447,11 @@ app.get('/shifts/:id', (req, res) => {
           ${showPool ? `
           <div class="bs-sec-h"><span class="bs-kicker">Shared tip pool</span></div>
           <div class="bs-lrows">
-            <div class="bs-lrow"><span>Cash pool</span><b class="bs-fig">${money(poolCash)}</b></div>
-            <div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>
+            ${showCash ? `<div class="bs-lrow"><span>Cash pool</span><b class="bs-fig">${money(poolCash)}</b></div>` : ''}
+            ${showCard ? `<div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>` : ''}
           </div>` : ''}
-          ${!hasPool && (poolCash + poolCard) > 0
-            ? `<p class="bs-clear warn">This service's policy has no pool rule, so nothing pays this ${money(poolCash + poolCard)} out. Zero it above, or add a pool rule to the policy.</p>` : ''}
+          ${(poolCash > 0 && !poolsCash) || (poolCard > 0 && !poolsCard)
+            ? `<p class="bs-clear warn">${money((poolsCash ? 0 : poolCash) + (poolsCard ? 0 : poolCard))} is counted here that no rule pays out. Zero it, or add a pool rule to the policy.</p>` : ''}
           ${eligible.length ? `
             ${/* Not "support" any more: a bartender is tipped out AND earns
                  directly, so this list is "who was tipped out", which is what it
@@ -2452,11 +2462,11 @@ app.get('/shifts/:id', (req, res) => {
           ${showPool && (poolCash + poolCard) > 0 && !eligible.length
             ? `<p class="bs-clear warn">${money(poolCash + poolCard)} in the pool with nobody to receive it.</p>` : ''}
           <p class="bs-sheet-note">Card rides the paycheck (to-go card + any tip-out); cash is handed over.${hasPool ? ' Split by hours across the support on shift.' : ''}</p>
-          ${canWrite() && showPool ? `<details class="bs-x">
+          ${canWrite() && hasPool ? `<details class="bs-x">
             <summary>Edit what you counted</summary>
             <form method="post" action="/shifts/${sh.id}/pool" class="bs-form">
-              <label>Cash you counted <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
-              <label>To-go card you counted <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>
+              ${poolsCash ? `<label>Cash you counted <input name="jar" type="number" step="0.01" min="0" value="${sh.pool_jar_cents ? (sh.pool_jar_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>` : ''}
+              ${poolsCard ? `<label>To-go card you counted <input name="togo_card" type="number" step="0.01" min="0" value="${sh.pool_togo_card_cents ? (sh.pool_togo_card_cents / 100).toFixed(2) : ''}" placeholder="0.00"></label>` : ''}
               <button class="bs-btn-quiet" type="submit">Save pool</button>
             </form>
           </details>` : ''}
@@ -2754,13 +2764,27 @@ app.post('/shifts/:id/pool', (req, res) => {
   if (!sh) return res.status(404).end();
   // The form is hidden on a policy with no pool rule, but a stale tab still has
   // it. Money saved here would sit in a pot nothing pays out.
+  // Per bucket, matching the boxes. A policy can pool the cash jar and leave
+  // to-go card with whoever rang it — saving into the pot it does not pool
+  // would put money somewhere nothing pays out.
+  const rules = policyForShift(sh) || [];
+  const pools = (b) => rules.some((x) => x.type === 'pool' && bucketsOf(x.source).includes(b));
   const jar = toCents(req.body.jar);
   const togoCard = toCents(req.body.togo_card);
-  if ((jar || togoCard) && !(policyForShift(sh) || []).some((x) => x.type === 'pool')) {
+  const stray = [];
+  if (jar && !pools('cash')) stray.push('a cash tip jar');
+  if (togoCard && !pools('card')) stray.push('to-go card tips');
+  if (stray.length) {
     return res.redirect(`/shifts/${sh.id}?msg=`
-      + encodeURIComponent('This service runs on a policy with no tip pool, so there is nothing to pay a counted pot out to. Add a pool rule to the policy first.') + '&err=1');
+      + encodeURIComponent(`This service's policy does not pool ${stray.join(' or ')}, so there is nothing to pay it out to. Add a pool rule to the policy first.`) + '&err=1');
   }
-  s.setPool.run({ id: Number(req.params.id), jar, togo_card: togoCard });
+  // An absent box must not blank what is already on file — the form only sends
+  // the pots this policy actually pools.
+  s.setPool.run({
+    id: Number(req.params.id),
+    jar: req.body.jar === undefined ? (sh.pool_jar_cents || 0) : jar,
+    togo_card: req.body.togo_card === undefined ? (sh.pool_togo_card_cents || 0) : togoCard,
+  });
   res.redirect(`/shifts/${req.params.id}?msg=` + encodeURIComponent('Tip pool saved.'));
 });
 

@@ -363,4 +363,4 @@ function runShift(shift, rules) {
   };
 }
 
-module.exports = { runShift, defaultRules, TIPOUT_ROLES, fmt };
+module.exports = { runShift, defaultRules, TIPOUT_ROLES, fmt, bucketsOf };
