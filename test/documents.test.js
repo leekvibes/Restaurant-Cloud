@@ -240,3 +240,40 @@ test('a signed document reopens read-only, with the values in place', () => {
   assert.ok(shown.some((x) => /^\d{2}\/\d{2}\/\d{4}$/.test(x)), 'and the date');
   assert.strictEqual(id > 0, true);
 });
+
+test('a receipt does not lead back into the flow that produced it', () => {
+  // Pressing Back on a receipt landed on the form that made it — restored from
+  // the browser's cache mid-submit, button disabled, reading "Submitting…".
+  // It looked like the app had hung, and tapping the button did nothing
+  // because it was disabled.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+  // The corner link on a receipt is a plain link to the section, not the
+  // history.back() every other portal page upgrades to.
+  assert.match(src, /label: 'Documents', exact: true \}, 'Signed'\)/,
+    'the signed receipt opts out of history.back()');
+  assert.match(src, /label: 'Home', exact: true \}, 'Sales & tips'\)/,
+    'and so does the tips receipt');
+  assert.match(src, /\$\{back\.exact \? '' : ' data-pt-back'\}/,
+    'and portalTop honours it — the upgrade script only touches data-pt-back');
+
+  // And the browser's own Back leaves the flow rather than re-entering it.
+  assert.match(src, /doneHome: '\/portal\/documents'/, 'the signed receipt names where Back goes');
+  assert.match(src, /doneHome: '\/portal'/, 'so does the tips receipt');
+  assert.match(src, /location\.replace\(\$\{JSON\.stringify\(home\)\}\)/,
+    'and it replaces rather than pushing, so Back does not bounce');
+});
+
+test('a page restored from the browser cache is not left mid-submit', () => {
+  // Nothing had reset it because nothing ran: a restored page fires pageshow
+  // with persisted = true and does not re-run the document.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /window\.addEventListener\('pageshow', function \(ev\) \{\s*\n\s*if \(!ev\.persisted\) return;/,
+    'it listens for a restore specifically');
+  assert.match(src, /b\.disabled = false;/, 'and re-enables the button');
+  assert.match(src, /b\.dataset\.ptLabel/, 'putting back the label it started with, not a guess');
+  assert.match(src, /'\.pdv-sheet, \.pt-sheet'/, 'and closes anything modal that came back open');
+  // Every portal page, not just the documents one — the tips form disables its
+  // button in exactly the same way.
+  assert.match(src, /\}\$\{portalRestoreScript\(\)\}\$\{/, 'emitted from portalPage for all of them');
+});

@@ -3524,9 +3524,15 @@ const portalHead = () => '';
  * @param back  {href, label} — omit only on the hub itself.
  * @param title the page's own name, in the corner, as a label not a link.
  */
+/**
+ * `back.exact` means: this is the end of a flow, so go to the PARENT and not to
+ * wherever the person came from. Without it the link becomes history.back(),
+ * which on a receipt lands on the form that produced it — restored from cache,
+ * mid-submit and disabled. A receipt's only way back is out.
+ */
 const portalTop = (back, title) => `
   <div class="pt-crumb">
-    ${back ? `<a class="pt-back" href="${back.href}" data-pt-back>‹ ${esc(back.label)}</a>` : ''}
+    ${back ? `<a class="pt-back" href="${back.href}"${back.exact ? '' : ' data-pt-back'}>‹ ${esc(back.label)}</a>` : ''}
     ${title ? `<span class="pt-who">${esc(title)}</span>` : ''}
   </div>`;
 
@@ -3827,6 +3833,70 @@ function portalNavScript() {
   </script>`;
 }
 
+/**
+ * A PAGE COMING BACK FROM THE BROWSER'S CACHE IS NOT A FRESH PAGE.
+ *
+ * Press Back onto a form that was submitted and the browser hands back the DOM
+ * exactly as it was left: the submit button still disabled and still reading
+ * "Submitting…", and any sheet that was open still open over the top. It looks
+ * like the app has hung, and tapping the button does nothing because it is
+ * disabled. That is the freeze.
+ *
+ * Nothing had reset it, because nothing ran — a restored page fires `pageshow`
+ * with persisted = true and does NOT re-run the document. So this listens for
+ * exactly that, puts every disabled submit back the way it started, and closes
+ * anything modal. Applies to every portal screen: the tips form disables its
+ * button the same way the document one does.
+ */
+const portalRestoreScript = () => `<scr` + `ipt>
+  (function () {
+    // Remember the label before anything changes it, so restoring is exact
+    // rather than a guess at what it said.
+    function arm() {
+      Array.prototype.forEach.call(
+        document.querySelectorAll('button[type=submit], .tc-btn-go'),
+        function (b) { if (b.dataset.ptLabel == null) b.dataset.ptLabel = b.textContent; });
+    }
+    arm();
+    window.addEventListener('pageshow', function (ev) {
+      if (!ev.persisted) return;
+      Array.prototype.forEach.call(document.querySelectorAll('[data-pt-label]'), function (b) {
+        b.disabled = false;
+        if (b.textContent !== b.dataset.ptLabel) b.textContent = b.dataset.ptLabel;
+      });
+      // Sheets are DOM state, not history, so a restore brings them back open
+      // over a page the person thought they had left.
+      Array.prototype.forEach.call(document.querySelectorAll('.pdv-sheet, .pt-sheet'), function (sh) {
+        sh.hidden = true;
+      });
+      document.documentElement.style.overflow = '';
+    });
+  })();
+</scr` + `ipt>`;
+
+/**
+ * A FINISHED THING DOES NOT GO BACK INTO THE THING THAT FINISHED IT.
+ *
+ * A receipt is the end of a flow. Pressing Back on one landed on the form that
+ * produced it — restored from cache, mid-submit, disabled — and pressing it
+ * again re-entered the flow further up. Nobody wants to walk back through a
+ * submission they have already made; they want to be out of it.
+ *
+ * So one Back press from a receipt leaves for the section it belongs to. It is
+ * one entry, not a trap: from there Back behaves entirely normally, and the
+ * link in the corner goes to the same place, so the two agree.
+ */
+const portalDoneScript = (home) => `<scr` + `ipt>
+  (function () {
+    try {
+      history.pushState({ ptDone: 1 }, '', location.href);
+      window.addEventListener('popstate', function () {
+        location.replace(${JSON.stringify(home)});
+      });
+    } catch (e) { /* no history API: the corner link still works */ }
+  })();
+</scr` + `ipt>`;
+
 const portalPage = (title, body, opts = {}) => layout(title,
   // Emitted here rather than at eleven call sites, and only when the page
   // actually has a back link — which is every sub-page and not the hub.
@@ -3841,7 +3911,8 @@ const portalPage = (title, body, opts = {}) => layout(title,
   // position: fixed still resolves against the viewport.
   `<div class="pt${opts.noTabs ? '' : ' has-tabs'}">${body}${
     opts.noTabs ? '' : portalTabs(currentPath())}</div>${
-    body.includes('data-pt-back') ? portalBackScript() : ''}`,
+    body.includes('data-pt-back') ? portalBackScript() : ''}${portalRestoreScript()}${
+    opts.doneHome ? portalDoneScript(opts.doneHome) : ''}`,
   { bare: true, staff: true });
 
 // ---------------------------------------------------------------------------
@@ -5765,7 +5836,7 @@ app.get('/portal/tips/receipt/:id', (req, res) => {
   };
   const when = String(row.created_at || '').replace(' ', ' at ');
   const body = `
-    ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
+    ${portalTop({ href: '/portal', label: 'Home', exact: true }, 'Sales & tips')}
     <div class="pt-body tc-body st-body">
       <div class="tcc tcc-ok">
         <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
@@ -5788,7 +5859,7 @@ app.get('/portal/tips/receipt/:id', (req, res) => {
       <a class="st-alt" href="/portal/tips">Report another shift</a>
     </div>
     <script>(function(){var h=document.getElementById('st-receipt-h');if(h)h.focus();})();</script>`;
-  res.send(portalPage('Sales & tips', body));
+  res.send(portalPage('Sales & tips', body, { doneHome: '/portal' }));
 });
 
 // Push notifications: a device turns them on (subscribe) or off (unsubscribe).
@@ -30404,7 +30475,7 @@ app.get('/portal/documents/:id/done', (req, res) => {
   const queue = DOCS.forEmployee(emp.id).filter((d) => d.kind === 'sign' && !d.signature && d.id !== doc.id);
 
   res.send(portalPage('Signed', `
-    ${portalTop({ href: '/portal/documents', label: 'Documents' }, 'Signed')}
+    ${portalTop({ href: '/portal/documents', label: 'Documents', exact: true }, 'Signed')}
     <div class="pt-body pdd-body">
       <div class="pdd-mark" aria-hidden="true">✓</div>
       <h1 class="pdd-h">Completed</h1>
@@ -30427,7 +30498,7 @@ app.get('/portal/documents/:id/done', (req, res) => {
     ? `<a class="tc-btn" href="/portal/documents/${queue[0].id}">Next document (${queue.length} left)</a>`
     : '<a class="tc-btn" href="/portal/documents">Back to documents</a>'}
       </div>
-    </div>`));
+    </div>`, { doneHome: '/portal/documents' }));
 });
 
 // --- admin: placing the fields ---------------------------------------------
