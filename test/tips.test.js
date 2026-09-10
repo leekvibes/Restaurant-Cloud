@@ -2139,6 +2139,8 @@ test('what a bartender submits lands where the engine reads it', async () => {
   assert.ok(row, 'a sales row exists for them');
   assert.strictEqual(row.alcohol_cents, 90000, 'the bar alcohol landed');
   assert.strictEqual(row.food_cents, 12000, 'and the bar food');
+});
+
 test('a shift that has been sent out cannot be reported on again', async () => {
   // /shifts/:id/send runs the tip-out, allocates every penny, emails each
   // person their own figures and marks the shift emailed. Sales or tips
