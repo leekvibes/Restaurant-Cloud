@@ -292,9 +292,7 @@ function runShift(shift, rules) {
     ? support.reduce((a, p) => a + (p.tipEligible === false ? 0 : p.cardTips), 0) : 0;
   // Money the manager counted stays on the books either way -- if it is sitting
   // in a bucket no rule pays out, the sheet should say so, not swallow it.
-  // pool.staffJar is the tip jar as counted by whoever was standing at it.
-  // Same pot as the manager's count, entered by a different person.
-  const cash = toCents(pool.jar) + toCents(pool.staffJar) + toCents(legacyCash) + staffCash;
+  const cash = toCents(pool.jar) + toCents(legacyCash) + staffCash;
   const togoCard = toCents(pool.togoCard) + staffCard;
   // Allocate each bucket SEPARATELY even when one rule covers both, so we can
   // tell someone "$X of this was card, $Y was cash out of the jar". Splitting

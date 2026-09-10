@@ -173,16 +173,6 @@ if (!shiftCols.includes('sales_note')) db.exec('ALTER TABLE shifts ADD COLUMN sa
 // comment or concern, or an explanation of something odd in their numbers.
 const salesCols = db.prepare('PRAGMA table_info(server_sales)').all().map((c) => c.name);
 if (!salesCols.includes('note')) db.exec('ALTER TABLE server_sales ADD COLUMN note TEXT');
-// THE JAR IS NOT SOMEBODY'S OWN CASH.
-//
-// A barista keeps the cash their own guests hand them and that goes in
-// cash_tips_cents. The tip jar on the counter is a different pot with a rule
-// of its own, and until now only a manager could enter it — the one person
-// not standing next to it at close. Same column would have been wrong: the
-// two numbers are owned by different people and paid out by different rules.
-if (!salesCols.includes('jar_cash_cents')) {
-  db.exec('ALTER TABLE server_sales ADD COLUMN jar_cash_cents INTEGER NOT NULL DEFAULT 0');
-}
 
 // ---- Users --------------------------------------------------------------
 // People who sign in to the back office. Separate from `employees` on purpose:
@@ -523,13 +513,6 @@ const w = {
      VALUES (@shift_id, @employee_id, @card_tips_cents)
      ON CONFLICT(shift_id, employee_id) DO UPDATE SET card_tips_cents = excluded.card_tips_cents`
   ),
-  // The tip jar as counted by whoever was standing at it — a different pot
-  // from their own cash tips, and paid out by a different rule.
-  setJarCash: db.prepare(
-    `INSERT INTO server_sales (shift_id, employee_id, jar_cash_cents)
-     VALUES (@shift_id, @employee_id, @jar_cash_cents)
-     ON CONFLICT(shift_id, employee_id) DO UPDATE SET jar_cash_cents = excluded.jar_cash_cents`
-  ),
   // A note staff left with their submission (doesn't touch any figures).
   setNote: db.prepare(
     `INSERT INTO server_sales (shift_id, employee_id, note)
@@ -696,16 +679,8 @@ function shiftInputs(shiftId) {
   }
   const sh = s.shiftById.get(shiftId) || {};
   // The jar holds all cash tips; to-go card tips are tracked separately.
-  // Kept apart from the manager's own count rather than added to it, so the
-  // sheet can still say "you counted X, staff reported Y" truthfully.
-  let staffJar = 0;
-  try {
-    staffJar = db.prepare('SELECT COALESCE(SUM(jar_cash_cents), 0) n FROM server_sales WHERE shift_id = ?')
-      .get(shiftId).n;
-  } catch { staffJar = 0; }
   const pool = {
     jar: (sh.pool_jar_cents || 0) / 100,
-    staffJar: staffJar / 100,
     togoCash: (sh.pool_togo_cents || 0) / 100, // legacy column, folds into cash
     togoCard: (sh.pool_togo_card_cents || 0) / 100,
   };

@@ -2447,9 +2447,7 @@ app.get('/shifts/:id', (req, res) => {
           ${showPool ? `
           <div class="bs-sec-h"><span class="bs-kicker">Shared tip pool</span></div>
           <div class="bs-lrows">
-            ${showCash ? `<div class="bs-lrow"><span>Cash pool${
-  toCents(inp.pool.staffJar) ? `<i class="bs-em">· you ${money(toCents(inp.pool.jar))}, staff counted ${money(toCents(inp.pool.staffJar))}</i>` : ''
-}</span><b class="bs-fig">${money(poolCash)}</b></div>` : ''}
+            ${showCash ? `<div class="bs-lrow"><span>Cash pool</span><b class="bs-fig">${money(poolCash)}</b></div>` : ''}
             ${showCard ? `<div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>` : ''}
           </div>` : ''}
           ${(poolCash > 0 && !poolsCash) || (poolCard > 0 && !poolsCard)
@@ -2890,6 +2888,34 @@ function shiftWarnings(sh, inp, r) {
   }
   const missingEmail = inp.people.filter((p) => !p.email).map((p) => p.name);
   if (missingEmail.length) warn.push('No email on file for: ' + missingEmail.join(', ') + '. Add it under Staff.');
+  // TWO PEOPLE, ONE POT.
+  //
+  // Where a role shares something to count — the jar on the counter is the
+  // obvious one, but a float, a section or a till does the same — two of them
+  // can each enter the whole thing instead of their half. Nothing else would
+  // notice: both figures are plausible, the books still balance, and the
+  // service is simply over by the amount one of them should not have typed.
+  //
+  // The fingerprint is the SAME role reporting the SAME amount. Two servers on
+  // different sections landing on an identical figure is a coincidence worth a
+  // second look; two baristas doing it is almost always one jar counted twice.
+  // Different amounts are not flagged, because that is people splitting it,
+  // which is what they are meant to do.
+  const cashSeen = new Map();
+  for (const p of inp.people) {
+    const c = toCents(p.cashTips);
+    if (!c) continue;
+    const k = `${p.role}|${c}`;
+    if (!cashSeen.has(k)) cashSeen.set(k, { role: p.role, cents: c, names: [] });
+    cashSeen.get(k).names.push(p.name);
+  }
+  for (const d of cashSeen.values()) {
+    if (d.names.length < 2) continue;
+    warn.push(`${d.names.join(' and ')} each reported ${money(d.cents)} in cash as ${posName(d.role).toLowerCase()}.`
+      + ` If that is one pot counted twice, this service is ${money(d.cents * (d.names.length - 1))} over —`
+      + ' each of them should enter only their own share.');
+  }
+
   const noCash = inp.servers.filter((sv) => !sv.cashEnteredBy).map((sv) => sv.name);
   if (noCash.length) warn.push('Cash tips not entered yet for: ' + noCash.join(', ') + '. They can add them on the cash-tip page.');
   // A server with tips but no sales means the tip-out is being computed off $0.
@@ -4689,10 +4715,6 @@ function filingCapabilities(slug) {
     reports_card_tips: true,
     reports_server_cash_kept: isServer,
     reports_pooled_cash: !isServer,
-    // THE JAR, asked of whoever stands next to it. Turned on per service by
-    // fieldsForShift, which only offers it where the policy actually pays a
-    // cash pool out — and only to a role that pool names.
-    reports_jar_cash: slug === 'barista',
     // Sales are written only when something was entered, so a blank form never
     // wipes a figure. That is existing behaviour and stays.
     requires_sales: false,
@@ -4726,10 +4748,6 @@ const TIP_FIELDS = [
     group: 'tips', label: 'Cash tips you already took home',
     hint: 'This amount is excluded from the tips sent through payroll.',
     blank: 'Leave blank if you took none.' },
-  { key: 'jar_cash', name: 'jar_cash', stored: 'jar_cash_cents', cap: 'reports_jar_cash',
-    group: 'tips', label: 'Cash from the tip jar',
-    hint: 'What was in the jar at the end of your shift. This is the jar, not your own tips — it is shared under the policy.',
-    blank: 'Leave blank if somebody else counted it.' },
   { key: 'pooled_cash', name: 'cash_tips', stored: 'cash_tips_cents', cap: 'reports_pooled_cash',
     group: 'tips', label: 'Pooled cash tips',
     hint: 'Cash tips collected for the pool during this shift. This is not money you keep — it is split with the rest of the team.',
@@ -4799,24 +4817,6 @@ function fieldsForShift(caps, shiftId, slug) {
       label: TILL_LABEL[who][f.key] || f.label,
       hint: TILL_LABEL[who].hint,
     }));
-  }
-
-  // THE JAR BOX APPEARS WHERE THE JAR IS ACTUALLY PAID OUT.
-  //
-  // A box for a pot the policy does not have is a box for money that goes
-  // nowhere — the same defect as the night jar on the manager's sheet, asked
-  // of a phone instead. It is also removed where the cash pool exists but does
-  // not name them: counting a jar you are not in is somebody else's job.
-  if (fields.some((f) => f.key === 'jar_cash')) {
-    let payTo = null;
-    try {
-      const sh = shiftId ? s.shiftById.get(shiftId) : null;
-      const rules = sh ? (policyForShift(sh) || []) : [];
-      payTo = rules.filter((x) => x.type === 'pool' && bucketsOf(x.source).includes('cash'));
-    } catch { payTo = null; }
-    const named = (payTo || []).some((x) => (Array.isArray(x.among) ? x.among : [x.among])
-      .some((y) => y === who || y === 'all_support' || y === 'foh' || y == null));
-    if (!named) fields = fields.filter((f) => f.key !== 'jar_cash');
   }
 
   if (pools && !keeps) return fields;
@@ -5609,12 +5609,6 @@ function writeSalesTips(req, emp, opts = {}) {
     // a zero would silently wipe it.
     if (cardP && cardP.state === 'ok') {
       w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: cardP.cents });
-    }
-    // The jar, when this job was asked for it. Blank means "somebody else
-    // counted it" and must leave whatever is on file alone — two baristas both
-    // sending a zero would otherwise wipe the one who actually counted.
-    if (caps.reports_jar_cash && parsed.jar_cash && parsed.jar_cash.state === 'ok') {
-      w.setJarCash.run({ shift_id: sh.id, employee_id: emp.id, jar_cash_cents: parsed.jar_cash.cents });
     }
     w.setNote.run({ shift_id: sh.id, employee_id: emp.id,
       note: String(body.note || '').trim().slice(0, 500) || null });

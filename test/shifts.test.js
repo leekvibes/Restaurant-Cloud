@@ -664,3 +664,64 @@ test('the two pots are gated separately, because they are two pots', async () =>
 
   db.prepare('UPDATE shifts SET pool_jar_cents = 0, pool_togo_card_cents = 0 WHERE id = ?').run(review);
 });
+
+// --- two people, one pot ------------------------------------------------------
+//
+// Where a role shares something to count, two of them can each enter the whole
+// thing instead of their half. Nothing else notices: both figures are
+// plausible, the books still balance, and the service is simply over.
+
+test('two people in a role reporting the SAME cash is flagged', async () => {
+  const { review, people } = module.exports;
+  const w = new Database(DB);
+  const second = Number(w.prepare(
+    "INSERT INTO employees (name, role, hourly_rate_cents, active) VALUES ('Twin Barista','barista',1200,1)")
+    .run().lastInsertRowid);
+  const first = Number(w.prepare(
+    "INSERT INTO employees (name, role, hourly_rate_cents, active) VALUES ('Other Barista','barista',1200,1)")
+    .run().lastInsertRowid);
+  for (const id of [first, second]) {
+    w.prepare("INSERT OR REPLACE INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, 'barista', 5)").run(review, id);
+    w.prepare(`INSERT INTO server_sales (shift_id, employee_id, cash_tips_cents)
+      VALUES (?, ?, 12000) ON CONFLICT(shift_id, employee_id) DO UPDATE SET cash_tips_cents = 12000`).run(review, id);
+  }
+  w.close();
+
+  const h = await html(`/shifts/${review}`);
+  assert.match(h, /each reported \$120\.00 in cash/, 'it names the amount');
+  assert.match(h, /this service is \$120\.00 over/, 'and what it would cost to be wrong');
+  assert.match(h, /Other Barista and Twin Barista|Twin Barista and Other Barista/, 'and who');
+});
+
+test('different amounts are not flagged — that is them splitting it', async () => {
+  const { review } = module.exports;
+  const w = new Database(DB);
+  const ids = w.prepare("SELECT id FROM employees WHERE name IN ('Twin Barista','Other Barista') ORDER BY id").all();
+  w.prepare('UPDATE server_sales SET cash_tips_cents = 7000 WHERE shift_id = ? AND employee_id = ?').run(review, ids[0].id);
+  w.prepare('UPDATE server_sales SET cash_tips_cents = 5000 WHERE shift_id = ? AND employee_id = ?').run(review, ids[1].id);
+  w.close();
+  const h = await html(`/shifts/${review}`);
+  assert.ok(!/each reported/.test(h), 'no flag when the numbers differ');
+});
+
+test('the flag is not scoped to one role or one service type', async () => {
+  // Asked for on baristas, and there is no reason it stops there.
+  const { review, people } = module.exports;
+  const w = new Database(DB);
+  const other = Number(w.prepare(
+    "INSERT INTO employees (name, role, hourly_rate_cents, active) VALUES ('Twin Server','server',1000,1)")
+    .run().lastInsertRowid);
+  w.prepare("INSERT OR REPLACE INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, 'server', 6)").run(review, other);
+  for (const id of [people.sandra, other]) {
+    w.prepare(`INSERT INTO server_sales (shift_id, employee_id, cash_tips_cents)
+      VALUES (?, ?, 4400) ON CONFLICT(shift_id, employee_id) DO UPDATE SET cash_tips_cents = 4400`).run(review, id);
+  }
+  w.close();
+  const h = await html(`/shifts/${review}`);
+  assert.match(h, /each reported \$44\.00 in cash as server/, 'servers too');
+
+  const w2 = new Database(DB);
+  w2.prepare('UPDATE server_sales SET cash_tips_cents = 0 WHERE shift_id = ?').run(review);
+  w2.prepare("DELETE FROM work WHERE shift_id = ? AND employee_id IN (SELECT id FROM employees WHERE name LIKE 'Twin %' OR name = 'Other Barista')").run(review);
+  w2.close();
+});
