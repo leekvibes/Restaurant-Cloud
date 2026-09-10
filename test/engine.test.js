@@ -566,3 +566,119 @@ test('the books still balance with no pool rule', () => {
   assert.ok(r.reconciliation.balanced, 'tips collected = kept + pots');
   assert.strictEqual(r.orphanedPots.length, 0, 'and nothing is stranded');
 });
+
+// ---------------------------------------------------------------------------
+// ONE PERSON'S TAKE, SET BY HAND.
+//
+// The rule stays as written; one person's figure is set, and the difference
+// goes back to whoever paid it in the proportion they paid it. Nobody else's
+// share moves, and the service still adds up to exactly what was collected.
+// ---------------------------------------------------------------------------
+
+const NIGHT = () => ({
+  servers: [
+    one({ employeeId: 'S1', name: 'S1', hours: 8, food: 3000, alcohol: 600, cardTips: 500 }),
+    one({ employeeId: 'S2', name: 'S2', hours: 8, food: 2000, alcohol: 400, cardTips: 400 }),
+    one({ employeeId: 'BT', name: 'BT', role: 'bartender', hours: 8, food: 200, alcohol: 1800, cardTips: 400 }),
+  ],
+  support: [
+    { employeeId: 'B1', name: 'B1', role: 'busser', hours: 8 },
+    { employeeId: 'B2', name: 'B2', role: 'busser', hours: 4 },
+    { employeeId: 'BB', name: 'BB', role: 'barback', hours: 6 },
+  ],
+  pool: {},
+});
+const RULES = [
+  { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+  { type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+];
+const withAdj = (adjustments) => runShift({ ...NIGHT(), adjustments }, RULES);
+const takeOf = (r, id) => (r.support.find((p) => p.employeeId === id) || {}).tipShare;
+const keptOf = (r, id) => (r.servers.find((p) => p.employeeId === id) || {}).tipsKept;
+const balanced = (r) => r.reconciliation.totalTipsCollected === r.reconciliation.totalKept + r.reconciliation.totalPots;
+
+test('lowering one person hands the difference back, and moves nobody else', () => {
+  const before = withAdj([]);
+  const b1 = takeOf(before, 'B1');
+  const target = b1 - 2000;                       // take $20 off them
+  const after = withAdj([{ employee_id: 'B1', mode: 'amount', cents: target }]);
+
+  assert.strictEqual(takeOf(after, 'B1'), target, 'they get exactly the figure');
+  assert.strictEqual(takeOf(after, 'B2'), takeOf(before, 'B2'),
+    'the OTHER busser is untouched — this is not a redistribution');
+  assert.strictEqual(takeOf(after, 'BB'), takeOf(before, 'BB'), 'nor is the barback');
+
+  // Back to the two servers, split the way they paid in.
+  const backS1 = keptOf(after, 'S1') - keptOf(before, 'S1');
+  const backS2 = keptOf(after, 'S2') - keptOf(before, 'S2');
+  assert.strictEqual(backS1 + backS2, 2000, 'every penny went home');
+  assert.ok(backS1 > backS2, 'and the bigger payer got the bigger share back');
+  const paidS1 = before.servers.find((p) => p.employeeId === 'S1').tipouts.busser;
+  const paidS2 = before.servers.find((p) => p.employeeId === 'S2').tipouts.busser;
+  assert.strictEqual(backS1, Math.round((2000 * paidS1) / (paidS1 + paidS2)),
+    'in exactly the proportion they paid it');
+
+  // The bartender pays the barback, not the busser, so nothing of theirs moves.
+  assert.strictEqual(keptOf(after, 'BT'), keptOf(before, 'BT'),
+    'somebody who never paid into that pot is not refunded from it');
+  assert.ok(balanced(after), 'and the service still adds up to what was collected');
+});
+
+test('raising one person takes it from the same people, the same way', () => {
+  const before = withAdj([]);
+  const bb = takeOf(before, 'BB');
+  const after = withAdj([{ employee_id: 'BB', mode: 'amount', cents: bb + 3000 }]);
+
+  assert.strictEqual(takeOf(after, 'BB'), bb + 3000);
+  // The barback is paid BY THE BARTENDER, so it comes off the bartender and
+  // not off the servers, who never paid into that pot.
+  assert.strictEqual(keptOf(before, 'BT') - keptOf(after, 'BT'), 3000, 'the bartender funds it');
+  assert.strictEqual(keptOf(after, 'S1'), keptOf(before, 'S1'), 'the servers do not');
+  assert.strictEqual(keptOf(after, 'S2'), keptOf(before, 'S2'));
+  assert.ok(balanced(after));
+});
+
+test('two adjustments in one service, in opposite directions, both hold', () => {
+  const before = withAdj([]);
+  const after = withAdj([
+    { employee_id: 'B1', mode: 'amount', cents: takeOf(before, 'B1') - 1500 },
+    { employee_id: 'BB', mode: 'amount', cents: takeOf(before, 'BB') + 1000 },
+  ]);
+  assert.strictEqual(takeOf(after, 'B1'), takeOf(before, 'B1') - 1500);
+  assert.strictEqual(takeOf(after, 'BB'), takeOf(before, 'BB') + 1000);
+  assert.strictEqual(takeOf(after, 'B2'), takeOf(before, 'B2'), 'the unadjusted busser is still untouched');
+  assert.ok(balanced(after));
+  // And the breakdown says which tip-out each difference belongs to, rather
+  // than putting both on whichever was listed first.
+  const bt = after.servers.find((p) => p.employeeId === 'BT');
+  assert.strictEqual(Object.keys(bt.tipouts).join(), 'barback', 'the bartender only ever paid the barback');
+});
+
+test('nobody can be raised past what the people funding them hold', () => {
+  const before = withAdj([]);
+  const after = withAdj([{ employee_id: 'BB', mode: 'amount', cents: 99999999 }]);
+  assert.ok(takeOf(after, 'BB') < 99999999, 'it lands at what could be moved');
+  assert.strictEqual(keptOf(after, 'BT'), 0, 'the bartender is emptied and no further');
+  for (const p of after.servers) assert.ok(p.tipsKept >= 0, `${p.employeeId} is not owing money`);
+  for (const p of after.support) assert.ok(p.tipShare >= 0, `${p.employeeId} is not owing money`);
+  assert.ok(balanced(after), 'and it still balances at the boundary');
+});
+
+test('a per-person row is never read as a rule', () => {
+  // Both name a recipient. Read as a rule, "B1 gets $80" charged the whole
+  // busser POT $80 — which split across both bussers and was then adjusted a
+  // second time. One row, applied twice, two different ways.
+  const before = withAdj([]);
+  const after = withAdj([{ employee_id: 'B1', recipient: 'busser', mode: 'amount', cents: 8000 }]);
+  assert.strictEqual(takeOf(after, 'B1'), 8000);
+  assert.strictEqual(takeOf(after, 'B2'), takeOf(before, 'B2'),
+    'the second busser did not have the pot re-split under her');
+});
+
+test('setting somebody to what they already have changes nothing', () => {
+  const before = withAdj([]);
+  const after = withAdj([{ employee_id: 'B1', mode: 'amount', cents: takeOf(before, 'B1') }]);
+  for (const p of after.support) assert.strictEqual(p.tipShare, takeOf(before, p.employeeId));
+  for (const p of after.servers) assert.strictEqual(p.tipsKept, keptOf(before, p.employeeId));
+});

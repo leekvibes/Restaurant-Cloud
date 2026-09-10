@@ -262,8 +262,53 @@ CREATE TABLE IF NOT EXISTS shift_tip_adjustments (
 );
 `);
 
+// PER PERSON, not per rule.
+//
+// It bent a RULE — "charge the busser pot $80 tonight" — which is a sentence
+// about a percentage and not about anybody. What a manager actually needs to
+// change is one person's take: Joseph got $105.33 and for tonight he gets $80.
+// The rule stays exactly as written and the other busser keeps hers.
+//
+// Nullable, because the rule-level rows already written keep their meaning.
+const adjCols = db.prepare('PRAGMA table_info(shift_tip_adjustments)').all().map((c) => c.name);
+if (!adjCols.includes('employee_id')) {
+  db.exec('ALTER TABLE shift_tip_adjustments ADD COLUMN employee_id INTEGER');
+}
+// One per person per service. UNIQUE(shift, recipient, paid_by) cannot express
+// that — two people in the same role would collide on it — so the person rows
+// carry their own index.
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS shift_tip_adj_person
+  ON shift_tip_adjustments (shift_id, employee_id) WHERE employee_id IS NOT NULL`);
+
 const adjustmentsFor = (shiftId) => db.prepare(
   'SELECT * FROM shift_tip_adjustments WHERE shift_id = ? ORDER BY id').all(shiftId);
+
+/** What one person is set to tonight, or null if the policy rate stands. */
+const personAdjustment = (shiftId, employeeId) => db.prepare(
+  'SELECT * FROM shift_tip_adjustments WHERE shift_id = ? AND employee_id = ?')
+  .get(shiftId, employeeId) || null;
+
+/**
+ * Set one person's take for one service.
+ *
+ * Stores the figure, nothing else. Where the difference goes is the engine's
+ * business, and it is the same answer every time: back to whoever paid it.
+ */
+function setPersonAmount(shiftId, employeeId, { cents, recipient, reason, by }) {
+  const c = Math.max(0, Math.round(Number(cents) || 0));
+  db.prepare(`INSERT INTO shift_tip_adjustments
+    (shift_id, employee_id, recipient, paid_by, mode, cents, reason, created_by)
+    VALUES (@shift, @emp, @recipient, NULL, 'amount', @cents, @reason, @by)
+    ON CONFLICT(shift_id, employee_id) WHERE employee_id IS NOT NULL DO UPDATE SET
+      cents = excluded.cents, reason = excluded.reason,
+      created_by = excluded.created_by, created_at = datetime('now')`)
+    .run({ shift: shiftId, emp: employeeId, recipient: recipient || '', cents: c,
+      reason: String(reason || '').trim() || null, by: by || null });
+}
+
+const clearPersonAmount = (shiftId, employeeId) => db.prepare(
+  'DELETE FROM shift_tip_adjustments WHERE shift_id = ? AND employee_id = ?')
+  .run(shiftId, employeeId);
 
 function setAdjustment(shiftId, { recipient, paidBy, mode, cents, reason, by }) {
   if (!['off', 'amount'].includes(mode)) throw new Error('An adjustment is either off or an amount.');
@@ -294,5 +339,6 @@ const adjustmentsLocked = (sh) => String(sh && sh.status) === 'emailed';
 
 module.exports = {
   adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked,
+  personAdjustment, setPersonAmount, clearPersonAmount,
   currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo,
   stagedForDaypart, stageRules, activateStaged, discardStaged, isNewModel, needsNewEngine };

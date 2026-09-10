@@ -118,6 +118,7 @@ function runShift(shift, rules) {
   const roleSplit = {}; // role -> split method
   const skippedPots = {}; // role -> cents servers kept because nobody worked it
   const transfers = [];   // pot -> pot movements, for the receipt to explain
+  const potFrom = {};     // role -> [{ kind, employeeId|role, cents }] — who funded it
   const serverPayouts = [];
 
   /**
@@ -134,7 +135,14 @@ function runShift(shift, rules) {
   // What the manager changed about tonight, keyed the way the table names a
   // rule: who it pays, and who pays it.
   const adjustments = shift.adjustments || [];
-  const adjustmentFor = (earner, r) => adjustments.find((a) => a.recipient === r.recipient
+  //
+  // A PERSON row is not a rule row, and must not be read as one. Both name a
+  // recipient, so "Joseph, $80" matched the busser rule here and charged the
+  // whole busser POT $80 — which split across both bussers and then got
+  // adjusted a second time further down. One row, applied twice, two different
+  // ways. A row that names somebody is theirs alone.
+  const adjustmentFor = (earner, r) => adjustments.find((a) => a.employee_id == null
+    && a.recipient === r.recipient
     && (!a.paid_by || a.paid_by === (earner.role || 'server'))) || null;
   // An amount is what the RECIPIENT should end up with, so when several people
   // pay the same rule it is shared between them rather than charged to each in
@@ -166,6 +174,14 @@ function runShift(shift, rules) {
     const charge = (role, amt) => {
       if (staffedRoles.has(role)) {
         tipouts[role] = (tipouts[role] || 0) + amt;
+        // WHERE THIS POT'S MONEY CAME FROM, recorded as it arrives.
+        //
+        // Handing money back needs to know who handed it over. Without this the
+        // engine knows a busser pot holds $189.60 and not that $72.60 of it is
+        // Sandra's, so "give him $80 instead of $100" has nowhere honest to put
+        // the $20 and it either vanishes or lands on whoever is convenient.
+        (potFrom[role] || (potFrom[role] = []))
+          .push({ kind: 'earner', employeeId: s.employeeId, cents: amt });
         return true;
       }
       skippedPots[role] = (skippedPots[role] || 0) + amt;
@@ -251,6 +267,10 @@ function runShift(shift, rules) {
     rolePools[r.recipient] = (rolePools[r.recipient] || 0) + amt;
     roleSplit[r.recipient] = r.split || 'hours';
     transfers.push({ from: r.from, to: r.recipient, cents: amt });
+    // The barback's pot was funded by the bartenders' pot, so money handed back
+    // out of it goes there and not to the servers, who already paid it once.
+    (potFrom[r.recipient] || (potFrom[r.recipient] = []))
+      .push({ kind: 'pot', role: r.from, cents: amt });
   }
 
   // Distribute each role's pool among the people working that role.
@@ -263,6 +283,134 @@ function runShift(shift, rules) {
     const split = roleSplit[role] || 'hours';
     const alloc = allocateByWeight(rolePools[role], people.map((p) => ({ id: p.employeeId, weight: split === 'even' ? 1 : p.hours })));
     for (const [id, c] of alloc) roleShare.set(id, (roleShare.get(id) || 0) + c);
+  }
+
+  // ---------------------------------------------------------------------
+  // ONE PERSON'S TAKE, SET BY HAND — and the difference goes home.
+  //
+  // A rate is a rule about the ordinary night. Some nights one person's share
+  // is simply wrong: they came in at nine, they covered two sections, they
+  // agreed something with the manager. The figure is theirs to set.
+  //
+  // WHAT MAKES IT SAFE is that this MOVES money and never edits a number. Take
+  // $20 off a busser and it goes back to the servers who paid it, in the
+  // proportion they paid it — not to the other busser, who earned theirs, and
+  // not nowhere, which is what "just change the number" means. Give a busser
+  // $20 more and it comes off those same servers. Either direction, the service
+  // still adds up to exactly what was collected.
+  //
+  // Money that came from another POT goes back to that pot: the barback's share
+  // was funded by the bartenders, so handing it back hands it to them, not to
+  // the servers who had already paid it once.
+  // ---------------------------------------------------------------------
+  const refundEarner = new Map();  // employeeId -> cents back to what they keep
+  const refundPot = new Map();     // role -> cents back into that pot
+  const personSet = [];            // what was set, for the page to explain
+  const keptOf = new Map(serverPayouts.map((p) => [p.employeeId, p.tipsKept]));
+
+  for (const a of adjustments) {
+    if (a.employee_id == null || a.mode !== 'amount') continue;
+    const p = support.find((x) => x.employeeId === a.employee_id && x.tipEligible !== false);
+    if (!p) continue;
+    const current = roleShare.get(p.employeeId) || 0;
+    const target = Math.max(0, Math.round(a.cents || 0));
+    let delta = current - target;                 // positive: hand money back
+    if (!delta) continue;
+
+    const src = (potFrom[p.role] || []).filter((x) => x.cents > 0);
+    const totalSrc = src.reduce((x, y) => x + y.cents, 0);
+    if (totalSrc <= 0) continue;                  // nothing funded it; nothing to unwind
+
+    // Each source's share of the difference: proportional to what it PUT IN,
+    // which is the only defensible answer to "whose money was that".
+    const parts = new Array(src.length).fill(0);
+    let handed = 0;
+    src.forEach((x, i) => {
+      const part = i === src.length - 1 ? delta - handed : Math.round((delta * x.cents) / totalSrc);
+      handed += part;
+      parts[i] = part;
+    });
+
+    // TAKING MORE THAN A PAYER HAS IS NOT A THING MONEY DOES.
+    //
+    // Raising somebody is capped at what the people funding them still hold,
+    // and PER PERSON rather than in total: capping only the sum let the biggest
+    // payer absorb a share larger than everything they had and finish the night
+    // owing money. Whatever one payer cannot cover is offered to the others who
+    // still have room, and if nobody does, the figure lands at what could
+    // actually be moved. A number the books cannot support is not a figure.
+    if (delta < 0) {
+      const roomOf = (x) => (x.kind === 'earner'
+        ? Math.max(0, keptOf.get(x.employeeId) || 0)
+        : Math.max(0, rolePools[x.role] || 0));
+      const room = src.map(roomOf);
+      let short = 0;
+      src.forEach((x, i) => {
+        const want = -parts[i];                       // positive: taking this much
+        if (want > room[i]) { short += want - room[i]; parts[i] = -room[i]; room[i] = 0; }
+        else room[i] -= want;
+      });
+      // Spread the shortfall over whoever is left, until it is placed or there
+      // is nowhere left to place it.
+      for (let pass = 0; pass < src.length && short > 0; pass++) {
+        const open = src.map((x, i) => i).filter((i) => room[i] > 0);
+        if (!open.length) break;
+        const each = Math.ceil(short / open.length);
+        for (const i of open) {
+          if (short <= 0) break;
+          const take = Math.min(each, room[i], short);
+          parts[i] -= take; room[i] -= take; short -= take;
+        }
+      }
+      delta = parts.reduce((a, b) => a + b, 0);       // what could really be moved
+    }
+    if (!delta) continue;
+
+    src.forEach((x, i) => {
+      const part = parts[i];
+      if (!part) return;
+      // Keyed by person AND the pot it came out of. Keyed by person alone, a
+      // night where somebody was adjusted for two different roles put both
+      // differences on whichever tip-out happened to be listed first — the
+      // totals still added up and the breakdown said something untrue.
+      if (x.kind === 'earner') {
+        const k = `${x.employeeId}|${p.role}`;
+        refundEarner.set(k, (refundEarner.get(k) || 0) + part);
+      } else refundPot.set(x.role, (refundPot.get(x.role) || 0) + part);
+    });
+
+    roleShare.set(p.employeeId, current - delta);
+    rolePools[p.role] = (rolePools[p.role] || 0) - delta;
+    personSet.push({ employeeId: p.employeeId, name: p.name, role: p.role,
+      from: current, to: current - delta, reason: a.reason || null });
+  }
+
+  // Back to the people who paid it. A refund raises what a server keeps and
+  // lowers what they are recorded as having tipped out, because those are the
+  // same fact said twice.
+  for (const [key, cents] of refundEarner) {
+    const [idPart, role] = key.split('|');
+    const sp = serverPayouts.find((x) => String(x.employeeId) === idPart);
+    if (!sp) continue;
+    sp.tipsKept += cents;
+    sp.tipoutTotal -= cents;
+    sp.tipouts[role] = Math.max(0, (sp.tipouts[role] || 0) - cents);
+  }
+  // Back into a pot, then straight out again to the people working that role —
+  // by the same weights the pot is always split by.
+  for (const [role, cents] of refundPot) {
+    rolePools[role] = (rolePools[role] || 0) + cents;
+    const people = support.filter((x) => x.role === role && x.tipEligible);
+    if (!people.length) { orphanedPots.push({ role, cents }); continue; }
+    const split = roleSplit[role] || 'hours';
+    // Split the SIZE and put the sign back afterwards. allocateByWeight floors
+    // and hands out leftover pennies upward, which is right for sharing money
+    // out and silently wrong for taking it back — a negative total came out as
+    // nothing moving at all.
+    const sign = cents < 0 ? -1 : 1;
+    for (const [id, c] of allocateByWeight(Math.abs(cents), people.map((x) => ({ id: x.employeeId, weight: split === 'even' ? 1 : x.hours })))) {
+      roleShare.set(id, (roleShare.get(id) || 0) + sign * c);
+    }
   }
 
   // Two buckets per shift: the CASH tip jar (all cash tips go in the jar) and
@@ -357,7 +505,7 @@ function runShift(shift, rules) {
 
   return {
     servers: serverPayouts, support: supportResult,
-    pots: rolePools, transfers, adjusted, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
+    pots: rolePools, transfers, adjusted, personSet, potFrom, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
     skippedPots: Object.entries(skippedPots).filter(([, c]) => c > 0).map(([role, cents]) => ({ role, cents })),
     reconciliation: { totalTipsCollected, totalKept, totalPots, balanced: totalTipsCollected === totalKept + totalPots },
   };

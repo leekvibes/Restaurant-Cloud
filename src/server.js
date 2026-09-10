@@ -16,6 +16,7 @@ const { mountModules, MODULES, pagesOf } = require('./modules');
 const PORTAL = require('./portal');
 const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertTo,
   adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked,
+  personAdjustment, setPersonAmount, clearPersonAmount,
   stagedForDaypart, stageRules, activateStaged, discardStaged } = require('./policy');
 const { defaultRules, bucketsOf } = require('./engine');
 const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
@@ -28696,24 +28697,36 @@ app.post('/shifts/:id/adjust', (req, res) => {
   // moving a figure afterwards would change a number somebody has already been
   // told, with nothing saying the two no longer agree.
   if (adjustmentsLocked(sh)) return back('That service has been sent, so its tip-outs are fixed.', true);
-  const recipient = String(req.body.recipient || '').trim();
-  if (!recipient) return back('Which tip-out?', true);
-  const paidBy = String(req.body.paid_by || '').trim() || null;
+
+  const empId = Number(req.body.employee_id) || 0;
+  if (!empId) return back('Which person?', true);
+  // Only somebody actually on this service. A hand-written POST naming anybody
+  // else would create a figure for a night they did not work.
+  const inp = shiftInputs(sh.id);
+  const who = inp.support.find((p) => p.employeeId === empId);
+  if (!who) return back('That person is not on this service.', true);
+
   try {
     if (req.body.mode === 'clear') {
-      clearAdjustment(sh.id, recipient, paidBy);
-      return back('Back to the policy rate.');
+      clearPersonAmount(sh.id, empId);
+      return back(`${who.name} is back on the policy rate.`);
     }
-    setAdjustment(sh.id, {
-      recipient, paidBy,
-      mode: req.body.mode === 'off' ? 'off' : 'amount',
-      cents: toCents(req.body.amount),
-      reason: req.body.reason,
+    const cents = toCents(req.body.amount);
+    if (String(req.body.amount || '').trim() === '') return back('Enter an amount.', true);
+    setPersonAmount(sh.id, empId, {
+      cents, recipient: who.role, reason: req.body.reason,
       by: (req.user && req.user.name) || 'Owner',
     });
-    return back(req.body.mode === 'off'
-      ? 'Not charged tonight — it stays with whoever would have paid it.'
-      : 'Set for tonight only.');
+    // Said back from the ENGINE's answer, not from what was typed. If the
+    // people funding them did not have it, the figure that actually landed is
+    // the one worth reporting — otherwise the page confirms a number the books
+    // never held.
+    const after = runShift(shiftInputs(sh.id), policyForShift(sh));
+    const got = after.support.find((p) => p.employeeId === empId);
+    const landed = got ? got.tipShare + got.poolCash + got.poolCard : cents;
+    return back(landed === cents
+      ? `${who.name} set to ${money(landed)} for this service. The difference went back to whoever paid it.`
+      : `${who.name} set to ${money(landed)} — the most the people funding it had left.`);
   } catch (e) {
     return back(e.message || 'Could not change that.', true);
   }
@@ -28726,50 +28739,78 @@ app.post('/shifts/:id/adjust', (req, res) => {
  * about money made while looking at the money — and it is the last place before
  * it goes out.
  */
+/**
+ * WHAT EACH PERSON TAKES TONIGHT, and the one control that changes it.
+ *
+ * This listed the RULES — "busser, 2% of total sales, from server" — with a box
+ * to charge that pot something else. That is a sentence about a percentage and
+ * not about anybody, and it could not answer the question a manager actually
+ * has: Joseph got $105.33 and tonight he should get $80. Two bussers share that
+ * pot; bending the rule moved both of them.
+ *
+ * So it is one row per person, showing what they are getting and letting it be
+ * set. The rule is untouched, the other busser keeps hers, and the difference
+ * goes back to whoever paid it — which is the engine's job and the only reason
+ * this is safe to offer at all.
+ */
 function tipoutControls(req, sh, inp, r) {
   if (!canWrite()) return '';
-  const rules = policyForShift(sh).filter((x) => x.type === 'tipout');
-  if (!rules.length) return '';
-  const adj = new Map(adjustmentsFor(sh.id).map((a) => [`${a.recipient}|${a.paid_by || ''}`, a]));
+  const rules = policyForShift(sh);
+  const people = tippedOutTo(rules, r.support);
+  if (!people.length) return '';
   const locked = adjustmentsLocked(sh);
   const roleName = (slug) => (positions.bySlug.get(slug) || {}).name || slug;
-  const potOf = (role) => r.pots[role] || 0;
+  const set = new Map((r.personSet || []).map((x) => [x.employeeId, x]));
 
-  const row = (rule) => {
-    const payers = rule.paidBy ? (Array.isArray(rule.paidBy) ? rule.paidBy : [rule.paidBy]) : null;
-    const key = `${rule.recipient}|${payers ? payers[0] : ''}`;
-    const a = adj.get(key) || adj.get(`${rule.recipient}|`) || null;
-    const worked = inp.support.some((p) => p.role === rule.recipient && p.tipEligible);
-    const paidLabel = payers ? payers.map(roleName).join(' & ') : 'everyone';
-    return `<div class="tpa-row${a ? ' is-adj' : ''}${worked ? '' : ' is-absent'}">
+  // Who a change would come out of, said in the same words the policy uses, so
+  // the sentence on the button matches the sentence on the policy page.
+  const payersFor = (role) => {
+    const names = new Set();
+    for (const rule of rules) {
+      if (rule.type !== 'tipout' || rule.recipient !== role) continue;
+      if (rule.from) { names.add(roleName(rule.from)); continue; }
+      const who = rule.paidBy ? (Array.isArray(rule.paidBy) ? rule.paidBy : [rule.paidBy]) : ['server'];
+      who.forEach((x) => names.add(roleName(x)));
+    }
+    const list = [...names];
+    if (!list.length) return 'whoever paid it';
+    return list.length === 1 ? `the ${list[0].toLowerCase()}s`
+      : `the ${list.slice(0, -1).map((x) => x.toLowerCase()).join(', ')} and ${list[list.length - 1].toLowerCase()}s`;
+  };
+
+  const row = (p) => {
+    const a = set.get(p.employeeId);
+    const take = p.tipShare + p.poolCash + p.poolCard;
+    return `<div class="tpa-row${a ? ' is-adj' : ''}">
       <div class="tpa-what">
-        <b>${esc(roleName(rule.recipient))}</b>
-        <i>${esc(rule.percent)}% of ${esc(String(rule.base).replace(/_/g, ' '))} · from ${esc(paidLabel)}</i>
-        ${a ? `<em class="tpa-note">${a.mode === 'off' ? 'Not charged tonight'
-    : `Set to ${money(a.cents / 100)}`}${a.reason ? ` — ${esc(a.reason)}` : ''}</em>` : ''}
-        ${worked ? '' : '<em class="tpa-note">Nobody worked this role, so it is not charged.</em>'}
+        <b>${esc(p.name)}</b>
+        <i>${esc(roleName(p.role))} &middot; ${p.hours}h &middot; from ${esc(payersFor(p.role))}</i>
+        ${a ? `<em class="tpa-note">Set to ${money(a.to)} for tonight${
+  a.to !== a.from ? ` &mdash; ${money(Math.abs(a.from - a.to))} ${a.to < a.from ? 'back to' : 'from'} ${esc(payersFor(p.role))}` : ''
+}${a.reason ? ` &middot; ${esc(a.reason)}` : ''}</em>` : ''}
       </div>
-      <div class="tpa-amt">${money(potOf(rule.recipient) / 100)}</div>
-      ${locked || !worked ? '' : `<form method="post" action="/shifts/${sh.id}/adjust" class="tpa-form">
+      <div class="tpa-amt">${money(take)}</div>
+      ${locked ? '' : `<form method="post" action="/shifts/${sh.id}/adjust" class="tpa-form">
         <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-        <input type="hidden" name="recipient" value="${esc(rule.recipient)}">
-        <input type="hidden" name="paid_by" value="${esc(payers ? payers[0] : '')}">
-        ${a ? `<button class="bs-btn-sm" type="submit" name="mode" value="clear">Use the policy rate</button>`
-    : `<input class="tpa-in" type="text" inputmode="decimal" name="amount" placeholder="${money(potOf(rule.recipient) / 100).replace('$', '')}" aria-label="Amount for ${esc(roleName(rule.recipient))}">
+        <input type="hidden" name="employee_id" value="${p.employeeId}">
+        <input type="hidden" name="recipient" value="${esc(p.role)}">
+        ${a ? `<button class="bs-btn-sm" type="submit" name="mode" value="clear">Back to the policy rate</button>`
+    : `<input class="tpa-in" type="text" inputmode="decimal" name="amount"
+         placeholder="${(take / 100).toFixed(2)}" aria-label="Amount for ${esc(p.name)}">
        <input class="tpa-why" type="text" name="reason" maxlength="60" placeholder="Why?" aria-label="Reason">
-       <button class="bs-btn-sm" type="submit" name="mode" value="amount">Set</button>
-       <button class="bs-btn-sm tpa-off" type="submit" name="mode" value="off">Not tonight</button>`}
+       <button class="bs-btn-sm" type="submit" name="mode" value="amount">Set</button>`}
       </form>`}
     </div>`;
   };
 
   return `<section class="bs-panel tpa">
-    <div class="bs-sec-h"><span class="bs-kicker">Tip-outs tonight</span>
-      <span class="bs-sec-note">${locked ? 'Sent — fixed' : 'One service only'}</span></div>
-    <p class="inc-hint">These are the policy rates. Changing one here applies to this service and
-      nothing else — the money always goes back to whoever would have paid it, so the totals still
-      add up. To change it for good, edit the <a class="bs-act" href="/policy?daypart=${esc(sh.daypart)}">tip-out policy</a>.</p>
-    <div class="tpa-rows">${rules.map(row).join('')}</div>
+    <div class="bs-sec-h"><span class="bs-kicker">What each person takes</span>
+      <span class="bs-sec-note">${locked ? 'Sent — fixed' : 'This service only'}</span></div>
+    <p class="inc-hint">Change anybody's figure and the difference goes straight back to whoever paid it,
+      in the proportion they paid it &mdash; so the service still adds up to exactly what was collected.
+      Nobody else's share moves. It applies to this service and nothing else; to change it for good, edit
+      the <a class="bs-act" href="/policy?daypart=${esc(sh.daypart)}">tip-out policy</a>.</p>
+    <div class="tpa-rows">${people.map(row).join('')}</div>
   </section>`;
 }
 
