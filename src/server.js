@@ -29846,13 +29846,18 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
       el.setAttribute('data-kind', f.kind);
       if (val) {
         el.innerHTML = '<span class="pdf-v' + (f.kind === 'signature' ? ' pdf-v-sig' : '') + '"></span>';
-        el.firstChild.textContent = val;
+        // Shown the way it will be printed in the document. A field reading
+        // 2026-09-10 while the signed copy says 09/10/2026 is two answers to
+        // one question, and the one they checked is the one they will not see
+        // again. Split rather than parsed: a plain date is a calendar day, and
+        // new Date('2026-09-10') is midnight UTC — the evening before, here.
+        var p = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(val));
+        el.firstChild.textContent = (f.kind === 'date' && p) ? (p[2] + '/' + p[3] + '/' + p[1]) : val;
       } else {
         el.innerHTML = '<span class="pdf-p"></span>';
         el.firstChild.textContent = (f.kind === 'date' ? 'Date' : 'Sign here');
         if (el.tagName === 'BUTTON') {
-          el.setAttribute('aria-label', (f.kind === 'date' ? 'Date field' : 'Signature field')
-            + (reviewed ? '' : ' — read to the end first'));
+          el.setAttribute('aria-label', f.kind === 'date' ? 'Date field' : 'Signature field');
         }
       }
       ov.appendChild(el);
@@ -29894,16 +29899,9 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     var t = document.getElementById('pdv-bar-t');
     var go = document.getElementById('pdv-done-btn');
     if (!t || !go) return;
-    if (!reviewed) {
-      t.textContent = 'Read to the end to sign';
-      go.disabled = true;
-      return;
-    }
     var left = requiredLeft();
     if (left) {
-      t.innerHTML = '';
-      t.appendChild(document.createTextNode('Reviewed ✓ · ' + left + ' field'
-        + (left === 1 ? '' : 's') + ' to fill'));
+      t.textContent = left + ' field' + (left === 1 ? '' : 's') + ' to fill';
       go.disabled = true;
     } else {
       t.textContent = 'Ready to submit';
@@ -29911,15 +29909,9 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     }
   }
 
-  // The gate. Reaching the last page opens the fields — and the server checks
-  // the same thing again at submit, from its own record of what was seen.
-  function markReviewed() {
-    if (reviewed) return;
-    reviewed = true;
-    var note = document.getElementById('pdv-reviewed');
-    if (note) note.hidden = false;
-    paintFields();
-  }
+  // The fields are open from the moment the document opens. How far somebody
+  // scrolled is still recorded; it is no longer a condition of signing.
+  function markReviewed() { if (!reviewed) { reviewed = true; paintFields(); } }
 
   var sigSheet = document.getElementById('pdv-sig-sheet');
   var sigName = document.getElementById('pdv-sig-name');
@@ -29934,24 +29926,26 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     var f = ev.target.closest && ev.target.closest('.pdf-f');
     if (!f || !wantsSign) return;
     var id = Number(f.getAttribute('data-field'));
-    if (mine[id]) return;
-    if (!reviewed) {
-      // Said quietly, next to the thing they tapped, rather than in a modal
-      // that has to be dismissed before they can carry on reading.
-      var tip = document.getElementById('pdv-tip');
-      if (tip) {
-        tip.textContent = 'Please review the full document before signing.';
-        tip.hidden = false;
-        clearTimeout(tip._t);
-        tip._t = setTimeout(function () { tip.hidden = true; }, 2600);
+    // A FILLED FIELD IS STILL YOURS TO CHANGE, right up until you submit.
+    // Locking it the moment it was touched meant a date defaulted to today
+    // could not be corrected, and a name typed wrong meant reloading the page.
+    // Nothing here is committed until the submit sheet.
+    var isDate = f.getAttribute('data-kind') === 'date';
+    if (mine[id] && !isDate && !confirm('Replace this signature?')) return;
+    if (isDate) {
+      // A DATE IS ASKED FOR, not assumed. It was filled in silently from the
+      // signature's timestamp, which is right up until somebody is signing
+      // something dated the day they actually agreed it rather than the day
+      // they got round to the app.
+      pendingField = id;
+      if (dateSheet) {
+        // Whatever is on the field now, or today. Opening the picker on a date
+        // other than the one showing is how somebody confirms the wrong day.
+        if (dateVal) dateVal.value = /^\\d{4}-\\d{2}-\\d{2}$/.test(mine[id] || '') ? mine[id] : todayISO();
+        dateSheet.hidden = false;
+        document.documentElement.style.overflow = 'hidden';
+        if (dateVal) dateVal.focus();
       }
-      return;
-    }
-    if (f.getAttribute('data-kind') === 'date') {
-      // Nothing to type. The real value comes from the server at submit; this
-      // is a placeholder so they can see the field is handled.
-      mine[id] = 'On signing';
-      paintFields();
       return;
     }
     pendingField = id;
@@ -29962,13 +29956,35 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     }
   });
 
+  var dateSheet = document.getElementById('pdv-date-sheet');
+  var dateVal = document.getElementById('pdv-date-val');
+  function todayISO() {
+    // The browser's own calendar day. A date typed into a document is a
+    // statement about where the person is standing, not about UTC.
+    var d = new Date();
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  var dateOk = document.getElementById('pdv-date-ok');
+  if (dateOk) dateOk.addEventListener('click', function () {
+    var v = (dateVal && dateVal.value) || '';
+    if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(v)) { if (dateVal) dateVal.focus(); return; }
+    if (pendingField) mine[pendingField] = v;
+    pendingField = null;
+    if (dateSheet) dateSheet.hidden = true;
+    document.documentElement.style.overflow = '';
+    paintFields();
+  });
+
   var sigOk = document.getElementById('pdv-sig-ok');
   if (sigOk) sigOk.addEventListener('click', function () {
     var name = (sigName && sigName.value || '').trim();
     if (!name) { if (sigName) sigName.focus(); return; }
     if (pendingField) mine[pendingField] = name;
-    // Signing fills every date field too — nobody should have to tap a date.
-    placed.forEach(function (f) { if (f.kind === 'date' && !mine[f.id]) mine[f.id] = 'On signing'; });
+    // A date left untouched still defaults to today rather than making somebody
+    // tap every one of them — but it is a real date they can change, not a
+    // promise about the server's clock.
+    placed.forEach(function (f) { if (f.kind === 'date' && !mine[f.id]) mine[f.id] = todayISO(); });
     pendingField = null;
     if (sigSheet) sigSheet.hidden = true;
     document.documentElement.style.overflow = '';
@@ -29979,7 +29995,7 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
   var doneBtn = document.getElementById('pdv-done-btn');
   if (doneBtn && fin) doneBtn.addEventListener('click', function () {
     var vals = {};
-    placed.forEach(function (f) { if (f.kind !== 'date' && mine[f.id]) vals[f.id] = mine[f.id]; });
+    placed.forEach(function (f) { if (mine[f.id]) vals[f.id] = mine[f.id]; });
     var first = placed.filter(function (f) { return f.kind === 'signature' && mine[f.id]; })[0];
     document.getElementById('pdv-fin-name').value = first ? mine[first.id] : '';
     document.getElementById('pdv-fin-fields').value = JSON.stringify(vals);
@@ -30163,7 +30179,7 @@ app.get('/portal/documents/:id', (req, res) => {
            data-ver="${v.id}" data-start="${view ? view.last_page : 1}"
            data-progress="/portal/documents/${doc.id}/progress"
            data-sign="${needsSign ? '1' : '0'}"
-           data-reviewed="${DOCS.reviewComplete(v.id, emp.id) ? '1' : '0'}"
+           data-reviewed="1"
            data-name="${esc(emp.name)}"
            data-fields='${esc(JSON.stringify(fieldsOnPage))}'>
         <div class="pdv-load" id="pdv-load"><span class="pdv-spin" aria-hidden="true"></span>
@@ -30181,13 +30197,9 @@ app.get('/portal/documents/:id', (req, res) => {
            "Document reviewed" to somebody who had just opened the file — and
            then the fields stayed locked underneath it, which reads as the app
            contradicting itself. */''}
-      <div class="pdv-reviewed" id="pdv-reviewed"${
-  needsSign && hasFields && DOCS.reviewComplete(v.id, emp.id) ? '' : ' hidden'}>
-        <span aria-hidden="true">✓</span> Document reviewed — you can sign now
-      </div>
 
       ${needsSign && hasFields ? `<div class="pdv-bar" id="pdv-bar">
-        <span class="pdv-bar-t" id="pdv-bar-t">Read to the end to sign</span>
+        <span class="pdv-bar-t" id="pdv-bar-t">Tap a field to sign</span>
         <button type="button" class="tc-btn tc-btn-go" id="pdv-done-btn" disabled>Complete &amp; submit</button>
       </div>
 
@@ -30203,6 +30215,21 @@ app.get('/portal/documents/:id', (req, res) => {
           <p class="pdv-sig-prev" id="pdv-sig-prev" aria-live="polite">${esc(emp.name)}</p>
           <p class="pdv-sh-note">Your typed name is used as your electronic signature.</p>
           <button type="button" class="tc-btn tc-btn-go tc-btn-big" id="pdv-sig-ok">Add signature</button>
+          <button type="button" class="tc-btn" data-pdv-close>Cancel</button>
+        </div>
+      </div>
+
+      ${/* The date, asked for. A native date input, so every phone gives its
+           own calendar rather than this inventing one that behaves almost but
+           not quite like the picker they already know. */''}
+      <div class="pdv-sheet" id="pdv-date-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="pdv-date-h">
+        <div class="pdv-scrim" data-pdv-close></div>
+        <div class="pdv-panel">
+          <h2 id="pdv-date-h" class="pdv-sh-h">Date of signing</h2>
+          <label class="pdv-f"><span>Date</span>
+            <input id="pdv-date-val" type="date" value="${esc(TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour))}"></label>
+          <p class="pdv-sh-note">Today by default. Change it if you are dating this differently.</p>
+          <button type="button" class="tc-btn tc-btn-go tc-btn-big" id="pdv-date-ok">Use this date</button>
           <button type="button" class="tc-btn" data-pdv-close>Cancel</button>
         </div>
       </div>
@@ -30312,9 +30339,14 @@ app.post('/portal/documents/:id/sign', (req, res) => {
   // request that skipped the reading is refused however it was made.
   const placed = DOCS.fieldsFor(v.id);
   if (placed.length) {
-    if (!DOCS.reviewComplete(v.id, emp.id)) {
-      return back('Read through to the last page before signing.', true);
-    }
+    // NO READ-TO-THE-END GATE. It refused people who had genuinely read the
+    // thing — a missed observer entry, a released page, a footer below the
+    // fold — and "I read it and it will not let me sign" is a worse failure
+    // than somebody scrolling fast. What the record keeps is what they signed
+    // and when; how far they scrolled was never the point.
+    //
+    // doc_views is still written, so how much was read is still known. It is
+    // simply no longer a condition of signing.
     let sent = {};
     try { sent = JSON.parse(req.body.fields || '{}') || {}; } catch { sent = {}; }
     const missing = placed.filter((f) => f.required && f.kind !== 'date'

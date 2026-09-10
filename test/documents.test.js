@@ -53,7 +53,7 @@ test('a field is stored as a fraction of the page, never as pixels', () => {
   assert.ok(w.y >= 0 && w.y + w.h <= 1.0001, 'y clamped onto the page');
 });
 
-test('signing is refused until the last page has actually been seen', () => {
+test('how far somebody read is still recorded, though it no longer gates signing', () => {
   const { v } = mkDoc('sign', 6);
   assert.strictEqual(D.reviewComplete(v, emp), false, 'nothing seen yet');
   D.noteView(v, emp, 1, 6);
@@ -61,7 +61,7 @@ test('signing is refused until the last page has actually been seen', () => {
   D.noteView(v, emp, 5, 6);
   assert.strictEqual(D.reviewComplete(v, emp), false, 'page 5 of 6 is not either');
   D.noteView(v, emp, 6, 6);
-  assert.strictEqual(D.reviewComplete(v, emp), true, 'the last page opens it');
+  assert.strictEqual(D.reviewComplete(v, emp), true, 'the last page completes it');
   // And it stays open — closing the app after reading does not undo the reading.
   D.noteView(v, emp, 2, 6);
   assert.strictEqual(D.reviewComplete(v, emp), true, 'scrolling back up does not re-lock it');
@@ -160,19 +160,56 @@ test('a document with no fields still signs the old way', () => {
   assert.strictEqual(D.valuesFor(v, emp).length, 0, 'with no field values');
 });
 
-test('the review gate has more than one way to open, because one was not enough', () => {
-  // It used to depend solely on an IntersectionObserver entry for the last
-  // page. When that did not arrive the reader was left with locked fields, a
-  // disabled button and no way forward — having genuinely read the document.
-  // The server's own record is the authority now, and it is asked on the way
-  // through rather than only at submit.
+test('reading to the end is recorded, and no longer gates signing', () => {
+  // The gate was built with three ways to open because one kept failing —
+  // a missed observer entry, a released page, a footer below the fold — and
+  // "I read it and it will not let me sign" is a worse outcome than somebody
+  // scrolling fast. It is off. How far they read is still recorded; it is
+  // simply not a condition.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.ok(!/if \(!DOCS\.reviewComplete\(v\.id, emp\.id\)\) \{/.test(src),
+    'the submit route no longer refuses on it');
+  assert.ok(!/Read through to the last page before signing/.test(src),
+    'and nothing says it does');
   assert.match(src, /reviewed: DOCS\.reviewComplete\(v\.id, who\.emp\.id\)/,
-    'the progress route reports the verdict');
-  assert.match(src, /if \(j && j\.reviewed\) markReviewed\(\);/,
-    'and the page acts on it');
-  assert.match(src, /atEnd\) \{ markReviewed\(\);/,
-    'reaching the bottom counts too');
+    'the reading is still tracked — the record is worth having, the gate was not');
+  assert.match(src, /data-reviewed="1"/, 'the fields open with the document');
+});
+
+test('a signature is accepted from somebody who never scrolled', () => {
+  // The behaviour, not the source: no doc_views row at all, and it still signs.
+  const { v } = mkDoc('sign', 40);
+  const who = Number(db.prepare("INSERT INTO employees (name, role, active) VALUES ('Never Scrolled','server',1)")
+    .run().lastInsertRowid);
+  assert.strictEqual(D.reviewComplete(v, who), false, 'they read nothing');
+  const out = D.sign({ versionId: v, employeeId: who, employeeName: 'Never Scrolled',
+    ackText: D.DEFAULT_ACK });
+  assert.ok(out.fresh && out.signature, 'and the signature stands');
+});
+
+test('a date field keeps the date the person chose', () => {
+  // It used to be filled in from the signature's own timestamp — right when
+  // nobody is asked, and they are asked now. The date on a document is a
+  // statement by the person signing it.
+  const { v } = mkDoc('sign', 1);
+  const f = D.addField(v, { kind: 'date', page: 1, x: 0.1, y: 0.1, w: 0.2, h: 0.05 });
+  const who = Number(db.prepare("INSERT INTO employees (name, role, active) VALUES ('Date Picker','server',1)")
+    .run().lastInsertRowid);
+  D.sign({ versionId: v, employeeId: who, employeeName: 'Date Picker', ackText: D.DEFAULT_ACK,
+    values: { [String(f)]: '2026-03-04' } });
+  const vals = D.valuesFor(v, who);
+  const dv = vals.find((x) => x.kind === 'date') || vals[0];
+  assert.strictEqual(dv.value, '2026-03-04', 'stored as the day they picked');
+  assert.strictEqual(D.renderValue({ kind: 'date' }, '2026-03-04', { signed_at: '2026-09-10 06:00:00' },
+    'America/New_York'), '03/04/2026', 'and printed as that day, not as the signing day');
+});
+
+test('anything that is not a plain date falls back to the signing timestamp', () => {
+  // The field is a date. A hand-written POST must not be able to put arbitrary
+  // text where one belongs.
+  const out = D.renderValue({ kind: 'date' }, 'whenever I feel like it',
+    { signed_at: '2026-09-10 06:00:00' }, 'America/New_York');
+  assert.ok(/^\d{2}\/\d{2}\/\d{4}$/.test(out), `fell back to a real date, got ${out}`);
 });
 
 test('signing lands on a receipt, not back on the document', () => {

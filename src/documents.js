@@ -377,9 +377,19 @@ function sign({ versionId, employeeId, employeeName, ackText, ip, userAgent, val
         // The date is the SERVER's, taken from the signature row that was just
         // written, so what the document shows and what the audit says are the
         // same timestamp rather than two readings of two clocks.
-        const val = f.kind === 'date' ? null : (values && values[String(f.id)]);
-        if (f.kind === 'date') put.run(f.id, sid, employeeId, '@signed');
-        else if (val != null && String(val).trim()) put.run(f.id, sid, employeeId, String(val).trim());
+        // A DATE THEY CHOSE, OR THE SERVER'S IF THEY DID NOT.
+        //
+        // The date field used to be filled in for them from the signature's own
+        // timestamp, which is right when nobody is asked — but they ARE asked
+        // now, and the date somebody puts on a document is theirs to state.
+        // Only a plain YYYY-MM-DD is taken; anything else falls back to the
+        // sentinel, so a hand-written POST cannot put arbitrary text where a
+        // date belongs.
+        const raw = values && values[String(f.id)];
+        const txt = raw == null ? '' : String(raw).trim();
+        if (f.kind === 'date') {
+          put.run(f.id, sid, employeeId, /^\d{4}-\d{2}-\d{2}$/.test(txt) ? txt : '@signed');
+        } else if (txt) put.run(f.id, sid, employeeId, txt);
       }
       return sid;
     })();
@@ -552,6 +562,13 @@ function reviewComplete(versionId, employeeId) {
  */
 function renderValue(field, value, signature, tz) {
   if (!value) return '';
+  // A date they chose is printed as they chose it. Read as a plain calendar
+  // date, not as an instant — new Date('2026-09-10') is midnight UTC, which in
+  // New York is the evening BEFORE, and the document would show the wrong day.
+  if (field.kind === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
+    const [y, m, d] = String(value).split('-');
+    return `${m}/${d}/${y}`;
+  }
   if (field.kind === 'date' || value === '@signed') {
     const at = signature && signature.signed_at;
     if (!at) return '';
