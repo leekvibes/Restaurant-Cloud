@@ -21562,8 +21562,26 @@ function sbWeek(req) {
   return { today, week: SCH.weekWindowFor(far > 730 ? today : asked) };
 }
 
-const sbBack = (res, weekStart, msg, err) =>
-  res.redirect(`/schedule?w=${weekStart}${msg ? `&msg=${encodeURIComponent(msg)}` : ''}${err ? '&err=1' : ''}`);
+/**
+ * BACK TO THE BOARD YOU WERE ON.
+ *
+ * This dropped the service, and /schedule without one is the PICKER — so every
+ * save, copy, publish and template on the board landed on "pick a schedule to
+ * plan" instead of on the week you were looking at, taking the confirmation
+ * message with it. Saving a shift therefore read as nothing having happened.
+ *
+ * `req` first, and the service read off the posted form rather than passed in.
+ * As a trailing argument it would land in `err` on every three-argument call —
+ * which is a redirect that says the save failed and still loses the board.
+ *
+ * A post with no service falls back to the picker exactly as before, rather
+ * than guessing at one.
+ */
+const sbBack = (req, res, weekStart, msg, err) => {
+  const svc = String((req && req.body && req.body.svc) || '');
+  const to = SERVICES.isActive(svc) || svc === 'all' ? `&svc=${encodeURIComponent(svc)}` : '';
+  res.redirect(`/schedule?w=${weekStart}${to}${msg ? `&msg=${encodeURIComponent(msg)}` : ''}${err ? '&err=1' : ''}`);
+};
 
 /**
  * Read the drawer's fields into what the domain wants.
@@ -22227,12 +22245,14 @@ app.get('/schedule', (req, res) => {
             <form method="post" action="/schedule/copy-week" style="margin:0">
               <input type="hidden" name="_csrf" value="${csrfFor(req)}">
               <input type="hidden" name="to" value="${week.start}">
+              <input type="hidden" name="svc" value="${esc(svc)}">
               <button class="sb-btn" type="submit"
                 title="Copy the previous week's plan into this one">Copy last week</button>
             </form>
             ${dayTmpls.length || weekTmpls.length ? `<form method="post" action="/schedule/apply-template" style="margin:0">
               <input type="hidden" name="_csrf" value="${csrfFor(req)}">
               <input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}">
               <input type="hidden" name="to" value="${week.start}">
               <select class="sb-btn sb-tsel" name="id" onchange="if(this.value)this.form.submit()"
                 aria-label="Apply a saved staffing pattern">
@@ -22250,6 +22270,7 @@ app.get('/schedule', (req, res) => {
             <form method="post" action="/schedule/publish-week" style="margin:0">
               <input type="hidden" name="_csrf" value="${csrfFor(req)}">
               <input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}">
               <button class="sb-btn sb-go" type="submit"
                 title="Send this week to the people on it">Publish week</button>
             </form>
@@ -22264,6 +22285,7 @@ app.get('/schedule', (req, res) => {
               <input type="hidden" name="_csrf" value="${csrfFor(req)}">
               <input type="hidden" name="on" value="${availOn ? '0' : '1'}">
               <input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}">
               <button class="sb-chip sb-chip--av" type="submit"
                 aria-pressed="${availOn ? 'true' : 'false'}"
                 title="${availOn
@@ -22299,6 +22321,7 @@ app.get('/schedule', (req, res) => {
                             if(!n){return false;} this.querySelector('[name=name]').value=n;">
                   <input type="hidden" name="_csrf" value="${csrfFor(req)}">
                   <input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}">
                   <input type="hidden" name="from" value="${d}">
                   <input type="hidden" name="name" value="">
                   <button type="submit" title="Save this day's staffing as a reusable pattern">Save as pattern</button>
@@ -22306,6 +22329,7 @@ app.get('/schedule', (req, res) => {
                 ${s.n && di < days.length - 1 ? `<form method="post" action="/schedule/copy-day" class="sb-dh-cp">
                   <input type="hidden" name="_csrf" value="${csrfFor(req)}">
                   <input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}">
                   <input type="hidden" name="from" value="${d}">
                   <input type="hidden" name="to" value="${days[di + 1]}">
                   <button type="submit" title="Copy this day's shifts onto ${esc(dow(days[di + 1]))} as drafts"
@@ -22381,6 +22405,7 @@ app.get('/schedule', (req, res) => {
       <form class="drawer-b" method="post" id="sb-form" action="/schedule/shift">
         <input type="hidden" name="_csrf" value="${csrfFor(req)}">
         <input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}">
         <label class="fld wide">Who
           <select name="employee_id" id="sb-emp" required>${employeeOptions}</select></label>
         <p class="sb-hint sb-ctx" id="sb-ctx" hidden></p>
@@ -23128,13 +23153,17 @@ app.get('/schedule', (req, res) => {
       }());
     </script>
     <form method="post" id="sb-pub-f" style="display:none">
-      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}"></form>
     <form method="post" id="sb-unpub-f" style="display:none">
-      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}"></form>
     <form method="post" id="sb-dup" style="display:none">
-      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}"></form>
     <form method="post" id="sb-del" style="display:none">
-      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}"></form>
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}"><input type="hidden" name="w" value="${week.start}">
+          <input type="hidden" name="svc" value="${esc(svc)}"></form>
   </div>`;
 
   res.send(layout('Schedule', body));
@@ -23187,7 +23216,7 @@ app.post('/schedule/shift', (req, res) => {
       if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already on the schedule.`;
       if (refused) msg += ` ${refused} could not be made (${esc(out.skipped.find((x) => !/already/i.test(x.reason)).reason)}).`;
       if (out.capped) msg += ' That is as far ahead as one repeat goes.';
-      return sbBack(res, w, msg + (n ? sbAvailNote(out.made[0]) : ''));
+      return sbBack(req, res, w, msg + (n ? sbAvailNote(out.made[0]) : ''));
     }
 
     const made = SCH.create({ ...sbForm(req.body), createdBy: 'owner' });
@@ -23197,7 +23226,7 @@ app.post('/schedule/shift', (req, res) => {
     if (req.body.publish !== '1') {
       // Says what happened rather than that something happened. "Added to the
       // plan" left a manager guessing whether the floor had been told.
-      return sbBack(res, w, `Saved as a draft — employees cannot see it yet.${note}`);
+      return sbBack(req, res, w, `Saved as a draft — employees cannot see it yet.${note}`);
     }
     // Publish the week the shift LANDS in, which is not always the week on
     // screen: a shift dated into next week publishes next week, and notifying
@@ -23206,14 +23235,14 @@ app.post('/schedule/shift', (req, res) => {
     const before = sbFingerprintsBefore(week, [made.employee_id]);
     const [result] = SCH.publish(made.id);
     if (result && result.action === 'skipped-open') {
-      return sbBack(res, w, `Saved as a draft — an open shift has nobody to publish it to yet.${note}`);
+      return sbBack(req, res, w, `Saved as a draft — an open shift has nobody to publish it to yet.${note}`);
     }
     const told = sbNotifyPublished(before, week);
-    sbBack(res, w, told ? `Published — the employee has been told.${note}`
+    sbBack(req, res, w, told ? `Published — the employee has been told.${note}`
       : `Published. Nothing they can see changed.${note}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w, e.message, true);
+    sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23222,10 +23251,10 @@ app.post('/schedule/shift/:id', (req, res) => {
   const w = sbWeekOf(req);
   try {
     const saved = SCH.edit(Number(req.params.id), sbForm(req.body));
-    sbBack(res, w, `Shift updated.${sbOverlapNote(saved)}${sbAvailNote(saved)}`);
+    sbBack(req, res, w, `Shift updated.${sbOverlapNote(saved)}${sbAvailNote(saved)}`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w, e.message, true);
+    sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23236,10 +23265,10 @@ app.post('/schedule/shift/:id/delete', (req, res) => {
     // cancel(), not a row delete: a cancelled plan is still a record of what
     // was planned, and it touches no punch.
     SCH.cancel(Number(req.params.id));
-    sbBack(res, w, 'Shift removed from the plan.');
+    sbBack(req, res, w, 'Shift removed from the plan.');
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w, e.message, true);
+    sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23262,19 +23291,19 @@ app.post('/schedule/shift/:id/duplicate', (req, res) => {
     } catch (e) {
       if (!(e instanceof SCH.ScheduleError)) throw e;
       if (!made) throw e;
-      return sbBack(res, w, `Made ${made} of ${n} — ${e.message}`, true);
+      return sbBack(req, res, w, `Made ${made} of ${n} — ${e.message}`, true);
     }
-    if (n > 1) return sbBack(res, w, `Duplicated ${n} times into the same day.`);
+    if (n > 1) return sbBack(req, res, w, `Duplicated ${n} times into the same day.`);
     // Deliberately NO overlap note here. A duplicate lands in the same cell at
     // the same times, so it always overlaps its own original — the warning
     // would fire every time and tell the manager the thing they just asked
     // for. A warning that is always true carries no information; worse, one
     // that cries wolf here trains people to skim past it on create and edit,
     // where it means something.
-    sbBack(res, w, 'Duplicated into the same day.');
+    sbBack(req, res, w, 'Duplicated into the same day.');
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w, e.message, true);
+    sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23289,10 +23318,10 @@ app.post('/schedule/copy-week', (req, res) => {
     const msg = made.length
       ? `Copied ${made.length} shift${made.length === 1 ? '' : 's'}.${skipped.length ? ` ${skipped.length} skipped — ${why}` : ''}`
       : (skipped.length ? `Nothing copied. ${skipped.length} skipped — ${why}` : 'Last week has nothing to copy.');
-    sbBack(res, to, msg, !made.length);
+    sbBack(req, res, to, msg, !made.length);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, to, e.message, true);
+    sbBack(req, res, to, e.message, true);
   }
 });
 
@@ -23331,11 +23360,11 @@ app.post('/schedule/save-day-template', (req, res) => {
   const w = sbWeekOf(req);
   try {
     const t = SCH.saveScheduleTemplate('day', req.body.name, req.body.from);
-    return sbBack(res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'}, with who works them.`
+    return sbBack(req, res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'}, with who works them.`
       + (t.skippedOpen ? ` ${t.skippedOpen} open shift${t.skippedOpen === 1 ? '' : 's'} left out.` : ''));
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    return sbBack(res, w, e.message, true);
+    return sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23344,11 +23373,11 @@ app.post('/schedule/save-week-template', (req, res) => {
   const w = sbWeekOf(req);
   try {
     const t = SCH.saveScheduleTemplate('week', req.body.name, req.body.from || w);
-    return sbBack(res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'} across the week, with who works them.`
+    return sbBack(req, res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'} across the week, with who works them.`
       + (t.skippedOpen ? ` ${t.skippedOpen} open shift${t.skippedOpen === 1 ? '' : 's'} left out.` : ''));
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    return sbBack(res, w, e.message, true);
+    return sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23357,17 +23386,17 @@ app.post('/schedule/apply-template', (req, res) => {
   const w = sbWeekOf(req);
   try {
     const out = SCH.applyScheduleTemplate(req.body.id, req.body.to || w);
-    return sbBack(res, w, schedTmplMsg(out, `"${out.template.name}"`));
+    return sbBack(req, res, w, schedTmplMsg(out, `"${out.template.name}"`));
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    return sbBack(res, w, e.message, true);
+    return sbBack(req, res, w, e.message, true);
   }
 });
 
 app.post('/schedule/drop-template', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
-  return sbBack(res, w, SCH.deleteScheduleTemplate(req.body.id)
+  return sbBack(req, res, w, SCH.deleteScheduleTemplate(req.body.id)
     ? 'Template removed. Shifts already made from it are untouched.'
     : 'That template is already gone.');
 });
@@ -23383,21 +23412,21 @@ app.post('/schedule/shift/:id/move', (req, res) => {
       toEmployeeId: req.body.to_employee === undefined || req.body.to_employee === ''
         ? undefined : req.body.to_employee,
     });
-    if (!out.moved) return sbBack(res, w, '');          // dropped where it already was
+    if (!out.moved) return sbBack(req, res, w, '');          // dropped where it already was
     const note = sbOverlapNote(out.row) + sbAvailNote(out.row);
     const who = (sbEmpName.get(out.row.employee_id) || {}).name || 'that shift';
     // Names the person AND the day, because a diagonal drag changed both and a
     // message saying only one of them reads like half the move failed.
     const reassigned = out.was != null && out.was !== out.row.employee_id;
     const from = reassigned ? (sbEmpName.get(out.was) || {}).name : null;
-    return sbBack(res, w, (reassigned
+    return sbBack(req, res, w, (reassigned
       ? `Moved to ${esc(who)}${from ? ` from ${esc(from)}` : ''} — ${esc(TC.dayLabel(out.row.business_date))}.`
       : `Moved — ${esc(who)}, ${esc(TC.dayLabel(out.row.business_date))}.`)
       + (SCH.q.pubById.get(out.row.id) ? ' Publish the week to tell them.' : '') + note);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     // Nothing moved, so the card is still where it was. Say why.
-    return sbBack(res, w, `Not moved — ${e.message}`, true);
+    return sbBack(req, res, w, `Not moved — ${e.message}`, true);
   }
 });
 
@@ -23416,10 +23445,10 @@ app.post('/schedule/copy-day', (req, res) => {
     if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already there.`;
     if (open) msg += ` ${open} open shift${open === 1 ? '' : 's'} skipped.`;
     if (refused) msg += ` ${refused} could not be copied.`;
-    return sbBack(res, w, msg);
+    return sbBack(req, res, w, msg);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    return sbBack(res, w, e.message, true);
+    return sbBack(req, res, w, e.message, true);
   }
 });
 
@@ -23437,17 +23466,17 @@ app.post('/schedule/template', (req, res) => {
       startMin: mins(req.body.start), endMin: mins(req.body.end),
       breakMinutes: req.body.break_minutes, breakPaid: String(req.body.break_paid || '') === '1',
     });
-    return sbBack(res, w, `Saved "${t.name}" — pick it from the drawer next time.`);
+    return sbBack(req, res, w, `Saved "${t.name}" — pick it from the drawer next time.`);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    return sbBack(res, w, e.message, true);
+    return sbBack(req, res, w, e.message, true);
   }
 });
 
 app.post('/schedule/template/:id/delete', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
-  return sbBack(res, w, SCH.deleteTemplate(req.params.id)
+  return sbBack(req, res, w, SCH.deleteTemplate(req.params.id)
     ? 'Template removed. Shifts already made from it are untouched.'
     : 'That template is already gone.', false);
 });
@@ -23481,10 +23510,10 @@ app.post('/schedule/publish-week', (req, res) => {
       ? `Week published — ${told} ${told === 1 ? 'person was' : 'people were'} told.`
         + (open ? ` ${open} open shift${open === 1 ? '' : 's'} skipped.` : '')
       : `Week published. Nothing changed for anybody${live || gone ? '' : ' — nothing to publish'}.`;
-    sbBack(res, w.start, msg);
+    sbBack(req, res, w.start, msg);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w.start, e.message, true);
+    sbBack(req, res, w.start, e.message, true);
   }
 });
 
@@ -23498,14 +23527,14 @@ app.post('/schedule/shift/:id/publish', (req, res) => {
     const before = sbFingerprintsBefore(w, [row.employee_id]);
     const [result] = SCH.publish(Number(req.params.id));
     if (result && result.action === 'skipped-open') {
-      return sbBack(res, w.start, 'An open shift has nobody to publish it to yet.', true);
+      return sbBack(req, res, w.start, 'An open shift has nobody to publish it to yet.', true);
     }
     const told = sbNotifyPublished(before, w);
-    sbBack(res, w.start, told ? 'Published — the employee has been told.'
+    sbBack(req, res, w.start, told ? 'Published — the employee has been told.'
       : 'Published. Nothing they can see changed.');
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w.start, e.message, true);
+    sbBack(req, res, w.start, e.message, true);
   }
 });
 
@@ -23522,12 +23551,12 @@ app.post('/schedule/shift/:id/unpublish', (req, res) => {
     // the person it disappeared from is told.
     SCH.unpublish(Number(req.params.id));
     const told = sbNotifyPublished(before, w);
-    sbBack(res, w.start, told
+    sbBack(req, res, w.start, told
       ? 'Taken off the employee schedule. The shift is still here as a draft.'
       : 'Taken off the employee schedule.');
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
-    sbBack(res, w.start, e.message, true);
+    sbBack(req, res, w.start, e.message, true);
   }
 });
 

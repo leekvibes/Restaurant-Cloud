@@ -2277,3 +2277,62 @@ test('a schedule made without a clock is not offered as one, until it is connect
     if (sv) SVC.archive(sv.slug);
   }
 });
+
+// ---------------------------------------------------------------------------
+// EVERY WRITE COMES BACK TO THE BOARD IT CAME FROM.
+//
+// /schedule without a service is the PICKER. The board's forms carried the week
+// and not the service, and sbBack redirected to /schedule?w=… — so saving a
+// shift, copying a day, publishing a week or applying a template all landed on
+// "pick a schedule to plan", carrying the confirmation message off with them.
+// Saving therefore read as nothing having happened.
+// ---------------------------------------------------------------------------
+
+test('every form on the board carries the board it is on', async () => {
+  const html = await text('/schedule?svc=cafe');
+  const forms = [...html.matchAll(/<form[^>]*action="(\/schedule[^"]*)"[^>]*>([\s\S]{0,1400}?)<\/form>/g)];
+  assert.ok(forms.length >= 4, `found ${forms.length} board forms to check`);
+  for (const [, action, body] of forms) {
+    assert.match(body, /name="svc"/, `${action} carries the service`);
+  }
+});
+
+test('a save lands back on the week, not on the picker', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  // Read off the REQUEST rather than passed in. As a trailing argument it lands
+  // in `err` on every three-argument call — a redirect that says the save
+  // failed AND still loses the board.
+  assert.match(src, /const sbBack = \(req, res, weekStart, msg, err\) => \{/,
+    'sbBack takes the request');
+  assert.match(src, /const svc = String\(\(req && req\.body && req\.body\.svc\) \|\| ''\);/,
+    'and reads the service off the posted form');
+  assert.match(src, /SERVICES\.isActive\(svc\) \|\| svc === 'all'/,
+    'only a real service is echoed back');
+  assert.ok(!/sbBack\(res,/.test(src), 'and no call site was left on the old signature');
+});
+
+test('a shift saved as a draft is a draft, and one published is published', async () => {
+  // Both were reported as saving to draft. The server was right all along —
+  // what was wrong is that the redirect above meant nobody ever saw the result.
+  const emp = db.prepare("SELECT id FROM employees WHERE active = 1 LIMIT 1").get().id;
+  const w = week().start;
+  const post = (body) => fetch(`${BASE}/schedule/shift`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(body).toString(),
+  });
+  const base = { w, svc: 'cafe', employee_id: String(emp), position: 'server',
+    start: '09:00', end: '15:00', daypart: 'cafe' };
+
+  const d = await post({ ...base, date: dates.addDays(w, 3) });
+  assert.match(d.headers.get('location') || '', /svc=cafe/, 'the draft save keeps the board');
+  const draft = db.prepare("SELECT status FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?")
+    .get(emp, dates.addDays(w, 3));
+  assert.strictEqual(draft && draft.status, 'draft');
+
+  const p = await post({ ...base, date: dates.addDays(w, 4), publish: '1' });
+  assert.match(p.headers.get('location') || '', /svc=cafe/, 'and so does the publish');
+  const pub = db.prepare("SELECT status FROM scheduled_shifts WHERE employee_id = ? AND business_date = ?")
+    .get(emp, dates.addDays(w, 4));
+  assert.strictEqual(pub && pub.status, 'published', 'publishing one shift publishes it');
+});
