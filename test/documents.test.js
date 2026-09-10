@@ -277,3 +277,64 @@ test('a page restored from the browser cache is not left mid-submit', () => {
   // button in exactly the same way.
   assert.match(src, /\}\$\{portalRestoreScript\(\)\}\$\{/, 'emitted from portalPage for all of them');
 });
+
+// ---------------------------------------------------------------------------
+// JUMP TO THE FIELD.
+//
+// A handbook is forty pages and the thing somebody came here to do is on page
+// forty. A policy agreed in person needs signing, not re-reading. Scrolling to
+// hunt for a box is not part of the job.
+// ---------------------------------------------------------------------------
+
+test('the reader offers a way straight to the next field it needs', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /id="pdv-jump">Jump to signature<\/button>/, 'the control exists');
+  assert.match(src, /<div class="pdv-bar" id="pdv-bar">[\s\S]{0,400}?id="pdv-jump"/,
+    'in the bar, which is fixed to the bottom and reachable from anywhere');
+  assert.match(src, /jb\.textContent = n\.kind === 'date' \? 'Jump to date' : 'Jump to signature'/,
+    'and it names what it is actually taking you to');
+});
+
+test('it goes to the FIRST thing outstanding, in reading order', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /open\.sort\(function \(a, b\) \{ return a\.page - b\.page \|\| a\.y - b\.y \|\| a\.x - b\.x; \}\);/,
+    'earliest page, then highest on it — a signature and its date sit side by '
+    + 'side, and jumping to the date first reads as skipping the thing it is named after');
+  assert.match(src, /placed\.filter\(function \(f\) \{ return !mine\[f\.id\]; \}\)/,
+    'and only at fields still to fill');
+});
+
+test('it draws the page before it measures, and corrects until it settles', () => {
+  // The reason this is not scrollIntoView. Pages are drawn lazily and released
+  // behind, so an undrawn page is a box of roughly the right height and not the
+  // right height — scroll to page 40 and the 39 above it settle on the way, and
+  // you arrive near the field rather than at it.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function jumpTo(f) {'), src.indexOf('var jumpBtn ='));
+  assert.match(fn, /draw\(f\.page\); if \(f\.page > 1\) draw\(f\.page - 1\);/,
+    'the target page and the one above it are drawn first');
+  assert.match(fn, /if \(\+\+tries < 4\)/, 'and it checks where it actually landed, more than once');
+  assert.match(fn, /window\.innerHeight \* 0\.33/,
+    'a third down, not centred — the bar is fixed over the bottom of the window '
+    + 'and a centred field sits behind the sheet that opens when you tap it');
+  assert.match(fn, /Math\.max\(0, Math\.min\(to, max\)\)/, 'and it never scrolls past either end');
+});
+
+test('nothing left to fill means nothing to jump to', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  assert.match(src, /jb\.hidden = !n;/,
+    'the button stands down — one that scrolls to a field already signed appears to do nothing');
+});
+
+test('the jump button cannot shoulder the submit off the screen', () => {
+  // .tc-btn is width:100%, and a flex item that may not shrink takes that as
+  // its basis. `flex: none` alone made the button 1248px wide and pushed
+  // Complete & submit clean off the right of the bar.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'staff.css'), 'utf8');
+  assert.match(css, /\.pdv-bar \.pdv-jump \{ flex: 0 0 auto; width: auto;/,
+    'width: auto is the load-bearing half');
+  assert.match(css, /\.pdv-bar \.tc-btn-go \{ flex: 0 0 auto; width: auto;/,
+    'and the submit is sized the same way');
+  assert.match(css, /@media \(max-width: 460px\) \{[\s\S]{0,240}?\.pdv-bar \.pdv-bar-t \{ display: none; \}/,
+    'on a small phone the status line goes, not one of the buttons');
+});

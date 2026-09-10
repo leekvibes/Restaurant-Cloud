@@ -30068,6 +30068,14 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     var go = document.getElementById('pdv-done-btn');
     if (!t || !go) return;
     var left = requiredLeft();
+    var jb = document.getElementById('pdv-jump');
+    // Nothing left to fill means nothing to jump to. A button that scrolls to
+    // a field already signed is a button that appears to do nothing.
+    if (jb) {
+      var n = nextUnfilled();
+      jb.hidden = !n;
+      if (n) jb.textContent = n.kind === 'date' ? 'Jump to date' : 'Jump to signature';
+    }
     if (left) {
       t.textContent = left + ' field' + (left === 1 ? '' : 's') + ' to fill';
       go.disabled = true;
@@ -30080,6 +30088,73 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
   // The fields are open from the moment the document opens. How far somebody
   // scrolled is still recorded; it is no longer a condition of signing.
   function markReviewed() { if (!reviewed) { reviewed = true; paintFields(); } }
+
+  /**
+   * TAKE THEM TO THE NEXT THING THEY HAVE TO FILL IN.
+   *
+   * Harder than scrollIntoView, and the reason is the reader: pages are drawn
+   * lazily and released again behind, so a page that has not been drawn is a
+   * box of approximately the right height and not the right height. Scroll to
+   * a field on page forty and the forty pages above it settle to their real
+   * sizes on the way, and you arrive somewhere near it rather than at it.
+   *
+   * So: draw the target page and its neighbour FIRST, scroll, then check where
+   * the field actually ended up and correct until it stops moving. Cheap —
+   * three passes on a timer, stopping early once it is where it should be.
+   */
+  function nextUnfilled() {
+    var open = placed.filter(function (f) { return !mine[f.id]; });
+    if (!open.length) return null;
+    // Reading order: earliest page, then highest on it. A signature and its
+    // date sit side by side, and jumping to the date first would read as the
+    // button skipping the thing it is named after.
+    open.sort(function (a, b) { return a.page - b.page || a.y - b.y || a.x - b.x; });
+    return open[0];
+  }
+
+  function elFor(f) {
+    var host = pagesEl.querySelector('[data-page="' + f.page + '"]');
+    return host ? host.querySelector('.pdf-f[data-field="' + f.id + '"]') : null;
+  }
+
+  function jumpTo(f) {
+    if (!f) return;
+    // The page it is on, and the one before, so the height above it is real by
+    // the time we measure. draw() is idempotent.
+    draw(f.page); if (f.page > 1) draw(f.page - 1);
+    paintFields();
+
+    var tries = 0;
+    function settle(smooth) {
+      var el = elFor(f);
+      var host = pagesEl.querySelector('[data-page="' + f.page + '"]');
+      var target = el || host;
+      if (!target) return;
+      var r = target.getBoundingClientRect();
+      // A third of the way down, not centred: the fixed bar sits over the
+      // bottom of the window, and a field centred in the window is half hidden
+      // behind the sheet that opens when you tap it.
+      var want = window.innerHeight * 0.33;
+      var to = window.scrollY + r.top - want;
+      var max = document.documentElement.scrollHeight - window.innerHeight;
+      to = Math.max(0, Math.min(to, max));
+      if (Math.abs(to - window.scrollY) > 4) {
+        try { window.scrollTo({ top: to, behavior: smooth ? 'smooth' : 'auto' }); }
+        catch (e) { window.scrollTo(0, to); }
+      }
+      if (++tries < 4) setTimeout(function () { settle(false); }, tries === 1 ? 260 : 200);
+      else if (el) {
+        // Say where they are, for a screen reader and for anybody who did not
+        // watch the page move.
+        el.setAttribute('tabindex', '-1');
+        try { el.focus({ preventScroll: true }); } catch (e2) { /* older browser */ }
+      }
+    }
+    settle(true);
+  }
+
+  var jumpBtn = document.getElementById('pdv-jump');
+  if (jumpBtn) jumpBtn.addEventListener('click', function () { jumpTo(nextUnfilled()); });
 
   var sigSheet = document.getElementById('pdv-sig-sheet');
   var sigName = document.getElementById('pdv-sig-name');
@@ -30366,8 +30441,14 @@ app.get('/portal/documents/:id', (req, res) => {
            then the fields stayed locked underneath it, which reads as the app
            contradicting itself. */''}
 
+      ${/* JUMP TO THE FIELD. A handbook is forty pages and the thing somebody
+           came here to do is on page forty; a policy agreed in person needs
+           signing and not re-reading. Scrolling to find a box is not part of
+           the job. In the bar, which is fixed to the bottom, so it is reachable
+           from anywhere in the document rather than only from the top. */''}
       ${needsSign && hasFields ? `<div class="pdv-bar" id="pdv-bar">
         <span class="pdv-bar-t" id="pdv-bar-t">Tap a field to sign</span>
+        <button type="button" class="tc-btn pdv-jump" id="pdv-jump">Jump to signature</button>
         <button type="button" class="tc-btn tc-btn-go" id="pdv-done-btn" disabled>Complete &amp; submit</button>
       </div>
 
