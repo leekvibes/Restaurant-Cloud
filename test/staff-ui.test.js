@@ -121,10 +121,16 @@ test('the PIN is shown on the details tab and nowhere else', async () => {
   }
 });
 
-test('Documents is a shell and says so, rather than pretending', async () => {
+test('Documents shows what they have been given and what they signed', async () => {
+  // This asserted "Not built yet" while the tab was a placeholder. It is a
+  // real tab now, and the thing worth holding is that it reads from the
+  // documents module rather than offering controls of its own — assigning
+  // happens in one place, and a second one is how two lists come to disagree.
   const html = await text(`/employees/${ANNA}/edit?tab=documents`);
-  assert.match(html, /Not built yet/, 'it is honest about having no backend');
-  assert.doesNotMatch(html, /<form[^>]*enctype="multipart/, 'and offers no upload that would fail');
+  assert.doesNotMatch(html, /Not built yet/, 'no longer a shell');
+  assert.match(html, /signed|assigned/i, 'it speaks about assignment and signing');
+  assert.doesNotMatch(html, /<form[^>]*enctype="multipart/,
+    'and still offers no upload here — that belongs on Documents itself');
 });
 
 // --- what must not change ----------------------------------------------------
