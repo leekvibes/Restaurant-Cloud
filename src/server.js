@@ -13439,8 +13439,38 @@ function payerPhrase(r) {
   return `${joined.charAt(0).toUpperCase()}${joined.slice(1)} tip out`;
 }
 
+/**
+ * WHO KEEPS WHAT THEIR OWN GUESTS LEAVE THEM.
+ *
+ * This said "Servers" and nothing else — hardcoded from when a server was the
+ * only person who kept their own tips and everybody else's went into a pot.
+ * Under the new policy a bartender and a barista do exactly the same thing:
+ * they serve, they ring, they keep what they are tipped, and they pay their
+ * percentages out of it. The line naming only servers reads as though a
+ * bartender's tips still go somewhere, which is the thing this whole change
+ * stopped doing.
+ *
+ * Read from the policy itself, through keepsOwnCash — the same function the
+ * engine and the staff form use — so it can never say one thing while the
+ * money does another.
+ */
+function keepersLine(rules) {
+  let who = [];
+  try {
+    who = positions.active.all().map((p) => p.slug).filter((sl) => keepsOwnCash(sl, rules));
+  } catch { who = ['server']; }
+  if (!who.length) who = ['server'];
+  const names = who.map((x) => plural(x).toLowerCase());
+  const joined = names.length === 1 ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  const cap = joined.charAt(0).toUpperCase() + joined.slice(1);
+  return names.length === 1
+    ? `${cap} keep the tips their own guests leave them.`
+    : `${cap} each keep the tips their own guests leave them, and pay the percentages below out of their own sales.`;
+}
+
 function describeRules(rules) {
-  const items = ['Servers keep the tips their own guests leave them.'];
+  const items = [keepersLine(rules)];
   for (const r of rules) {
     if (r.type === 'tipout') {
       const base = BASE[r.base] || r.base;

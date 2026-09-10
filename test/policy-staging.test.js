@@ -280,3 +280,22 @@ test('moving one service type leaves the other where it is', () => {
   assert.strictEqual(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(cafeShift).p, 1,
     'Day Service untouched');
 });
+
+test('the summary names everyone who keeps their own tips, not just servers', () => {
+  // It said "Servers" and nothing else, hardcoded from when a server was the
+  // only person who kept their own. Under the Palm policy a bartender keeps
+  // theirs and pays a percentage out of it — a line naming only servers reads
+  // as though a bartender's tips still go somewhere.
+  const { positions, keepsOwnCash } = require('../src/db');
+  const slugs = positions.active.all().map((p) => p.slug);
+  const keepsUnder = (rules) => slugs.filter((sl) => keepsOwnCash(sl, rules));
+
+  assert.deepStrictEqual(keepsUnder(OLD), ['server'],
+    'under the old shape only a server keeps their own');
+  const palm = keepsUnder(PALM_EVENING);
+  for (const who of ['server', 'bartender', 'barista']) {
+    assert.ok(palm.includes(who), `${who} keeps their own under the Palm policy`);
+  }
+  assert.ok(!palm.includes('busser'), 'a busser does not, they are paid a percentage');
+  assert.ok(!palm.includes('barback'), 'nor a barback');
+});
