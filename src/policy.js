@@ -220,9 +220,61 @@ function stageUnactivatedNewPolicy() {
   db.prepare(`INSERT INTO settings (key, value) VALUES ('policy_staging_2026_09', '1')
               ON CONFLICT(key) DO UPDATE SET value = '1'`).run();
 }
+/**
+ * THE PALM POLICY, WRITTEN DOWN AND NOT IN FORCE.
+ *
+ * A policy is rows in this table, not code — so shipping the switch without
+ * this ships a page with nothing on it: no draft, no card, nothing to turn on.
+ * The rules were agreed against the signed PDF and checked line by line; what
+ * is missing on a fresh database is only that somebody has typed them in.
+ *
+ * STAGED, so it changes not one penny on arrival. What is live stays live,
+ * every closed service keeps the version it was closed under, and the next
+ * service carries on being priced exactly as the last one was. It appears on
+ * the tip-out policy page as "Ready · not live", and it is a person clicking
+ * the button that starts it — on one service at a time.
+ *
+ * Skipped wherever a draft already exists, so a manager who has edited theirs
+ * does not find it replaced on the next deploy. Runs once besides.
+ */
+const PALM_2026_09 = {
+  cafe: {
+    note: 'Palm day policy: every penny moves by percentage. Card and cash stay with whoever earned them.',
+    rules: [
+      { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+      { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+      { type: 'tipout', recipient: 'barista', percent: 1.5, base: 'coffee', split: 'hours', paidBy: ['server'] },
+      { type: 'tipout', recipient: 'busser', percent: 1.5, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+    ],
+  },
+  dinner: {
+    note: 'Palm evening policy: no cash tip jar at night, so no pool rule at all — every penny moves by percentage.',
+    rules: [
+      { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+      { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+      { type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+    ],
+  },
+};
+
+function seedPalmDraft() {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'palm_draft_2026_09'").get();
+  if (done) return;
+  for (const [daypart, spec] of Object.entries(PALM_2026_09)) {
+    if (Q.staged.get(daypart)) continue;                 // theirs, not ours, to replace
+    const live = Q.latest.get(daypart);
+    // Already running it — there is nothing to offer.
+    if (live && needsNewEngine(JSON.parse(live.rules_json))) continue;
+    Q.insert.run({ daypart, rules_json: JSON.stringify(spec.rules), note: spec.note, staged: 1 });
+  }
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('palm_draft_2026_09', '1')
+              ON CONFLICT(key) DO UPDATE SET value = '1'`).run();
+}
+
 try {
   db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
   stageUnactivatedNewPolicy();
+  seedPalmDraft();
 } catch { /* settings table not ready on a bare boot; nothing is staged, nothing breaks */ }
 
 

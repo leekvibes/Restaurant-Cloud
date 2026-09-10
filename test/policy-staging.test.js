@@ -299,3 +299,53 @@ test('the summary names everyone who keeps their own tips, not just servers', ()
   assert.ok(!palm.includes('busser'), 'a busser does not, they are paid a percentage');
   assert.ok(!palm.includes('barback'), 'nor a barback');
 });
+
+// ---------------------------------------------------------------------------
+// THE POLICY IS DATA, SO IT HAS TO ARRIVE.
+//
+// Rules are rows in policy_versions, not code. Shipping the switch without
+// shipping the policy ships a page with nothing on it — no draft, no card,
+// nothing to turn on. So a fresh database gets the Palm policy as a DRAFT.
+// ---------------------------------------------------------------------------
+
+test('the Palm policy arrives as a draft, and changes nothing on arrival', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'policy.js'), 'utf8');
+  const spec = src.slice(src.indexOf('const PALM_2026_09 = {'), src.indexOf('function seedPalmDraft'));
+
+  // The percentages, as agreed. Written out here so a change to either has to
+  // be a change to both, on purpose.
+  for (const want of [
+    /recipient: 'busser', percent: 2, base: 'total_sales'[^}]*paidBy: \['server'\]/,
+    /recipient: 'bartender', percent: 9, base: 'alcohol'[^}]*paidBy: \['server'\]/,
+    /recipient: 'barista', percent: 1\.5, base: 'coffee'[^}]*paidBy: \['server'\]/,
+    /recipient: 'busser', percent: 1\.5, base: 'total_sales'[^}]*paidBy: \['bartender'\]/,
+    /recipient: 'barback', percent: 3, base: 'total_sales'[^}]*paidBy: \['bartender'\]/,
+  ]) assert.match(spec, want, `the seeded policy still says ${want}`);
+  assert.ok(!/type: 'pool'/.test(spec), 'and pools nothing — every penny moves by percentage');
+
+  // Staged, never live. This is the line that decides whether a deploy is a
+  // policy change, and it must never become saveRules.
+  assert.match(src, /Q\.insert\.run\(\{ daypart, rules_json: JSON\.stringify\(spec\.rules\), note: spec\.note, staged: 1 \}\);/,
+    'seeded as a draft');
+  assert.match(src, /if \(Q\.staged\.get\(daypart\)\) continue;/,
+    'and never over a draft somebody has already written');
+  assert.match(src, /if \(live && needsNewEngine\(JSON\.parse\(live\.rules_json\)\)\) continue;/,
+    'nor offered to a service already running it');
+  assert.match(src, /palm_draft_2026_09/, 'and once, not on every boot');
+});
+
+test('a database that has never seen it ends up with the old rules live', () => {
+  // The shape production is in: rules seeded, nothing switched on.
+  const P2 = require('../src/policy');
+  for (const dp of ['cafe', 'dinner']) {
+    const live = P2.currentForDaypart(dp);
+    if (!live) continue;
+    // Whatever this fixture's live policy is, seeding must not have made a
+    // new-shape one current behind anybody's back.
+    const draft = P2.stagedForDaypart(dp);
+    if (draft) {
+      assert.ok(P2.needsNewEngine(draft.rules), `${dp}: the draft is the new shape`);
+      assert.notStrictEqual(live.id, draft.id, `${dp}: and it is not what is live`);
+    }
+  }
+});
