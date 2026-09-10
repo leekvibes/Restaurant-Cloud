@@ -2447,7 +2447,9 @@ app.get('/shifts/:id', (req, res) => {
           ${showPool ? `
           <div class="bs-sec-h"><span class="bs-kicker">Shared tip pool</span></div>
           <div class="bs-lrows">
-            ${showCash ? `<div class="bs-lrow"><span>Cash pool</span><b class="bs-fig">${money(poolCash)}</b></div>` : ''}
+            ${showCash ? `<div class="bs-lrow"><span>Cash pool${
+  toCents(inp.pool.staffJar) ? `<i class="bs-em">· you ${money(toCents(inp.pool.jar))}, staff counted ${money(toCents(inp.pool.staffJar))}</i>` : ''
+}</span><b class="bs-fig">${money(poolCash)}</b></div>` : ''}
             ${showCard ? `<div class="bs-lrow"><span>To-go card <i class="bs-em">· you ${money(toCents(inp.pool.togoCard))}</i></span><b class="bs-fig">${money(poolCard)}</b></div>` : ''}
           </div>` : ''}
           ${(poolCash > 0 && !poolsCash) || (poolCard > 0 && !poolsCard)
@@ -4687,6 +4689,10 @@ function filingCapabilities(slug) {
     reports_card_tips: true,
     reports_server_cash_kept: isServer,
     reports_pooled_cash: !isServer,
+    // THE JAR, asked of whoever stands next to it. Turned on per service by
+    // fieldsForShift, which only offers it where the policy actually pays a
+    // cash pool out — and only to a role that pool names.
+    reports_jar_cash: slug === 'barista',
     // Sales are written only when something was entered, so a blank form never
     // wipes a figure. That is existing behaviour and stays.
     requires_sales: false,
@@ -4720,6 +4726,10 @@ const TIP_FIELDS = [
     group: 'tips', label: 'Cash tips you already took home',
     hint: 'This amount is excluded from the tips sent through payroll.',
     blank: 'Leave blank if you took none.' },
+  { key: 'jar_cash', name: 'jar_cash', stored: 'jar_cash_cents', cap: 'reports_jar_cash',
+    group: 'tips', label: 'Cash from the tip jar',
+    hint: 'What was in the jar at the end of your shift. This is the jar, not your own tips — it is shared under the policy.',
+    blank: 'Leave blank if somebody else counted it.' },
   { key: 'pooled_cash', name: 'cash_tips', stored: 'cash_tips_cents', cap: 'reports_pooled_cash',
     group: 'tips', label: 'Pooled cash tips',
     hint: 'Cash tips collected for the pool during this shift. This is not money you keep — it is split with the rest of the team.',
@@ -4789,6 +4799,24 @@ function fieldsForShift(caps, shiftId, slug) {
       label: TILL_LABEL[who][f.key] || f.label,
       hint: TILL_LABEL[who].hint,
     }));
+  }
+
+  // THE JAR BOX APPEARS WHERE THE JAR IS ACTUALLY PAID OUT.
+  //
+  // A box for a pot the policy does not have is a box for money that goes
+  // nowhere — the same defect as the night jar on the manager's sheet, asked
+  // of a phone instead. It is also removed where the cash pool exists but does
+  // not name them: counting a jar you are not in is somebody else's job.
+  if (fields.some((f) => f.key === 'jar_cash')) {
+    let payTo = null;
+    try {
+      const sh = shiftId ? s.shiftById.get(shiftId) : null;
+      const rules = sh ? (policyForShift(sh) || []) : [];
+      payTo = rules.filter((x) => x.type === 'pool' && bucketsOf(x.source).includes('cash'));
+    } catch { payTo = null; }
+    const named = (payTo || []).some((x) => (Array.isArray(x.among) ? x.among : [x.among])
+      .some((y) => y === who || y === 'all_support' || y === 'foh' || y == null));
+    if (!named) fields = fields.filter((f) => f.key !== 'jar_cash');
   }
 
   if (pools && !keeps) return fields;
@@ -5581,6 +5609,12 @@ function writeSalesTips(req, emp, opts = {}) {
     // a zero would silently wipe it.
     if (cardP && cardP.state === 'ok') {
       w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: cardP.cents });
+    }
+    // The jar, when this job was asked for it. Blank means "somebody else
+    // counted it" and must leave whatever is on file alone — two baristas both
+    // sending a zero would otherwise wipe the one who actually counted.
+    if (caps.reports_jar_cash && parsed.jar_cash && parsed.jar_cash.state === 'ok') {
+      w.setJarCash.run({ shift_id: sh.id, employee_id: emp.id, jar_cash_cents: parsed.jar_cash.cents });
     }
     w.setNote.run({ shift_id: sh.id, employee_id: emp.id,
       note: String(body.note || '').trim().slice(0, 500) || null });
