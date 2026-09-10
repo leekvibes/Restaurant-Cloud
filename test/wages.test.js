@@ -300,3 +300,36 @@ test('currentFor says what somebody earns now, per role and schedule', () => {
   // Only the latest of each, not every change ever made.
   assert.strictEqual(now.filter((r) => r.role === 'kitchen' && r.service_slug === 'dinner').length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// HOURS ONCE PER PERSON PER SERVICE.
+//
+// Under the new policies a bartender and a barista are in BOTH of the engine's
+// lists: they earn directly and they are tipped out. Payroll walked both and
+// paid them for their hours twice — an eight-hour bartender came out with
+// sixteen hours and double the wage. Invisible on the old policies, where
+// nobody is in both lists, and it would have gone live with the new one.
+// ---------------------------------------------------------------------------
+
+test('payroll pays a bartender for their hours once, not once per list', () => {
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const src = fs2.readFileSync(path2.join(__dirname, '..', 'src', 'reports.js'), 'utf8');
+
+  assert.match(src, /const paidHours = new Set\(\);/,
+    'the two loops share one record of who has been paid for their hours');
+  assert.match(src, /if \(paidHours\.has\(p\.employeeId\)\) return \{ hours: 0, wage: 0, counted: false \};/,
+    'and the second sighting of the same person adds no hours and no wage');
+
+  // Both loops must go through it — one of them left on p.hours is the bug.
+  const body = src.slice(src.indexOf('for (const p of r.servers) {'), src.indexOf('// Derived per-person columns'));
+  assert.strictEqual((body.match(/const h = hoursOnce\(p\);/g) || []).length, 2,
+    'both the earner loop and the tipped-out loop ask it');
+  assert.ok(!/rec\.hours \+= p\.hours;/.test(body), 'neither adds raw hours any more');
+  assert.ok(!/rec\[wk \+ 'Hours'\] \+= p\.hours;/.test(body), 'nor to the weekly split overtime is measured on');
+
+  // Tips still come from BOTH sides — those are two different pieces of money.
+  assert.match(body, /rec\.tipsEarned \+= p\.tipsKept;/, 'what their own guests left them');
+  assert.match(body, /rec\.tipsEarned \+= p\.tipShare \+ \(p\.poolShare \|\| 0\);/,
+    'and their share of what was handed over');
+});

@@ -149,28 +149,51 @@ function aggregatePayroll(from, to, opts = {}) {
     const r = runShift(inp, policyForShift(sh));
     const wk = weekKey(sh.date);
 
+    // HOURS AND WAGE ONCE PER PERSON PER SERVICE, WHATEVER SIDE THEY ARE ON.
+    //
+    // Under the new policies a bartender and a barista are in BOTH lists: they
+    // earn directly and they are tipped out. Both loops below paid them for
+    // their hours, so an eight-hour bartender came out of payroll with sixteen
+    // hours and twice the wage — $128 of work paid as $256. It is invisible on
+    // the old policies, where nobody is in both lists, and would have gone live
+    // with the new one.
+    //
+    // TIPS still come from both sides, because those are genuinely two
+    // different pieces of money: what their own guests left them, and their
+    // share of what the servers handed over. Only the hours are one fact.
+    const paidHours = new Set();
+    const hoursOnce = (p) => {
+      if (paidHours.has(p.employeeId)) return { hours: 0, wage: 0, counted: false };
+      paidHours.add(p.employeeId);
+      return { hours: p.hours, wage: Math.round(toCents(rateMap.get(p.employeeId) || 0) * p.hours), counted: true };
+    };
+
     for (const p of r.servers) {
       const rec = bump(p.employeeId, p.name);
-      const wage = Math.round(toCents(rateMap.get(p.employeeId) || 0) * p.hours);
+      const h = hoursOnce(p);
+      const wage = h.wage;
       const paycheck = p.tipsKept - p.cashTips;
-      rec.roles.add('server'); rec.hours += p.hours; rec.wage += wage;
-      rec[wk + 'Hours'] += p.hours; rec[wk + 'Wage'] += wage;
-      rec.paycheckTips += paycheck; rec.cashHome += p.cashTips; rec.tipsEarned += p.tipsKept; rec.shifts += 1;
-      detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: 'server', hours: p.hours,
+      rec.roles.add('server'); rec.hours += h.hours; rec.wage += wage;
+      rec[wk + 'Hours'] += h.hours; rec[wk + 'Wage'] += wage;
+      rec.paycheckTips += paycheck; rec.cashHome += p.cashTips; rec.tipsEarned += p.tipsKept;
+      if (h.counted) rec.shifts += 1;
+      detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: 'server', hours: h.hours,
         wage, cardTips: p.cardTips, cashTips: p.cashTips, tipout: p.tipoutTotal, tipsKept: p.tipsKept, paycheck });
     }
     for (const p of r.support) {
       const rec = bump(p.employeeId, p.name);
-      const wage = Math.round(toCents(rateMap.get(p.employeeId) || 0) * p.hours);
+      const h = hoursOnce(p);
+      const wage = h.wage;
       const shares = p.poolShares || {};
       const poolPaycheck = shares.paycheck || 0;                          // e.g. to-go card
       const poolCash = (shares.weekly_cash || 0) + (shares.nightly_cash || 0); // jar + to-go cash
-      rec.roles.add(p.role); rec.hours += p.hours; rec.wage += wage;
-      rec[wk + 'Hours'] += p.hours; rec[wk + 'Wage'] += wage;
+      rec.roles.add(p.role); rec.hours += h.hours; rec.wage += wage;
+      rec[wk + 'Hours'] += h.hours; rec[wk + 'Wage'] += wage;
       rec.paycheckTips += p.tipShare + poolPaycheck;   // role tip-out + card pool → paycheck
       rec.weeklyCash += poolCash;                      // jar + to-go cash → handed out
-      rec.tipsEarned += p.tipShare + (p.poolShare || 0); rec.shifts += 1;
-      detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: p.role, hours: p.hours,
+      rec.tipsEarned += p.tipShare + (p.poolShare || 0);
+      if (h.counted) rec.shifts += 1;
+      detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: p.role, hours: h.hours,
         wage, cardTips: 0, cashTips: 0, tipout: 0, tipsKept: p.tipShare + (p.poolShare || 0), paycheck: p.tipShare + poolPaycheck });
     }
   }
