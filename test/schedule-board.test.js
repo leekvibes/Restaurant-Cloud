@@ -2548,3 +2548,123 @@ test('a third schedule can hold its own shifts, instead of losing them to the pa
     db.prepare("DELETE FROM employee_services WHERE service_slug = 'brunch-board'").run();
   }
 });
+
+// ===========================================================================
+// THE CORNER FLAG SAYS WHY
+//
+// The flag was a drawn ::after with nothing behind it: a card could be seen to
+// be wrong, and what was wrong could not, short of opening the Issues panel
+// and matching names by eye. It is a button now and the reason travels with
+// it. And the panel it summarises is scoped to the board — it listed the whole
+// restaurant's conflicts, so the Day board showed Evening problems under names
+// that are not on the Day schedule at all. Reported as "errors on random names".
+// ===========================================================================
+
+const SVCS = () => require('../src/services');
+async function onBoth(fn) {
+  const before = SVCS().forEmployee(E.server);
+  SVCS().setForEmployee(E.server, ['cafe', 'dinner']);
+  try { return await fn(); } finally { SVCS().setForEmployee(E.server, before); }
+}
+const mkOn = (day, dp, a, b) => SCH.create({ employeeId: E.server, position: 'server', daypart: dp,
+  startsAt: `${day} ${a}`, endsAt: `${day} ${b}` });
+const dropIds = (...ids) => { for (const id of ids) db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(id); };
+/** The hidden reason rendered beside a card's flag, or null when there is no flag. */
+const reasonOf = (html, id) => {
+  if (!new RegExp(`<button class="sbk-iss[^"]*"[^>]*data-why="${id}"`).test(html)) return null;
+  const m = html.match(new RegExp(`id="sbw-${id}" hidden>([\\s\\S]*?)</span>\\s*</div>`));
+  return m ? m[1] : null;
+};
+
+test('a flagged card explains itself: the flag is a button, and the reason rides with it', async () => {
+  await onBoth(async () => {
+    const day = dates.addDays(today(), 640);
+    const a = mkOn(day, 'dinner', '16:00', '22:00');
+    const b = mkOn(day, 'dinner', '18:00', '23:00');
+    try {
+      const html = await raw(`/schedule?w=${SCH.weekWindowFor(day).start}&svc=dinner`);
+      const why = reasonOf(html, a.id);
+      assert.ok(why, 'a real button, with its reason beside it');
+      assert.match(why, /<b>Overlap<\/b>/, 'titled exactly as the Issues panel titles it');
+      assert.match(why, /overlaps/, 'and says which two shifts');
+      assert.doesNotMatch(why, / on (Day|Evening) Service/, 'no schedule named when both halves are on this one');
+      assert.ok(reasonOf(html, b.id), 'both halves of the clash carry it');
+      assert.match(html, new RegExp(`<div class="sbk-w has-iss">\\s*<button class="sbk[^"]*"[^>]*data-drag="${a.id}"`),
+        'and the actions trigger steps out of the corner');
+      assert.match(html, /<div class="sb-tip" id="sb-tip" role="tooltip" hidden><\/div>/, 'one box for the whole board');
+    } finally { dropIds(a.id, b.id); }
+  });
+});
+
+test('a card with nothing wrong has no flag and no hidden reason', async () => {
+  await onBoth(async () => {
+    const day = dates.addDays(today(), 661);
+    const a = mkOn(day, 'dinner', '16:00', '22:00');
+    try {
+      const html = await raw(`/schedule?w=${SCH.weekWindowFor(day).start}&svc=dinner`);
+      assert.ok(html.includes(`data-drag="${a.id}"`), 'the card is there');
+      assert.strictEqual(reasonOf(html, a.id), null, 'with no flag');
+      assert.ok(!html.includes(`id="sbw-${a.id}"`), 'and nothing hidden beside it');
+    } finally { dropIds(a.id); }
+  });
+});
+
+test('a conflict that is all on Evening is not listed on the Day board', async () => {
+  await onBoth(async () => {
+    const day = dates.addDays(today(), 647);
+    const wk = SCH.weekWindowFor(day).start;
+    const a = mkOn(day, 'dinner', '16:00', '22:00');
+    const b = mkOn(day, 'dinner', '18:00', '23:00');
+    try {
+      const first = Math.min(a.id, b.id);
+      const dayBoard = await raw(`/schedule?w=${wk}&svc=cafe`);
+      assert.ok(!dayBoard.includes(`data-goto="${first}"`), 'the Day board does not list it');
+      assert.doesNotMatch(dayBoard, /id="sb-iss-open"/, 'nor count it');
+      const evening = await raw(`/schedule?w=${wk}&svc=dinner`);
+      assert.ok(evening.includes(`data-goto="${first}"`), 'the Evening board, where it lives, does');
+      const all = await raw(`/schedule?w=${wk}&svc=all`);
+      assert.ok(all.includes(`data-goto="${first}"`), 'and so does the all-services board');
+    } finally { dropIds(a.id, b.id); }
+  });
+});
+
+test('a clash between a Day and an Evening shift shows on both boards, naming the other one', async () => {
+  await onBoth(async () => {
+    const day = dates.addDays(today(), 654);
+    const wk = SCH.weekWindowFor(day).start;
+    const d = mkOn(day, 'cafe', '10:00', '16:00');
+    const e = mkOn(day, 'dinner', '15:00', '22:00');
+    try {
+      const whyDay = reasonOf(await raw(`/schedule?w=${wk}&svc=cafe`), d.id);
+      assert.ok(whyDay, 'the Day card is flagged');
+      assert.ok(whyDay.includes(`on ${SVCS().nameOf('dinner')}`), `names where the other half is: ${whyDay}`);
+      const whyEve = reasonOf(await raw(`/schedule?w=${wk}&svc=dinner`), e.id);
+      assert.ok(whyEve && whyEve.includes(`on ${SVCS().nameOf('cafe')}`), 'and the Evening card names the Day half');
+    } finally { dropIds(d.id, e.id); }
+  });
+});
+
+test('a stated constraint gets a title in the panel and the box, not a blank', async () => {
+  const day = dates.addDays(today(), 668);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${day} 16:00`, endsAt: `${day} 22:00` });
+  db.prepare(`INSERT INTO availability_rules (employee_id, avail_kind, on_date, all_day)
+              VALUES (?, 'unavailable', ?, 1)`).run(E.server, day);
+  try {
+    const html = await text(`/schedule?w=${SCH.weekWindowFor(day).start}`);
+    assert.match(reasonOf(html, s.id) || '', /<b>Said they cannot work<\/b>/, 'the box has a title');
+    assert.match(html, /class="sb-iss-r[^"]*"[\s\S]*?<b>Said they cannot work<\/b>/, 'and so does the panel');
+    assert.doesNotMatch(html, /<b>(undefined)?<\/b>/, 'where it used to have none');
+  } finally {
+    db.prepare('DELETE FROM availability_rules').run();
+    dropIds(s.id);
+  }
+});
+
+test('the box is opened by hover, focus and a tap, and is drawn above the grid', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css, /\.sb-tip \{ position: fixed; z-index: 61;/, 'page-level and above the menu');
+  assert.match(css, /\.sb-tip\[hidden\] \{ display: none; \}/);
+  assert.match(css, /\.sbk-w\.has-iss \.sbk-dots \{ right: 17px; \}/, 'the trigger steps aside');
+  assert.doesNotMatch(css, /(^|\n)\.sbk--iss-action::after/, 'the grid no longer draws a flag it cannot explain');
+});

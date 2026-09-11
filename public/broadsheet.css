@@ -5576,11 +5576,37 @@ input[type="date"], input[type="time"], input[type="search"], select {
    colour and gains a red edge and a corner flag, so it reads as "this one" in a
    row of cards rather than as a different kind of object. */
 .sbk--iss-action, .sbk--iss-review { position: relative; border: 1.5px solid var(--danger) !important; }
-.sbk--iss-action::after, .sbk--iss-review::after {
+/* The phone's Today list keeps the drawn flag. On the week grid the flag is a
+   real button (.sbk-iss, below), so it can be hovered, focused and tapped for
+   its reason — a pseudo-element can be none of those. */
+.sbm-k.sbk--iss-action::after, .sbm-k.sbk--iss-review::after {
   content: '!'; position: absolute; top: -1px; right: -1px;
   width: 15px; height: 15px; border-radius: 0 var(--sb-kr) 0 6px;
   background: var(--danger); color: #fff;
   font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
+/* The same corner flag, drawn the same way, as a button. It sits above the
+   actions trigger, which steps left on a flagged card so the two never share
+   a corner and a reach for one never lands on the other. */
+.sbk-iss { position: absolute; top: 0; right: 0; z-index: 3;
+  width: 15px; height: 15px; padding: 0; border: 0; border-radius: 0 var(--sb-kr) 0 6px;
+  background: var(--danger); color: #fff; cursor: help;
+  font: inherit; font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
+/* A finger needs more than 15px. The flag stays small; what it answers to does not. */
+.sbk-iss::before { content: ''; position: absolute; inset: -8px -6px -8px -8px; }
+.sbk-iss:focus-visible { outline: 2px solid var(--headline); outline-offset: 1px; }
+.sbk-w.has-iss .sbk-dots { right: 17px; }
+/* The box. Page-level and fixed, like .sb-menu, because inside the grid the
+   scroller would clip it; and lifted with an outline, not a shadow, because
+   .bs * removes every shadow in this shell. */
+.sb-tip { position: fixed; z-index: 61; max-width: 290px; padding: 9px 11px;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+  outline: 1px solid rgba(0,0,0,.06);
+  font-size: 12.5px; line-height: 1.4; color: var(--body); pointer-events: none; }
+.sb-tip[hidden] { display: none; }
+.sb-tip .sbk-why-r { display: block; }
+.sb-tip .sbk-why-r + .sbk-why-r { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--rule); }
+.sb-tip .sbk-why-r b { display: block; font-weight: 650; color: var(--headline); }
+.sb-tip .sbk-why-r i { display: block; font-style: normal; color: var(--muted); margin-top: 1px; }
 
 /* The week pill and the buttons beside it, sized to sit on one line together.
    The pill was a headline; it is a control. */

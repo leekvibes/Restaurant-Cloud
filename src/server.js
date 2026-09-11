@@ -22151,11 +22151,12 @@ app.get('/schedule', (req, res) => {
   const card = (s) => {
     const st = pubOf(s);
     const iss = issueOn.get(s.id);
+    const why = iss ? (whyOn.get(s.id) || []) : [];
     // The trigger is a SIBLING of the card, not a child: the card is itself a
     // <button> and a button inside a button is not a thing browsers agree on.
     // The wrapper is what positions it, and it is also why dragging from the
     // dots does not start a drag — only .sbk carries draggable.
-    return `<div class="sbk-w">
+    return `<div class="sbk-w${why.length ? ' has-iss' : ''}">
   <button class="sbk sbk--${sbColor(s.position)} sbk--${st}${iss ? ` sbk--iss-${iss}` : ''}" type="button"
       draggable="true" data-drag="${s.id}"
       data-edit="${s.id}" aria-label="Edit ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))} to ${esc(sbTimeFull(s.ends_at))}, ${STATE_WORD[st]}${
@@ -22164,7 +22165,19 @@ app.get('/schedule', (req, res) => {
     <s aria-hidden="true"></s>
   </button>
   <button class="sbk-dots" type="button" data-dots="${s.id}" aria-haspopup="menu" aria-expanded="false"
-    aria-label="Actions for ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))}">&hellip;</button>
+    aria-label="Actions for ${esc(posName(s.position))} ${esc(sbTimeFull(s.starts_at))}">&hellip;</button>${
+    /* THE FLAG SAYS WHY. It was a drawn ::after, which can be seen and not
+       hovered, focused or tapped, so the only way to learn what was wrong was
+       to open the Issues panel and match names. A sibling button, like the
+       actions trigger and for the same reason: a button inside the card
+       button is not a thing browsers agree on. The reason is rendered here,
+       hidden, and copied into one page-level box — the box cannot live in the
+       cell, where the grid's scroller would clip it. */
+    why.length ? `
+  <button class="sbk-iss sbk-iss--${iss}" type="button" data-why="${s.id}" aria-describedby="sbw-${s.id}"
+    aria-expanded="false" aria-label="Why this shift is flagged">!</button>
+  <span class="sbk-why" id="sbw-${s.id}" hidden>${why.map((i) => `<span class="sbk-why-r"><b>${
+    esc(ISSUE_TITLE[i.kind] || 'Issue')}</b><i>${issueLine(i)}</i></span>`).join('')}</span>` : ''}
 </div>`;
   };
 
@@ -22259,7 +22272,18 @@ app.get('/schedule', (req, res) => {
   // or an edit made elsewhere is caught without any route knowing the engine
   // exists. The domain returns data; the wording lives here, where the employee
   // and position names are already loaded for the board.
-  const { issues } = SCH.issuesFor(week.start);
+  //
+  // SCOPED TO THIS BOARD, like every other count on the page. The engine checks
+  // the whole restaurant's week, and has to — a clash between somebody's Day
+  // and Evening shifts is real on both boards — but the page showed that list
+  // whole, so the Day board's Issues carried Evening-only conflicts under names
+  // that are not on the Day schedule at all. An issue belongs here when at
+  // least one of its shifts does. A cross-schedule clash therefore shows on
+  // both boards, and issueLine names the other schedule.
+  const { issues: weekIssues } = SCH.issuesFor(week.start);
+  const dpOf = new Map(SCH.q.inRangeAll.all(week.start, week.end).map((r) => [r.id, r.daypart]));
+  const issues = !svc || svc === 'all' ? weekIssues
+    : weekIssues.filter((i) => i.shiftIds.some((id) => dpOf.get(id) === svc));
   const whoName = (id) => (byId.get(id) || {}).name || 'Someone';
   const dayShort = (d) => {
     const label = TC.dayLabel(d);                      // 'Tuesday, Aug 11'
@@ -22271,12 +22295,20 @@ app.get('/schedule', (req, res) => {
     qualification: 'Position no longer assigned',
     'position-retired': 'Position retired',
     'cancelled-live': 'Cancellation not published',
+    // Phase 6 added two kinds and no titles, so the Issues panel headed them
+    // with nothing. The corner box reads this map too, and would have as well.
+    timeoff: 'Approved time off',
+    unavailable: 'Said they cannot work',
   };
   const issueLine = (i) => {
     const who = whoName(i.employeeId);
     if (i.kind === 'overlap') {
       const [a, b] = i.pair;
-      return `${esc(shiftPhrase(a))} overlaps ${esc(shiftPhrase(b))}`;
+      // Each half names its schedule when they differ. The other half is
+      // filtered off this board, so without its schedule named the flag points
+      // at a shift nobody looking at this screen can see.
+      const on = (x) => (a.daypart !== b.daypart ? ` on ${SERVICES.nameOf(x.daypart)}` : '');
+      return `${esc(shiftPhrase(a) + on(a))} overlaps ${esc(shiftPhrase(b) + on(b))}`;
     }
     if (i.kind === 'qualification') {
       return `${esc(posName(i.position))} is no longer one of ${esc(who)}&rsquo;s assigned positions`;
@@ -22301,6 +22333,16 @@ app.get('/schedule', (req, res) => {
   for (const i of issues) {
     for (const id of i.shiftIds) {
       if (i.severity === 'action' || !issueOn.has(id)) issueOn.set(id, i.severity);
+    }
+  }
+  // And every REASON per card, for the box the corner flag opens. Worded by
+  // issueLine and ISSUE_TITLE, the same two the Issues panel uses, so the box
+  // and the panel can never give different answers about one shift.
+  const whyOn = new Map();
+  for (const i of issues) {
+    for (const id of i.shiftIds) {
+      if (!whyOn.has(id)) whyOn.set(id, []);
+      whyOn.get(id).push(i);
     }
   }
 
@@ -22496,6 +22538,76 @@ app.get('/schedule', (req, res) => {
       <button class="sb-menu-i sb-menu-i--del" type="button" data-act="delete" role="menuitem">
         ${sbIcon('trash')}Delete</button>
     </div>
+
+    <div class="sb-tip" id="sb-tip" role="tooltip" hidden></div>
+    <script>
+      // Hover or focus shows it; a tap pins it, because a phone has no hover.
+      // Delegated from the document so a board redrawn without a page load —
+      // a drag, a menu action — keeps working with no rebinding.
+      (function () {
+        var tip = document.getElementById('sb-tip');
+        if (!tip) return;
+        var cur = null, pinned = false;
+        function flagOf(t) { return t && t.closest ? t.closest('.sbk-iss') : null; }
+        function place(btn) {
+          // Under the CARD, not under the flag. The flag is in the card's top
+          // corner, and a box hung from it covered the card's own times, which
+          // is the one thing you want to read beside the reason.
+          var card = btn.closest('.sbk-w') || btn;
+          var r = btn.getBoundingClientRect(), c = card.getBoundingClientRect();
+          tip.hidden = false;
+          var w = tip.offsetWidth, h = tip.offsetHeight;
+          var left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8));
+          var top = c.bottom + 6;
+          if (top + h > window.innerHeight - 8) top = Math.max(8, c.top - h - 6);
+          tip.style.left = Math.round(left) + 'px';
+          tip.style.top = Math.round(top) + 'px';
+        }
+        function show(btn, pin) {
+          var src = document.getElementById(btn.getAttribute('aria-describedby'));
+          if (!src) return;
+          if (cur && cur !== btn) cur.setAttribute('aria-expanded', 'false');
+          tip.innerHTML = src.innerHTML;
+          cur = btn; pinned = !!pin;
+          btn.setAttribute('aria-expanded', 'true');
+          place(btn);
+        }
+        function hide() {
+          if (cur) cur.setAttribute('aria-expanded', 'false');
+          tip.hidden = true; cur = null; pinned = false;
+        }
+        document.addEventListener('mouseover', function (ev) {
+          var b = flagOf(ev.target);
+          if (b && b !== cur) show(b, false);
+        });
+        document.addEventListener('mouseout', function (ev) {
+          var b = flagOf(ev.target);
+          if (b && b === cur && !pinned && flagOf(ev.relatedTarget) !== b) hide();
+        });
+        document.addEventListener('focusin', function (ev) {
+          var b = flagOf(ev.target);
+          if (b) show(b, false);
+        });
+        document.addEventListener('focusout', function (ev) {
+          if (cur && ev.target === cur && !pinned) hide();
+        });
+        // Capture, so the grid never sees the tap: it would open the edit
+        // drawer, and the flag is a question about the card, not an edit.
+        document.addEventListener('click', function (ev) {
+          var b = flagOf(ev.target);
+          if (b) {
+            ev.preventDefault(); ev.stopPropagation();
+            if (cur === b && pinned) hide(); else show(b, true);
+            return;
+          }
+          if (cur) hide();
+        }, true);
+        document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && cur) hide(); });
+        // Fixed to the screen, so anything that moves the flag leaves it behind.
+        window.addEventListener('scroll', function () { if (cur) hide(); }, true);
+        window.addEventListener('resize', function () { if (cur) hide(); });
+      }());
+    </script>
 
     <div class="sb">
       <div class="sb-frame">
