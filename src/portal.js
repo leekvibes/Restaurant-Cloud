@@ -665,9 +665,110 @@ function shapeFor(position) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// WHO USES THE PORTAL, AND HOW OFTEN
+//
+// Asked for by the owner: when does somebody sign in, and how often are they
+// on the app at all. Nothing recorded either before this — a correct PIN
+// cleared the guard's failure row and left no trace of its own — so both
+// tables start empty on the day they ship, and the page says so rather than
+// implying a history that was never kept.
+//
+// Two tables, because they answer two different questions:
+//
+//   portal_signins  one row per PIN that opened a session. "When did they log
+//                   in" is a list of these. The refreshes that keep somebody
+//                   on the clock signed in are not sign-ins and never reach it.
+//   portal_days     one row per person per business date they used the portal
+//                   at all, with the first and last moment they were seen.
+//                   "How often" is a count of these. One row a DAY, not one a
+//                   request: the question is about days, and a request log
+//                   grows by the thousand for nothing anybody reads.
+//
+// Times only — no address, no device, no page. It is a staff member's
+// employer reading this, and what they asked for was when and how often.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS portal_signins (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id   INTEGER NOT NULL,
+  business_date TEXT NOT NULL,          -- the night it belongs to, by the clock's cutoff
+  signed_in_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_psignins ON portal_signins (employee_id, business_date);
+
+CREATE TABLE IF NOT EXISTS portal_days (
+  employee_id   INTEGER NOT NULL,
+  business_date TEXT NOT NULL,
+  first_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  last_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (employee_id, business_date)
+);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+`);
+// The moment recording began, written once and never moved. Without it an
+// empty history reads as somebody who never opens the app, when the truth is
+// that the app was not looking yet.
+db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('portal_activity_since', datetime('now'))").run();
+
+const aq = {
+  signIn: db.prepare('INSERT INTO portal_signins (employee_id, business_date) VALUES (?, ?)'),
+  day: db.prepare(`INSERT INTO portal_days (employee_id, business_date) VALUES (?, ?)
+    ON CONFLICT(employee_id, business_date) DO UPDATE SET last_at = datetime('now')`),
+  since: db.prepare("SELECT value FROM settings WHERE key = 'portal_activity_since'"),
+  signIns: db.prepare(`SELECT business_date, signed_in_at FROM portal_signins
+    WHERE employee_id = ? AND business_date >= ? ORDER BY signed_in_at`),
+  days: db.prepare(`SELECT business_date, first_at, last_at FROM portal_days
+    WHERE employee_id = ? AND business_date >= ? ORDER BY business_date DESC`),
+  last: db.prepare('SELECT MAX(last_at) AS at FROM portal_days WHERE employee_id = ?'),
+};
+
+// At most one write a minute per person. One screen can fire several requests,
+// and "last seen" only has to be right to the minute. Keyed by person, not by
+// person-and-day, so the map is never bigger than the staff list.
+const VISIT_EVERY_MS = 60 * 1000;
+const lastWrite = new Map();
+
+/**
+ * They were on the portal. Called on every signed-in portal request.
+ *
+ * Fenced: a failure to RECORD must never become a failure to SERVE. This rides
+ * on clock-outs, and losing a punch because a log line could not be written
+ * would be trading the thing that matters for the thing that does not.
+ */
+function recordVisit(empId, businessDate) {
+  if (!empId || !businessDate) return;
+  const now = Date.now();
+  const prev = lastWrite.get(empId);
+  if (prev && prev.day === businessDate && now - prev.at < VISIT_EVERY_MS) return;
+  lastWrite.set(empId, { day: businessDate, at: now });
+  try { aq.day.run(empId, businessDate); } catch (e) { console.warn('[portal] visit not recorded:', e.message); }
+}
+
+/** A PIN opened a session. Also counts as being on the app that day. */
+function recordSignIn(empId, businessDate) {
+  if (!empId || !businessDate) return;
+  try {
+    aq.signIn.run(empId, businessDate);
+    aq.day.run(empId, businessDate);
+    lastWrite.set(empId, { day: businessDate, at: Date.now() });
+  } catch (e) { console.warn('[portal] sign-in not recorded:', e.message); }
+}
+
+/** Everything the Activity tab shows about one person, from a business date on. */
+function activityFor(empId, fromDate) {
+  return {
+    since: (aq.since.get() || {}).value || null,
+    lastAt: (aq.last.get(empId) || {}).at || null,
+    signIns: aq.signIns.all(empId, fromDate),
+    days: aq.days.all(empId, fromDate),
+  };
+}
+
 module.exports = {
   q, TONES, STOCK_STATUS, STOCK_RESOLUTION, shapeFor, notify,
   savePush, sendPush, sendTest, VAPID_PUBLIC, pushEnabled: pushOn,
   notifyOnce, notifiedAt,
   adminNotify, adminNotifyOnce, saveAdminPush, sendAdminPush, sendAdminTest,
+  recordVisit, recordSignIn, activityFor,
 };

@@ -3472,6 +3472,9 @@ let portalMe = null;
 function requirePortal(req, res) {
   const emp = portalUser(req);
   if (emp) {
+    // On the app today. Throttled and fenced inside PORTAL: one small write a
+    // minute at most, and it can never fail the request it rides on.
+    PORTAL.recordVisit(emp.id, TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour));
     const who = portalWho(emp);
     portalShape = who.shape;
     portalMe = { name: emp.name, role: who.roleName };
@@ -9835,6 +9838,10 @@ app.post('/tips/start', (req, res) => {
         : "That PIN wasn't recognised. Check it and try again, or ask your manager."));
   }
   GUARD.passed('pin', matches[0].id);
+  // The ONE door that turns a PIN into a session, so the one place a sign-in
+  // is recorded. The refreshes that keep somebody on the clock signed in go
+  // through setPortalCookie, not through here, and are not sign-ins.
+  PORTAL.recordSignIn(matches[0].id, TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour));
   // The PIN screen is unchanged; where it lands is not. A verified PIN now
   // opens the hub, because the portal holds more than the tip form — and for
   // a cook it holds no form at all. The submission flow behind it is
@@ -11228,11 +11235,79 @@ function eprDocuments(req, e) {
 }
 
 /**
+ * On the app — when somebody signs in to the staff portal, and how often.
+ *
+ * Read from portal_signins and portal_days, which start empty on the day they
+ * shipped. The line under the heading gives that date: a blank before it is
+ * the app not having looked, not the person not having opened it. For the same
+ * reason "N of the last 30 days" counts only days that were recorded — a
+ * feature three days old must not report somebody as away for the other
+ * twenty-seven.
+ *
+ * Managers are told why there is nothing, rather than shown an empty history
+ * that reads as a manager who never looks. They have no staff portal to open.
+ */
+function eprOnApp(e) {
+  const head = '<h2 class="epr-h">On the app</h2>';
+  if (e.role === 'manager') {
+    return `<section class="epr-card">${head}
+      <p class="epr-none">Managers do not use the staff portal, so there is nothing to show here.</p>
+    </section>`;
+  }
+  const cfg = TC.settings();
+  const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
+  const a = PORTAL.activityFor(e.id, addDays(today, -29));
+  const sinceDay = a.since ? TC.businessDateOf(a.since, cfg.cutoffHour) : today;
+  const recorded = Math.min(30, Math.round(
+    (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${sinceDay}T00:00:00Z`)) / 86400000) + 1);
+  const whenDay = (d) => (d === today ? 'Today' : d === addDays(today, -1) ? 'Yesterday' : TC.dayLabel(d));
+  const lastDay = a.lastAt ? TC.businessDateOf(a.lastAt, cfg.cutoffHour) : null;
+  const noPin = !String(e.pin || '').trim();
+
+  const signedOn = new Map();
+  for (const s of a.signIns) {
+    if (!signedOn.has(s.business_date)) signedOn.set(s.business_date, []);
+    signedOn.get(s.business_date).push(s.signed_in_at);
+  }
+  const daysOn = recorded > 1 ? `${a.days.length} of the last ${recorded}`
+    : (a.days.length ? 'Today' : 'Not today');
+
+  return `
+    <section class="epr-card">
+      ${head}
+      <p class="epr-hint">When ${esc(e.name)} signs in to the staff portal, and how often they use it.
+        Recorded since ${esc(TC.dayLabel(sinceDay))} &mdash; nothing before that was kept.</p>
+      ${noPin ? `<p class="epr-hint"><b>No PIN on file</b> &mdash; they cannot sign in to the staff portal
+        until they have one.</p>` : ''}
+      <div class="epr-stats">
+        <div><span>Last on the app</span><b>${a.lastAt
+    ? `${esc(whenDay(lastDay))}, ${esc(TC.clockFace(a.lastAt))}` : 'Not yet'}</b></div>
+        <div><span>Days on the app</span><b>${esc(daysOn)}</b></div>
+        <div><span>Sign-ins, last 30 days</span><b>${a.signIns.length}</b></div>
+      </div>
+      ${a.days.length ? `<ol class="epr-tl">${a.days.map((d) => {
+    const ins = signedOn.get(d.business_date) || [];
+    return `<li>
+          <span class="epr-tl-d">${esc(whenDay(d.business_date))}</span>
+          <span class="epr-tl-b"><b>${ins.length
+    ? `Signed in ${ins.length === 1 ? 'once' : `${ins.length} times`}` : 'On the app'}</b>
+            ${ins.length ? `<i>${esc(ins.map((t) => TC.clockFace(t)).join(', '))}</i>` : ''}
+            <i>First seen ${esc(TC.clockFace(d.first_at))} &middot; last seen ${esc(TC.clockFace(d.last_at))}</i></span>
+        </li>`;
+  }).join('')}</ol>`
+    : `<p class="epr-none">${noPin ? 'Nothing recorded.'
+      : 'They have not opened the staff portal since recording began.'}</p>`}
+    </section>`;
+}
+
+/**
  * Activity — only what was actually recorded.
  *
- * Wage changes carry who, when and which option was chosen. Membership carries
- * when somebody was added to a schedule. Nothing else is logged, so nothing
- * else appears: an invented timeline is worse than a short one.
+ * Two cards. On the app: portal sign-ins and the days somebody used it, logged
+ * from the day that feature shipped. Employment changes: wage changes carry
+ * who, when and which option was chosen, and membership carries when somebody
+ * was added to a schedule. Nothing else is logged, so nothing else appears —
+ * an invented timeline is worse than a short one.
  */
 function eprActivity(req, e) {
   const items = [];
@@ -11255,9 +11330,9 @@ function eprActivity(req, e) {
   } catch { /* older database */ }
   items.sort((a, b) => String(b.at).localeCompare(String(a.at)));
 
-  return `
+  return `${eprOnApp(e)}
     <section class="epr-card">
-      <h2 class="epr-h">Activity</h2>
+      <h2 class="epr-h">Employment changes</h2>
       <p class="epr-hint">Employment changes that were recorded. Only what the app actually logs appears here.</p>
       ${items.length ? `<ol class="epr-tl">
         ${items.map((x) => `<li${x.future ? ' class="epr-tl--soon"' : ''}>

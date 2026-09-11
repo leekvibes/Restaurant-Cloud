@@ -2325,3 +2325,82 @@ test('tips follow the CLOCK — a service nobody punched into is not offered', a
   assert.match(src, /No services worked to submit for/,
     'with a message that says so rather than one about services being open');
 });
+
+// ===========================================================================
+// WHO USES THE PORTAL, AND HOW OFTEN — the owner's Activity tab
+//
+// Nothing recorded a sign-in before this: a correct PIN cleared the guard's
+// failure row and left no trace of its own. These pin the two things the tab
+// is built on — a PIN that opens a session is one sign-in, and using the
+// portal afterwards is being ON it, never signing in again — and that the tab
+// says when recording began, so a blank is not read as somebody staying away.
+// ===========================================================================
+
+const withDb = (fn, readonly = true) => {
+  const c = new (require('better-sqlite3'))(DB, { readonly });
+  try { return fn(c); } finally { c.close(); }
+};
+const idOf = (name) => withDb((c) => c.prepare('SELECT id FROM employees WHERE name = ?').get(name).id);
+const countOf = (sql, ...args) => withDb((c) => c.prepare(sql).get(...args).n);
+const addPerson = (name, role, pin) => withDb((c) => Number(c.prepare(`INSERT INTO employees
+  (name, role, hourly_rate_cents, active, pin) VALUES (?, ?, 900, 1, ?)`).run(name, role, pin).lastInsertRowid), false);
+const activityTab = async (id) => (await fetch(`${BASE}/employees/${id}/edit?tab=activity`)).text();
+
+test('a PIN sign-in is recorded once, against the person who signed in', async () => {
+  const id = idOf('Solo Server');
+  const ins = () => countOf('SELECT COUNT(*) n FROM portal_signins WHERE employee_id = ?', id);
+  const before = ins();
+  const cookie = await signIn('5555');
+  assert.strictEqual(ins(), before + 1, 'one PIN, one sign-in');
+  // Browsing afterwards is being ON the app. It is not signing in again, and
+  // counting it as that would turn one visit into a dozen "logins".
+  await asStaff('/portal', cookie);
+  await asStaff('/portal', cookie);
+  assert.strictEqual(ins(), before + 1, 'using the portal adds no sign-ins');
+  assert.ok(countOf('SELECT COUNT(*) n FROM portal_days WHERE employee_id = ?', id) >= 1,
+    'and the day is marked as one they were on');
+});
+
+test('a wrong PIN is not a sign-in', async () => {
+  const all = () => countOf('SELECT COUNT(*) n FROM portal_signins');
+  const before = all();
+  const res = await form('/tips/start', { pin: '9876' });
+  assert.strictEqual(res.status, 302);
+  assert.strictEqual(all(), before, 'a refused PIN records nothing');
+});
+
+test('the Activity tab says when they signed in and how often they are on', async () => {
+  const id = idOf('Solo Server');
+  await signIn('5555');
+  const html = await activityTab(id);
+  assert.match(html, /<h2 class="epr-h">On the app<\/h2>/, 'its own card');
+  assert.match(html, /Recorded since/, 'and when recording began, so a blank is not read as absence');
+  assert.match(html, /Last on the app<\/span><b>Today, \d{1,2}:\d{2}/, 'when they were last on, as a time');
+  assert.match(html, /Signed in (once|\d+ times)/, 'each day lists its sign-ins');
+  assert.match(html, /First seen .* last seen /, 'and the span they were on the app');
+  // The older card is still there, under a name that says what it holds.
+  assert.match(html, /<h2 class="epr-h">Employment changes<\/h2>/);
+});
+
+test('somebody who has never opened the portal reads as exactly that', async () => {
+  const id = addPerson('Never Opened', 'server', '7171');
+  const html = await activityTab(id);
+  assert.match(html, /Last on the app<\/span><b>Not yet<\/b>/);
+  assert.match(html, /have not opened the staff portal since recording began/);
+});
+
+test('a manager is told managers do not use the portal, not shown an empty history', async () => {
+  const id = addPerson('Floor Manager', 'manager', '7272');
+  const html = await activityTab(id);
+  // Anchored to the new card: this profile already says the same sentence
+  // beside the PIN field, so a bare match passed against the old code too.
+  assert.match(html, /<h2 class="epr-h">On the app<\/h2>\s*<p class="epr-none">Managers do not use the staff portal/,
+    'the On the app card itself says why it is empty');
+  assert.doesNotMatch(html, /Last on the app/, 'no stats that would read as a manager who never looks');
+});
+
+test('somebody with no PIN is told why they cannot be on the app', async () => {
+  const id = addPerson('No Pin Yet', 'server', '');
+  const html = await activityTab(id);
+  assert.match(html, /No PIN on file/);
+});
