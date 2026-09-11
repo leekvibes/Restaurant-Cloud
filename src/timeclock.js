@@ -958,20 +958,15 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
     return { written: false, reason: 'sheet_frozen', hours, ...r };
   }
 
-  // A shift that has been emailed had its money worked out and handed over on
-  // the numbers it had at the time. Nothing is snapshotted — every view
-  // recomputes live — so rewriting one now would make the app quietly disagree
-  // with mail already in people's inboxes. Hold, and leave a note saying so.
-  // `force` is one caller: a manager answering "the service was already sent,
-  // update it anyway?" after correcting a punch. Everywhere else this must
-  // keep holding, or the guard is not a guard.
-  if (sh.status === 'emailed' && !opts.force) {
-    logEvent('shift', shiftId, 'hours_held_sent', by, {
-      after: `${hours}h clocked`,
-      reason: 'shift already emailed — the hours it was sent with stand',
-    });
-    heldNotice(shiftId, employeeId, sh, hours, 'shift_sent', by);
-    return { written: false, reason: 'shift_sent', hours, ...r };
+  // A SENT SERVICE STILL TAKES THE HOURS. It used to hold them: the service
+  // kept the figures it was emailed with, and a clock-out after sending never
+  // reached payroll. Measured: a three-hour clock-out paid at 0h. The owner's
+  // rule is the other way round, and right for how this restaurant runs:
+  // services are sent before payday, so a late clock-out or a correction is
+  // almost always the truth and the pay should follow it. Not silent: the
+  // service stamps what it was sent with, and its page says when that changed.
+  if (sh.status === 'emailed') {
+    logEvent('shift', shiftId, 'hours_after_sent', by, { after: `${hours}h clocked` });
   }
 
   if (r.entries === 0) {

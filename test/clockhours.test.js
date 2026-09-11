@@ -407,7 +407,10 @@ test('a shift with punches on it cannot be deleted out from under them', async (
     'and so do the punches — the foreign key would have NULLed them silently');
 });
 
-test('a shift already emailed keeps the hours it was sent with', async () => {
+test('a punch corrected after its service was sent reaches pay, on the record', async () => {
+  // The owner's rule: sending is not payday. A sent service used to keep the
+  // hours it was emailed with, so a late clock-out never reached payroll. It
+  // takes them now, and the service records that it changed after sending.
   const e = await punch(E.sent, '2026-03-11', '09:00', '14:00');
   const sh = shiftOn('2026-03-11', 'dinner');
   assert.strictEqual(Number(workOf(sh.id, E.sent).hours), 5);
@@ -417,10 +420,9 @@ test('a shift already emailed keeps the hours it was sent with', async () => {
     in: '2026-03-11T09:00', out: '2026-03-11T18:00',
     position: 'server', daypart: 'dinner', reason: 'they stayed late',
   });
-  assert.strictEqual(Number(workOf(sh.id, E.sent).hours), 5,
-    'the figure the emails were built on stands');
-  const held = db.prepare("SELECT * FROM time_events WHERE entity='shift' AND entity_id=? AND action='hours_held_sent'").get(sh.id);
-  assert.ok(held, 'and the app says out loud that it held one back');
+  assert.strictEqual(Number(workOf(sh.id, E.sent).hours), 9, 'the corrected nine hours are what pays');
+  const logged = db.prepare("SELECT * FROM time_events WHERE entity='shift' AND entity_id=? AND action='hours_after_sent'").get(sh.id);
+  assert.ok(logged, 'and the service records that it changed after sending');
 });
 
 // ===========================================================================
@@ -1471,12 +1473,15 @@ test('a punch that crosses midnight is marked, and one that does not is not', as
 
 // --- a punch edit, and the service it belongs to --------------------------
 
-test('editing a punch on an ALREADY-SENT service asks before touching it', async () => {
+test('editing a punch on an already-sent service updates the service too', async () => {
   // The clock and the service used to disagree in silence. A punch edit flows
   // through to work.hours — which the Services page and the tip-out read —
   // except on a service already emailed, where the hours it was sent with
   // stand. That default is right; happening with nothing on screen was not.
-  const sh = db.prepare("SELECT id, date, daypart FROM shifts WHERE status = 'emailed' LIMIT 1").get();
+  // Sending is not payday: the service follows the punch, and nothing is held
+  // back for the manager to be asked about.
+  const sh = db.prepare(`SELECT id, date, daypart FROM shifts WHERE status = 'emailed'
+    AND id NOT IN (SELECT shift_id FROM work WHERE employee_id = ?) LIMIT 1`).get(E.both);
   if (!sh) return;                                   // no sent service in this fixture
   const e = Number(db.prepare(`INSERT INTO time_entries
     (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at,
@@ -1490,12 +1495,13 @@ test('editing a punch on an ALREADY-SENT service asks before touching it', async
     });
     const j = await res.json();
     assert.strictEqual(res.status, 200, 'the punch itself saves');
-    assert.ok(j.ask, 'and the answer carries a question');
-    assert.strictEqual(j.ask.kind, 'shift_sent');
-    assert.strictEqual(j.ask.can, true, 'which the manager can act on');
-    assert.match(j.ask.body, /already sent/i, 'saying why the service did not follow');
+    assert.ok(!j.ask, 'nothing held back, so nothing to ask');
+    const fresh = db.prepare('SELECT payable_minutes FROM time_entries WHERE id = ?').get(e);
+    assert.strictEqual(Number(workOf(sh.id, E.both).hours), Math.round((fresh.payable_minutes / 60) * 1000) / 1000,
+      'the service took the corrected hours');
   } finally {
     db.prepare('DELETE FROM time_entries WHERE id = ?').run(e);
+    db.prepare("DELETE FROM work WHERE shift_id = ? AND employee_id = ? AND hours_source = 'clock'").run(sh.id, E.both);
   }
 });
 
@@ -2214,23 +2220,21 @@ test('deleting one of two punches leaves the person on the shift with the other'
 // timesheet showing 3h, and nothing on any screen about either.
 // ===========================================================================
 
-test('clocked hours held back from a sent service tell the manager, and the service says so', async () => {
+test('a clock change after the service was sent reaches pay, and the service says so until it is sent again', async () => {
   const e = await punch(E.sent, '2026-03-18', '09:00', '14:00');
   const sh = shiftOn('2026-03-18', 'dinner');
-  db.prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?").run(sh.id);
+  await post(`/shifts/${sh.id}/send`, {});
+  assert.ok(db.prepare('SELECT sent_fingerprint FROM shifts WHERE id = ?').get(sh.id).sent_fingerprint,
+    'sending stamps what was sent');
+  assert.doesNotMatch(await text(`/shifts/${sh.id}`), /Changed after it was sent/, 'nothing to say yet');
   await post(`/timeclock/${e.id}/edit`, {
     in: '2026-03-18T09:00', out: '2026-03-18T18:00', position: 'server', daypart: 'dinner', reason: 'stayed late',
   });
-  assert.strictEqual(Number(workOf(sh.id, E.sent).hours), 5, 'the figure the service was sent with stands');
-  const told = db.prepare(`SELECT * FROM admin_events WHERE kind = 'timeclock'
-    AND title LIKE '%did not reach%' ORDER BY id DESC`).get();
-  assert.ok(told, 'the manager is told, not only the audit log');
-  assert.ok(told.title.endsWith(require('../src/services').nameOf('dinner')), `naming the service, not just the day: ${told.title}`);
-  assert.match(told.body || '', /9\.00h/, 'with what the clock says');
-  assert.strictEqual(told.href, `/shifts/${sh.id}`, 'and a way straight to the service');
-  const page = await text(`/shifts/${sh.id}`);
-  assert.match(page, /clocked 9\.00h on this service, but it pays 5\.00h: it was sent before the clock caught up/,
-    'and the service itself says it, for as long as it is true');
+  assert.strictEqual(Number(workOf(sh.id, E.sent).hours), 9, 'the late hours reach the service, so payroll and the tip-out');
+  assert.match(await text(`/shifts/${sh.id}`), /Changed after it was sent: the emails people got show the figures from before/,
+    'and the service says everybody’s email is out of date');
+  await post(`/shifts/${sh.id}/send`, {});
+  assert.doesNotMatch(await text(`/shifts/${sh.id}`), /Changed after it was sent/, 'sending again settles it');
 });
 
 test('a number typed over clocked hours is said on the service and on the timesheet', async () => {
@@ -2247,4 +2251,57 @@ test('a number typed over clocked hours is said on the service and on the timesh
   const ts = await text(`/portal/timesheet?p=${start}`, { cookie });
   assert.match(ts, /Pay for this shift uses 5h 0m, set by your manager/,
     'and the timesheet they sign says pay is not the clock for that shift');
+});
+
+test('somebody added to a sent service is paid and tipped as if they had been there all along', async () => {
+  const eng = require('../src/engine'); const pol = require('../src/policy');
+  const { shiftInputs } = require('../src/db'); const { aggregatePayroll } = require('../src/reports');
+  const day = '2026-03-25';
+  const mk = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1200, 1)`).run(name, role).lastInsertRowid);
+  const srv = mk('Night Server', 'server'); const b1 = mk('First Busser', 'busser');
+  const b2 = mk('Added Busser', 'busser'); const cook = mk('Added Cook', 'kitchen');
+  const made = await post('/shifts', { date: day, daypart: 'dinner' });
+  const sid = Number(String(made.headers.get('location')).split('/').pop());
+  await post(`/shifts/${sid}/server`, { employee_id: String(srv), food: '1000', coffee: '0', alcohol: '0',
+    card_tips: '200', hours: '6', wage: '12' });
+  await post(`/shifts/${sid}/support`, { employee_id: String(b1), role: 'busser', hours: '4', wage: '12' });
+  await post(`/shifts/${sid}/send`, {});
+  const run = () => eng.runShift(shiftInputs(sid), pol.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(sid)));
+  const before = run();
+  const tipout = (r) => r.servers.find((x) => x.employeeId === srv).tipoutTotal;
+  const busserPot = (r) => r.support.filter((x) => x.role === 'busser').reduce((a, x) => a + x.tipShare, 0);
+
+  // After sending: a second busser, four hours, the same as the first.
+  await post(`/shifts/${sid}/support`, { employee_id: String(b2), role: 'busser', hours: '4', wage: '12' });
+  const withB2 = run();
+  assert.strictEqual(tipout(withB2), tipout(before), 'the server tips out the same: a share of their sales, not of who else worked');
+  assert.ok(Math.abs(busserPot(withB2) - busserPot(before)) <= 1, 'the busser pot is the same money, now shared');
+  const share = (r, id) => r.support.find((x) => x.employeeId === id).tipShare;
+  assert.ok(Math.abs(share(withB2, b1) - share(withB2, b2)) <= 1, `equal hours, equal shares (${share(withB2, b1)} / ${share(withB2, b2)})`);
+
+  // Then a cook. Whatever the policy gives the kitchen, every tip is accounted for.
+  await post(`/shifts/${sid}/support`, { employee_id: String(cook), role: 'kitchen', hours: '5', wage: '12' });
+  const withCook = run();
+  const paidOut = withCook.servers.reduce((a, x) => a + (x.tipoutTotal || 0), 0);
+  const received = withCook.support.reduce((a, x) => a + x.tipShare, 0);
+  assert.ok(Math.abs(paidOut - received) <= withCook.support.length, `tipped out ${paidOut} = received ${received}`);
+  const pay = aggregatePayroll(day, day).rows;
+  assert.strictEqual(pay.find((x) => x.employeeId === cook).hours, 5, 'the cook is in payroll for their hours');
+  assert.strictEqual(pay.find((x) => x.employeeId === cook).wage, 6000, 'at their rate');
+  assert.match(await text(`/shifts/${sid}`), /Changed after it was sent/, 'and the service says it changed after sending');
+});
+
+test('"Update from the clock" brings hours held before this change up to date', async () => {
+  await punch(E.corrected, '2026-03-26', '17:00', '21:00');                // 4h
+  const sh = shiftOn('2026-03-26', 'dinner');
+  // What the old hold left behind: a sent service still paying 0 for a clocked 4h.
+  db.prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?").run(sh.id);
+  db.prepare('UPDATE work SET hours = 0 WHERE shift_id = ? AND employee_id = ?').run(sh.id, E.corrected);
+  const page = await text(`/shifts/${sh.id}`);
+  assert.match(page, /clocked 4\.00h on this service, but it pays 0\.00h/, 'the gap is said');
+  assert.match(page, /action="\/shifts\/\d+\/resync-clock"/, 'with the button that fixes it');
+  await post(`/shifts/${sh.id}/resync-clock`, {});
+  assert.strictEqual(Number(workOf(sh.id, E.corrected).hours), 4, 'one click and it pays what was clocked');
+  assert.doesNotMatch(await text(`/shifts/${sh.id}`), /but it pays/, 'and the gap is gone');
 });

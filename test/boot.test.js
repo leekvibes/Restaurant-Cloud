@@ -176,3 +176,16 @@ test('every test file that spawns a server claims its own port', () => {
   }
   assert.ok(seen.size >= 4, `found ${seen.size} spawning files, expected several`);
 });
+
+test('a failing background route cannot stop the server', () => {
+  // Express 4 does not catch a rejected async handler, and Node then stops the
+  // whole process. Measured once: a throw in the async send route took every
+  // later request with it. The wrapper must be installed before any route.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const made = src.indexOf('const app = express();');
+  const net = src.indexOf("h.constructor.name === 'AsyncFunction'");
+  const firstRoute = src.search(/\napp\.(get|post)\('/);
+  assert.ok(made > -1 && net > made && net < firstRoute, 'async handlers are wrapped before the first route is registered');
+  assert.match(src, /\(req, res, next\) => h\(req, res, next\)\.catch\(next\)/, 'and their errors go to the error page');
+  assert.match(src, /process\.on\('unhandledRejection'/, 'with a logged backstop for anything outside a request');
+});

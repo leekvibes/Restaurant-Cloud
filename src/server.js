@@ -67,6 +67,25 @@ const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSiz
 
 const app = express();
 
+// BACKGROUND ROUTES CANNOT TAKE THE SERVER DOWN. Express 4 does not catch a
+// rejected async handler: the rejection goes unhandled and Node stops the whole
+// process, portal and all, until the host restarts it. Measured: one throw
+// inside the async send route, then every request refused. Every async handler
+// registered below is wrapped, so its error reaches the error page at the end
+// of this file like any other route's. app.get(name) is Express's settings
+// getter as well as a route, so a lone string passes straight through.
+for (const m of ['get', 'post', 'put', 'delete']) {
+  const orig = app[m].bind(app);
+  app[m] = (...args) => {
+    if (m === 'get' && args.length === 1 && typeof args[0] === 'string') return orig(args[0]);
+    return orig(...args.map((h) => (typeof h === 'function' && h.constructor && h.constructor.name === 'AsyncFunction'
+      ? (req, res, next) => h(req, res, next).catch(next) : h)));
+  };
+}
+// And the backstop for anything outside a request: log it, do not die. A crash
+// takes every open portal session with it; a logged error takes nothing.
+process.on('unhandledRejection', (e) => console.error('[unhandled rejection]', e && (e.stack || e)));
+
 // In production this runs behind Render's proxy, so the TLS terminates one hop
 // away and req.secure is false on every request no matter how the browser
 // connected. Trusting one hop makes it tell the truth, which is what decides
@@ -2055,7 +2074,7 @@ app.get('/shifts/:id', (req, res) => {
   if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
   const inp = shiftInputs(sh.id);
   const r = runShift(inp, policyForShift(sh));
-  const { warn, notes } = shiftWarnings(sh, inp, r);
+  const { warn, notes, clockGap } = shiftWarnings(sh, inp, r);
   // A schedule added from the picker has no tip-out policy of its own until
   // somebody writes one, and until then it is priced on the built-in default
   // rules without a word anywhere. Said on the service page AND on Preview &
@@ -2408,6 +2427,9 @@ app.get('/shifts/:id', (req, res) => {
       </div>
 
       ${attention}
+      ${clockGap && canWrite() ? `<form method="post" action="/shifts/${sh.id}/resync-clock" class="bs-form" style="margin:10px 0 0">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <button class="bs-btn" type="submit">Update from the clock</button></form>` : ''}
 
       ${canWrite() ? `<div class="bs-tools">
         <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add employee to shift</button>
@@ -2905,6 +2927,39 @@ function peopleMap(inp) {
  * Everything worth knowing before a shift's emails go out. Shared by the
  * results page and the manager's own copy, so the two can't drift apart.
  */
+/**
+ * WHAT A SERVICE LOOKED LIKE WHEN IT WAS SENT.
+ *
+ * Sending no longer freezes a service: a late clock-out or a manager's
+ * correction lands on it, because sending happens before payday and the
+ * correction is usually the truth. What must not happen is that change going
+ * unnoticed, since everybody's email shows the figures from before. So the
+ * send stamps a fingerprint of everything the money is worked out from, and
+ * the service page compares it with now.
+ */
+function serviceFingerprint(shiftId) {
+  // SELECT * and fixed keys, never named columns: a newer database has grown
+  // columns an older one lacks, and naming one that was not there threw inside
+  // the send route, which is async, so the throw took the whole server down.
+  // Measured in the suite: the first send, then every request refused. Money
+  // is normalised so a column that arrives later as 0 reads the same as null.
+  const n = (v) => Number(v) || 0;
+  const s0 = db.prepare('SELECT * FROM shifts WHERE id = ?').get(shiftId) || {};
+  const sh = [s0.policy_id || null, n(s0.pool_jar_cents), n(s0.pool_togo_cents), n(s0.pool_togo_card_cents),
+    n(s0.total_food_cents), n(s0.total_coffee_cents), n(s0.total_alcohol_cents), n(s0.total_other_cents)];
+  const work = db.prepare('SELECT * FROM work WHERE shift_id = ? ORDER BY employee_id').all(shiftId)
+    .map((x) => [x.employee_id, x.role, n(x.hours), n(x.hourly_rate_cents)]);
+  const sales = db.prepare('SELECT * FROM server_sales WHERE shift_id = ? ORDER BY employee_id').all(shiftId)
+    .map((x) => [x.employee_id, n(x.food_cents), n(x.coffee_cents), n(x.alcohol_cents),
+      n(x.card_tips_cents), n(x.cash_tips_cents), n(x.jar_cash_cents)]);
+  let adj = [];
+  try {
+    adj = db.prepare('SELECT * FROM shift_tip_adjustments WHERE shift_id = ? ORDER BY id').all(shiftId)
+      .map((x) => [x.recipient, x.paid_by, x.mode, n(x.cents), x.employee_id || null]);
+  } catch { /* an older database has no adjustments */ }
+  return crypto.createHash('sha1').update(JSON.stringify({ sh, work, sales, adj })).digest('hex').slice(0, 20);
+}
+
 function shiftWarnings(sh, inp, r) {
   const warn = [];
   const notes = [];
@@ -2984,14 +3039,14 @@ function shiftWarnings(sh, inp, r) {
     .map((sv) => sv.name);
   if (noSales.length) warn.push('No sales recorded for: ' + noSales.join(', ') + ' — their tip-out will calculate as $0. Add their sales below.');
 
-  // THE CLOCK AND THE SERVICE, compared. Two ways they part without a word: a
-  // service sent before somebody clocked out keeps the hours it was sent with,
-  // and a number typed on this page outranks the clock for good. Both are
-  // right as rules and both were invisible, so the pay on this page could
-  // differ from the hours on the person's own timesheet with nothing said.
-  // Measured: a three-hour punch paid at 0h; 5h typed over a 3h punch while
-  // the timesheet showed 3h. Only for somebody with a finished punch here, so
-  // hand-entered services with no clock behind them are left alone.
+  // THE CLOCK AND THE SERVICE, compared. A number typed on this page outranks
+  // the clock for good, which is deliberate and was invisible: the pay on this
+  // page could differ from the hours on the person's own timesheet with
+  // nothing said. And hours held back from a sent service before sending
+  // stopped freezing one are still sitting on some services; those get a
+  // button. Only for somebody with a finished punch here, so hand-entered
+  // services with no clock behind them are left alone.
+  let clockGap = false;
   {
     const f = (h) => `${(Math.round(h * 100) / 100).toFixed(2)}h`;
     const nameOf = new Map((inp.people || []).map((p) => [p.employeeId, p.name]));
@@ -3007,14 +3062,33 @@ function shiftWarnings(sh, inp, r) {
         warn.push(`${who}: ${f(paid)} typed on this service, ${f(clocked)} on the clock. Pay uses the typed ${f(paid)}, `
           + `and their timesheet shows the clock's ${f(clocked)}. If the clock is right, switch their row back to the clock's hours.`);
       } else {
-        warn.push(sh.status === 'emailed'
-          ? `${who} clocked ${f(clocked)} on this service, but it pays ${f(paid)}: it was sent before the clock caught up. `
-            + `Put ${f(clocked)} on their row below if the clock is right.`
-          : `${who} clocked ${f(clocked)} on this service, but it pays ${f(paid)}. Check their punch on Time clock.`);
+        clockGap = true;
+        warn.push(`${who} clocked ${f(clocked)} on this service, but it pays ${f(paid)}. Use "Update from the clock" below to bring it up to date.`);
       }
     }
   }
-  return { warn, notes };
+
+  // CHANGED AFTER IT WAS SENT. A sent service still takes a late clock-out or
+  // a correction; everybody's email still shows the figures from before. Said
+  // here, and on Preview & send, until it is sent again.
+  let fpNow = null;
+  if (sh.status === 'emailed' && sh.sent_fingerprint) {
+    try { fpNow = serviceFingerprint(sh.id); } catch { fpNow = null; }  // a page never fails on this
+  }
+  if (fpNow && fpNow !== sh.sent_fingerprint) {
+    let line = 'Changed after it was sent: the emails people got show the figures from before. '
+      + 'Send it again from Preview & send to update them.';
+    try {
+      const per = periodFor(sh.date);
+      const went = per && sendRecord(per.start);
+      if (went) {
+        line += ` This pay period went to payroll on ${String(went.sent_at).slice(0, 10)}, `
+          + 'so the change is not in that run: carry it into the next one.';
+      }
+    } catch { /* no period record to check against */ }
+    warn.push(line);
+  }
+  return { warn, notes, clockGap };
 }
 
 app.get('/shifts/:id/results', (req, res) => {
@@ -3022,7 +3096,7 @@ app.get('/shifts/:id/results', (req, res) => {
   if (!sh) return res.status(404).send(layout('Not found', '<h1>Shift not found</h1>'));
   const inp = shiftInputs(sh.id);
   const r = runShift(inp, policyForShift(sh));
-  const { warn, notes } = shiftWarnings(sh, inp, r);
+  const { warn, notes, clockGap } = shiftWarnings(sh, inp, r);
   // A schedule added from the picker has no tip-out policy of its own until
   // somebody writes one, and until then it is priced on the built-in default
   // rules without a word anywhere. Said on the service page AND on Preview &
@@ -3214,6 +3288,30 @@ app.post('/shifts/:id/send-one', async (req, res) => {
     : `Mail isn't connected, so ${one.name}'s email was written as a preview file instead.`, !out.sent);
 });
 
+/**
+ * Bring every clocked person on a service up to what the clock says.
+ *
+ * For hours held back from a sent service before sending stopped freezing
+ * one: those stay put until somebody asks, and this is the asking. A number a
+ * manager typed is left alone (setClockHours defers to it), and a signed
+ * timesheet still holds, with its own notice.
+ */
+app.post('/shifts/:id/resync-clock', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  const actor = tcActor(req);
+  let updated = 0;
+  for (const p of db.prepare(`SELECT DISTINCT employee_id FROM time_entries
+    WHERE shift_id = ? AND clock_out_at IS NOT NULL`).all(sh.id)) {
+    const out = TC.syncShiftHours(sh.id, p.employee_id, actor);
+    if (out && out.written) updated += 1;
+  }
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(updated
+    ? `Updated ${updated} ${updated === 1 ? 'person' : 'people'} from the clock.`
+    : 'Nothing to update: the clock and this service already agree.'));
+});
+
 app.post('/shifts/:id/send', async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
@@ -3222,6 +3320,11 @@ app.post('/shifts/:id/send', async (req, res) => {
   const emails = buildEmails(r, { date: sh.date, daypart: sh.daypart }, peopleMap(inp));
   const result = await sendEmails(emails);
   s.markEmailed.run(sh.id);
+  // What was sent, so a later change is said rather than silent. Fenced: a
+  // failure to stamp must never be a failure to send, let alone a crash.
+  try {
+    db.prepare('UPDATE shifts SET sent_fingerprint = ? WHERE id = ?').run(serviceFingerprint(sh.id), sh.id);
+  } catch (e) { console.warn('[send] could not stamp what was sent:', e && e.message); }
 
   // Tell each person on the shift, on their portal, that their pay is ready —
   // the same moment the email goes out. Their own event, so only they see it.

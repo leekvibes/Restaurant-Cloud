@@ -110,6 +110,10 @@ if (!shiftCols.includes('policy_id')) db.exec('ALTER TABLE shifts ADD COLUMN pol
 // as $0 would drag every average and leave the service nagging to be filled in
 // forever, so it is marked rather than zeroed.
 if (!shiftCols.includes('closed_at')) db.exec('ALTER TABLE shifts ADD COLUMN closed_at TEXT');
+// What a service's money looked like when it was sent, so a change afterwards
+// is said instead of silently parting from everybody's email (server.js,
+// serviceFingerprint). NULL for services sent before this existed.
+if (!shiftCols.includes('sent_fingerprint')) db.exec('ALTER TABLE shifts ADD COLUMN sent_fingerprint TEXT');
 if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_jar_cents INTEGER NOT NULL DEFAULT 0');
 if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
 if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');
