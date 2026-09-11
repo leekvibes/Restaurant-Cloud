@@ -2481,3 +2481,14 @@ test('a service on a schedule with no tip-out policy of its own says so before i
   const ok = await (await fetch(BASE + cafe.headers.get('location'))).text();
   assert.doesNotMatch(ok, /no tip-out policy of its own/, 'and a schedule that has one is not nagged');
 });
+
+test('portal pages tell the phone never to keep a copy', async () => {
+  // Pay, hours and the clock are live state. Without a header a browser may
+  // show a remembered screen from before a manager's edit, which is the one
+  // thing somebody checking their pay must never see.
+  const cookie = await signIn('5555');
+  for (const p of ['/portal', '/portal/earnings', '/portal/timesheet', '/portal/clock']) {
+    const r = await asStaff(p, cookie);
+    assert.match(r.headers.get('cache-control') || '', /no-store/, `${p} is never kept`);
+  }
+});

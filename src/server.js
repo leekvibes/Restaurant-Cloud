@@ -661,6 +661,14 @@ app.use((req, res, next) => {
   });
 });
 
+// THE PORTAL IS NEVER KEPT. Every page on it is somebody's live hours, pay or
+// clock state, and nothing told a phone not to hold on to one: no header at
+// all, so a browser was free to show a Pay screen from before a manager added
+// the hours. Asked for outright: anything edited on the time clock or a service
+// has to show on the portal. The service worker already refuses to cache pages;
+// this makes the same promise to the browser, before any portal route runs.
+app.use('/portal', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+
 app.get('/login', (req, res) => {
   if (!APP_PASSWORD) return res.redirect('/');
   const bad = req.query.bad === '1';
@@ -3590,7 +3598,11 @@ const portalHead = () => '';
 const portalTop = (back, title) => `
   <div class="pt-crumb">
     ${back ? `<a class="pt-back" href="${back.href}"${back.exact ? '' : ' data-pt-back'}>‹ ${esc(back.label)}</a>` : ''}
-    ${title ? `<span class="pt-who">${esc(title)}</span>` : ''}
+    ${/* WHOSE PORTAL THIS IS, on every screen. A Pay page said "PAY" and
+         nothing else, so a phone still signed in as somebody else showed their
+         pay with no way to tell. Reported as a service missing from Pay. */''}
+    ${title ? `<span class="pt-who">${esc(title)}${portalMe && portalMe.name
+    ? ` · ${esc(firstName(portalMe.name))}` : ''}</span>` : ''}
   </div>`;
 
 /**
@@ -26747,7 +26759,11 @@ app.post('/timeclock/:id/delete', (req, res) => {
     // The hours this punch put on the shift go with it.
     TC.syncShiftHours(shiftId, empId, actor);
   })();
-  res.redirect(punchBack(req, '/timeclock', `Punch deleted — ${was}.`, `#d-${day}`));
+  // Said in the restaurant's time. `was` is the log record and stays exact;
+  // shown to a manager it read "20:00 → 01:30" for a 4pm-to-9:30pm punch.
+  const wasSaid = `${TC.stamp(e.clock_in_at)} → ${e.clock_out_at ? TC.clockFace(e.clock_out_at) : 'still open'}`
+    + ` · ${posName(e.position)}${e.daypart ? `, ${dp(e.daypart)}` : ''}`;
+  res.redirect(punchBack(req, '/timeclock', `Punch deleted — ${wasSaid}.`, `#d-${day}`));
 });
 
 /**
