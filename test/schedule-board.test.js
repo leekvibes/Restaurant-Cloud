@@ -2668,3 +2668,21 @@ test('the box is opened by hover, focus and a tap, and is drawn above the grid',
   assert.match(css, /\.sbk-w\.has-iss \.sbk-dots \{ right: 17px; \}/, 'the trigger steps aside');
   assert.doesNotMatch(css, /(^|\n)\.sbk--iss-action::after/, 'the grid no longer draws a flag it cannot explain');
 });
+
+test('a shift that starts after midnight moves to the column it was dropped on', () => {
+  // Starts at 1am, so by the 4am cutoff it belongs to the night before and sits
+  // in that night's column. A move was counted in CALENDAR days from its start,
+  // so dropping it one column right computed no move at all and it snapped back.
+  const day = dates.addDays(today(), 675);
+  const next = dates.addDays(day, 1);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${next} 01:00`, endsAt: `${next} 06:00` });
+  try {
+    assert.strictEqual(s.business_date, day, 'a 1am start is the night before');
+    const out = SCH.moveShift(s.id, { toDate: next });
+    assert.strictEqual(out.moved, true, 'the drop is a move');
+    assert.strictEqual(out.row.business_date, next, 'onto the column it was dropped on');
+    const back = SCH.moveShift(s.id, { toDate: day });
+    assert.strictEqual(back.row.business_date, day, 'and back again');
+  } finally { db.prepare('DELETE FROM scheduled_shifts WHERE id = ?').run(s.id); }
+});

@@ -477,6 +477,28 @@ for (const f of ['sw.js', 'manifest.webmanifest', 'manifest-tips.webmanifest', '
 
 const PORT = Number(process.env.PORT || 4000);
 const DAYPARTS = ['cafe', 'dinner'];
+
+// EVERY SCHEDULE, NOT JUST THE FIRST TWO.
+//
+// DAYPARTS is the pair this restaurant started with. Schedules can be added
+// from the picker now, each with its own time clock, but twenty-odd places
+// still asked DAYPARTS whether a service was real and said no to every one
+// that was added. The portal offered a new schedule's clock and then refused
+// the clock-in: "Choose which service you are working." Measured, not
+// inferred. These answer the question instead, and the original pair still
+// passes both, so nothing that worked before can stop working.
+//
+//   svcLive   may NEW work land on it: a clock-in, a service, a punch
+//   svcKnown  may an EXISTING record keep it. Archived schedules count, so an
+//             old punch is never forced off the schedule it was made on.
+const svcLive = (slug) => DAYPARTS.includes(slug) || SERVICES.isActive(slug);
+const svcKnown = (slug) => svcLive(slug) || !!SERVICES.bySlug(slug);
+/** Schedules to offer in a select: the live ones, plus the one a record already has. */
+const svcOptions = (keep) => {
+  const live = SERVICES.all().map((x) => x.slug);
+  const list = live.length ? live : DAYPARTS.slice();
+  return keep && !list.includes(keep) && svcKnown(keep) ? [...list, keep] : list;
+};
 // Positions are data now (see the positions table), so these read live rather
 // than being a fixed list — adding a job in Settings shows up everywhere.
 /** Everything someone can be put on a shift as, servers aside. */
@@ -1627,7 +1649,7 @@ app.get('/shifts', (req, res) => {
     const dow = new Date(x.date + 'T00:00:00').getDay();
     const weekend = dow === 0 || dow === 5 || dow === 6;
     return `<a class="bs-lr bs-shiftrow${weekend ? ' wknd' : ''}" href="/shifts/${x.id}" data-shift data-status="${s.key}"
-       data-service="${esc(x.daypart)}" data-search="${esc(search)}">
+       data-service="${esc(x.daypart)}" data-svcname="${esc(dp(x.daypart))}" data-search="${esc(search)}">
       <span class="bs-lr-d">${new Date(x.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${Number(x.date.slice(8, 10))}</span>
       <span class="bs-lr-s">${esc(dp(x.daypart))}</span>
       <span class="bs-lr-st ${s.key}">${esc(s.label.toUpperCase())}</span>
@@ -1748,8 +1770,23 @@ app.get('/shifts', (req, res) => {
       ${/* One chip per service, from the list, rather than a hardcoded pair —
            the two that existed were still called Café and Dinner after they
            were renamed, and a third service had no chip at all. */''}
-      ${SERVICES.all().map((sv) => `<button class="bs-fchip" data-f="service"
-        data-v="${esc(sv.slug)}">${esc(sv.name)}</button>`).join('')}
+      ${/* A service filed under a schedule that was later archived and made
+           again under the same name used to vanish from its own chip: the
+           chip asked for the new schedule's key, the row carried the old
+           one, and "Evening Service" answered "Nothing matches" while All
+           showed the row sitting there. The chip now also matches by NAME,
+           which is what a manager means by it; a row whose schedule has no
+           live chip at all gets one of its own. */''}
+      ${(() => {
+    const live = SERVICES.all();
+    const slugs = new Set(live.map((sv) => sv.slug));
+    const names = new Set(live.map((sv) => sv.name));
+    const extra = [...new Set(rows.map(({ x }) => x.daypart))]
+      .filter((d) => d && !slugs.has(d) && !names.has(dp(d)))
+      .map((d) => ({ slug: d, name: dp(d) }));
+    return [...live, ...extra].map((sv) => `<button class="bs-fchip" data-f="service"
+        data-v="${esc(sv.slug)}" data-name="${esc(sv.name)}">${esc(sv.name)}</button>`).join('');
+  })()}
       <button class="bs-fchip" data-f="status" data-v="open">Open</button>
       <button class="bs-fchip" data-f="status" data-v="review">Needs review</button>
       <button class="bs-fchip" data-f="status" data-v="ready">Ready</button>
@@ -1774,7 +1811,7 @@ app.get('/shifts', (req, res) => {
     </div>
     <script>
       (function () {
-        var q = '', mode = 'all', val = '';
+        var q = '', mode = 'all', val = '', nm = '';
         var panels = [].slice.call(document.querySelectorAll('[data-monthpanel]'));
         var picks = [].slice.call(document.querySelectorAll('[data-monthpick]'));
         var msel = document.getElementById('mb-month');
@@ -1811,7 +1848,8 @@ app.get('/shifts', (req, res) => {
             var n = 0;
             p.querySelectorAll('[data-shift]').forEach(function (el) {
               var ok = mode === 'all' ? true
-                : mode === 'service' ? el.getAttribute('data-service') === val
+                : mode === 'service' ? (el.getAttribute('data-service') === val
+                  || (nm !== '' && el.getAttribute('data-svcname') === nm))
                 : el.getAttribute('data-status') === val;
               if (ok && q) ok = el.getAttribute('data-search').indexOf(q) !== -1;
               el.style.display = ok ? '' : 'none';
@@ -1832,7 +1870,8 @@ app.get('/shifts', (req, res) => {
           b.addEventListener('click', function () {
             document.querySelectorAll('.bs-fchip').forEach(function (x) { x.classList.remove('on'); });
             b.classList.add('on');
-            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v'); apply();
+            mode = b.getAttribute('data-f'); val = b.getAttribute('data-v');
+            nm = b.getAttribute('data-name') || ''; apply();
           });
         });
 
@@ -1871,7 +1910,7 @@ app.get('/shifts/new', (req, res) => {
       </label>
       <label class="bs-field">
         <span class="bs-field-l">Service</span>
-        <select name="daypart">${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}</select>
+        <select name="daypart">${svcOptions().map((d) => `<option value="${esc(d)}">${esc(dp(d))}</option>`).join('')}</select>
       </label>
       <button class="bs-btn bs-newshift-go" type="submit">Start shift →</button>
     </form>`;
@@ -1880,7 +1919,7 @@ app.get('/shifts/new', (req, res) => {
 
 app.post('/shifts', (req, res) => {
   const { date, daypart } = req.body;
-  if (!date || !DAYPARTS.includes(daypart)) return res.redirect('/shifts/new?err=1&msg=' + encodeURIComponent('Pick a date and service.'));
+  if (!date || !svcLive(daypart)) return res.redirect('/shifts/new?err=1&msg=' + encodeURIComponent('Pick a date and service.'));
   s.getOrIgnore.run(date, daypart);
   const sh = s.findShift.get(date, daypart);
   policyForShift(sh); // lock in the tip-out policy version that's current right now
@@ -2009,6 +2048,13 @@ app.get('/shifts/:id', (req, res) => {
   const inp = shiftInputs(sh.id);
   const r = runShift(inp, policyForShift(sh));
   const { warn, notes } = shiftWarnings(sh, inp, r);
+  // A schedule added from the picker has no tip-out policy of its own until
+  // somebody writes one, and until then it is priced on the built-in default
+  // rules without a word anywhere. Said on the service page AND on Preview &
+  // send, because the second is where the money actually goes out.
+  if (sh.status !== 'emailed' && !sh.policy_id && !currentForDaypart(sh.daypart)) {
+    warn.push(`${dp(sh.daypart)} has no tip-out policy of its own yet, so this service is using the built-in default rules. Set one under Tip-out policy before you send it.`);
+  }
   const staff = q.nonManagerList.all();
   const people = inp.people;
   // Anybody on this service whose punch the sweep closed. Read once per page
@@ -2938,6 +2984,13 @@ app.get('/shifts/:id/results', (req, res) => {
   const inp = shiftInputs(sh.id);
   const r = runShift(inp, policyForShift(sh));
   const { warn, notes } = shiftWarnings(sh, inp, r);
+  // A schedule added from the picker has no tip-out policy of its own until
+  // somebody writes one, and until then it is priced on the built-in default
+  // rules without a word anywhere. Said on the service page AND on Preview &
+  // send, because the second is where the money actually goes out.
+  if (sh.status !== 'emailed' && !sh.policy_id && !currentForDaypart(sh.daypart)) {
+    warn.push(`${dp(sh.daypart)} has no tip-out policy of its own yet, so this service is using the built-in default rules. Set one under Tip-out policy before you send it.`);
+  }
 
 
   // Per-person send. Someone not receiving theirs shouldn't mean re-sending to
@@ -5357,10 +5410,10 @@ function tipsWorkspacePage(model, opts = {}) {
                 aria-describedby="st-dp-h${errs.daypart ? ' st-dp-e' : ''}"${
   errs.daypart ? ' aria-invalid="true"' : ''}>
           <option value="">Choose a service</option>
-          ${DAYPARTS.map((d) => `<option value="${d}"${
-    vals.daypart === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+          ${svcOptions(vals.daypart).map((d) => `<option value="${esc(d)}"${
+    vals.daypart === d ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}
         </select>
-        <p class="st-hint" id="st-dp-h">Caf&eacute; or dinner.</p>
+        <p class="st-hint" id="st-dp-h">The schedule you worked.</p>
         ${errs.daypart ? `<p class="st-err" id="st-dp-e">${esc(errs.daypart)}</p>` : ''}
       </div>
       <input type="hidden" name="mode" value="manual">
@@ -5559,6 +5612,18 @@ const stScript = () => `<script>(function(){
       if (b) rs.textContent = b.textContent.replace(/^Current shift · /, '');
     }
   }
+  // Put back what was typed before a job change reloaded the form. One hop
+  // only, and only if it is fresh: a stale copy must never fill a later report.
+  try {
+    var kept = JSON.parse(sessionStorage.getItem('st-keep') || 'null');
+    sessionStorage.removeItem('st-keep');
+    if (kept && Date.now() - kept.t < 60000) {
+      Object.keys(kept.v).forEach(function (n) {
+        var el = form.querySelector('[name="' + n + '"]');
+        if (el) el.value = kept.v[n];
+      });
+    }
+  } catch (err) { /* nothing kept */ }
   form.addEventListener('input', review);
   form.addEventListener('change', function (e) {
     review();
@@ -5571,6 +5636,19 @@ const stScript = () => `<script>(function(){
       var po = form.querySelector('[data-st-pos]');
       if (sh) p.set('shift', sh.value);
       if (po && po.value) p.set('position', po.value);
+      // WHAT THEY TYPED COMES WITH THEM. The job decides which fields exist,
+      // so a change reloads the form, and the reload silently threw away every
+      // figure already entered. Measured: $111 typed, job changed, gone. Held
+      // for this one hop in the tab's own session storage, never the URL,
+      // since these are somebody's takings, and put back below.
+      try {
+        var keep = { t: Date.now(), v: {} };
+        ['food', 'coffee', 'alcohol', 'card_tips', 'cash_tips', 'note'].forEach(function (n) {
+          var el = form.querySelector('[name="' + n + '"]');
+          if (el && el.value !== el.defaultValue) keep.v[n] = el.value;
+        });
+        sessionStorage.setItem('st-keep', JSON.stringify(keep));
+      } catch (err) { /* storage refused: the reload starts clean, as before */ }
       location.href = '/portal/tips?' + p.toString();
     }
   });
@@ -5762,7 +5840,7 @@ function writeSalesTips(req, emp, opts = {}) {
   }
   if (!sh) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date)) errs.date = 'Choose the date you worked.';
-    if (!DAYPARTS.includes(vals.daypart)) errs.daypart = 'Choose which service you worked.';
+    if (!svcLive(vals.daypart)) errs.daypart = 'Choose which service you worked.';
     manual = true;
   }
 
@@ -6370,11 +6448,21 @@ app.get('/portal/earnings', (req, res) => {
   // Opens on the last period that has ENDED. A fortnight still being worked has
   // a total that will be wrong by closing time, and the figure somebody came to
   // check is the one they were actually paid.
-  const defaultIdx = Math.max(0, periods.findIndex((x) => todayIso > x.end));
+  const endedIdx = Math.max(0, periods.findIndex((x) => todayIso > x.end));
+  // ...UNLESS there is nothing on it for this person and something on the
+  // period still running. A new hire's first week opened on "No pay recorded
+  // for this period" (a fortnight they never worked) while the shift they came
+  // to look for sat one arrow away, with nothing on screen saying so. Reported
+  // exactly that way: "I don't see the service under Pay."
+  const mNow = periods.length ? payPeriodModel(emp, periods[0], todayIso) : null;
+  const nowHas = !!(mNow && mNow.status.key !== 'none');
+  let defaultIdx = endedIdx;
+  if (endedIdx > 0 && nowHas
+      && payPeriodModel(emp, periods[endedIdx], todayIso).status.key === 'none') defaultIdx = 0;
   const asked = periods.findIndex((x) => x.start === req.query.p);
   const idx = asked >= 0 ? asked : defaultIdx;
   const period = periods[idx];
-  const m = payPeriodModel(emp, period, todayIso);
+  const m = idx === 0 && mNow ? mNow : payPeriodModel(emp, period, todayIso);
 
   // Only the shifts inside this period, costed. Not the archive.
   const mine = period
@@ -6399,6 +6487,9 @@ app.get('/portal/earnings', (req, res) => {
         <a class="tsp-arrow${idx > 0 ? '' : ' off'}"
            href="${idx > 0 ? link(idx - 1) : '#'}" aria-label="Later pay period">→</a>
       </nav>`}
+      ${/* Said, not left behind an arrow: work in the period still running. */''}
+      ${idx > 0 && nowHas ? `<a class="tc-more" href="${link(0)}">This period so far · ${
+    esc(labelFor(periods[0]))} ›</a>` : ''}
 
       ${!period || m.status.key === 'none' ? `<div class="tc-empty">
         <b>No pay recorded${period ? ' for this period' : ' yet'}</b>
@@ -8166,7 +8257,9 @@ app.post('/portal/clock/in', (req, res) => {
 
   const position = allowed.includes(req.body.position) ? req.body.position : (allowed.length === 1 ? allowed[0] : null);
   if (!position) return back('err=' + encodeURIComponent('Choose the position you are working.'));
-  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  // Any live schedule. Whether THIS person may work it is the canWork gate
+  // right below, which is the real authorisation and always was.
+  const daypart = svcLive(req.body.daypart) ? req.body.daypart : null;
   if (!daypart) return back('err=' + encodeURIComponent('Choose which service you are working.'));
   // THE GATE. Not the select on the previous screen — this. A POST naming a
   // service somebody does not work has to be refused where it lands, or the
@@ -8928,7 +9021,7 @@ app.post('/portal/clock/fix', (req, res) => {
       payload.position = b.position; bits.push(`position ${posName(b.position)}`);
     }
     if (b.daypart && b.daypart !== e.daypart) {
-      if (!DAYPARTS.includes(b.daypart)) return back('err=' + encodeURIComponent('Pick a service that exists.'));
+      if (!svcLive(b.daypart)) return back('err=' + encodeURIComponent('Pick a service that exists.'));
       payload.daypart = b.daypart; bits.push(`service ${dp(b.daypart)}`);
     }
 
@@ -8983,7 +9076,7 @@ app.post('/portal/clock/fix', (req, res) => {
     if (!clockPositionsFor(emp).includes(b.position)) return back('err=1');
     payload = { position: b.position }; summary = `position → ${b.position}`;
   } else if (kind === 'wrong_service') {
-    if (!DAYPARTS.includes(b.daypart)) return back('err=1');
+    if (!svcLive(b.daypart)) return back('err=1');
     payload = { daypart: b.daypart }; summary = `service → ${dp(b.daypart)}`;
   } else {
     summary = String(b.proposed || '').trim().slice(0, 200) || null;
@@ -9048,7 +9141,7 @@ app.post('/portal/clock/add', (req, res) => {
   // function, so this refuses only a hand-made post.
   const position = clockPositionsFor(emp).includes(b.position) ? b.position : null;
   if (!position) return back('err=' + encodeURIComponent('Pick the position you worked.'));
-  const daypart = DAYPARTS.includes(b.daypart) ? b.daypart : null;
+  const daypart = svcLive(b.daypart) ? b.daypart : null;
   if (!daypart) return back('err=' + encodeURIComponent('Pick the service you worked.'));
 
   // The optional break. Checked to the same standard the edit sheet's is, and
@@ -9869,7 +9962,7 @@ function legacyAuth(body, req) {
   const pin = String(body.pin || '').trim();
   if (!id || !pin) return null;
   const e = q.employee.get(id);
-  if (!e || !e.active || e.role === 'manager') return null;
+  if (!e || !e.active) return null;
   // Throttled like every other PIN door. This one takes an employee id
   // outright, so it would otherwise be the easiest of the lot to grind.
   if (!req) return String(e.pin || '') === pin ? e : null;
@@ -9945,11 +10038,10 @@ app.get('/employees', (req, res) => {
   // one that has to shout.
   const byPin = {};
   for (const e of staff) {
-    if (!e.pin || isMgr(e) || !e.active) continue;
+    if (!e.pin || !e.active) continue;
     (byPin[e.pin] = byPin[e.pin] || []).push(e.name);
   }
   const access = (e) => {
-    if (isMgr(e)) return { k: 'na', t: '—', why: 'Managers do not use the staff portal.' };
     if (!e.pin) return { k: 'bad', t: 'No PIN', why: `${e.name} cannot sign in to the portal until they have one.` };
     if ((byPin[e.pin] || []).length > 1) {
       return { k: 'bad', t: 'PIN clash', why: `Shared with ${esc(byPin[e.pin].filter((n) => n !== e.name).join(', '))} — neither can sign in.` };
@@ -11249,11 +11341,6 @@ function eprDocuments(req, e) {
  */
 function eprOnApp(e) {
   const head = '<h2 class="epr-h">On the app</h2>';
-  if (e.role === 'manager') {
-    return `<section class="epr-card">${head}
-      <p class="epr-none">Managers do not use the staff portal, so there is nothing to show here.</p>
-    </section>`;
-  }
   const cfg = TC.settings();
   const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
   const a = PORTAL.activityFor(e.id, addDays(today, -29));
@@ -11383,9 +11470,7 @@ app.get('/employees/:id/edit', (req, res) => {
   const sub = headerLine(e, mine);
 
   // --- left column: who they are, and how they get in -------------------------
-  const pinState = e.role === 'manager'
-    ? { k: 'na', t: 'Managers do not use the staff portal' }
-    : !e.pin ? { k: 'bad', t: 'No PIN — they cannot sign in to the portal' }
+  const pinState = !e.pin ? { k: 'bad', t: 'No PIN — they cannot sign in to the portal' }
       : { k: 'ok', t: 'Can sign in to the staff portal' };
 
   const side = `
@@ -13143,7 +13228,7 @@ function cashForm(row, movements, denoms, req) {
         <div class="fld-row3">
           <label class="fld">Date<input name="date" type="date" required value="${esc(theDate)}"></label>
           <label class="fld">Service<select name="daypart">
-            ${DAYPARTS.map((d) => `<option value="${d}"${(row.daypart || 'cafe') === d ? ' selected' : ''}>${dp(d)}</option>`).join('')}
+            ${svcOptions(row.daypart).map((d) => `<option value="${esc(d)}"${(row.daypart || 'cafe') === d ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}
           </select></label>
           <label class="fld">Opening till<input name="float" id="c-float" type="number" step="0.01" min="0" inputmode="decimal"
             value="${row.float_cents == null ? m(dflt) : m(row.float_cents)}"></label>
@@ -13511,7 +13596,7 @@ function cashBody(body) {
   const typedDeposit = n(body.deposit);
   const row = {
     date: String(body.date || '').slice(0, 10) || null,
-    daypart: DAYPARTS.includes(body.daypart) ? body.daypart : 'dinner',
+    daypart: svcKnown(body.daypart) ? body.daypart : 'dinner',
     location: 'Palm Vintage',
     drawer_id: body.drawer_id ? Number(body.drawer_id) : null,
     float_cents: n(body.float) ?? CASH.defaultFloat(),
@@ -14929,12 +15014,17 @@ app.post('/users/:id/delete', (req, res) => {
 });
 
 app.get('/policy', (req, res) => {
-  const daypart = DAYPARTS.includes(req.query.daypart) ? req.query.daypart : 'dinner';
+  // Every schedule gets a tab. One added from the picker had no page here at
+  // all, so it ran on the built-in default rules with no way to set its own:
+  // a tip-out nobody chose, on real money.
+  const polTabs = svcOptions(svcKnown(req.query.daypart) ? req.query.daypart : null);
+  const daypart = svcKnown(req.query.daypart) ? req.query.daypart
+    : (polTabs.includes('dinner') ? 'dinner' : polTabs[0]);
   const cur = currentForDaypart(daypart);
   const rules = cur ? cur.rules : defaultRules();
   const hist = historyForDaypart(daypart);
 
-  const tabs = DAYPARTS.map((d) => `<a href="/policy?daypart=${d}" class="tab ${d === daypart ? 'active' : ''}">${dp(d)}</a>`).join('');
+  const tabs = polTabs.map((d) => `<a href="/policy?daypart=${encodeURIComponent(d)}" class="tab ${d === daypart ? 'active' : ''}">${esc(dp(d))}</a>`).join('');
   const summary = describeRules(rules).map((x) => `<li>${x}</li>`).join('');
 
   // --- a policy that is written down and not yet in force -------------------
@@ -14943,7 +15033,7 @@ app.get('/policy', (req, res) => {
   // making them one is how a new policy goes live on the deploy that carried
   // it. This card is the second decision, taken on purpose, on one service.
   const draft = stagedForDaypart(daypart);
-  const otherDrafts = DAYPARTS.filter((d) => d !== daypart && stagedForDaypart(d));
+  const otherDrafts = polTabs.filter((d) => d !== daypart && stagedForDaypart(d));
   // --- services already open, still on the policy before this one ----------
   //
   // A service is stamped the FIRST time anything touches it — a manager
@@ -14994,7 +15084,7 @@ app.get('/policy', (req, res) => {
       <ol class="plain-list">${describeRules(draft.rules).map((x) => `<li>${x}</li>`).join('')}</ol>
       <div class="pol-draft-f">
         <form method="post" action="/policy/activate" style="margin:0"
-          onsubmit="return confirm('Make this the ${esc(dp(daypart))} policy from now on?\n\nEvery service already closed keeps the policy it was closed under — none of them are recalculated. This decides how the NEXT ${esc(dp(daypart))} is worked out.\n\n${esc(DAYPARTS.filter((d) => d !== daypart).map(dp).join(' and '))} is not affected.')">
+          onsubmit="return confirm('Make this the ${esc(dp(daypart))} policy from now on?\n\nEvery service already closed keeps the policy it was closed under — none of them are recalculated. This decides how the NEXT ${esc(dp(daypart))} is worked out.\n\n${esc(polTabs.filter((d) => d !== daypart).map(dp).join(' and '))} is not affected.')">
           <input type="hidden" name="_csrf" value="${csrfFor(req)}">
           <input type="hidden" name="id" value="${draft.id}">
           <button class="btn btn-primary" type="submit">Make this live for ${esc(dp(daypart))}</button>
@@ -15008,8 +15098,8 @@ app.get('/policy', (req, res) => {
       </div>
       <p class="pol-draft-safe">Nothing is recalculated. Every service already closed keeps the policy it
         was closed under &mdash; this only decides how the next one is worked out,
-        and ${esc(DAYPARTS.filter((d) => d !== daypart).map(dp).join(' and '))} stays on ${
-  DAYPARTS.filter((d) => d !== daypart).length === 1 ? 'its own policy' : 'their own policies'}.</p>
+        and ${esc(polTabs.filter((d) => d !== daypart).map(dp).join(' and '))} stays on ${
+  polTabs.filter((d) => d !== daypart).length === 1 ? 'its own policy' : 'their own policies'}.</p>
     </div>` : '';
   const elsewhere = otherDrafts.length ? `<p class="pol-elsewhere">${
   otherDrafts.map((d) => `<a href="/policy?daypart=${d}">${dp(d)} also has a policy waiting &rsaquo;</a>`).join(' ')}</p>` : '';
@@ -15068,7 +15158,7 @@ app.get('/policy', (req, res) => {
 
 app.post('/policy/save', (req, res) => {
   const { daypart } = req.body;
-  if (!DAYPARTS.includes(daypart)) return res.redirect('/policy?err=1&msg=' + encodeURIComponent('Bad daypart.'));
+  if (!svcKnown(daypart)) return res.redirect('/policy?err=1&msg=' + encodeURIComponent('Bad daypart.'));
   let rules;
   try { rules = JSON.parse(req.body.rules_json); } catch { rules = null; }
   if (!Array.isArray(rules) || !rules.length) return res.redirect(`/policy?daypart=${daypart}&err=1&msg=` + encodeURIComponent('Add at least one rule.'));
@@ -15100,7 +15190,7 @@ app.post('/policy/activate', (req, res) => {
  */
 app.post('/policy/restamp', (req, res) => {
   if (!canWrite(req)) return res.status(403).send('Read-only');
-  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  const daypart = svcKnown(req.body.daypart) ? req.body.daypart : null;
   if (!daypart) return res.redirect('/policy?err=1&msg=' + encodeURIComponent('Which service?'));
   const cur = currentForDaypart(daypart);
   if (!cur) return res.redirect(`/policy?daypart=${daypart}&err=1&msg=` + encodeURIComponent('No policy in force.'));
@@ -15139,8 +15229,8 @@ app.post('/webhook/benugin', (req, res) => {
   const { date, daypart, servers } = req.body || {};
   // The date is checked properly, the way the tips page checks it. A truthy
   // test alone let a malformed batch date mint a junk shift nobody could find.
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !DAYPARTS.includes(daypart) || !Array.isArray(servers)) {
-    return res.status(400).json({ ok: false, error: 'need { date: YYYY-MM-DD, daypart: cafe|dinner, servers: [...] }' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !svcLive(daypart) || !Array.isArray(servers)) {
+    return res.status(400).json({ ok: false, error: 'need { date: YYYY-MM-DD, daypart: a live schedule, servers: [...] }' });
   }
   s.getOrIgnore.run(date, daypart);
   const sh = s.findShift.get(date, daypart);
@@ -23049,11 +23139,24 @@ app.get('/schedule', (req, res) => {
             return el ? el.value : '';
           }
           out.w = pick('w'); out._csrf = pick('_csrf');
+          // THE BOARD YOU ARE ON. Without it every action below came back as
+          // the schedule PICKER: the route redirects to the board named in the
+          // post, this post named none, and a board with no service is the
+          // picker. The action had happened. The swap then found no grid in the
+          // reply and changed nothing, so a duplicate did not appear until a
+          // refresh, and a dragged card sat faded as "in flight" forever.
+          out.svc = pick('svc');
           return out;
         }
 
         function sbSwap(html) {
           var doc = new DOMParser().parseFromString(html, 'text/html');
+          // NOT A BOARD, NOT A SWAP. If the reply is any other page, swapping
+          // nothing in leaves the board showing a state the database no longer
+          // has — which is exactly how the bug above hid. The action already
+          // happened, so reloading this board is the honest answer: it asks
+          // the database again, and it cannot repeat the post.
+          if (!doc.querySelector('.sb-grid')) { location.reload(); return; }
           // Held across the swap. The element survives, but for the instant the
           // grid is empty the browser clamps scrollTop to the new maximum —
           // zero — and does not put it back when the rows return. Measured
@@ -24578,7 +24681,7 @@ app.get('/timeclock/export', (req, res) => {
   // handed back the whole floor — a spreadsheet that quietly disagreed with the
   // screen it came from.
   const xEmp = String(req.query.emp || '');
-  const xSvc = DAYPARTS.includes(req.query.svc) ? req.query.svc : '';
+  const xSvc = svcKnown(req.query.svc) ? req.query.svc : '';
   const xPos = String(req.query.pos || '');
   const xSt = String(req.query.st || '');
   const xMissing = (e) => !e.clock_out_at && e.status !== 'active' && e.status !== 'on_break';
@@ -24943,7 +25046,7 @@ app.get('/timeclock/new', (req, res) => {
           <select name="employee_id" required><option value="">Choose…</option>
             ${staff.map((s2) => `<option value="${s2.id}">${esc(s2.name)}</option>`).join('')}</select></label>
         <label class="tcm-f"><span>Service</span>
-          <select name="daypart" required>${DAYPARTS.map((d) => `<option value="${d}">${dp(d)}</option>`).join('')}</select></label>
+          <select name="daypart" required>${svcOptions().map((d) => `<option value="${esc(d)}">${esc(dp(d))}</option>`).join('')}</select></label>
         <label class="tcm-f"><span>Position</span>
           <select name="position" required><option value="">Choose…</option>
             ${allRoles().map((r) => `<option value="${esc(r)}">${esc(tcPosName(r))}</option>`).join('')}</select></label>
@@ -24962,7 +25065,7 @@ app.post('/timeclock/new', (req, res) => {
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   const inAt = TC.localInputToUtc(req.body.in);
   const outAt = TC.localInputToUtc(req.body.out);
-  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : null;
+  const daypart = svcLive(req.body.daypart) ? req.body.daypart : null;
   const position = allRoles().includes(req.body.position) ? req.body.position : null;
   // A manager is never asked to justify a correction. The record still says who
   // changed what, when, and what it was before — which is the part anybody
@@ -26080,7 +26183,7 @@ app.get('/timeclock/:id', (req, res) => {
               <label class="tcm-f"><span>Position</span><select name="position">
                 ${allRoles().map((r) => `<option value="${esc(r)}"${r === e.position ? ' selected' : ''}>${esc(tcPosName(r))}</option>`).join('')}</select></label>
               <label class="tcm-f"><span>Service</span><select name="daypart">
-                ${DAYPARTS.map((d) => `<option value="${d}"${d === e.daypart ? ' selected' : ''}>${dp(d)}</option>`).join('')}</select></label>
+                ${svcOptions(e.daypart).map((d) => `<option value="${esc(d)}"${d === e.daypart ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}</select></label>
               <label class="tcm-f wide"><span>Reason <i>required</i></span>
                 <input name="reason" required maxlength="300" placeholder="Why the change — this is kept forever."></label>
               <button class="bs-btn" type="submit">Save the correction</button>
@@ -26153,7 +26256,7 @@ app.post('/timeclock/:id/edit', (req, res) => {
   const outAt = TC.localInputToUtc(req.body.out);
   if (outAt && outAt <= inAt) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Clock-out must be after clock-in.'));
   const position = allRoles().includes(req.body.position) ? req.body.position : e.position;
-  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart : e.daypart;
+  const daypart = svcKnown(req.body.daypart) ? req.body.daypart : e.daypart;
   // tcCanEdit checked the day this punch is on NOW. Moving a clock-in across
   // the cutoff moves it to another day and another pay period, so the day it is
   // going TO has to be free as well — otherwise the freeze is a wall you can
@@ -26460,8 +26563,8 @@ app.post('/timeclock/day-cell', express.json(), (req, res) => {
   const from = already[0] || {};
   const position = allRoles().includes(req.body.position) ? req.body.position
     : (allRoles().includes(from.role) ? from.role : emp.role);
-  const daypart = DAYPARTS.includes(req.body.daypart) ? req.body.daypart
-    : (DAYPARTS.includes(from.daypart) ? from.daypart : DAYPARTS[DAYPARTS.length - 1]);
+  const daypart = svcKnown(req.body.daypart) ? req.body.daypart
+    : (svcKnown(from.daypart) ? from.daypart : DAYPARTS[DAYPARTS.length - 1]);
 
   const at = TC.localInputToUtc(`${date}T${value}`);
   let inAt, outAt;

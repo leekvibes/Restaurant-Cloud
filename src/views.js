@@ -73,7 +73,9 @@ const dp = (d) => {
     const name = require('./services').nameOf(d);
     if (name && name !== d) return name;
   } catch { /* no services table here — fall through to the old pair */ }
-  return d === 'cafe' ? 'Café' : 'Dinner';
+  // The original pair keeps its old words; anything else is at least its own
+  // key, never mislabelled as Dinner because it was not the cafe.
+  return d === 'cafe' ? 'Café' : d === 'dinner' ? 'Dinner' : String(d);
 };
 
 // Set by server.js so the nav can be drawn for whoever is signed in, without

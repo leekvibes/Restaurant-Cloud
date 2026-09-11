@@ -1149,6 +1149,17 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-cols2 { display: grid; grid-template-columns: 1fr 330px; margin-top: 4px; }
 .bs-cols2 > .bs-col:first-child { padding-left: 0; padding-right: 30px; border-right: 1px solid var(--field-border); }
 .bs-cols2 > .bs-col:last-child { padding-right: 0; padding-left: 30px; border-left: 0; }
+/* The staff table needs about 570px of its own, and the tip-pool column takes
+   330px beside it. Below this width that does not leave enough, and the table
+   spilled UNDER the pool: the pool's figures sat on top of Hrs, Wage and Edit.
+   Reported from a laptop. Stacked instead, so the table gets the full width
+   and the pool follows it. */
+@media (max-width: 1260px) {
+  .bs-cols2 { grid-template-columns: 1fr; }
+  .bs-cols2 > .bs-col:first-child { padding-right: 0; border-right: 0; }
+  .bs-cols2 > .bs-col:last-child { padding-left: 0; margin-top: 22px; padding-top: 18px;
+    border-top: 1px solid var(--field-border); }
+}
 .bs-sheet-acts { font-size: 13px; }
 .bs-split-h { margin-top: 26px; }
 .bs-sheet-note { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }

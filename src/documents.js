@@ -354,11 +354,10 @@ function forEmployee(empId) {
  * cannot get into the staff portal is filed correctly, listed correctly, and
  * seen by nobody — and the only thing the app said was "Added."
  *
- * Two ways that happens, and both are ordinary:
- *   a MANAGER does not use the staff portal at all. It is deliberate, and it
- *     means a document assigned to one has nowhere to appear.
- *   somebody with NO PIN cannot sign in. The PIN is the whole of portal
- *     authentication, so no PIN is no portal.
+ * The ordinary way that happens: somebody with NO PIN cannot sign in. The PIN
+ * is the whole of portal authentication, so no PIN is no portal. (Managers
+ * were a second way until the owner's rule changed: any staff member uses the
+ * portal now, managers included, to sign their own documents.)
  *
  * Returns null when they can, and the reason when they cannot — phrased for a
  * manager reading a list, because that is the only place it is ever shown.
@@ -371,9 +370,6 @@ function cannotOpen(emp) {
   const no = (tag, after) => ({ tag, after, toString: () => tag });
   if (!emp) return no('No longer on staff', 'is no longer on staff');
   if (!emp.active) return no('Not active', 'is not an active employee');
-  if (emp.role === 'manager') {
-    return no('Managers do not use the staff portal', 'does not use the staff portal');
-  }
   if (!String(emp.pin || '').trim()) {
     return no('No PIN — cannot sign in to the portal', 'has no PIN, so cannot sign in to the portal');
   }

@@ -70,7 +70,7 @@ const SOURCES = [
     run: (p, n) => db.prepare(`SELECT id, date, daypart, status FROM shifts
       WHERE date LIKE ? ESCAPE '\\' OR daypart LIKE ? ESCAPE '\\'
       ORDER BY date DESC LIMIT ?`).all(p, p, n)
-      .map((r) => ({ title: `${r.date} · ${r.daypart === 'cafe' ? 'Café' : 'Dinner'}`,
+      .map((r) => ({ title: `${r.date} · ${require('./views').dp(r.daypart)}`,
         sub: r.status === 'emailed' ? 'sent' : 'open', href: `/shifts/${r.id}` })),
   },
   {

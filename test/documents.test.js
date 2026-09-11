@@ -355,7 +355,9 @@ test('it says who cannot open a document, and why', () => {
   const gone = { id: 3, name: 'Gone', role: 'server', pin: '2222', active: 0 };
   const fine = { id: 4, name: 'Fine', role: 'server', pin: '3333', active: 1 };
 
-  assert.ok(D2.cannotOpen(mgr), 'a manager has no staff portal to open it in');
+  // Managers use the portal now, so a manager with a PIN reaches their documents
+  // like anybody else. This asserted the opposite while that was the rule.
+  assert.strictEqual(D2.cannotOpen(mgr), null, 'a manager with a PIN can open it');
   assert.ok(D2.cannotOpen(nopin), 'and no PIN is no portal — the PIN is the whole of that sign-in');
   assert.ok(D2.cannotOpen(gone), 'nor somebody no longer active');
   assert.strictEqual(D2.cannotOpen(fine), null, 'anybody else can');
@@ -364,7 +366,6 @@ test('it says who cannot open a document, and why', () => {
   // the tag to fit the sentence turned "No PIN" into "no pin".
   assert.match(D2.cannotOpen(nopin).tag, /No PIN/, 'the tag keeps the field its own name');
   assert.match(D2.cannotOpen(nopin).after, /^has no PIN/, 'and the sentence form follows a name');
-  assert.match(D2.cannotOpen(mgr).after, /^does not use/);
 });
 
 test('the audience carries what deciding that needs', () => {

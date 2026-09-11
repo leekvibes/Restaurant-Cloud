@@ -297,7 +297,10 @@ const q = {
   employeeByPin: db.prepare('SELECT * FROM employees WHERE pin = ? AND active = 1 AND id <> ?'),
   // Sign-in lookup for the tips page. Returns every match so a duplicate PIN
   // fails loudly instead of silently picking one of them.
-  staffByPin: db.prepare("SELECT * FROM employees WHERE pin = ? AND active = 1 AND role <> 'manager'"),
+  // Managers included. They were kept out on the reasoning that a manager has
+  // no staff portal, and the owner's answer is that they do: any staff member
+  // signs in here, to sign their own documents like everybody else.
+  staffByPin: db.prepare("SELECT * FROM employees WHERE pin = ? AND active = 1"),
   // Per-role wages
   roleWage: db.prepare('SELECT wage_cents FROM employee_roles WHERE employee_id = ? AND role = ?'),
   rolesForEmployee: db.prepare('SELECT role, wage_cents FROM employee_roles WHERE employee_id = ? ORDER BY role'),

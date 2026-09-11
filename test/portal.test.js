@@ -2389,18 +2389,95 @@ test('somebody who has never opened the portal reads as exactly that', async () 
   assert.match(html, /have not opened the staff portal since recording began/);
 });
 
-test('a manager is told managers do not use the portal, not shown an empty history', async () => {
+test('a manager signs in to the portal like anybody, and their Activity shows it', async () => {
+  // Managers were kept out of the portal entirely. The owner's rule is that any
+  // staff member uses it, to sign their own documents like everybody else.
   const id = addPerson('Floor Manager', 'manager', '7272');
+  const r = await form('/tips/start', { pin: '7272' });
+  assert.strictEqual(r.status, 302);
+  assert.match((r.headers.get('set-cookie') || ''), /^zwin_portal=/, 'the manager PIN opens a portal session');
   const html = await activityTab(id);
-  // Anchored to the new card: this profile already says the same sentence
-  // beside the PIN field, so a bare match passed against the old code too.
-  assert.match(html, /<h2 class="epr-h">On the app<\/h2>\s*<p class="epr-none">Managers do not use the staff portal/,
-    'the On the app card itself says why it is empty');
-  assert.doesNotMatch(html, /Last on the app/, 'no stats that would read as a manager who never looks');
+  assert.match(html, /Last on the app<\/span><b>Today, \d{1,2}:\d{2}/, 'and the sign-in is recorded');
+  assert.doesNotMatch(html, /do not use the staff portal/, 'no sentence left saying otherwise');
 });
 
 test('somebody with no PIN is told why they cannot be on the app', async () => {
   const id = addPerson('No Pin Yet', 'server', '');
   const html = await activityTab(id);
   assert.match(html, /No PIN on file/);
+});
+
+// ===========================================================================
+// A SCHEDULE ADDED FROM THE PICKER WORKS EVERYWHERE THE FIRST TWO DO
+//
+// Twenty-odd places asked the hard-coded pair ['cafe','dinner'] whether a
+// service was real. The portal offered a new schedule's clock and then refused
+// the clock-in with "Choose which service you are working.", so a night team
+// on a schedule made from the picker could not start work at all. Log a
+// service, the tip-out policy page, fix requests and the manager's punch
+// editor all said no the same way. Each test here failed against the code
+// this replaces.
+// ===========================================================================
+
+const locOf = (res) => decodeURIComponent(res.headers.get('location') || '');
+
+test('a schedule added from the picker can be clocked into, and the punch reaches payroll', async () => {
+  const id = addPerson('Late Shift', 'server', '8181');
+  const made = await form('/services', { name: 'Late Night', member: String(id), clock: '1' });
+  assert.strictEqual(made.status, 302, 'the schedule is created');
+  const cookie = await signIn('8181');
+  const page = await (await asStaff('/portal/clock?svc=late-night', cookie)).text();
+  assert.match(page, /name="daypart"[^>]*value="late-night"|value="late-night"[^>]*name="daypart"/,
+    'the portal offers its clock');
+
+  const res = await form('/portal/clock/in', { daypart: 'late-night', position: 'server' }, { cookie });
+  assert.doesNotMatch(locOf(res), /Choose which service/, `not refused: ${locOf(res)}`);
+  assert.match(locOf(res), /Clocked in/, 'clocked in');
+  const open = withDb((c) => c.prepare(
+    'SELECT * FROM time_entries WHERE employee_id = ? AND clock_out_at IS NULL').get(id));
+  assert.ok(open, 'an open punch exists');
+  assert.strictEqual(open.daypart, 'late-night', 'stamped with the schedule it was made on');
+
+  await form('/portal/clock/out', {}, { cookie });
+  const done = withDb((c) => c.prepare('SELECT * FROM time_entries WHERE id = ?').get(open.id));
+  assert.ok(done.clock_out_at, 'and clocked out');
+  const work = withDb((c) => c.prepare(`SELECT w.* FROM work w JOIN shifts s ON s.id = w.shift_id
+    WHERE w.employee_id = ? AND s.daypart = 'late-night'`).get(id));
+  assert.ok(work, 'the hours landed on a Late Night service, which is what payroll reads');
+});
+
+test('the clock still refuses somebody who is not on that schedule', async () => {
+  addPerson('Not Late', 'server', '8282');
+  // Straight through the PIN door, NOT signIn(): that helper puts everybody on
+  // every schedule first, which is exactly the membership this test is about.
+  const r = await form('/tips/start', { pin: '8282' });
+  const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(cookie, /^zwin_portal=/, 'signed in');
+  const res = await form('/portal/clock/in', { daypart: 'late-night', position: 'server' }, { cookie });
+  assert.match(locOf(res), /not set up for Late Night/, 'membership is still the gate');
+});
+
+test('a schedule added from the picker can have a service logged, and a tip-out policy of its own', async () => {
+  const newPage = await (await fetch(`${BASE}/shifts/new`)).text();
+  assert.match(newPage, /<option value="late-night">Late Night<\/option>/, 'Log a service offers it');
+  const res = await form('/shifts', { date: '2026-07-23', daypart: 'late-night' });
+  assert.match(res.headers.get('location') || '', /^\/shifts\/\d+$/, 'and makes the service instead of refusing it');
+  const pol = await (await fetch(`${BASE}/policy?daypart=late-night`)).text();
+  assert.match(pol, /class="tab active">Late Night</, 'the policy page has a tab for it');
+});
+
+test('the Services list finds a service by its schedule name, not only its key', async () => {
+  const html = await (await fetch(`${BASE}/shifts`)).text();
+  assert.match(html, /data-f="service"\s+data-v="late-night" data-name="Late Night"/, 'the chip carries its name');
+  assert.match(html, /data-service="late-night" data-svcname="Late Night"/, 'and each row carries its own');
+  assert.match(html, /el\.getAttribute\('data-svcname'\) === nm/, 'and the filter matches on it');
+});
+
+test('a service on a schedule with no tip-out policy of its own says so before it is sent', async () => {
+  const res = await form('/shifts', { date: '2026-07-24', daypart: 'late-night' });
+  const html = await (await fetch(BASE + res.headers.get('location'))).text();
+  assert.match(html, /Late Night has no tip-out policy of its own yet/, 'not priced on defaults in silence');
+  const cafe = await form('/shifts', { date: '2026-07-24', daypart: 'cafe' });
+  const ok = await (await fetch(BASE + cafe.headers.get('location'))).text();
+  assert.doesNotMatch(ok, /no tip-out policy of its own/, 'and a schedule that has one is not nagged');
 });

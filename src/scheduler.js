@@ -913,7 +913,13 @@ function moveShift(id, { toDate, toEmployeeId } = {}) {
   const patch = {};
   if (toDate) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(toDate))) throw new ScheduleError('That is not a day.', 'range');
-    const off = daysApart(localDateOf(row.starts_at), toDate);
+    // In BUSINESS days, which is what a board column is. The calendar date of
+    // the start was used, and for a shift that starts between midnight and the
+    // cutoff the two differ by one: a 3am start sits in the previous night's
+    // column. Dropped on the next column it computed "no move" and the card
+    // snapped back without a word; dropped anywhere else it landed one column
+    // short. Measured on a 3am shift dropped onto Tuesday, back on Monday.
+    const off = daysApart(row.business_date, toDate);
     if (!Number.isFinite(off)) throw new ScheduleError('That is not a day.', 'range');
     if (off !== 0) {
       patch.startsAt = TC.utcToLocalInput(shiftUtcByDays(row.starts_at, off)).replace('T', ' ');

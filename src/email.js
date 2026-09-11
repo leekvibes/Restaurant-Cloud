@@ -1,5 +1,12 @@
 'use strict';
 
+// The schedule's own name, not the pair it started as. These said "Cafe" or
+// "Dinner" by hard-coded test long after both were renamed, so an Evening
+// Service pay email called itself Dinner, and a schedule added later did too.
+// Required late: views reads the services table, and this file is loaded by
+// scripts that never open one.
+const svcLabel = (d) => require('./views').dp(d);
+
 const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
@@ -194,7 +201,7 @@ function serverEmail(p, ctx) {
   return { to: ctx.email, subject, html: shell('Your shift summary', body, {
     // Their OWN role, not always 'Server'. A bartender's email said Server at
     // the top from the moment they became a direct earner.
-    subline: [p.name, ROLE_LABEL[p.role] || ROLE_LABEL.server, ctx.date, ctx.daypart === 'cafe' ? 'Café' : 'Dinner'].filter(Boolean).join(' · '),
+    subline: [p.name, ROLE_LABEL[p.role] || ROLE_LABEL.server, ctx.date, svcLabel(ctx.daypart)].filter(Boolean).join(' · '),
     hero: { label: alsoTotal > 0 ? 'Your total tips' : 'Tips you keep', value: fmt(grand), color: GREEN },
   }) };
 }
@@ -222,7 +229,7 @@ function supportEmail(p, ctx) {
 
   const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(total)} in tips`;
   return { to: ctx.email, subject, html: shell('Your shift summary', body, {
-    subline: [p.name, ROLE_LABEL[p.role] || p.role, ctx.date, ctx.daypart === 'cafe' ? 'Café' : 'Dinner'].filter(Boolean).join(' · '),
+    subline: [p.name, ROLE_LABEL[p.role] || p.role, ctx.date, svcLabel(ctx.daypart)].filter(Boolean).join(' · '),
     hero: { label: 'Total tips', value: fmt(total), color: GREEN },
   }) };
 }
@@ -240,7 +247,7 @@ function supportEmail(p, ctx) {
  * @param delivery { sent, previewed, errors:[], recipients:[{name,to,total}] }
  */
 function managerShiftEmail(results, meta, delivery) {
-  const dayLabel = meta.daypart === 'cafe' ? 'Café' : 'Dinner';
+  const dayLabel = svcLabel(meta.daypart);
   const failed = delivery.errors || [];
   const ok = delivery.recipients || [];
   const preview = !delivery.sent && delivery.previewed;

@@ -212,7 +212,9 @@ test('the reskin dropped none of the information', () => {
 test('who and when moved into the masthead rather than being dropped', () => {
   // Three rows became one subline. The values still have to be there.
   const s = E.serverEmail(server, serverCtx).html;
-  assert.match(s, /Rosa Diaz · Server · 2026-07-16 · Dinner/);
+  // The schedule's own name. This said Dinner for a service called Evening
+  // Service, because the label was a hard-coded test on the key.
+  assert.match(s, /Rosa Diaz · Server · 2026-07-16 · Evening Service/);
   const p = E.periodEmail(periodRow, periodCtx).html;
   assert.match(p, /Rosa Diaz · Jul 4 – Jul 17/);
 });
