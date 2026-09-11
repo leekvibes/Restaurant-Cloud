@@ -2983,6 +2983,37 @@ function shiftWarnings(sh, inp, r) {
     .filter((sv) => (toCents(sv.cardTips) + toCents(sv.cashTips)) > 0 && (toCents(sv.food) + toCents(sv.coffee) + toCents(sv.alcohol)) === 0)
     .map((sv) => sv.name);
   if (noSales.length) warn.push('No sales recorded for: ' + noSales.join(', ') + ' — their tip-out will calculate as $0. Add their sales below.');
+
+  // THE CLOCK AND THE SERVICE, compared. Two ways they part without a word: a
+  // service sent before somebody clocked out keeps the hours it was sent with,
+  // and a number typed on this page outranks the clock for good. Both are
+  // right as rules and both were invisible, so the pay on this page could
+  // differ from the hours on the person's own timesheet with nothing said.
+  // Measured: a three-hour punch paid at 0h; 5h typed over a 3h punch while
+  // the timesheet showed 3h. Only for somebody with a finished punch here, so
+  // hand-entered services with no clock behind them are left alone.
+  {
+    const f = (h) => `${(Math.round(h * 100) / 100).toFixed(2)}h`;
+    const nameOf = new Map((inp.people || []).map((p) => [p.employeeId, p.name]));
+    for (const wr of db.prepare('SELECT employee_id, hours, hours_source FROM work WHERE shift_id = ?').all(sh.id)) {
+      const closed = db.prepare(`SELECT COUNT(*) n FROM time_entries
+        WHERE shift_id = ? AND employee_id = ? AND clock_out_at IS NOT NULL`).get(sh.id, wr.employee_id).n;
+      if (!closed) continue;
+      const clocked = (TC.clockedMinutesOn(sh.id, wr.employee_id) || 0) / 60;
+      const paid = Number(wr.hours) || 0;
+      if (Math.abs(clocked - paid) < 0.01) continue;
+      const who = nameOf.get(wr.employee_id) || 'Somebody';
+      if (wr.hours_source === 'manager') {
+        warn.push(`${who}: ${f(paid)} typed on this service, ${f(clocked)} on the clock. Pay uses the typed ${f(paid)}, `
+          + `and their timesheet shows the clock's ${f(clocked)}. If the clock is right, switch their row back to the clock's hours.`);
+      } else {
+        warn.push(sh.status === 'emailed'
+          ? `${who} clocked ${f(clocked)} on this service, but it pays ${f(paid)}: it was sent before the clock caught up. `
+            + `Put ${f(clocked)} on their row below if the clock is right.`
+          : `${who} clocked ${f(clocked)} on this service, but it pays ${f(paid)}. Check their punch on Time clock.`);
+      }
+    }
+  }
   return { warn, notes };
 }
 
@@ -9555,6 +9586,18 @@ app.get('/portal/timesheet', (req, res) => {
     // a time and finds nothing to edit.
     for (const x of d.extra) {
       rows.push(line(x && x.daypart ? dp(x.daypart) : '', 'on the shift sheet', ''));
+    }
+    // WHEN PAY IS NOT THE CLOCK. A number a manager typed on the service
+    // outranks the punches, and this page showed only the punches, so somebody
+    // could sign 3h here and be paid the 5h typed on the service with nothing
+    // saying so. Said on the day, beside the punch it overrides. The day's
+    // total stays the clock's: what a person signs is not changed underneath them.
+    for (const sid of [...new Set(d.entries.map((e) => e.shift_id).filter(Boolean))]) {
+      const wr = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?').get(sid, emp.id);
+      if (!wr || wr.hours_source !== 'manager') continue;
+      const setMin = Math.round((Number(wr.hours) || 0) * 60);
+      if (Math.abs(setMin - (TC.clockedMinutesOn(sid, emp.id) || 0)) < 1) continue;
+      rows.push(line('', `Pay for this shift uses ${TC.hm(setMin)}, set by your manager`, ''));
     }
     return `<a class="tc-row${bad ? ' tc-row-bad' : ''}" href="/portal/timesheet/day/${d.date}">
       <span class="tc-row-l">

@@ -2203,3 +2203,47 @@ test('deleting one of two punches leaves the person on the shift with the other'
   await post(`/timeclock/${a.id}/delete`, { reason: 'entered twice' });
   assert.strictEqual(Number(workOf(sh.id, emp).hours), 1, 'the other punch keeps them on it, with its hour');
 });
+
+// ===========================================================================
+// THE CLOCK AND PAY NEVER DISAGREE IN SILENCE
+//
+// Two holds are right as rules and were invisible: clocked hours held back from
+// a service already sent, and a number typed on a service outranking the clock.
+// Measured before this: a three-hour clock-out paid at 0h with the manager told
+// only that the service had been sent; 5h typed over a 3h punch, the employee's
+// timesheet showing 3h, and nothing on any screen about either.
+// ===========================================================================
+
+test('clocked hours held back from a sent service tell the manager, and the service says so', async () => {
+  const e = await punch(E.sent, '2026-03-18', '09:00', '14:00');
+  const sh = shiftOn('2026-03-18', 'dinner');
+  db.prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?").run(sh.id);
+  await post(`/timeclock/${e.id}/edit`, {
+    in: '2026-03-18T09:00', out: '2026-03-18T18:00', position: 'server', daypart: 'dinner', reason: 'stayed late',
+  });
+  assert.strictEqual(Number(workOf(sh.id, E.sent).hours), 5, 'the figure the service was sent with stands');
+  const told = db.prepare(`SELECT * FROM admin_events WHERE kind = 'timeclock'
+    AND title LIKE '%did not reach%' ORDER BY id DESC`).get();
+  assert.ok(told, 'the manager is told, not only the audit log');
+  assert.match(told.body || '', /9\.00h/, 'with what the clock says');
+  assert.strictEqual(told.href, `/shifts/${sh.id}`, 'and a way straight to the service');
+  const page = await text(`/shifts/${sh.id}`);
+  assert.match(page, /clocked 9\.00h on this service, but it pays 5\.00h: it was sent before the clock caught up/,
+    'and the service itself says it, for as long as it is true');
+});
+
+test('a number typed over clocked hours is said on the service and on the timesheet', async () => {
+  const emp = E.corrected;
+  await punch(emp, '2026-03-19', '17:00', '20:00');                       // 3h on the clock
+  const sh = shiftOn('2026-03-19', 'dinner');
+  await post(`/shifts/${sh.id}/server`, { employee_id: String(emp), hours: '5', wage: '15' });
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 5, 'the typed figure is what pays');
+  const page = await text(`/shifts/${sh.id}`);
+  assert.match(page, /5\.00h typed on this service, 3\.00h on the clock\. Pay uses the typed 5\.00h/,
+    'the service page says both numbers and which one pays');
+  const cookie = await signIn(PIN(emp));
+  const start = require('../src/periods').periodFor('2026-03-19').start;
+  const ts = await text(`/portal/timesheet?p=${start}`, { cookie });
+  assert.match(ts, /Pay for this shift uses 5h 0m, set by your manager/,
+    'and the timesheet they sign says pay is not the clock for that shift');
+});

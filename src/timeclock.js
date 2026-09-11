@@ -885,6 +885,42 @@ const shiftHasPunches = (shiftId) => countShiftPunches.get(shiftId).n > 0;
  * the clock; that is the override rule, and it is enforced in the SQL rather
  * than here so no caller can forget it.
  */
+/**
+ * SAY IT WHEN CLOCKED HOURS CANNOT REACH THE SERVICE.
+ *
+ * Both holds in syncShiftHours are right: a sent service keeps the hours it was
+ * sent with, and a signed timesheet is not rewritten under its signature. What
+ * was wrong was the silence. Somebody clocking out after their service was sent
+ * had those hours held with nothing but a line in the audit log. Measured: a
+ * three-hour punch, and the service and payroll still at 0h, with the manager
+ * told only that the service had been sent. Told now, once per figure, with a
+ * link to the service.
+ *
+ * Only when the held figure differs from what the service pays, so nothing is
+ * announced that would change nothing. Skipped for the startup backfill, which
+ * re-reads old data and would flood the bell on every deploy. Never throws:
+ * telling the manager must not be the thing that stops a clock-out.
+ */
+function heldNotice(shiftId, employeeId, sh, hours, reason, by) {
+  if (by === 'backfill') return;
+  try {
+    const row = db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(shiftId, employeeId);
+    const on = row ? Number(row.hours) || 0 : 0;
+    if (Math.abs(on - hours) < 0.01) return;
+    const who = (db.prepare('SELECT name FROM employees WHERE id = ?').get(employeeId) || {}).name || 'Somebody';
+    let svc = sh.daypart || '';
+    try { svc = require('./services').nameOf(sh.daypart) || svc; } catch { /* keep the key */ }
+    const f = (n) => `${(Math.round(n * 100) / 100).toFixed(2)}h`;
+    require('./portal').adminNotifyOnce(`held:${shiftId}:${employeeId}:${f(hours)}:${reason}`, 'timeclock',
+      `${who}'s clocked hours did not reach ${dayLabel(sh.date)} ${svc}`.trim(), {
+        body: reason === 'shift_sent'
+          ? `The service was sent before this was clocked, so it still pays ${f(on)} while the punches say ${f(hours)}. Open the service and put ${f(hours)} on ${who}'s row if the clock is right.`
+          : `That day is on a timesheet already signed off, so the service still pays ${f(on)} while the punches say ${f(hours)}. Reopen the timesheet to take these hours.`,
+        href: `/shifts/${shiftId}`,
+      });
+  } catch (e) { console.warn('[clock] held-hours notice not sent:', e && e.message); }
+}
+
 function syncShiftHours(shiftId, employeeId, by, opts = {}) {
   if (!shiftId || !employeeId) return { written: false, reason: 'no_shift' };
   const sh = shiftRow.get(shiftId);
@@ -915,6 +951,7 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
       after: `${hours}h clocked`,
       reason: 'the timesheet covering this day is approved — reopen it to take these hours',
     });
+    heldNotice(shiftId, employeeId, sh, hours, 'sheet_frozen', by);
     return { written: false, reason: 'sheet_frozen', hours, ...r };
   }
 
@@ -930,6 +967,7 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
       after: `${hours}h clocked`,
       reason: 'shift already emailed — the hours it was sent with stand',
     });
+    heldNotice(shiftId, employeeId, sh, hours, 'shift_sent', by);
     return { written: false, reason: 'shift_sent', hours, ...r };
   }
 
