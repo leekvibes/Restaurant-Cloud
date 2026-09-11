@@ -3976,7 +3976,9 @@ test('the delete reuses the punch route rather than opening a second way in', as
     'and typed hours post to the one that removes them from the service');
   // That route's guards, restated here so removing one is a failing test.
   const at = src.indexOf("app.post('/timeclock/:id/delete'");
-  const route = src.slice(at, at + 1400);
+  // The whole route, not a fixed 1400 characters of it: a longer comment
+  // pushed the resync past that window and failed this with nothing removed.
+  const route = src.slice(at, src.indexOf('\n});', at));
   assert.match(route, /tcCanEdit\(req, res, e\)/, 'permission and the frozen-period check');
   assert.match(route, /needs a reason/, 'a reason is required');
   assert.match(route, /locked/, 'a locked punch is refused');

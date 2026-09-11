@@ -333,3 +333,26 @@ test('payroll pays a bartender for their hours once, not once per list', () => {
   assert.match(body, /rec\.tipsEarned \+= p\.tipShare \+ \(p\.poolShare \|\| 0\);/,
     'and their share of what was handed over');
 });
+
+test('a service somebody is on with no hours and no money is not a shift worked', () => {
+  // A deleted punch left people on a service at 0 hours, and the portal counted
+  // it: "Shifts worked 2" for one shift of work. Hours and money were right.
+  const { aggregatePayroll } = require('../src/reports');
+  const day = '2026-06-03';
+  const emp = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES ('Zero Row', 'server', 1000, 1)`).run().lastInsertRowid);
+  const sid = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, created_at)
+    VALUES (?, 'cafe', 'open', datetime('now'))`).run(day).lastInsertRowid);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, ?, 0)').run(sid, emp, 'server');
+  try {
+    const r = aggregatePayroll(day, day).rows.find((x) => x.employeeId === emp);
+    assert.ok(!r || r.shifts === 0, `nothing worked is not a shift (${r && r.shifts})`);
+    db.prepare('UPDATE work SET hours = 3 WHERE shift_id = ? AND employee_id = ?').run(sid, emp);
+    const r2 = aggregatePayroll(day, day).rows.find((x) => x.employeeId === emp);
+    assert.strictEqual(r2.shifts, 1, 'and three hours on it is one');
+  } finally {
+    db.prepare('DELETE FROM work WHERE shift_id = ?').run(sid);
+    db.prepare('DELETE FROM shifts WHERE id = ?').run(sid);
+    db.prepare('DELETE FROM employees WHERE id = ?').run(emp);
+  }
+});

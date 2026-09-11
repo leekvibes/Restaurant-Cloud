@@ -176,7 +176,11 @@ function aggregatePayroll(from, to, opts = {}) {
       rec.roles.add('server'); rec.hours += h.hours; rec.wage += wage;
       rec[wk + 'Hours'] += h.hours; rec[wk + 'Wage'] += wage;
       rec.paycheckTips += paycheck; rec.cashHome += p.cashTips; rec.tipsEarned += p.tipsKept;
-      if (h.counted) rec.shifts += 1;
+      // A SHIFT WORKED has hours or money on it. Somebody left on a service at
+      // 0 hours with nothing rung and nothing tipped, a deleted punch being
+      // the usual way, was counted anyway: the portal said "Shifts worked 2"
+      // for one shift of work. Hours, wages and tips were already right.
+      if (h.counted && (h.hours > 0 || p.food || p.coffee || p.alcohol || p.cardTips || p.cashTips)) rec.shifts += 1;
       detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: 'server', hours: h.hours,
         wage, cardTips: p.cardTips, cashTips: p.cashTips, tipout: p.tipoutTotal, tipsKept: p.tipsKept, paycheck });
     }
@@ -192,7 +196,7 @@ function aggregatePayroll(from, to, opts = {}) {
       rec.paycheckTips += p.tipShare + poolPaycheck;   // role tip-out + card pool → paycheck
       rec.weeklyCash += poolCash;                      // jar + to-go cash → handed out
       rec.tipsEarned += p.tipShare + (p.poolShare || 0);
-      if (h.counted) rec.shifts += 1;
+      if (h.counted && (h.hours > 0 || p.tipShare || p.poolShare)) rec.shifts += 1;
       detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: p.role, hours: h.hours,
         wage, cardTips: 0, cashTips: 0, tipout: 0, tipsKept: p.tipShare + (p.poolShare || 0), paycheck: p.tipShare + poolPaycheck });
     }

@@ -26311,6 +26311,8 @@ app.post('/timeclock/:id/edit', (req, res) => {
     TC.syncShiftHours(moved.shift_id, e.employee_id, actor, { role: position });
     if (wasShiftId && wasShiftId !== moved.shift_id) {
       TC.syncShiftHours(wasShiftId, e.employee_id, actor);
+      // Moved off that service entirely: off it as a person too, not left at 0h.
+      pruneClockOnlyRow(wasShiftId, e.employee_id, actor);
     }
   })();
   } catch (err) {
@@ -26736,6 +26738,40 @@ app.post('/timeclock/work/:shiftId/delete', (req, res) => {
   return back(`${emp.name} taken off ${dp(sh.daypart)} on ${TC.dayLabel(sh.date)} — ${row.hours}h removed.`);
 });
 
+/**
+ * Take somebody off a service when the clock was the only reason they were on it.
+ *
+ * A punch puts a person on that night's service. Deleting the punch, or moving
+ * it to another night, took the hours away and left the person behind at 0
+ * hours: the service told a manager to "check the time clock" for hours that
+ * never existed, and the portal counted a shift they did not work. Measured:
+ * one real shift, "Shifts worked 2".
+ *
+ * Only when nothing else holds them there: no hours left, no punch left, a row
+ * the clock made, no sales, tips, note or report, and a service not yet sent.
+ * Money cannot move either way: 0 hours at any rate is $0, and there were no
+ * tips. Logged on the service, so the removal is on the record.
+ */
+function pruneClockOnlyRow(shiftId, empId, actor) {
+  if (!shiftId || !empId) return false;
+  const sh = s.shiftById.get(shiftId);
+  if (!sh || sh.status === 'emailed') return false;
+  const wr = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?').get(shiftId, empId);
+  if (!wr || Number(wr.hours) > 0 || wr.hours_source !== 'clock') return false;
+  if (db.prepare('SELECT 1 FROM time_entries WHERE shift_id = ? AND employee_id = ? LIMIT 1').get(shiftId, empId)) return false;
+  if (db.prepare('SELECT 1 FROM tip_submissions WHERE shift_id = ? AND employee_id = ? LIMIT 1').get(shiftId, empId)) return false;
+  const ss = db.prepare('SELECT * FROM server_sales WHERE shift_id = ? AND employee_id = ?').get(shiftId, empId);
+  if (ss) {
+    const money = ['food_cents', 'coffee_cents', 'alcohol_cents', 'card_tips_cents', 'cash_tips_cents', 'jar_cash_cents']
+      .reduce((a, k) => a + (Number(ss[k]) || 0), 0);
+    if (money || String(ss.note || '').trim()) return false;
+  }
+  db.prepare('DELETE FROM server_sales WHERE shift_id = ? AND employee_id = ?').run(shiftId, empId);
+  db.prepare('DELETE FROM work WHERE shift_id = ? AND employee_id = ?').run(shiftId, empId);
+  TC.logEvent('shift', shiftId, 'removed_clock_only', actor, { reason: `no punch left for employee ${empId}` });
+  return true;
+}
+
 app.post('/timeclock/:id/delete', (req, res) => {
   const e = TC.q.byId.get(Number(req.params.id));
   if (!e) return res.status(404).end();
@@ -26756,8 +26792,10 @@ app.post('/timeclock/:id/delete', (req, res) => {
     db.prepare('DELETE FROM time_corrections WHERE time_entry_id = ?').run(e.id);
     db.prepare('DELETE FROM time_entries WHERE id = ?').run(e.id);
     tcTouchDates(empId, [day], actor, 'a manager deleted a punch');
-    // The hours this punch put on the shift go with it.
+    // The hours this punch put on the shift go with it, and so does the person,
+    // when the punch was the only thing that put them there.
     TC.syncShiftHours(shiftId, empId, actor);
+    pruneClockOnlyRow(shiftId, empId, actor);
   })();
   // Said in the restaurant's time. `was` is the log record and stays exact;
   // shown to a manager it read "20:00 → 01:30" for a 4pm-to-9:30pm punch.

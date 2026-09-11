@@ -233,8 +233,10 @@ test('a punch moved to another service takes its hours with it — both ends', a
 
   const to = shiftOn('2026-03-06', 'cafe');
   assert.strictEqual(Number(workOf(to.id, E.corrected).hours), 5, 'the cafe gained them');
-  assert.strictEqual(Number(workOf(from.id, E.corrected).hours), 0,
-    'and dinner gave them up — otherwise the same five hours are paid twice');
+  // Gone from dinner, not left there at 0 hours: the punch was the only thing
+  // that put them on it, and a 0-hour row counted a shift they did not work.
+  assert.strictEqual(workOf(from.id, E.corrected), undefined,
+    'and dinner gave them up entirely — otherwise the same five hours are paid twice');
 });
 
 test('an approved correction reaches the shift, not just the punch', async () => {
@@ -384,7 +386,10 @@ test('a single punch can be deleted on its own, with a reason', async () => {
 
   await post(`/timeclock/${e.id}/delete`, { reason: 'clocked in on the wrong service' });
   assert.ok(!db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(e.id), 'the punch is gone');
-  assert.strictEqual(Number(workOf(sh.id, emp).hours), 0, 'and its hours came off the shift with it');
+  // And the person with them: it was their only punch and they had nothing
+  // else on the shift, so a 0-hour row would have counted a shift never
+  // worked. A second punch, or any money, keeps them on it (tested below).
+  assert.strictEqual(workOf(sh.id, emp), undefined, 'and its hours came off the shift with it, the person too');
   const ev = db.prepare("SELECT * FROM time_events WHERE entity='entry' AND entity_id=? AND action='deleted'").get(e.id);
   assert.ok(ev, 'the deletion is on the record even though the punch is not');
   assert.match(ev.before_val || '', /09:00|13:00|2026-05-06/, 'with what it destroyed');
@@ -2184,4 +2189,17 @@ test('too early says when the door opens and how long that is', async () => {
     SVC.setLimit('dinner', wasLimit.mode, wasLimit.earlyMin);
     SVC.setForEmployee(emp.id, wasSvcs);
   }
+});
+
+
+test('deleting one of two punches leaves the person on the shift with the other', async () => {
+  // The promise the delete test above makes: a punch that should not exist is
+  // removed without taking somebody off a shift they did work.
+  const emp = E.corrected;
+  const a = await punch(emp, '2026-05-27', '09:00', '11:00');
+  await punch(emp, '2026-05-27', '12:00', '13:00');
+  const sh = shiftOn('2026-05-27', 'dinner');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 3, 'three hours from two punches');
+  await post(`/timeclock/${a.id}/delete`, { reason: 'entered twice' });
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 1, 'the other punch keeps them on it, with its hour');
 });

@@ -2492,3 +2492,35 @@ test('portal pages tell the phone never to keep a copy', async () => {
     assert.match(r.headers.get('cache-control') || '', /no-store/, `${p} is never kept`);
   }
 });
+
+test('deleting somebody’s only punch takes them off the service it put them on', async () => {
+  // A punch puts a person on that day's service. Deleting it took the hours
+  // and left the person: 0 hours on a service they never worked, a manager told
+  // to "check the time clock", and an extra shift counted on their portal.
+  const id = addPerson('Punch Undo', 'server', '8383');
+  const day = '2026-07-25';
+  await form('/timeclock/new', { employee_id: String(id), daypart: 'cafe', position: 'server',
+    in: `${day}T16:00`, out: `${day}T20:00`, reason: 'test' });
+  const entry = withDb((c) => c.prepare('SELECT * FROM time_entries WHERE employee_id = ?').get(id));
+  assert.ok(entry && entry.shift_id, 'the punch landed on a service');
+  const onIt = () => withDb((c) => c.prepare(
+    'SELECT COUNT(*) n FROM work WHERE shift_id = ? AND employee_id = ?').get(entry.shift_id, id).n);
+  assert.strictEqual(onIt(), 1, 'and put them on it');
+  await form(`/timeclock/${entry.id}/delete`, { reason: 'entered by mistake' });
+  assert.strictEqual(onIt(), 0, 'deleting it takes them off again');
+});
+
+test('a deleted punch does NOT take somebody off a service they have money on', async () => {
+  const id = addPerson('Punch Keep', 'server', '8484');
+  const day = '2026-07-26';
+  await form('/timeclock/new', { employee_id: String(id), daypart: 'cafe', position: 'server',
+    in: `${day}T16:00`, out: `${day}T20:00`, reason: 'test' });
+  const entry = withDb((c) => c.prepare('SELECT * FROM time_entries WHERE employee_id = ?').get(id));
+  withDb((c) => c.prepare(`INSERT INTO server_sales (shift_id, employee_id, card_tips_cents)
+    VALUES (?, ?, 4200) ON CONFLICT(shift_id, employee_id) DO UPDATE SET card_tips_cents = 4200`)
+    .run(entry.shift_id, id), false);
+  await form(`/timeclock/${entry.id}/delete`, { reason: 'wrong times' });
+  const still = withDb((c) => c.prepare(
+    'SELECT COUNT(*) n FROM work WHERE shift_id = ? AND employee_id = ?').get(entry.shift_id, id).n);
+  assert.strictEqual(still, 1, 'their tips keep them on it, whatever happened to the punch');
+});
