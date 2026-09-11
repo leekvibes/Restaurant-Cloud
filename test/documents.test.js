@@ -487,6 +487,18 @@ test('reading a document keeps the reader signed in, on the clock or not', async
 
     const open = await fetch(`${base}/portal/documents/${id}`, { headers: { cookie }, redirect: 'manual' });
     assert.strictEqual(open.status, 200);
+    // The screen holds still while somebody signs: the page carries the script
+    // that holds the viewport at its normal size while any sheet is open. The
+    // page's own viewport stays pinchable; only the script asks for the hold.
+    const html = await open.text();
+    assert.doesNotMatch(html, /<meta name="viewport" content="[^"]*maximum-scale/,
+      'the document itself can still be pinched to read');
+    assert.match(html, /base \+ ',maximum-scale=1'/, 'a sheet holds the zoom while it is open');
+    assert.match(html, /gesturestart/, 'including against an iOS pinch');
+    // Every Cancel, Back and scrim closes the sheet it is in. They closed only
+    // the acknowledgment sheet, so on a document with fields the submit sheet
+    // could not be left except by submitting.
+    assert.match(html, /closeSheet\(x\.closest\('\.pdv-sheet'\)\)/, 'a close button closes its own sheet');
     assert.match(open.headers.get('set-cookie') || '', /zwin_portal=[^;]+;.*Max-Age=2700/,
       'opening the document starts a fresh 45 minutes');
 

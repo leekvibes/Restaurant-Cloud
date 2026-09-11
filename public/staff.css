@@ -293,6 +293,22 @@ body.bare {
   font-family: var(--sans, 'Geist', system-ui, sans-serif);
 }
 
+/* NOTHING IN THE PORTAL ZOOMS BY ITSELF.
+   An iPhone zooms the whole page in when a typing box smaller than 16px takes
+   the cursor, and leaves it zoomed after the box has gone. The document
+   sheet's name and date boxes had no size of their own, so they took the
+   phone's default of about 13px, and every signature began with the screen
+   lurching in. This is the floor for every box in the portal. :where() keeps
+   it at one class's weight and it sits above every portal rule, so a rule
+   that states a size still wins (the tips form's 17px). One that states less
+   than 16px would win too, which is why those are fixed where they stand and
+   why test/portal-zoom.test.js reads this file for them. */
+.pt :where(input, select, textarea) { font-size: 16px; }
+/* And no double tap zooms it either: a quick second tap on a field or a
+   button read as "zoom in". Pinch still works, so a handbook can still be read
+   up close; while a sheet is open even that is held (portalStillScript). */
+.pt { touch-action: manipulation; }
+
 /* --- chrome --------------------------------------------------------------- */
 .pt-top {
   display: flex; align-items: center; gap: 12px;
@@ -519,7 +535,7 @@ body.bare {
 .pt-addrow { display: flex; align-items: flex-end; gap: 12px; }
 .pt-underline {
   flex: 1; background: none; border: 0; border-bottom: 1px solid var(--pt-line);
-  padding: 12px 0; font: inherit; font-size: 15px; color: var(--pt-ink);
+  padding: 12px 0; font: inherit; font-size: 16px; color: var(--pt-ink); /* 16px+ or an iPhone zooms in */
 }
 .pt-underline:focus { outline: 0; border-bottom-color: var(--pt-blue); }
 .pt-add {
@@ -682,7 +698,7 @@ body.bare {
    width and sat in the sheet as a stub next to a full-width textarea one screen
    away. */
 .pes-note textarea, .pes-note input[type="text"], .pes-note input:not([type]) {
-  width: 100%; font: inherit; font-size: 15px; padding: 11px 12px; border-radius: var(--pt-r);
+  width: 100%; font: inherit; font-size: 16px; /* 16px+ or an iPhone zooms in */ padding: 11px 12px; border-radius: var(--pt-r);
   border: 1px solid var(--pt-line); background: var(--pt-field); color: var(--pt-ink); resize: vertical; }
 /* The PIN sits in the sheet's own row rhythm. (.tc-pin styles the input on the
    full-screen clock; on a label it turns the word "PIN" into a giant keypad.) */
@@ -808,7 +824,7 @@ body.bare {
 }
 .tsp-arrow.off { opacity: .3; pointer-events: none; }
 .tsp-sel {
-  flex: 1 1 auto; min-width: 0; font: inherit; font-size: 15px; text-align: center;
+  flex: 1 1 auto; min-width: 0; font: inherit; font-size: 16px; /* 16px+ or an iPhone zooms in */ text-align: center;
   min-height: 44px; padding: 0 10px; color: var(--pt-ink); border-radius: var(--pt-r);
   border: 1px solid var(--pt-line); background: var(--pt-field);
 }
@@ -1880,7 +1896,11 @@ body.bare {
   padding-top: 18px; border-top: 1px solid var(--pt-hair); text-align: center; }
 .pdv-next span { font-size: 13.5px; color: var(--pt-muted); }
 
-.pdv-sheet { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; }
+/* On the sheet layer, like every other portal sheet. It was 60, the tab bar's
+   own layer, and the bar is drawn after it, so on a phone the bar covered the
+   bottom of each sheet: the Cancel under "Add signature" and the Back under
+   "Complete & submit". */
+.pdv-sheet { position: fixed; inset: 0; z-index: var(--pt-z-sheet); display: flex; align-items: flex-end; }
 .pdv-scrim { position: absolute; inset: 0; background: rgba(16,20,26,.5); }
 .pdv-panel { position: relative; width: 100%; max-height: 88vh; overflow: auto;
   display: grid; gap: 13px; padding: 22px 20px calc(24px + env(safe-area-inset-bottom, 0px));
@@ -1889,7 +1909,14 @@ body.bare {
 .pdv-sh-p { margin: 0; padding: 13px 15px; border-radius: 10px; background: var(--pt-field);
   font-size: 14px; line-height: 1.6; color: var(--pt-body, var(--pt-ink)); }
 .pdv-f > span { display: block; margin-bottom: 5px; font-size: 12.5px; font-weight: 600; color: var(--pt-ink); }
-.pdv-f input { width: 100%; }
+/* 17px, like the tips form. Under 16px an iPhone zooms the page in the moment
+   the sheet puts the cursor here, which is every time: the sheet focuses the
+   box as it opens. Styled like the portal's other boxes, too; nothing styled
+   it before, so it was the phone's bare default, in Arial. */
+.pdv-f input { display: block; width: 100%; min-height: 50px; padding: 12px 14px;
+  font: inherit; font-size: 17px; color: var(--pt-ink); background: var(--pt-field);
+  border: 1px solid var(--pt-line); border-radius: var(--pt-r); }
+.pdv-f input:focus { outline: 2px solid var(--pt-blue); outline-offset: 1px; }
 .pdv-chk { display: flex; gap: 11px; align-items: flex-start; padding: 4px 0;
   font-size: 14.5px; color: var(--pt-ink); cursor: pointer; }
 .pdv-chk input { width: 21px; height: 21px; flex: none; margin-top: 1px; }

@@ -4158,8 +4158,53 @@ const portalPage = (title, body, opts = {}) => layout(title,
   `<div class="pt${opts.noTabs ? '' : ' has-tabs'}">${body}${
     opts.noTabs ? '' : portalTabs(currentPath())}</div>${
     body.includes('data-pt-back') ? portalBackScript() : ''}${portalRestoreScript()}${
-    opts.doneHome ? portalDoneScript(opts.doneHome) : ''}`,
+    portalStillScript()}${opts.doneHome ? portalDoneScript(opts.doneHome) : ''}`,
   { bare: true, staff: true });
+
+/**
+ * NOTHING MOVES WHILE A SHEET IS UP.
+ *
+ * Signing, dating, any step: the owner's rule is that the screen holds still.
+ * The 16px floor in staff.css stops the phone zooming by itself when a box
+ * takes the cursor, and touch-action there stops a double tap. This is the
+ * rest. While a sheet, a dialog or the menu is open the viewport is held at
+ * its normal size, so a page somebody had pinched into snaps back and the
+ * sheet opens whole, and a pinch inside it does nothing. Closed, the page can
+ * be pinched again, because a forty-page handbook has to be readable on a
+ * phone.
+ *
+ * It watches the page rather than hooking each sheet's open and close. There
+ * are several sheets and several ways out of each (the button, the scrim,
+ * Escape, the back-forward restore above), and a hold that one of them forgot
+ * to release would leave the page unzoomable until a reload.
+ */
+const portalStillScript = () => `<scr` + `ipt>
+  (function () {
+    var meta = document.querySelector('meta[name=viewport]');
+    if (!meta || !window.MutationObserver) return;
+    var base = meta.getAttribute('content') || '';
+    if (/maximum-scale/.test(base)) return;   // already held for good, like the PIN screen
+    var held = false;
+    function anyOpen() {
+      var els = document.querySelectorAll('.pdv-sheet, .pt-sheet, .myav-sheet, [aria-modal="true"]');
+      for (var i = 0; i < els.length; i++) if (els[i].getClientRects().length) return true;
+      return false;
+    }
+    function check() {
+      var now = anyOpen();
+      if (now === held) return;
+      held = now;
+      meta.setAttribute('content', now ? base + ',maximum-scale=1' : base);
+    }
+    new MutationObserver(check).observe(document.body,
+      { subtree: true, attributes: true, attributeFilter: ['hidden', 'class'] });
+    // iOS lets a pinch past maximum-scale on purpose, for accessibility. This
+    // is the one signal it still honours, so it is only cancelled while a
+    // sheet is up.
+    document.addEventListener('gesturestart', function (e) { if (held) e.preventDefault(); }, { passive: false });
+    check();
+  })();
+</scr` + `ipt>`;
 
 // ---------------------------------------------------------------------------
 // What a person earned. Everything here already existed — it is the engine's
@@ -31406,17 +31451,28 @@ const pdfViewerScript = () => `<script src="/static/vendor/pdf.min.js"></script>
     var f = sheet.querySelector('input[name=full_name]');
     if (f) f.focus();
   }
-  function closeSheet() {
-    if (!sheet) return;
-    sheet.hidden = true;
-    document.documentElement.style.overflow = '';
+  // CLOSES THE SHEET IT IS IN. Every sheet here has a Cancel or a Back and a
+  // scrim marked data-pdv-close, and this used to close only the acknowledgment
+  // sheet, the one a document with no fields uses. On a document with fields,
+  // Cancel on the signature and on the date did nothing, and so did Back on the
+  // submit sheet: the only way out of "Submit this document" was to submit it,
+  // which is the one step that sheet exists to keep deliberate.
+  function closeSheet(which) {
+    var sh = which || sheet;
+    if (!sh) return;
+    sh.hidden = true;
+    if (sh === sigSheet || sh === dateSheet) pendingField = null;
+    if (!document.querySelector('.pdv-sheet:not([hidden])')) document.documentElement.style.overflow = '';
   }
   document.addEventListener('click', function (ev) {
     if (ev.target.closest && ev.target.closest('[data-pdv-sign]')) { ev.preventDefault(); openSheet(); }
-    if (ev.target.closest && ev.target.closest('[data-pdv-close]')) { ev.preventDefault(); closeSheet(); }
+    var x = ev.target.closest && ev.target.closest('[data-pdv-close]');
+    if (x) { ev.preventDefault(); closeSheet(x.closest('.pdv-sheet')); }
   });
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape' && sheet && !sheet.hidden) closeSheet();
+    if (ev.key !== 'Escape') return;
+    var open = document.querySelectorAll('.pdv-sheet:not([hidden])');
+    if (open.length) closeSheet(open[open.length - 1]);
   });
   // The button stays dead until the box is ticked, so Sign is never something
   // a thumb can hit on the way past.
