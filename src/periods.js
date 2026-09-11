@@ -34,10 +34,20 @@ CREATE TABLE IF NOT EXISTS period_skips (
 );
 `);
 
+// Migration: the overtime rule, and who was exempt from it, as they stood when
+// a period's payroll went out. A sent period is worked out with these from then
+// on (reports.js), so changing overtime later cannot restate it.
+const sendCols = db.prepare('PRAGMA table_info(period_sends)').all().map((c) => c.name);
+if (!sendCols.includes('ot_rule')) db.exec('ALTER TABLE period_sends ADD COLUMN ot_rule TEXT');
+if (!sendCols.includes('ot_exempt')) db.exec('ALTER TABLE period_sends ADD COLUMN ot_exempt TEXT');
+
 const Q = {
   get: db.prepare('SELECT value FROM settings WHERE key = ?'),
   set: db.prepare('INSERT INTO settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
   sendFor: db.prepare('SELECT * FROM period_sends WHERE period_start = ?'),
+  // Once: a period sent again keeps the rule it first went out under.
+  stampOT: db.prepare(`UPDATE period_sends SET ot_rule = @rule, ot_exempt = @exempt
+    WHERE period_start = @start AND ot_rule IS NULL`),
   markSent: db.prepare(`INSERT INTO period_sends (period_start, period_end, sent_count, sent_at)
     VALUES (@start, @end, @count, datetime('now'))
     ON CONFLICT(period_start) DO UPDATE SET sent_count = excluded.sent_count, sent_at = excluded.sent_at`),
@@ -105,6 +115,9 @@ function isPeriod(from, to) {
 
 const sendRecord = (start) => Q.sendFor.get(start) || null;
 const markSent = (start, end, count) => Q.markSent.run({ start, end, count });
+/** Record the overtime rule and exempt list a sent period went out under. The first send wins. */
+const stampOvertime = (start, rule, exemptIds) => Q.stampOT.run({
+  start, rule: JSON.stringify(rule || {}), exempt: JSON.stringify([...(exemptIds || [])]) });
 
 /**
  * A period the owner has said they are not running — a fortnight nobody was
@@ -117,6 +130,6 @@ const unskipPeriod = (start) => Q.unskip.run(start);
 
 module.exports = {
   getSetting, setSetting, anchor, periodLength, periodFor, currentPeriod,
-  recentPeriods, labelFor, fmtRange, isPeriod, sendRecord, markSent,
+  recentPeriods, labelFor, fmtRange, isPeriod, sendRecord, markSent, stampOvertime,
   skipRecord, markSkipped, unskipPeriod,
 };

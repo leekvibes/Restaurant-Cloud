@@ -499,7 +499,7 @@ test('the payroll support-tips report totals a support person over a date range'
   const h = await html(`/payroll/support-tips?from=${from}&to=${to}`);
   assert.match(h, /Support tip take-home/, 'the report renders');
   assert.match(h, new RegExp(`value="${from}"`), 'the chosen range is on the form');
-  assert.match(h, /bs-take-head[\s\S]*?Card[\s\S]*?Cash[\s\S]*?Total/, 'card / cash / total columns');
+  assert.match(h, /bs-take-head[\s\S]*?Paycheck[\s\S]*?Cash[\s\S]*?Total/, 'paycheck / cash / total columns, as Payroll pays it');
   assert.match(h, /bs-take-tot/, 'and a totals row, because a support person was paid from the pool');
 });
 

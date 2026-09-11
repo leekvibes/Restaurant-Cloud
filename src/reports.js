@@ -33,8 +33,10 @@ const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
  * each — half a second at five hundred shifts. Expects `w` (work), `e`
  * (employees) and `er` (employee_roles, LEFT JOINed on employee_id + role).
  */
+// The rate typed on the service first, then the rate the service was SETTLED
+// at when it was sent (db.js, settleShift), and only then anything live.
 const WAGE_RATE_SQL =
-  `COALESCE(NULLIF(w.hourly_rate_cents, 0), ${require('./wages').wageOnSql('sh.date', 'sh.daypart')},`
+  `COALESCE(NULLIF(w.hourly_rate_cents, 0), w.settled_rate_cents, ${require('./wages').wageOnSql('sh.date', 'sh.daypart')},`
   + ' NULLIF(er.wage_cents, 0), e.hourly_rate_cents, 0)';
 
 /** Sales (food+coffee+alcohol) and labor (wages) for a date range, in cents. */
@@ -141,6 +143,7 @@ function aggregatePayroll(from, to, opts = {}) {
   const weekKey = (date) => (date < midDate ? 'wk1' : 'wk2');
 
   const detail = []; // per-shift, per-person rows for the "Shift detail" sheet
+  const { countsKeptTips } = require('./db');
 
   for (const sh of shifts) {
     const inp = shiftInputs(sh.id);
@@ -193,12 +196,23 @@ function aggregatePayroll(from, to, opts = {}) {
       const poolCash = (shares.weekly_cash || 0) + (shares.nightly_cash || 0); // jar + to-go cash
       rec.roles.add(p.role); rec.hours += h.hours; rec.wage += wage;
       rec[wk + 'Hours'] += h.hours; rec[wk + 'Wage'] += wage;
-      rec.paycheckTips += p.tipShare + poolPaycheck;   // role tip-out + card pool → paycheck
-      rec.weeklyCash += poolCash;                      // jar + to-go cash → handed out
-      rec.tipsEarned += p.tipShare + (p.poolShare || 0);
-      if (h.counted && (h.hours > 0 || p.tipShare || p.poolShare)) rec.shifts += 1;
+      // TIPS THEY WERE GIVEN THAT NO POT TAKES. Under a policy with no shared
+      // pot (Palm: "card and cash stay with whoever earned them") these are the
+      // person's own money. The tip engine kept them for them and payroll never
+      // looked: the card half never reached the check, the cash half was never
+      // counted as in hand. Counted from pay-math revision 2; a service settled
+      // before that keeps what it was settled with (db.js, pay_math).
+      const kept = countsKeptTips(sh);
+      const keptCard = kept ? (p.keptCard || 0) : 0;
+      const keptCash = kept ? (p.keptCash || 0) : 0;
+      rec.paycheckTips += p.tipShare + poolPaycheck + keptCard;   // tip-out + card pool + own card → paycheck
+      rec.weeklyCash += poolCash;                                // jar + to-go cash → handed out
+      rec.cashHome += keptCash;                                  // their own cash, already in hand
+      rec.tipsEarned += p.tipShare + (p.poolShare || 0) + keptCard + keptCash;
+      if (h.counted && (h.hours > 0 || p.tipShare || p.poolShare || keptCard || keptCash)) rec.shifts += 1;
       detail.push({ employeeId: p.employeeId, shiftId: sh.id, date: sh.date, daypart: sh.daypart, name: p.name, role: p.role, hours: h.hours,
-        wage, cardTips: 0, cashTips: 0, tipout: 0, tipsKept: p.tipShare + (p.poolShare || 0), paycheck: p.tipShare + poolPaycheck });
+        wage, cardTips: keptCard, cashTips: keptCash, tipout: 0,
+        tipsKept: p.tipShare + (p.poolShare || 0) + keptCard + keptCash, paycheck: p.tipShare + poolPaycheck + keptCard });
     }
   }
 
@@ -212,8 +226,19 @@ function aggregatePayroll(from, to, opts = {}) {
   // Overtime, only if it is switched on. Off (the default) or exempt, otPay is
   // 0 and wage is exactly the straight-time total it always was — nothing about
   // this branch changes a figure until the owner turns it on.
-  const otRule = OT.rule();
-  const exempt = otRule.enabled ? OT.exemptSet() : null;
+  // A pay period whose payroll has gone out keeps the overtime rule and the
+  // exempt list it went out under (periods.js, stampOvertime), so turning
+  // overtime off, moving the threshold or exempting somebody later cannot
+  // restate a period already paid. Any other range uses the rule as it is.
+  let frozen = null;
+  try {
+    const sentP = require('./periods').sendRecord(from);
+    if (sentP && sentP.period_end === to && sentP.ot_rule) {
+      frozen = { rule: JSON.parse(sentP.ot_rule), exempt: new Set(JSON.parse(sentP.ot_exempt || '[]')) };
+    }
+  } catch { frozen = null; }
+  const otRule = frozen ? frozen.rule : OT.rule();
+  const exempt = otRule.enabled ? (frozen ? frozen.exempt : OT.exemptSet()) : null;
 
   const rows = [...people.values()].sort((a, b) => a.name.localeCompare(b.name)).map((r) => {
     const cashTips = r.cashHome + r.weeklyCash;   // shown for reference only

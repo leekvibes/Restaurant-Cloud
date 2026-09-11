@@ -330,8 +330,8 @@ test('payroll pays a bartender for their hours once, not once per list', () => {
 
   // Tips still come from BOTH sides — those are two different pieces of money.
   assert.match(body, /rec\.tipsEarned \+= p\.tipsKept;/, 'what their own guests left them');
-  assert.match(body, /rec\.tipsEarned \+= p\.tipShare \+ \(p\.poolShare \|\| 0\);/,
-    'and their share of what was handed over');
+  assert.match(body, /rec\.tipsEarned \+= p\.tipShare \+ \(p\.poolShare \|\| 0\)/,
+    'and their share of what was handed over (from pay-math revision 2, plus tips of their own no pot takes)');
 });
 
 test('a service somebody is on with no hours and no money is not a shift worked', () => {

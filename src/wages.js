@@ -262,13 +262,15 @@ function dropServiceWage(employeeId, role, service) {
  * a manager has to choose it, having been told what it will change.
  *
  * Scoped to the role as well as the person, so correcting a busser rate does
- * not silently restate the same person's server shifts.
+ * not silently restate the same person's server shifts. And never a service
+ * already settled (sent, or inside a pay period whose payroll went out): those
+ * keep the rate they went out at, whatever is typed here later.
  */
 function restamp(employeeId, role, wageCents, fromDate, toDate) {
   const res = db.prepare(`UPDATE work SET hourly_rate_cents = @cents
      WHERE employee_id = @id
        AND (@role IS NULL OR role = @role)
-       AND shift_id IN (SELECT id FROM shifts WHERE date >= @from AND date <= @to)`)
+       AND shift_id IN (SELECT id FROM shifts WHERE date >= @from AND date <= @to AND pay_math IS NULL)`)
     .run({
       id: employeeId, role: role || null, cents: Math.max(0, Math.round(Number(wageCents) || 0)),
       from: fromDate, to: toDate,
@@ -281,7 +283,7 @@ function countAffected(employeeId, role, fromDate, toDate) {
   return db.prepare(`SELECT COUNT(*) n FROM work
      WHERE employee_id = @id
        AND (@role IS NULL OR role = @role)
-       AND shift_id IN (SELECT id FROM shifts WHERE date >= @from AND date <= @to)`)
+       AND shift_id IN (SELECT id FROM shifts WHERE date >= @from AND date <= @to AND pay_math IS NULL)`)
     .get({ id: employeeId, role: role || null, from: fromDate, to: toDate }).n;
 }
 

@@ -50,7 +50,10 @@ const shiftRows = db.prepare(`
     (SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0)
        FROM work w JOIN employees e ON e.id = w.employee_id
        LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
-      WHERE w.shift_id = sh.id AND COALESCE(e.pay_type,'hourly') <> 'salary') AS wages
+      WHERE w.shift_id = sh.id
+        -- Salaried as the service was settled when it was sent (db.js,
+        -- settleShift), so a later switch to salary cannot move a past night.
+        AND COALESCE(w.settled_salaried, COALESCE(e.pay_type, 'hourly') = 'salary') = 0) AS wages
   FROM shifts sh
   WHERE sh.date >= ? AND sh.date <= ?
   ORDER BY sh.date, sh.daypart`);

@@ -96,7 +96,7 @@ test('a live version cannot be discarded, and a draft can', () => {
   assert.ok(P.byId(live.id), 'and it is still there');
 
   const draft = P.stageRules('dinner', NEW, 'throwaway');
-  assert.strictEqual(P.discardStaged(draft.id), true);
+  assert.strictEqual(P.discardStaged(draft.id), 'deleted', 'a draft nothing was worked out with simply goes');
   assert.strictEqual(P.stagedForDaypart('dinner'), null);
   assert.strictEqual(P.currentForDaypart('dinner').id, live.id, 'discarding did not touch the live one');
 });
@@ -348,4 +348,76 @@ test('a database that has never seen it ends up with the old rules live', () => 
       assert.notStrictEqual(live.id, draft.id, `${dp}: and it is not what is live`);
     }
   }
+});
+
+// Discarding or replacing a draft used to DELETE it, and a service whose policy
+// row is gone re-locks onto whatever is live the next time it is worked out, so
+// throwing a draft away re-priced every night worked out under it, sent or not.
+// A draft in use is retired now: nobody's draft, kept for those nights.
+test('a draft services were worked out with is retired, never deleted', () => {
+  const draft = P.stageRules('dinner', NEW, 'a draft some nights locked onto');
+  const sent = mkShift('2026-10-05', 'dinner', 'emailed');
+  const open = mkShift('2026-10-06', 'dinner', 'open');
+  db.prepare('UPDATE shifts SET policy_id = ? WHERE id IN (?, ?)').run(draft.id, sent, open);
+  const rulesOf = (id) => P.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(id));
+
+  assert.strictEqual(P.discardStaged(draft.id), 'retired', 'discarding it retires it');
+  assert.ok(P.byId(draft.id), 'the row is still there');
+  const waiting = P.stagedForDaypart('dinner');
+  assert.ok(!waiting || waiting.id !== draft.id, 'but it is no longer the draft waiting to go live');
+  assert.deepStrictEqual(rulesOf(sent), NEW, 'the sent night is still worked out exactly as it was sent');
+  assert.deepStrictEqual(rulesOf(open), NEW, 'and the open one too, until somebody moves it on purpose');
+  assert.strictEqual(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(sent).p, draft.id,
+    'nothing re-locked onto the live policy');
+
+  // Saving a new draft over one in use retires it the same way.
+  const d2 = P.stageRules('dinner', NEW.slice(0, 1), 'another draft');
+  const n3 = mkShift('2026-10-07', 'dinner', 'emailed');
+  db.prepare('UPDATE shifts SET policy_id = ? WHERE id = ?').run(d2.id, n3);
+  const d3 = P.stageRules('dinner', NEW, 'and another');
+  assert.ok(P.byId(d2.id), 'the replaced draft is kept for the night that used it');
+  assert.deepStrictEqual(rulesOf(n3), NEW.slice(0, 1));
+  // A draft nothing used still simply goes.
+  assert.strictEqual(P.discardStaged(d3.id), 'deleted');
+  assert.strictEqual(P.byId(d3.id), null);
+});
+
+test('peeking at a service locks nothing onto it', () => {
+  const D = require('../src/db');
+  const sh = mkShift('2026-10-08', 'dinner', 'open');
+  const row = () => db.prepare('SELECT * FROM shifts WHERE id = ?').get(sh);
+  P.policyForShift(row(), { peek: true });
+  D.shiftInputs(sh, { peek: true });
+  assert.strictEqual(row().policy_id, null, 'no policy locked on');
+  assert.strictEqual(row().role_kinds, null, 'no tip handling locked on');
+  D.shiftInputs(sh);
+  assert.ok(row().policy_id && row().role_kinds, 'working it out for real still locks both');
+});
+
+// Tips a support person was given that no pot takes are theirs under rules with
+// no shared pot. Payroll left them out: the card half never reached the check.
+test('a support person’s own tips reach payroll, except on a service settled before', () => {
+  const { aggregatePayroll } = require('../src/reports');
+  const day = '2026-10-09';
+  const mkEmp = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1500, 1)`).run(name, role).lastInsertRowid);
+  const srv = mkEmp('Kept Server', 'server');
+  const bus = mkEmp('Kept Busser', 'busser');
+  const sh = mkShift(day, 'dinner', 'open');
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, ?, ?)').run(sh, srv, 'server', 5);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, ?, ?)').run(sh, bus, 'busser', 4);
+  db.prepare(`INSERT INTO server_sales (shift_id, employee_id, food_cents, card_tips_cents)
+    VALUES (?, ?, 50000, 8000)`).run(sh, srv);
+  // The busser was handed tips of their own: $15 on a card, $7 in cash.
+  db.prepare(`INSERT INTO server_sales (shift_id, employee_id, card_tips_cents, cash_tips_cents)
+    VALUES (?, ?, 1500, 700)`).run(sh, bus);
+  const busRow = () => aggregatePayroll(day, day).rows.find((r) => r.employeeId === bus);
+
+  // Neither dinner policy in this file pools anything, so the $22 is theirs.
+  const now = busRow();
+  db.prepare('UPDATE shifts SET pay_math = 1 WHERE id = ?').run(sh);
+  const legacy = busRow();
+  assert.strictEqual(now.paycheckTips - legacy.paycheckTips, 1500, 'their own $15 card tip is on the check');
+  assert.strictEqual(now.cashHome - legacy.cashHome, 700, 'their own $7 cash is counted as already in hand');
+  assert.strictEqual(now.takeHome - legacy.takeHome, 1500, 'so the check is $15 more, and the cash is not added to it');
 });

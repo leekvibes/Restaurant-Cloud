@@ -44,7 +44,14 @@ const Q = {
   insert: db.prepare('INSERT INTO policy_versions (daypart, rules_json, note, staged) VALUES (@daypart, @rules_json, @note, @staged)'),
   count: db.prepare('SELECT COUNT(*) n FROM policy_versions'),
   golive: db.prepare("UPDATE policy_versions SET staged = 0, effective_from = datetime('now') WHERE id = ? AND staged = 1"),
-  drop: db.prepare('DELETE FROM policy_versions WHERE id = ? AND staged = 1'),
+  // Never a version a service was worked out with. Those rows are history, and
+  // a service whose version has gone quietly re-locks onto whatever is live.
+  drop: db.prepare(`DELETE FROM policy_versions WHERE id = ? AND staged = 1
+    AND NOT EXISTS (SELECT 1 FROM shifts WHERE shifts.policy_id = policy_versions.id)`),
+  // A draft services were worked out with is RETIRED instead: staged = 2 is
+  // neither live nor waiting, so no page offers it and no new service can lock
+  // onto it, and it stays exactly as it was for the services that did.
+  retire: db.prepare('UPDATE policy_versions SET staged = 2 WHERE id = ? AND staged = 1'),
 };
 
 // First run of the rule-based system: seed defaults, and reset any old policy
@@ -97,19 +104,34 @@ function activateStaged(id) {
   return parse(Q.byId.get(id));
 }
 
-/** Throw away a draft. Only ever a draft — a live version cannot be deleted. */
+/**
+ * Throw away a draft. Only ever a draft — a live version cannot be deleted.
+ *
+ * And never one a service was worked out with. This used to delete the row
+ * regardless, and policyForShift re-locks a service whose version is gone onto
+ * whatever is live — so discarding a draft quietly re-priced every night that
+ * had been worked out under it, sent or not. A draft in use is retired
+ * instead. Returns 'deleted', 'retired', or false when there was nothing to do.
+ */
 function discardStaged(id) {
   const row = Q.byId.get(id);
   if (!row || row.staged !== 1) return false;
-  return Q.drop.run(id).changes > 0;
+  if (Q.drop.run(id).changes > 0) return 'deleted';
+  return Q.retire.run(id).changes > 0 ? 'retired' : false;
 }
 
-/** Lock a policy version onto a shift (if unstamped) and return its rule list. */
-function policyForShift(shift) {
+/**
+ * Lock a policy version onto a shift (if unstamped) and return its rule list.
+ *
+ * { peek: true } answers the same question and locks nothing, for pages that
+ * only read. A report opened at 4pm must not decide that tonight is worked out
+ * under the policy that happened to be in force at 4pm.
+ */
+function policyForShift(shift, opts) {
   let row = shift.policy_id ? byId(shift.policy_id) : null;
   if (!row) {
     row = currentForDaypart(shift.daypart);
-    if (row) s.setPolicy.run(row.id, shift.id);
+    if (row && !(opts && opts.peek)) s.setPolicy.run(row.id, shift.id);
   }
   return row ? row.rules : defaultRules();
 }
@@ -126,7 +148,9 @@ function saveRules(daypart, rules, note) {
  */
 function stageRules(daypart, rules, note) {
   const had = Q.staged.get(daypart);
-  if (had) Q.drop.run(had.id);
+  // The draft it replaces goes, unless services were worked out with it: then
+  // it is retired and kept for them, exactly as discardStaged does.
+  if (had && !Q.drop.run(had.id).changes) Q.retire.run(had.id);
   Q.insert.run({ daypart, rules_json: JSON.stringify(rules), note: (note || '').trim() || null, staged: 1 });
   return parse(Q.staged.get(daypart));
 }

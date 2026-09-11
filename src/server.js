@@ -803,13 +803,16 @@ const SHIFT_ROLLUP_COLS = `
     (SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0)
        FROM work w JOIN employees e ON e.id = w.employee_id
        LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
-      WHERE w.shift_id = sh.id AND COALESCE(e.pay_type, 'hourly') <> 'salary') AS wage_cents,
+      WHERE w.shift_id = sh.id
+        -- Salaried as the service was settled when it was sent (db.js,
+        -- settleShift), so a later switch to salary cannot move a past night.
+        AND COALESCE(w.settled_salaried, COALESCE(e.pay_type, 'hourly') = 'salary') = 0) AS wage_cents,
     -- Anyone who worked hours with no wage on file: they cost real money the
     -- figure above can't see, so the card says when it's short.
     (SELECT COUNT(*) FROM work w JOIN employees e ON e.id = w.employee_id
        LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
       WHERE w.shift_id = sh.id AND w.hours > 0
-        AND COALESCE(e.pay_type, 'hourly') <> 'salary'
+        AND COALESCE(w.settled_salaried, COALESCE(e.pay_type, 'hourly') = 'salary') = 0
         AND ${WAGE_RATE_SQL} = 0) AS no_wage`;
 
 // ---------------------------------------------------------------------------
@@ -3325,18 +3328,26 @@ const toldBefore = (prefix) => {
   } catch { return false; }
 };
 
+// Pay-math revisions (db.js, pay_math): a service keeps the arithmetic it was
+// settled under, so a later correction can never restate it.
+const { countsKeptTips, settleShift, settleRange } = require('./db');
+
 app.post('/shifts/:id/send', async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const inp = shiftInputs(sh.id);
   const r = runShift(inp, policyForShift(sh));
-  const emails = buildEmails(r, { date: sh.date, daypart: sh.daypart }, peopleMap(inp));
+  const emails = buildEmails(r, { date: sh.date, daypart: sh.daypart, ownCard: countsKeptTips(sh) }, peopleMap(inp));
   const result = await sendEmails(emails);
   s.markEmailed.run(sh.id);
   // What was sent, so a later change is said rather than silent. Fenced: a
   // failure to stamp must never be a failure to send, let alone a crash.
   try {
     db.prepare('UPDATE shifts SET sent_fingerprint = ? WHERE id = ?').run(serviceFingerprint(sh.id), sh.id);
+    // And SETTLE it: each person's rate and whether they were salaried, and
+    // the pay-math revision it went out under, so nothing changed later — a
+    // raise, a switch to salary, a fix to the arithmetic — can restate it.
+    settleShift(sh.id);
   } catch (e) { console.warn('[send] could not stamp what was sent:', e && e.message); }
 
   // Tell each person on the shift, on their portal, that their pay is ready —
@@ -4183,14 +4194,14 @@ const SHIFT_DONE = 'emailed';
 const HISTORY_FROM = process.env.PORTAL_HISTORY_FROM || '2026-07-18';
 
 /**
- * How many finished shifts this person has. One COUNT, no engine.
+ * How many shifts this person has on record, closed out or not. One COUNT, no engine.
  *
  * The history archive needs a total to say "page 2 of 6" with, and it must not
  * get that by loading the history.
  */
 const earningsCount = (empId) => db.prepare(`SELECT COUNT(*) n
   FROM shifts sh JOIN work w ON w.shift_id = sh.id
-  WHERE w.employee_id = ? AND sh.status = '${SHIFT_DONE}' AND sh.date >= ?`)
+  WHERE w.employee_id = ? AND sh.date >= ?`)
   .get(empId, HISTORY_FROM).n;
 
 /**
@@ -4221,12 +4232,12 @@ function earningsFor(empId, limit = 400, offset = 0) {
   // rule is a second answer to "what were they paid", and the one on the
   // staff member's own phone must not be the one that drifts.
   const worked = db.prepare(`SELECT sh.*, w.hours AS worked_hours, w.role AS worked_role,
-      ${WAGE_RATE_SQL} AS rate_cents, e.pay_type
+      ${WAGE_RATE_SQL} AS rate_cents, e.pay_type, w.settled_salaried
     FROM shifts sh
     JOIN work w ON w.shift_id = sh.id
     JOIN employees e ON e.id = w.employee_id
     LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
-    WHERE w.employee_id = ? AND sh.status = '${SHIFT_DONE}' AND sh.date >= ?
+    WHERE w.employee_id = ? AND sh.date >= ?
     ORDER BY sh.date DESC, sh.id DESC LIMIT ? OFFSET ?`)
     .all(empId, HISTORY_FROM, limit, offset);
 
@@ -4244,7 +4255,7 @@ function earningsFor(empId, limit = 400, offset = 0) {
       // Enough to investigate with, in the log. None of it reaches the page.
       console.error('[pay] could not cost shift', sh.id, 'for employee', empId,
         '-', (e && e.message) || 'unknown');
-      const salariedF = sh.pay_type === 'salary';
+      const salariedF = sh.settled_salaried != null ? sh.settled_salaried === 1 : sh.pay_type === 'salary';
       out.push({ shift: sh, kind: 'unavailable', unavailable: true,
         // Null, not zero. A zero here is a claim about somebody's earnings.
         kept: null, collected: null, tippedOut: null, cash: null, toPaycheck: null,
@@ -4258,7 +4269,7 @@ function earningsFor(empId, limit = 400, offset = 0) {
     const asSupport = (r.support || []).find((x) => x.employeeId === empId);
     // Salaried people have no hourly rate, and showing them one would be a
     // number they are not paid by.
-    const salaried = sh.pay_type === 'salary';
+    const salaried = sh.settled_salaried != null ? sh.settled_salaried === 1 : sh.pay_type === 'salary';
     const rate = salaried ? 0 : (sh.rate_cents || 0);
     const hours = asServer ? asServer.hours : asSupport ? asSupport.hours : (sh.worked_hours || 0);
     const pay = { salaried, rate, hours, wage: Math.round(rate * (hours || 0)), role: sh.worked_role };
@@ -4308,7 +4319,12 @@ function earningsFor(empId, limit = 400, offset = 0) {
         cash: 0, toPaycheck: 0, ...pay });
     }
   }
-  return out;
+  // NOT CLOSED OUT YET. Services the manager has not sent are listed too, and
+  // marked, rather than missing: the period total already counted them, so a
+  // list that left them out did not add up to it, and somebody looking for
+  // last night's shift found nothing and no reason why. Their figures are not
+  // shown until the service is closed out, because they can still change.
+  return out.map((x) => ({ ...x, open: String(x.shift.status) !== SHIFT_DONE }));
 }
 
 // ---------------------------------------------------------------------------
@@ -6598,6 +6614,7 @@ const shiftRowModel = (x) => ({
   tipsCents: x.kept || 0,
   kind: x.kind,
   unavailable: !!x.unavailable,
+  open: !!x.open,
   href: `/portal/earnings/${x.shift.id}`,
 });
 
@@ -6609,9 +6626,11 @@ const payShiftRow = (r, from) => `
   <a class="tc-row" href="${r.href}${from || ''}">
     <span class="tc-row-l">
       <b>${esc(niceDate(r.date))}${r.service ? ` · ${esc(r.service)}` : ''}</b>
-      <i>${esc(r.position)} · ${esc(payHrs(r.hours))}${r.unavailable ? ''
+      <i>${esc(r.position)} · ${esc(payHrs(r.hours))}${r.unavailable || r.open ? ''
         : r.wageCents ? ` · ${esc(payMoney(r.wageCents))} wages` : ''}</i></span>
-    ${r.unavailable
+    ${r.open
+      ? `<span class="tc-row-r"><span class="tc-chip">Not closed out yet</span></span>`
+      : r.unavailable
       ? `<span class="tc-row-r"><span class="tc-chip warn">Earnings unavailable</span></span>`
       : `<span class="tc-row-r"><b>${r.tipsCents ? esc(payMoney(r.tipsCents)) : esc(payHrs(r.hours))}</b>
           <i>${r.tipsCents ? 'tips' : 'worked'}</i></span>`}
@@ -6647,6 +6666,7 @@ app.get('/portal/earnings', (req, res) => {
     ? earningsFor(emp.id, 60).filter((x) => x.shift.date >= period.start && x.shift.date <= period.end)
     : [];
   const rows = mine.map(shiftRowModel);
+  const openHere = rows.filter((r) => r.open).length;
   const link = (i) => `/portal/earnings?p=${encodeURIComponent(periods[i].start)}`;
 
   res.send(portalPage('Pay', `
@@ -6679,6 +6699,7 @@ app.get('/portal/earnings', (req, res) => {
         <div class="tcc-clock">${esc(payMoney(m.grossCents))}</div>
         <div class="tcc-cap">${esc(PAY_GROSS_LABEL.toLowerCase())} · ${esc(m.label)}</div>
         ${m.status.note ? `<p class="tcc-note${m.status.tone === 'warn' ? ' tcc-note-warn' : ''}">${esc(m.status.note)}</p>` : ''}
+        ${openHere ? `<p class="tcc-note">Includes ${openHere} service${openHere === 1 ? '' : 's'} not closed out by management yet. Those figures can still change.</p>` : ''}
         <p class="tcc-note">${esc(PAY_GROSS_NOTE)}</p>
       </section>
 
@@ -6716,7 +6737,7 @@ app.get('/portal/earnings', (req, res) => {
       ${rows.length ? `<h2 class="tc-kick tc-kick-sec">Shifts in this period<b>${rows.length}</b></h2>
         <div class="tc-rows">${rows.map((r) => payShiftRow(r, '')).join('')}</div>`
         : `<div class="tc-empty"><b>No shifts in this period</b>
-             <span>Nothing has been sent for this fortnight yet.</span></div>`}
+             <span>You have no shifts on record for this fortnight.</span></div>`}
       `}
 
       <a class="tc-more" href="/portal/earnings/shifts">View all shift history ›</a>
@@ -6769,7 +6790,7 @@ app.get('/portal/earnings/shifts', (req, res) => {
              ${page < pages ? '' : 'aria-disabled="true" tabindex="-1"'} aria-label="Next page">→</a>
         </nav>` : ''}`
         : `<div class="tc-empty"><b>No past shifts yet</b>
-             <span>Once your manager sends a shift you worked, it shows up here.</span></div>`}
+             <span>Shifts you work show up here.</span></div>`}
     </div>`));
 });
 
@@ -6815,6 +6836,12 @@ app.get('/portal/earnings/:id', (req, res) => {
     ${portalTop(back, 'Shift pay')}
     <div class="pt-body tc-body">
       <h1 class="tc-h">${esc(niceDate(x.shift.date))}</h1>
+      ${x.open ? `<section class="tcc tcc-warn">
+        <h2 class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+          <span class="tcc-state">Not closed out yet</span></h2>
+        <p class="tcc-note">This service hasn't been closed out by management yet. Your hours are
+          recorded; your tips and pay for it show here once your manager closes it out.</p>
+      </section>` : ''}
       ${x.unavailable ? `<section class="tcc tcc-warn">
         <h2 class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
           <span class="tcc-state">Earnings unavailable</span></h2>
@@ -6831,14 +6858,14 @@ app.get('/portal/earnings/:id', (req, res) => {
                  figure they are not paid by. */''}
           ${x.salaried ? '<div class="tcc-f"><span>Pay</span><b>Salaried</b></div>'
             : x.rate ? `<div class="tcc-f"><span>Rate</span><b>${esc(money(x.rate))}/hr</b></div>` : ''}
-          ${x.unavailable ? '' : `
+          ${x.unavailable || x.open ? '' : `
             ${x.wage ? `<div class="tcc-f"><span>Hours pay</span><b>${esc(payMoney(x.wage))}</b></div>` : ''}
             ${x.kept ? `<div class="tcc-f"><span>Tips</span><b>${esc(payMoney(x.kept))}</b></div>` : ''}`}
         </div>
       </div>
       ${/* The engine's own itemisation — the same object the nightly email is
              rendered from, so the two cannot drift. */''}
-      ${x.unavailable ? '' : shiftBreakdown(x)}
+      ${x.unavailable || x.open ? '' : shiftBreakdown(x)}
     </div>`));
 });
 
@@ -11200,13 +11227,13 @@ function wageWhenFields(employeeId, role, opts = {}) {
     <label class="wg-opt"><input type="radio" name="wage_from" value="today" checked>
       <span><b>From today</b><i>Shifts already worked keep the wage they were paid at.</i></span></label>
     <label class="wg-opt"><input type="radio" name="wage_from" value="date">
-      <span><b>From a date</b><i>A raise that starts on a particular day &mdash; back-dated or ahead.</i></span>
+      <span><b>From a date</b><i>A raise that starts on a particular day &mdash; back-dated or ahead. Shifts already sent keep what they were paid.</i></span>
       <input class="wg-date" type="date" name="wage_date" value="${today}"
         aria-label="The day this wage starts" onfocus="var r=this.form.querySelector('[value=date]'); if(r) r.checked=true;"></label>
     <label class="wg-opt wg-opt--all"><input type="radio" name="wage_from" value="all" id="wg-all-${n}">
       <span><b>All shifts, including past</b><i>${worked
-        ? `Rewrites the rate on ${worked} worked shift${worked === 1 ? '' : 's'}. For a wage that was typed wrong, not for a raise.`
-        : 'They have no worked shifts yet, so this is the same as from today.'}</i></span></label>
+        ? `Rewrites the rate on ${worked} worked shift${worked === 1 ? '' : 's'} not sent yet. For a wage that was typed wrong, not for a raise. Shifts already sent keep what they were paid.`
+        : 'None of their shifts are waiting to be sent, so this is the same as from today.'}</i></span></label>
   </fieldset>`;
 }
 
@@ -12305,7 +12332,15 @@ app.post('/payroll/send', async (req, res) => {
   // had been told about. The flash said "previews were written instead", but
   // that is a sentence you see once against a record that contradicts it
   // forever.
-  if (out.sent) markSent(from, to, out.sent);
+  if (out.sent) {
+    markSent(from, to, out.sent);
+    // Every service in the period is settled with it — their figures just went
+    // out in people's summaries — whether or not each was sent on its own.
+    try {
+      settleRange(from, to);
+      require('./periods').stampOvertime(from, OT.rule(), [...OT.exemptSet()]);
+    } catch (e) { console.warn('[payroll] could not settle the period:', e && e.message); }
+  }
 
   // And on their phone, not only in their inbox.
   //
@@ -12430,10 +12465,14 @@ app.get('/payroll/:employeeId(\\d+)', (req, res) => {
     </div>`));
 });
 
-// Support tip take-home over a date range: for each service in the range, run
-// the tip engine and add up what each support person took — card to the
-// paycheck, cash out of the jar. A pure read of the same figures the shift sheet
-// and payroll already show; it changes no data and enters nothing.
+// Support tip take-home over a date range: for each service, what each person
+// was TIPPED OUT, and their share of any shared pot, split the way payroll
+// pays it (on the check, or cash) so this page and Payroll agree to the penny.
+//
+// Read-only for real. It said "it changes no data" while every service it
+// opened was being locked onto the policy in force that minute; it works each
+// one out with { peek: true } now, so opening a report cannot decide which
+// rules tonight is priced by.
 app.get('/payroll/support-tips', (req, res) => {
   const iso = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null);
   const justEnded = recentPeriods(2)[1];
@@ -12442,56 +12481,88 @@ app.get('/payroll/support-tips', (req, res) => {
   let from = iso(req.query.from) || fallbackFrom;
   let to = iso(req.query.to) || fallbackTo;
   if (from > to) { const t = from; from = to; to = t; }   // a backwards range still reads forwards
+  // The Day / Evening choice Payroll was showing, carried here and back again.
+  const svc = svcKnown(req.query.svc) ? req.query.svc : 'all';
+  const svcQS = svc !== 'all' ? `&svc=${encodeURIComponent(svc)}` : '';
 
-  const shifts = s.shiftsInRange.all(from, to);
-  const acc = new Map();   // employeeId -> { name, role, card, cash, hours, shifts }
+  const shifts = s.shiftsInRange.all(from, to).filter((sh) => svc === 'all' || sh.daypart === svc);
+  const acc = new Map();   // employeeId -> { name, roles, paycheck, cash, hours, shifts, paidOut, direct }
+  let draftNights = 0;
   for (const sh of shifts) {
-    const r = runShift(shiftInputs(sh.id), policyForShift(sh));
+    const r = runShift(shiftInputs(sh.id, { peek: true }), policyForShift(sh, { peek: true }));
+    const kept = countsKeptTips(sh);
+    const earners = new Map(r.servers.map((x) => [x.employeeId, x]));
     for (const p of r.support) {
-      const a = acc.get(p.employeeId) || { name: p.name, role: p.role, card: 0, cash: 0, hours: 0, shifts: 0 };
-      a.card += p.cardTotal; a.cash += p.cashTotal; a.hours += p.hours;
-      if (p.cardTotal || p.cashTotal) a.shifts += 1;
+      const a = acc.get(p.employeeId) || { name: p.name, roles: new Set(), paycheck: 0, cash: 0,
+        hours: 0, shifts: 0, paidOut: 0, direct: false };
+      const shares = p.poolShares || {};
+      // EXACTLY payroll's support side (reports.js): tip-out and card pots on
+      // the check, pot cash handed over, and tips of their own no pot takes.
+      const onCheck = (p.tipShare || 0) + (shares.paycheck || 0) + (kept ? (p.keptCard || 0) : 0);
+      const inCash = (shares.weekly_cash || 0) + (shares.nightly_cash || 0) + (kept ? (p.keptCash || 0) : 0);
+      a.roles.add(posName(p.role));
+      a.paycheck += onCheck;
+      a.cash += inCash;
+      a.hours += p.hours || 0;
+      if ((p.hours || 0) > 0 || onCheck || inCash) a.shifts += 1;
+      // A bartender or barista under the new rules earns directly AND is
+      // tipped out, so they are in both lists. What they tip out themselves
+      // (the busser by day, the barback by evening) is said beside what they
+      // received, so their line is not read as their whole night.
+      const own = earners.get(p.employeeId);
+      if (own) { a.direct = true; a.paidOut += own.tipoutTotal || 0; }
       acc.set(p.employeeId, a);
     }
+    const v = sh.policy_id ? db.prepare('SELECT staged FROM policy_versions WHERE id = ?').get(sh.policy_id) : null;
+    if (v && v.staged) draftNights += 1;
   }
-  const rows = [...acc.values()].filter((a) => a.card || a.cash)
-    .sort((a, b) => (b.card + b.cash) - (a.card + a.cash) || a.name.localeCompare(b.name));
-  const tCard = rows.reduce((a, r) => a + r.card, 0);
+  const rows = [...acc.values()].filter((a) => a.paycheck || a.cash)
+    .sort((a, b) => (b.paycheck + b.cash) - (a.paycheck + a.cash) || a.name.localeCompare(b.name));
+  const tPay = rows.reduce((a, r) => a + r.paycheck, 0);
   const tCash = rows.reduce((a, r) => a + r.cash, 0);
-  const hrs = (n) => (Math.round(n * 10) / 10).toFixed(1);
+  // Two places, as Payroll shows them.
+  const hrs = (n) => (Math.round(n * 100) / 100).toFixed(2);
+  const anyDirect = rows.some((r) => r.direct);
 
   const table = rows.length ? `
     <div class="bs-take-tbl bs-take-report">
       <div class="bs-take bs-take-head">
-        <span class="bs-take-w">${rows.length} support · ${shifts.length} service${shifts.length === 1 ? '' : 's'}</span>
-        <span class="bs-take-n">Card</span><span class="bs-take-n">Cash</span><span class="bs-take-n">Total</span></div>
+        <span class="bs-take-w">${rows.length} ${rows.length === 1 ? 'person' : 'people'} · ${shifts.length} service${shifts.length === 1 ? '' : 's'}</span>
+        <span class="bs-take-n">Paycheck</span><span class="bs-take-n">Cash</span><span class="bs-take-n">Total</span></div>
       ${rows.map((r) => `<div class="bs-take">
-        <span class="bs-take-w">${esc(r.name)} <i>${esc(r.role)} · ${hrs(r.hours)}h · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}</i></span>
-        <span class="bs-take-n">${money(r.card)}</span>
+        <span class="bs-take-w">${esc(r.name)} <i>${esc([...r.roles].join(', '))} · ${hrs(r.hours)}h · ${r.shifts} shift${r.shifts === 1 ? '' : 's'}${
+    r.direct ? ` · keeps their own tips${r.paidOut ? `, tipped out ${money(r.paidOut)}` : ''}` : ''}</i></span>
+        <span class="bs-take-n">${money(r.paycheck)}</span>
         <span class="bs-take-n">${money(r.cash)}</span>
-        <span class="bs-take-n"><b>${money(r.card + r.cash)}</b></span></div>`).join('')}
+        <span class="bs-take-n"><b>${money(r.paycheck + r.cash)}</b></span></div>`).join('')}
       <div class="bs-take bs-take-tot"><span class="bs-take-w">Everyone</span>
-        <span class="bs-take-n">${money(tCard)}</span>
+        <span class="bs-take-n">${money(tPay)}</span>
         <span class="bs-take-n">${money(tCash)}</span>
-        <span class="bs-take-n"><b>${money(tCard + tCash)}</b></span></div>
+        <span class="bs-take-n"><b>${money(tPay + tCash)}</b></span></div>
     </div>
-    <p class="bs-sheet-note">Card rides the paycheck (to-go card + any tip-out); cash is handed over out of the jar. Enter each day's cash on its shift under Shared tip pool.</p>`
-    : `<p class="bs-clear">No support tips in this range yet. Enter each day's cash jar on its shift (Shared tip pool → “Cash you counted”), then come back.</p>`;
+    <p class="bs-sheet-note">Paycheck is what goes on the check: tip-outs, which are a percentage of sales, and any card pot. Cash is pot cash handed over, plus cash they were tipped directly.${
+    anyDirect ? ' Bartenders and baristas also keep their own tips, so their line here is only what was tipped out to them; their whole night is on Payroll.' : ''}</p>`
+    : '<p class="bs-clear">Nobody was tipped out in this range.</p>';
 
+  const svcOpts = ['all', ...svcOptions(svc !== 'all' ? svc : null)].map((k) => `<option value="${esc(k)}"${
+    k === svc ? ' selected' : ''}>${k === 'all' ? 'All services' : esc(dp(k))}</option>`).join('');
   res.send(layout('Support tip take-home', `
     <div class="bs-page">
       <div class="bs-head">
         <div>
           <h1 class="bs-headline">Support tip take-home</h1>
-          <p class="bs-subline">What each support person took from the pool over a date range.</p>
+          <p class="bs-subline">What each person was tipped out, and their share of any shared pot, over a date range.</p>
         </div>
-        <a class="bs-btn-quiet" href="/payroll">← Payroll</a>
+        <a class="bs-btn-quiet" href="/payroll?from=${esc(from)}&to=${esc(to)}${svcQS}">← Payroll</a>
       </div>
       <form class="bs-daterange" method="get" action="/payroll/support-tips">
         <label>From <input type="date" name="from" value="${esc(from)}"></label>
         <label>To <input type="date" name="to" value="${esc(to)}"></label>
+        <label>Service <select name="svc">${svcOpts}</select></label>
         <button class="bs-btn" type="submit">Show</button>
       </form>
+      ${draftNights ? `<p class="bs-note ask"><b>${draftNights} service${draftNights === 1 ? ' is' : 's are'} worked out by a policy that is not turned on.</b>
+        <span>They locked onto a draft while it was briefly live. Tip-out policy lists them, to move onto the live policy if that is what they should be.</span></p>` : ''}
       ${table}
     </div>`));
 });
@@ -12592,7 +12663,7 @@ app.get('/payroll', (req, res) => {
             ${shiftCount} shift${shiftCount === 1 ? '' : 's'}. Hours and card tip payout are what Gusto asks for.</p>
         </div>
         <div class="bs-head-acts">
-          <a class="bs-btn-sm" href="/payroll/support-tips?from=${from}&to=${to}">Support tips</a>
+          <a class="bs-btn-sm" href="/payroll/support-tips?from=${from}&to=${to}${paySvc !== 'all' ? `&svc=${encodeURIComponent(paySvc)}` : ''}">Support tips</a>
           <a class="bs-btn-sm" href="/payroll/summary?from=${from}&to=${to}">View summary</a>
           <a class="bs-btn-sm" href="/payroll/export?from=${from}&to=${to}">Export to Excel</a>
         </div>
@@ -15255,23 +15326,35 @@ app.get('/policy', (req, res) => {
   // are paid for a night some of them have already submitted against, so it
   // is a decision with the list in front of you. Anything sent is not offered
   // at all — that money has gone out.
+  //
+  // `onDraft`: locked onto a version that is not live and never became it — a
+  // draft, or one retired because services used it. Those are not "the old
+  // way" at all; they are the new policy, early. Calling them "still on an
+  // earlier policy" told the owner the opposite of what was true.
   const stragglers = cur ? db.prepare(`SELECT sh.id, sh.date, sh.policy_id,
+      COALESCE(v.staged, 0) <> 0 AS onDraft,
       (SELECT COUNT(*) FROM work w WHERE w.shift_id = sh.id) AS people,
-      (SELECT COUNT(*) FROM server_sales v WHERE v.shift_id = sh.id) AS entered
+      (SELECT COUNT(*) FROM server_sales v2 WHERE v2.shift_id = sh.id) AS entered
     FROM shifts sh
+    LEFT JOIN policy_versions v ON v.id = sh.policy_id
     WHERE sh.daypart = ? AND sh.status = 'open'
       AND sh.policy_id IS NOT NULL AND sh.policy_id <> ?
     ORDER BY sh.date DESC`).all(daypart, cur.id) : [];
+  const drafted = stragglers.filter((x) => x.onDraft).length;
+  const older = stragglers.length - drafted;
   const strandedCard = stragglers.length ? `
     <div class="card pol-stale">
       <h2>${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'}
-        still on an earlier policy</h2>
+        ${!older ? 'on a policy that is not turned on' : !drafted ? 'still on an earlier policy' : 'not on the current policy'}</h2>
       <p class="pol-stale-why">A service locks onto a policy the first time anything touches it &mdash;
-        somebody clocking in, a report coming in, or you opening its page. These were touched before the
-        current policy started, so they are still worked out the old way.</p>
+        somebody clocking in, a report coming in, or you opening its page.${older && !drafted
+    ? ' These were touched before the current policy started, so they are still worked out the old way.'
+    : drafted && !older
+      ? ' These locked onto a draft while it was briefly live, so they are worked out by rules that are not in force.'
+      : ' Some were touched before the current policy started; some locked onto a draft while it was briefly live.'}</p>
       <ul class="pol-stale-list">
         ${stragglers.map((x) => `<li><a href="/shifts/${x.id}">${esc(niceDate(x.date))}</a>
-          <i>${x.people} on shift${x.entered ? `, ${x.entered} already reported` : ', nothing reported yet'}</i></li>`).join('')}
+          <i>${x.onDraft ? 'on a draft' : 'on an earlier policy'} · ${x.people} on shift${x.entered ? `, ${x.entered} already reported` : ', nothing reported yet'}</i></li>`).join('')}
       </ul>
       ${canWrite(req) ? `<form method="post" action="/policy/restamp" style="margin:0"
         onsubmit="return confirm('Move ${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'} onto the current policy?\n\nAnything already sent is not touched. These are still open, so nobody has been paid from them yet \u2014 but if people have already reported, their tip-out will be worked out differently from here.')">
@@ -15417,7 +15500,9 @@ app.post('/policy/discard', (req, res) => {
   const row = byId(Number(req.body.id));
   const gone = discardStaged(Number(req.body.id));
   res.redirect(`/policy?daypart=${row ? row.daypart : 'dinner'}&msg=`
-    + encodeURIComponent(gone ? 'Draft discarded. The live policy is unchanged.' : 'Nothing to discard.'));
+    + encodeURIComponent(gone === 'retired'
+      ? 'Draft discarded. Some services were already worked out with it, so it is kept for them and never used again. Any still open are listed below, to move onto the live policy.'
+      : gone ? 'Draft discarded. The live policy is unchanged.' : 'Nothing to discard.'));
 });
 
 app.post('/policy/revert', (req, res) => {
@@ -32152,6 +32237,23 @@ try {
   // history is a migration behind — and every resolver falls back to the wage
   // on file, which is what it used before this existed.
   console.error('  Wage history seed skipped:', e.message);
+}
+
+// SETTLE WHAT HAS ALREADY GONE OUT. Services sent, or inside a pay period
+// whose payroll went out, before settling existed are settled here with what
+// they have been worked out with all along, so a raise, a switch to salary or
+// an overtime change made from now on cannot reach them. Only rows and periods
+// not settled yet are written, so every later boot is a quick no-op.
+try {
+  const todo = db.prepare(`SELECT DISTINCT w.shift_id AS id FROM work w JOIN shifts sh ON sh.id = w.shift_id
+    WHERE sh.pay_math IS NOT NULL AND w.settled_rate_cents IS NULL`).all();
+  for (const r of todo) settleShift(r.id);
+  if (todo.length) console.log(`  Settled ${todo.length} service(s) already sent, at the pay they went out with.`);
+  const n = db.prepare('UPDATE period_sends SET ot_rule = ?, ot_exempt = ? WHERE ot_rule IS NULL')
+    .run(JSON.stringify(OT.rule()), JSON.stringify([...OT.exemptSet()])).changes;
+  if (n) console.log(`  Recorded the overtime rule on ${n} sent pay period(s).`);
+} catch (e) {
+  console.error('  Settling sent services skipped:', e.message);
 }
 
 app.listen(PORT, () => {

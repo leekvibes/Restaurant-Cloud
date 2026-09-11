@@ -1604,10 +1604,15 @@ test('2E-2: a shift that cannot be costed is kept, not dropped', async () => {
   const cnt = src.slice(src.indexOf('const earningsCount'), src.indexOf('function earningsFor('));
 
   // Same WHERE on both, so the count can never describe a different set.
-  for (const clause of ["w.employee_id = ?", "sh.status = '${SHIFT_DONE}'", 'sh.date >= ?']) {
+  // Not on status any more: a service not yet closed out is listed and marked,
+  // rather than missing from a list whose total already counted it.
+  for (const clause of ["w.employee_id = ?", 'sh.date >= ?']) {
     assert.ok(fn.includes(clause), `the row query filters on ${clause}`);
     assert.ok(cnt.includes(clause), `and so does the count`);
   }
+  assert.ok(!fn.includes("sh.status = '${SHIFT_DONE}'") && !cnt.includes("sh.status = '${SHIFT_DONE}'"),
+    'neither leaves out a service that has not been sent');
+  assert.ok(fn.includes('open: String(x.shift.status) !== SHIFT_DONE'), 'and every row says whether it is closed out');
   // The catch keeps the row.
   const cat = fn.slice(fn.indexOf('catch (e)'), fn.indexOf('const asServer'));
   assert.match(cat, /out\.push\(/, 'a costing failure still pushes a row');
@@ -2523,4 +2528,28 @@ test('a deleted punch does NOT take somebody off a service they have money on', 
   const still = withDb((c) => c.prepare(
     'SELECT COUNT(*) n FROM work WHERE shift_id = ? AND employee_id = ?').get(entry.shift_id, id).n);
   assert.strictEqual(still, 1, 'their tips keep them on it, whatever happened to the punch');
+});
+
+// A service the manager has not sent was missing from Pay entirely, while the
+// period total above the list already counted it: somebody looking for last
+// night's shift found nothing, and no reason why.
+test('an unsent service is on Pay, marked as not closed out, and opens', async () => {
+  const id = addPerson('Open Olive', 'server', '6061');
+  onAllSchedules();
+  const day = require('../src/periods').recentPeriods(1)[0].start;
+  const sid = withDb((c) => {
+    c.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(day);
+    const sh = c.prepare("SELECT id, status FROM shifts WHERE date = ? AND daypart = 'cafe'").get(day);
+    c.prepare('INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours) VALUES (?, ?, ?, ?)')
+      .run(sh.id, id, 'server', 4);
+    return sh.status === 'open' ? sh.id : null;
+  }, false);
+  assert.ok(sid, 'the service is open');
+  const cookie = await signIn('6061');
+  const pay = await (await asStaff(`/portal/earnings?p=${day}`, cookie)).text();
+  assert.match(pay, new RegExp(`href="/portal/earnings/${sid}"[\\s\\S]*?Not closed out yet`), 'listed, and marked');
+  assert.match(pay, /not closed out by management yet/, 'and the total says it counts a service still open');
+  const detail = await (await asStaff(`/portal/earnings/${sid}`, cookie)).text();
+  assert.match(detail, /hasn.t been closed out by management yet/,
+    'the service itself opens and says why there is nothing to show');
 });

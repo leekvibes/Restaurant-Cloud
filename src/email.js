@@ -219,12 +219,17 @@ function supportEmail(p, ctx) {
   const cashTips = p.cashTotal != null ? p.cashTotal : 0;
   const togoCard = p.poolCard || 0;
   const serverTipout = p.tipShare || 0;
-  const total = cashTips + togoCard + serverTipout;
+  // Card tips they were given themselves that no pot takes: theirs, and on the
+  // check. A re-send of a service settled before pay-math revision 2 leaves
+  // them out, so the email agrees with what payroll paid (ctx.ownCard false).
+  const ownCard = ctx.ownCard === false ? 0 : (p.keptCard || 0);
+  const total = cashTips + togoCard + serverTipout + ownCard;
 
   body += section('Your tips');
   body += line('Cash tips', fmt(cashTips), { border: false });
   body += line('To-go card tips', fmt(togoCard));
   body += line('Server tip-out (card)', fmt(serverTipout));
+  if (ownCard) body += line('Card tips you were given', fmt(ownCard));
   body += line('Total tips', fmt(total), { strong: true, color: GREEN });
 
   const subject = `${RESTAURANT}: your ${ctx.date} ${ctx.daypart} summary — ${fmt(total)} in tips`;

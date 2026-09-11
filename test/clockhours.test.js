@@ -2409,3 +2409,41 @@ test('changing whether a job is tipped never restates a night already worked out
     db.prepare("UPDATE positions SET active = 0 WHERE slug = 'kind_trainee'").run();
   }
 });
+
+// Support tips split money by where it came from while Payroll splits it by how
+// it is paid, lost the period and service you came from, showed hours to one
+// place, named only the first role, and locked every night it opened onto the
+// policy of that minute while saying it changed nothing.
+test('Support tips agrees with payroll, keeps the view you came from, and locks nothing', async () => {
+  const { aggregatePayroll } = require('../src/reports');
+  const day = '2026-04-06';
+  const mk = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1200, 1)`).run(name, role).lastInsertRowid);
+  const srv = mk('Tips Page Server', 'server');
+  const bus = mk('Tips Page Busser', 'busser');
+  const made = await post('/shifts', { date: day, daypart: 'dinner' });
+  const sid = Number(String(made.headers.get('location')).split('/').pop());
+  await post(`/shifts/${sid}/server`, { employee_id: String(srv), food: '1000', coffee: '0', alcohol: '0',
+    card_tips: '200', hours: '6', wage: '12' });
+  await post(`/shifts/${sid}/support`, { employee_id: String(bus), role: 'busser', hours: '4.25', wage: '12' });
+  await post(`/shifts/${sid}/pool`, { jar: '40' });
+
+  const page = await text(`/payroll/support-tips?from=${day}&to=${day}&svc=dinner`);
+  const cents = (v) => Math.round(Number(String(v).replace(/[$,]/g, '')) * 100);
+  const m = page.match(/Tips Page Busser <i>([^<]*)<\/i><\/span>\s*<span class="bs-take-n">([^<]+)<\/span>\s*<span class="bs-take-n">([^<]+)<\/span>/);
+  assert.ok(m, 'the busser has a line');
+  const pay = aggregatePayroll(day, day).rows.find((r) => r.employeeId === bus);
+  assert.strictEqual(cents(m[2]), pay.paycheckTips, 'Paycheck is exactly what payroll puts on the check');
+  assert.strictEqual(cents(m[3]), pay.weeklyCash + pay.cashHome, 'Cash is exactly the cash payroll counts');
+  assert.match(m[1], /Busser · 4\.25h · 1 shift/, 'every role by name, and hours to two places');
+  assert.match(page, new RegExp(`href="/payroll\\?from=${day}&to=${day}&svc=dinner">← Payroll`),
+    'back to the same period and service');
+
+  // A night nothing has worked out yet is not locked by opening the report.
+  const quiet = Number(db.prepare("INSERT INTO shifts (date, daypart, status) VALUES ('2026-04-07', 'dinner', 'open')")
+    .run().lastInsertRowid);
+  await text('/payroll/support-tips?from=2026-04-07&to=2026-04-07');
+  const q = db.prepare('SELECT policy_id, role_kinds FROM shifts WHERE id = ?').get(quiet);
+  assert.strictEqual(q.policy_id, null, 'no policy locked on by a report');
+  assert.strictEqual(q.role_kinds, null, 'nor any tip handling');
+});

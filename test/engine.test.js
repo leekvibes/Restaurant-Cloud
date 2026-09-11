@@ -464,12 +464,13 @@ test('a wage set for a role beats the default when that role is worked', () => {
   // the number it produces is perfectly plausible.
   // The synthetic `w` now has to carry an employee_id and a role as well as a
   // zero override, because the dated lookup joins on both — and a date, which
-  // is taken from a real shift so the row is one the resolver could meet.
+  // is taken from a real shift so the row is one the resolver could meet. And
+  // a settled rate, NULL, as on any work row whose service has not been sent.
   const row = db.prepare(`
     SELECT ${WAGE_RATE_SQL} AS rate, e.hourly_rate_cents AS deflt, er.wage_cents AS role_rate
       FROM employees e
       LEFT JOIN employee_roles er ON er.employee_id = e.id AND er.role = 'busser'
-      JOIN (SELECT 0 AS hourly_rate_cents, e2.id AS employee_id, 'busser' AS role
+      JOIN (SELECT 0 AS hourly_rate_cents, NULL AS settled_rate_cents, e2.id AS employee_id, 'busser' AS role
               FROM employees e2) w ON w.employee_id = e.id
       ${/* daypart too: a wage can now be specific to one schedule, so the
              fragment reads sh.daypart as well as sh.date. */''}

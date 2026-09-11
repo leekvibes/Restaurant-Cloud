@@ -78,6 +78,13 @@ if (!workCols.includes('hours_source')) {
 }
 if (!workCols.includes('hours_set_by')) db.exec('ALTER TABLE work ADD COLUMN hours_set_by TEXT');
 if (!workCols.includes('hours_set_at')) db.exec('ALTER TABLE work ADD COLUMN hours_set_at TEXT');
+// What each person's pay was SETTLED at on a service: their hourly rate and
+// whether they were salaried, as they stood when the service was sent (or its
+// dates' payroll went out). NULL until then. Read ahead of anything live, so a
+// raise, a switch to salary or a removed rate entered later cannot reach a
+// night already paid (settleShift).
+if (!workCols.includes('settled_rate_cents')) db.exec('ALTER TABLE work ADD COLUMN settled_rate_cents INTEGER');
+if (!workCols.includes('settled_salaried')) db.exec('ALTER TABLE work ADD COLUMN settled_salaried INTEGER');
 // Per-employee role+wage pairs — a person can be e.g. server @ $11 AND busser @ $13.
 db.exec(`CREATE TABLE IF NOT EXISTS employee_roles (
   employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
@@ -186,16 +193,74 @@ const pinRoleKinds = db.prepare('UPDATE shifts SET role_kinds = ? WHERE id = ? A
  * now — which is what lets a Training position added this week be used on
  * last night's service without being counted as tipped.
  */
-function kindsForShift(sh) {
+function kindsForShift(sh, opts) {
   const live = positionKinds();
   if (!sh || !sh.id) return live;
   let pinned = null;
   if (sh.role_kinds) { try { pinned = JSON.parse(sh.role_kinds); } catch { pinned = null; } }
   if (!pinned || typeof pinned !== 'object') {
-    pinRoleKinds.run(JSON.stringify(live), sh.id);
+    // A page that only reads ({ peek: true }) gets the answer without stamping.
+    if (!(opts && opts.peek)) pinRoleKinds.run(JSON.stringify(live), sh.id);
     return live;
   }
   return { ...live, ...pinned };
+}
+
+// Migration: which revision of the PAY MATH a service was settled under.
+//
+// The owner's rule: nothing done later — a policy, a setting, or a correction
+// to how something is added up — may change a service that has been sent, or
+// the payroll for its dates. Policies and a job's tip handling are already
+// locked onto each service. This locks the arithmetic: a service sent, or
+// inside a pay period whose payroll went out, keeps the revision it went out
+// under, and a correction applies to everything else.
+//
+//   1 — tips a support person kept outside every pot were not counted in
+//       payroll (every service already settled when this column arrived)
+//   2 — they are: their card on the check, their cash as already in hand
+//
+// NULL is a service not settled yet, worked out with the current revision;
+// settling it (sending it, or sending payroll for its dates) stamps it.
+if (!shiftCols.includes('pay_math')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN pay_math INTEGER');
+  db.prepare("UPDATE shifts SET pay_math = 1 WHERE status = 'emailed'").run();
+  try {
+    db.prepare(`UPDATE shifts SET pay_math = 1 WHERE pay_math IS NULL AND EXISTS (
+      SELECT 1 FROM period_sends ps WHERE shifts.date >= ps.period_start AND shifts.date <= ps.period_end)`).run();
+  } catch { /* no payroll has ever been sent from this database */ }
+}
+const PAY_MATH = 2;
+const lockPayMathQ = db.prepare('UPDATE shifts SET pay_math = COALESCE(pay_math, ?) WHERE id = ?');
+const lockPayMathRangeQ = db.prepare('UPDATE shifts SET pay_math = COALESCE(pay_math, ?) WHERE date >= ? AND date <= ?');
+/** Settle a service's pay math at the revision in force now. Never moves one already settled. */
+const lockPayMath = (shiftId) => lockPayMathQ.run(PAY_MATH, shiftId);
+/** The same, for every service in a pay period whose payroll has just gone out. */
+const lockPayMathRange = (from, to) => lockPayMathRangeQ.run(PAY_MATH, from, to);
+/** Does this service count the tips a support person kept outside every pot? Revision 2 on. */
+const countsKeptTips = (sh) => !sh || sh.pay_math == null || sh.pay_math >= 2;
+
+/**
+ * SETTLE a service: lock what could still move underneath the people paid from
+ * it. Its policy and its jobs' tip handling lock the moment it is worked out,
+ * which shiftInputs does here; this adds each person's rate and whether they
+ * were salaried, and the pay-math revision. Only rows not settled yet are
+ * written, so settling twice changes nothing, and somebody added after it was
+ * sent is settled when it is sent again.
+ */
+function settleShift(shiftId) {
+  const inp = shiftInputs(shiftId);
+  const put = db.prepare(`UPDATE work SET settled_rate_cents = ?, settled_salaried = ?
+    WHERE shift_id = ? AND employee_id = ? AND settled_rate_cents IS NULL`);
+  db.transaction(() => {
+    for (const p of inp.people) {
+      put.run(p.salaried ? 0 : Math.round((p.hourlyRate || 0) * 100), p.salaried ? 1 : 0, shiftId, p.employeeId);
+    }
+    lockPayMathQ.run(PAY_MATH, shiftId);
+  })();
+}
+/** Settle every service in a date range: a pay period whose payroll just went out. */
+function settleRange(from, to) {
+  for (const sh of s.shiftsInRange.all(from, to)) settleShift(sh.id);
 }
 
 // Migration: total sales for the whole shift, not just what servers rang up.
@@ -515,7 +580,8 @@ const w = {
     // work happened, and fetching it per row instead would be a query inside
     // a loop on the page that closes every service.
     `SELECT w.role, w.hours, w.employee_id, w.hours_source,
-            w.hourly_rate_cents AS shift_rate_cents, sh.date AS worked_on,
+            w.hourly_rate_cents AS shift_rate_cents, w.settled_rate_cents, w.settled_salaried,
+            sh.date AS worked_on,
             sh.daypart AS worked_svc,
             e.name, e.email, e.hourly_rate_cents AS default_rate_cents, e.pay_type
      FROM work w JOIN employees e ON e.id = w.employee_id
@@ -618,21 +684,23 @@ function keepsOwnCash(role, rules) {
   return newModel(rules) ? DIRECT_ROLES.has(role) : role === 'server';
 }
 
-function shiftInputs(shiftId) {
+// opts.peek: work the service out without locking anything onto it — neither
+// its policy nor its jobs' tip handling. For pages that only read.
+function shiftInputs(shiftId, opts) {
   const workRows = w.workForShift.all(shiftId);
   // The shift's OWN policy decides how its people are classified. Lazily
   // required: policy.js reads this module.
   let isNew = false;
   const shRow = s.shiftById.get(shiftId);
   try {
-    isNew = newModel(require('./policy').policyForShift(shRow));
+    isNew = newModel(require('./policy').policyForShift(shRow, opts));
   } catch { isNew = false; }
   const sales = new Map(w.salesForShift.all(shiftId).map((r) => [r.employee_id, r]));
   const servers = [];
   const support = [];
   // Whether each job is in the pools at all, as it was the first time THIS
   // service was worked out: locked on like the policy, never read from today.
-  const kinds = kindsForShift(shRow);
+  const kinds = kindsForShift(shRow, opts);
   for (const row of workRows) {
     // Wage resolution: salaried → no hourly wage; else the rate recorded on
     // the shift → the wage that was IN FORCE ON THE DAY it was worked → the
@@ -641,11 +709,17 @@ function shiftInputs(shiftId) {
     // The dated step is what stops a raise restating history. Required lazily:
     // wages.js reads this module, so requiring it at the top would be a cycle,
     // and by the time this function runs both are loaded.
-    const salaried = row.pay_type === 'salary';
+    // SETTLED pay wins over anything read live: whether they were salaried and
+    // their rate, as they stood when this service was sent (settleShift). Only
+    // a rate typed on this very service outranks it, because that is somebody
+    // deliberately correcting this service.
+    const salaried = row.settled_salaried != null ? row.settled_salaried === 1 : row.pay_type === 'salary';
     let rateCents = 0;
     if (!salaried) {
       if (row.shift_rate_cents > 0) {
         rateCents = row.shift_rate_cents;
+      } else if (row.settled_rate_cents != null) {
+        rateCents = row.settled_rate_cents;
       } else {
         // The SHIFT's schedule, never today's or a guess: somebody paid more at
         // Evening must be paid that for an Evening shift and not for a Day one.
@@ -752,4 +826,5 @@ function shiftInputs(shiftId) {
   return { servers, support, people, pool, adjustments };
 }
 
-module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, keepsOwnCash, DB_PATH };
+module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, keepsOwnCash, DB_PATH,
+  PAY_MATH, lockPayMath, lockPayMathRange, countsKeptTips, settleShift, settleRange };
