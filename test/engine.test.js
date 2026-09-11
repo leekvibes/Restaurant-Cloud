@@ -388,18 +388,25 @@ test('shiftTotalSales adds the four categories, 0 when nothing is entered', () =
 
 test('the SQL wage rate resolves exactly like shiftInputs does', () => {
   const { WAGE_RATE_SQL } = require('../src/reports');
-  const { db, shiftInputs } = require('../src/db');
+  const { db, shiftInputs, settleShift } = require('../src/db');
 
   // `shifts sh` is joined because the fragment now resolves the wage that was
   // in force on sh.date. That requirement is the point of the change: without
   // a date there is no answer to "what were they earning then", only to "what
   // are they earning now", which is the bug.
+  //
+  // The salary filter is the same question asked of the pay type. A sent
+  // service keeps whether each person was salaried when it went out
+  // (work.settled_salaried); the shifts list and Performance filter on that,
+  // and so does shiftInputs. This copy went on reading today's pay type after
+  // they moved, and nothing noticed until the dev database had a sent service
+  // with settled rows.
   const wageOf = db.prepare(`
     SELECT COALESCE(ROUND(SUM(w.hours * ${WAGE_RATE_SQL})), 0) AS cents
       FROM work w JOIN employees e ON e.id = w.employee_id
       JOIN shifts sh ON sh.id = w.shift_id
       LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
-     WHERE w.shift_id = ? AND COALESCE(e.pay_type, 'hourly') <> 'salary'`);
+     WHERE w.shift_id = ? AND COALESCE(w.settled_salaried, COALESCE(e.pay_type, 'hourly') = 'salary') = 0`);
 
   const compare = (id, msg) => {
     const inp = shiftInputs(id);
@@ -423,9 +430,16 @@ test('the SQL wage rate resolves exactly like shiftInputs does', () => {
   // go untested — the live data has a second-role wage on file that nobody has
   // actually worked, so dropping that level of the rule changed no number here
   // and this test stayed green. So build the awkward rows and roll them back.
-  const shiftId = shifts[0].id;
+  //
+  // On a service of their own. They used to borrow the first service in the
+  // database, and in the dev database that one has been sent: its rows carry
+  // a settled rate, so each case below read that rate and never reached the
+  // level it is named for, and the salary case failed outright. A service not
+  // sent yet reaches every level; the last case then sends it.
   db.exec('BEGIN');
   try {
+    const shiftId = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+      VALUES ('2099-01-05', 'dinner', 'open')`).run().lastInsertRowid);
     const seat = (employee_id, role, hours, hourly_rate_cents) => db.prepare(
       `INSERT INTO work (shift_id, employee_id, role, hours, hourly_rate_cents)
        VALUES (?, ?, ?, ?, ?) ON CONFLICT(shift_id, employee_id)
@@ -449,7 +463,17 @@ test('the SQL wage rate resolves exactly like shiftInputs does', () => {
     compare(shiftId, 'zero role wage falls through to the default');
 
     db.prepare("UPDATE employees SET pay_type = 'salary' WHERE id = ?").run(emp);
-    compare(shiftId, 'salaried staff cost the shift nothing');
+    compare(shiftId, 'salaried staff cost a shift not sent yet nothing');
+    assert.strictEqual(wageOf.get(shiftId).cents, 0, 'and it really is nothing');
+
+    // Sent while they were hourly, made salaried afterwards: the night keeps
+    // the wage it went out with, in the SQL exactly as in shiftInputs.
+    db.prepare("UPDATE employees SET pay_type = 'hourly' WHERE id = ?").run(emp);
+    db.prepare("UPDATE shifts SET status = 'emailed' WHERE id = ?").run(shiftId);
+    settleShift(shiftId);
+    db.prepare("UPDATE employees SET pay_type = 'salary' WHERE id = ?").run(emp);
+    compare(shiftId, 'a sent shift keeps the pay type it went out with');
+    assert.ok(wageOf.get(shiftId).cents > 0, 'so it still carries their wage');
   } finally {
     db.exec('ROLLBACK');
   }
