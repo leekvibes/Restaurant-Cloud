@@ -142,7 +142,11 @@ test('the detail page shows the costed recipe', async () => {
   assert.ok(html.includes('PV Breakfast Sandwich'));
   assert.ok(html.includes('$1.67'), 'the total');
   assert.ok(html.includes('Croissants') && html.includes('Sandwich wrap'));
-  assert.ok(html.includes('BETA'), 'flagged as beta');
+  // The BETA flag is the sidebar entry's tag. Menu costing is off the sidebar
+  // at the owner's request (hidden, not removed), so the page carries no flag
+  // while it is off; put the entry back and the flag comes back with it.
+  const onNav = require('../src/nav').SECTIONS.some((s) => s.links.some((l) => l[0] === '/menu'));
+  if (onNav) assert.ok(html.includes('BETA'), 'flagged as beta');
 });
 
 test('the usage unit on a line is used, not assumed', async () => {

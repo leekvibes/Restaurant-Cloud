@@ -73,45 +73,51 @@ function areaFor(path) {
 // Daily work only. Anything about the account or the configuration of the
 // restaurant lives on the Settings page, reached from the top bar.
 //
+// HIDDEN, NOT REMOVED (Sep 2026, at the owner's request): Cash, Menu costing,
+// Expirations, Equipment and the Decisions log are off the sidebar because the
+// restaurant stopped using them. Their pages, their data and their AREAS are
+// untouched, so the addresses still open for anybody allowed, access settings
+// on user accounts keep meaning what they meant, and putting a line back here
+// brings one back exactly as it was.
+//
+// Grouped the way the week runs: the night's work and its numbers, the people
+// from rota to paycheck, what the restaurant buys, the paperwork, and last the
+// two pages that set the rules everything else is worked out by.
+//
 // [href, icon, label, accent, area, tag?]
 const SECTIONS = [
   { title: null, links: [
     ['/', 'dashboard', 'Dashboard', '#2563eb', 'dashboard'],
   ] },
-  { title: 'Operations', links: [
+  { title: 'Daily', links: [
     ['/shifts', 'shifts', 'Services', '#4f46e5', 'shifts'],
-    ['/schedule', 'calendar', 'Schedule', '#be185d', 'schedule'],
     ['/sales', 'sales', 'Sales', '#059669', 'sales'],
     ['/costs', 'costs', 'Performance', '#0891b2', 'costs'],
-    ['/cash', 'cash', 'Cash', '#d97706', 'cash'],
+    ['/calendar', 'calendar', 'Calendar', '#059669', 'trackers'],
+  ] },
+  { title: 'Team', links: [
+    ['/schedule', 'calendar', 'Schedule', '#be185d', 'schedule'],
+    ['/timeclock', 'shifts', 'Time clock', '#b45309', 'staff'],
     ['/payroll', 'payroll', 'Payroll', '#7c3aed', 'payroll'],
+    ['/employees', 'staff', 'Staff', '#2563eb', 'staff'],
+    ['/staff-portal', 'tips', 'Portal', '#1a7a3c', 'staff'],
+    // "Employee documents", not "Documents" — /c/documents already exists and is
+    // the business paperwork tracker (leases, tax, permits). Two identical
+    // labels in one sidebar is a coin toss every time somebody goes looking.
+    ['/documents', 'documents', 'Employee documents', '#0f766e', 'staff'],
   ] },
   { title: 'Purchasing', links: [
     ['/c/invoices', 'invoices', 'Invoices', '#0891b2', 'trackers'],
     ['/c/expenses', 'cash', 'Expenses', '#b45309', 'trackers'],
     ['/c/vendors', 'vendors', 'Vendors', '#ea580c', 'trackers'],
     ['/c/products', 'par', 'Products', '#ca8a04', 'trackers'],
-    ['/menu', 'costs', 'Menu costing', '#7c3aed', 'menu', 'BETA'],
   ] },
-  { title: 'Restaurant', links: [
-    ['/c/expirations', 'expirations', 'Expirations', '#dc2626', 'trackers'],
-    ['/c/equipment', 'equipment', 'Equipment', '#64748b', 'trackers'],
+  { title: 'Records', links: [
     ['/c/documents', 'documents', 'Documents', '#6366f1', 'trackers'],
     ['/c/contacts', 'contacts', 'Contacts', '#0d9488', 'trackers'],
-  ] },
-  { title: 'Tasks & logs', links: [
-    ['/calendar', 'calendar', 'Calendar', '#059669', 'trackers'],
     ['/c/incidents', 'incidents', 'Incident log', '#dc2626', 'trackers'],
-    ['/c/notes', 'notes', 'Decisions log', '#7c3aed', 'trackers'],
   ] },
-  { title: 'Team', links: [
-    ['/timeclock', 'shifts', 'Time clock', '#b45309', 'staff'],
-    ['/staff-portal', 'tips', 'Portal', '#1a7a3c', 'staff'],
-    ['/employees', 'staff', 'Staff', '#2563eb', 'staff'],
-    // "Employee documents", not "Documents" — /c/documents already exists and is
-    // the business paperwork tracker (leases, tax, permits). Two identical
-    // labels in one sidebar is a coin toss every time somebody goes looking.
-    ['/documents', 'documents', 'Employee documents', '#0f766e', 'staff'],
+  { title: 'Setup', links: [
     ['/positions', 'positions', 'Positions', '#7c3aed', 'settings'],
     ['/policy', 'policy', 'Tip-out policy', '#0891b2', 'settings'],
   ] },
@@ -136,9 +142,9 @@ const CREATE_ACTIONS = [
   { href: '/c/invoices', icon: 'invoices', label: 'Invoice', area: 'trackers' },
   { href: '/c/vendors', icon: 'vendors', label: 'Vendor', area: 'trackers' },
   { href: '/c/products', icon: 'par', label: 'Product', area: 'trackers' },
-  { href: '/menu/new', icon: 'costs', label: 'Menu item', area: 'menu' },
+  // Menu item and Cash count went with their pages off the sidebar (see
+  // SECTIONS). A create button for a page nobody can find is a way in to it.
   { href: '/c/incidents', icon: 'incidents', label: 'Incident', area: 'trackers' },
-  { href: '/cash/new', icon: 'cash', label: 'Cash count', area: 'cash' },
   { href: '/employees', icon: 'staff', label: 'Employee', area: 'staff' },
 ];
 

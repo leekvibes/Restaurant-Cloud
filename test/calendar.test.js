@@ -881,3 +881,126 @@ test('D: an item announces its own state, not just its colour', async () => {
   assert.match(chip, /aria-label="Spoken state, all day, complete, repeats"/,
     'a screen reader hears everything the styling shows');
 });
+
+// ---------------------------------------------------------------------------
+// E: EDIT. It was a link back to this page with ?edit= on it that nothing read,
+// so clicking it reloaded the calendar and the card was simply gone. These are
+// about what each choice of dates changes, and what it must leave alone.
+// ---------------------------------------------------------------------------
+const editForm = (item, extra) => ({
+  id: String(item.id), occurs_on: item.starts_on, scope: 'all',
+  kind: item.kind, title: item.title, category: item.category || 'Other',
+  starts_on: item.starts_on, all_day: item.all_day ? '1' : '', repeat: '',
+  responsible: item.responsible || '', notes: item.notes || '', reminder: '', reminder_was: '',
+  ...extra,
+});
+
+test('E: Edit opens the sheet instead of reloading the page', async () => {
+  C.create({ kind: 'task', title: 'Edit button check', starts_on: '2027-06-02' });
+  const html = await page('/calendar?v=month&m=2027-06');
+  assert.match(html, /<button class="btn" type="button" id="zc-d-edit">Edit<\/button>/,
+    'a button, not a link back to this page');
+  assert.doesNotMatch(html, /&edit=/, 'nothing builds the old ?edit= address');
+  assert.match(html, /'\/calendar\/edit'/, 'the sheet knows where an edit goes');
+  const form = html.slice(html.indexOf('id="zc-composer"'), html.indexOf('</aside>', html.indexOf('id="zc-composer"')));
+  for (const n of ['id', 'occurs_on', 'reminder_was', 'back', 'scope']) {
+    assert.match(form, new RegExp(`name="${n}"`), `the sheet carries ${n}`);
+  }
+});
+
+test('E: saving a one-off changes it, and lands back on the month you were looking at', async () => {
+  const item = C.create({ kind: 'task', title: 'Clean the ice machine', starts_on: '2027-06-10' });
+  const res = await send('/calendar/edit', editForm(item, {
+    title: 'Descale the ice machine', starts_on: '2027-06-12', category: 'Maintenance',
+    all_day: '', start_time: '14:00', end_time: '15:30', back: '/calendar?v=month&m=2027-06',
+  }));
+  assert.strictEqual(res.status, 302);
+  assert.match(res.headers.get('location'), /^\/calendar\?v=month&m=2027-06&msg=/, 'back to June, where it is');
+  const now = C.q.byId.get(item.id);
+  assert.strictEqual(now.title, 'Descale the ice machine');
+  assert.strictEqual(now.starts_on, '2027-06-12');
+  assert.strictEqual(now.category, 'Maintenance');
+  assert.strictEqual(now.all_day, 0);
+  assert.strictEqual(now.start_min, 14 * 60);
+  assert.strictEqual(now.end_min, 15 * 60 + 30);
+});
+
+test('E: the way back only ever goes to a calendar page', async () => {
+  const item = C.create({ kind: 'event', title: 'Back check', starts_on: '2027-06-14' });
+  for (const back of ['https://evil.example/x', '//evil.example', '/payroll', '/calendar\\evil']) {
+    const res = await send('/calendar/edit', editForm(item, { all_day: '1', back }));
+    assert.match(res.headers.get('location'), /^\/calendar\?msg=/, `${back} is ignored`);
+  }
+});
+
+test('E: "this date only" changes that date and leaves it following the series', async () => {
+  const item = C.create({ kind: 'task', title: 'Hood filters', starts_on: '2027-07-05', rrule_freq: 'weekly',
+    all_day: 0, start_min: 9 * 60, end_min: 10 * 60 });
+  // Only the time moves. The title goes back as it was, so none is stored on the date.
+  await send('/calendar/edit', { id: String(item.id), occurs_on: '2027-07-12', scope: 'one',
+    title: 'Hood filters', starts_on: '2027-07-12', start_time: '15:00', end_time: '16:00', notes: '' });
+  const ex = db.prepare('SELECT * FROM cal_exceptions WHERE item_id = ? AND occurs_on = ?').get(item.id, '2027-07-12');
+  assert.strictEqual(ex.moved_start_min, 15 * 60, 'the new time is on that date');
+  assert.strictEqual(ex.title_override, null, 'and the unchanged title is not frozen onto it');
+  // Rename the series. The moved date follows, because it holds no title of its own.
+  await send('/calendar/edit', editForm(C.q.byId.get(item.id), {
+    title: 'Hood filters and baffles', repeat: 'weekly', start_time: '09:00', end_time: '10:00',
+  }));
+  const days = C.range('2027-07-05', '2027-07-19').filter((o) => o.itemId === item.id)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  assert.deepStrictEqual(days.map((o) => o.title),
+    ['Hood filters and baffles', 'Hood filters and baffles', 'Hood filters and baffles']);
+  assert.deepStrictEqual(days.map((o) => o.startMin), [540, 900, 540],
+    'the moved date keeps its own time, the others keep the series time');
+});
+
+test('E: "this date and every one after" leaves the dates before it alone', async () => {
+  const item = C.create({ kind: 'task', title: 'Grease trap', starts_on: '2027-08-02', rrule_freq: 'weekly' });
+  const res = await send('/calendar/edit', editForm(item, {
+    scope: 'future', occurs_on: '2027-08-16', starts_on: '2027-08-16',
+    title: 'Grease trap (new vendor)', repeat: 'weekly', all_day: '1',
+  }));
+  assert.match(decodeURIComponent(res.headers.get('location')), /changed from .* on\. Earlier dates are as they were/);
+  assert.strictEqual(C.q.byId.get(item.id).rrule_until, '2027-08-15', 'the old series now ends the day before');
+  const got = C.range('2027-08-02', '2027-08-30').filter((o) => /^Grease trap/.test(o.title))
+    .map((o) => `${o.date} ${o.title}`).sort();
+  assert.deepStrictEqual(got, [
+    '2027-08-02 Grease trap', '2027-08-09 Grease trap',
+    '2027-08-16 Grease trap (new vendor)', '2027-08-23 Grease trap (new vendor)', '2027-08-30 Grease trap (new vendor)',
+  ]);
+});
+
+test('E: saving the whole series keeps a repeat the menu cannot say', async () => {
+  const item = C.create({ kind: 'task', title: 'Last Friday count', starts_on: '2027-09-24',
+    rrule_freq: 'monthly', rrule_byday: 'FR', rrule_bysetpos: -1 });
+  const html = await page('/calendar?v=month&m=2027-09');
+  assert.match(html, new RegExp(`"${item.id}":\\{[^}]*"rk":"keep"`), 'the sheet offers to keep it as it is');
+  await send('/calendar/edit', editForm(item, { title: 'Last Friday stock count', repeat: 'keep', all_day: '1' }));
+  const now = C.q.byId.get(item.id);
+  assert.strictEqual(now.title, 'Last Friday stock count');
+  assert.strictEqual(now.rrule_freq, 'monthly');
+  assert.strictEqual(now.rrule_byday, 'FR');
+  assert.strictEqual(now.rrule_bysetpos, -1, 'still the last Friday, not flattened to plain monthly');
+});
+
+test('E: an item keeps its reminders unless that menu was changed', async () => {
+  const item = C.create({ kind: 'task', title: 'Two reminders', starts_on: '2027-10-05' });
+  C.setReminders(item.id, [0, 1440]);
+  await send('/calendar/edit', editForm(item, {
+    title: 'Two reminders, renamed', all_day: '1', reminder: '1440', reminder_was: '1440',
+  }));
+  assert.deepStrictEqual(C.reminders(item.id).map((r) => r.offset_min).sort((a, b) => a - b), [0, 1440],
+    'saving a new title did not drop one');
+  await send('/calendar/edit', editForm(C.q.byId.get(item.id), { all_day: '1', reminder: '', reminder_was: '1440' }));
+  assert.deepStrictEqual(C.reminders(item.id), [], 'choosing None does clear them');
+});
+
+test('E: the Save row stays on screen however long the sheet gets', () => {
+  // The composer's parts sit inside a <form>. Unless the form is the sheet's
+  // column, it grows to fit everything and pushes Cancel and Save below the
+  // bottom of the window, where nothing can scroll to them. Measured at 1022px
+  // of form in a 768px window with More options open, which Edit opens with.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'broadsheet.css'), 'utf8');
+  assert.match(css, /\.zc-sheet > form \{ display:flex; flex-direction:column; flex:1; min-height:0; \}/);
+  assert.match(css, /\.zc-sheet-b \{ flex:1; overflow-y:auto;/, 'and the middle is what scrolls');
+});

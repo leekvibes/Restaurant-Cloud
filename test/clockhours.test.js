@@ -2305,3 +2305,36 @@ test('"Update from the clock" brings hours held before this change up to date', 
   assert.strictEqual(Number(workOf(sh.id, E.corrected).hours), 4, 'one click and it pays what was clocked');
   assert.doesNotMatch(await text(`/shifts/${sh.id}`), /but it pays/, 'and the gap is gone');
 });
+
+// Sending a service again used to tell everybody on it "your pay is ready" a
+// second time. It tells the people whose figures changed now, and nobody else.
+test('sending a service again tells only the people whose pay changed', async () => {
+  const day = '2026-03-27';
+  const mk = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1200, 1)`).run(name, role).lastInsertRowid);
+  const srv = mk('Resend Server', 'server');
+  const b1 = mk('Resend Busser', 'busser');
+  const b2 = mk('Resend Late Busser', 'busser');
+  const made = await post('/shifts', { date: day, daypart: 'dinner' });
+  const sid = Number(String(made.headers.get('location')).split('/').pop());
+  await post(`/shifts/${sid}/server`, { employee_id: String(srv), food: '1000', coffee: '0', alcohol: '0',
+    card_tips: '200', hours: '6', wage: '12' });
+  await post(`/shifts/${sid}/support`, { employee_id: String(b1), role: 'busser', hours: '4', wage: '12' });
+  const told = (id) => db.prepare(`SELECT title FROM portal_events WHERE kind = 'earnings'
+    AND employee_id = ? AND href = ? ORDER BY id`).all(id, `/portal/earnings/${sid}`)
+    .map((r) => (/was updated$/.test(r.title) ? 'updated' : /is ready$/.test(r.title) ? 'ready' : r.title));
+
+  await post(`/shifts/${sid}/send`, {});
+  assert.deepStrictEqual(told(srv), ['ready'], 'the first send tells the server');
+  assert.deepStrictEqual(told(b1), ['ready'], 'and the busser');
+
+  await post(`/shifts/${sid}/send`, {});
+  assert.deepStrictEqual(told(srv), ['ready'], 'sending again with nothing changed tells nobody');
+  assert.deepStrictEqual(told(b1), ['ready']);
+
+  await post(`/shifts/${sid}/support`, { employee_id: String(b2), role: 'busser', hours: '4', wage: '12' });
+  await post(`/shifts/${sid}/send`, {});
+  assert.deepStrictEqual(told(srv), ['ready'], 'the server tips out the same, so the server hears nothing new');
+  assert.deepStrictEqual(told(b1), ['ready', 'updated'], 'the first busser’s share halved, and they are told it changed');
+  assert.deepStrictEqual(told(b2), ['ready'], 'the busser added late hears their pay is ready');
+});

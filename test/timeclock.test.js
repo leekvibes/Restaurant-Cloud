@@ -3730,11 +3730,13 @@ test('2D-1: More holds the utility screens and nothing aspirational', async () =
   // it was aspirational — a link to a page that did not exist — and the rule
   // this test protects is "nothing aspirational", not "never documents". It is
   // a real screen now, and a utility screen, which is what More is for.
-  for (const keep of ['/portal/notifications', '/portal/requests', '/portal/specials',
+  for (const keep of ['/portal/requests', '/portal/specials',
     '/portal/stock', '/portal/documents', '/portal/out']) {
     assert.ok(sheet.includes(`href="${keep}"`), `${keep} stays in More`);
   }
-  for (const no of ['/portal/timesheet', '/portal/schedule', '/portal/account',
+  // Notifications came off the drawer at the owner's request (Sep 2026). The
+  // page is still there and Home still lists the newest few; only the row went.
+  for (const no of ['/portal/notifications', '/portal/timesheet', '/portal/schedule', '/portal/account',
     '/portal/help', '/portal/settings']) {
     assert.ok(!sheet.includes(`href="${no}"`), `${no} is not in More`);
   }

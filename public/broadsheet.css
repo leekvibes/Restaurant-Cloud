@@ -6511,6 +6511,12 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .zc-sheet-h b { font-size:16px; font-weight:680; color:var(--headline); }
 .zc-x { border:0; background:none; font-size:15px; color:var(--muted); cursor:pointer;
   min-width:36px; min-height:36px; }
+/* The composer's parts sit inside a <form>, and a form is display:block, so
+   the sheet's column never reached them: the form grew to fit everything, the
+   middle never scrolled, and with More options open, Cancel and Save sat below
+   the bottom of a laptop screen with no way to scroll to them. Measured at
+   1022px of form in a 768px window. The form is the column now. */
+.zc-sheet > form { display:flex; flex-direction:column; flex:1; min-height:0; }
 .zc-sheet-b { flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:12px; }
 .zc-sheet-f { display:flex; gap:8px; flex-wrap:wrap; padding:14px 20px;
   border-top:1px solid var(--rule); }
@@ -6539,6 +6545,7 @@ input[type="date"], input[type="time"], input[type="search"], select {
   text-transform:uppercase; color:var(--muted); }
 .zc-d-l b { font-weight:500; color:var(--headline); }
 .zc-d-scope { margin:0; font-size:12.5px; color:var(--muted); }
+.zc-f-note { margin:0; font-size:12.5px; line-height:1.45; color:var(--muted); }
 .zc-del { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 40%, var(--rule)); }
 
 /* Phone: the grid stays, tighter, and Agenda is where the day's work is read. */

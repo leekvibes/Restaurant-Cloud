@@ -398,3 +398,104 @@ test('the picker warns before the choice, and the document page after it', () =>
     'and on the document it beats every other state — "Not started" against '
     + 'somebody with no way to start reads as their fault');
 });
+
+// A new version starts with no signature boxes. Its page offers to copy the
+// last version's across, and nothing copies them without being asked: a new
+// file can have its pages in different places, and a box left on a page that
+// no longer exists could never be filled, so nobody could sign at all.
+test('a new version offers the old signature boxes, and copies them only when asked', async () => {
+  const { spawn } = require('node:child_process');
+  const port = 4007;
+  const base = `http://127.0.0.1:${port}`;
+  // DB_PATH and DOC_DIR come from the top of this file, so the files land in
+  // the temporary folder and never in the project's own uploads.
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: { ...process.env, PORT: String(port), TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
+    stdio: 'ignore',
+  });
+  try {
+    for (let i = 0; i < 200; i++) {
+      try { const r = await fetch(`${base}/version`); if (r.ok) break; } catch { /* not up yet */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const pdf = Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n'
+      + '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+      + '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n');
+    const up = (p, fields) => {
+      const fd = new FormData();
+      for (const [k, v] of Object.entries(fields)) fd.append(k, v);
+      fd.append('file', new Blob([pdf], { type: 'application/pdf' }), 'boxes.pdf');
+      return fetch(base + p, { method: 'POST', body: fd, redirect: 'manual' });
+    };
+    const post = (p, body) => fetch(base + p, { method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body).toString() });
+
+    const made = await up('/documents', { title: 'Boxes carry over', kind: 'sign', target: 'all', version: '1.0' });
+    const id = Number((/\/documents\/(\d+)/.exec(made.headers.get('location') || '') || [])[1]);
+    assert.ok(id, 'uploaded');
+    const v1 = D.currentVersion(id).id;
+    for (const field of [{ kind: 'signature', page: 1, x: 0.1, y: 0.8 }, { kind: 'date', page: 1, x: 0.6, y: 0.8 }]) {
+      const r = await fetch(`${base}/documents/${id}/fields`, { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ version_id: v1, op: 'add', field }) });
+      assert.strictEqual(r.status, 200, 'a box placed on 1.0');
+    }
+
+    const nv = await up(`/documents/${id}/version`, { version: '2.0' });
+    assert.match(decodeURIComponent(nv.headers.get('location') || ''),
+      /no signature boxes yet: copy the 2 from version 1\.0/, 'uploading it says the new version has none');
+    const v2 = D.currentVersion(id).id;
+    assert.notStrictEqual(v2, v1);
+    assert.strictEqual(D.fieldsFor(v2).length, 0, 'nothing is copied on its own');
+    assert.match(await (await fetch(`${base}/documents/${id}`)).text(), /Copy the 2 from version 1\.0/,
+      'the document page offers it');
+
+    const cp = await post(`/documents/${id}/fields/copy`, { from: String(v1) });
+    assert.match(cp.headers.get('location') || '', new RegExp(`^/documents/${id}/fields\\?msg=`),
+      'and lands in the editor, to check where they sit');
+    assert.deepStrictEqual(D.fieldsFor(v2).map((f) => f.kind).sort(), ['date', 'signature'], 'both boxes are on 2.0');
+    const again = await post(`/documents/${id}/fields/copy`, { from: String(v1) });
+    assert.match(decodeURIComponent(again.headers.get('location') || ''), /already has fields/,
+      'a second copy is refused rather than doubling them');
+    assert.strictEqual(D.fieldsFor(v2).length, 2);
+  } finally {
+    child.kill();
+  }
+});
+
+// A sign-in lasts 45 minutes and renewed only for somebody on the clock. Found
+// signing a 60-page handbook on a phone: every page was read, and the final
+// submit arrived after the session had run out, so it was refused and the
+// boxes were lost. Opening the document and reading on through it renew it now.
+test('reading a document keeps the reader signed in, on the clock or not', async () => {
+  const { spawn } = require('node:child_process');
+  const port = 4008;
+  const base = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
+    env: { ...process.env, PORT: String(port), TZ: 'America/New_York', ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
+    stdio: 'ignore',
+  });
+  try {
+    for (let i = 0; i < 200; i++) {
+      try { const r = await fetch(`${base}/version`); if (r.ok) break; } catch { /* not up yet */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const { id } = mkDoc('sign', 60);                       // assigned to Ada, who is not clocked in
+    const signIn = await fetch(`${base}/tips/start`, { method: 'POST', redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'pin=7001' });
+    const cookie = (signIn.headers.get('set-cookie') || '').split(';')[0];
+    assert.match(cookie, /^zwin_portal=/, 'signed in');
+
+    const open = await fetch(`${base}/portal/documents/${id}`, { headers: { cookie }, redirect: 'manual' });
+    assert.strictEqual(open.status, 200);
+    assert.match(open.headers.get('set-cookie') || '', /zwin_portal=[^;]+;.*Max-Age=2700/,
+      'opening the document starts a fresh 45 minutes');
+
+    const ping = await fetch(`${base}/portal/documents/${id}/progress`, { method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ page: 3, pages: 60 }) });
+    assert.strictEqual(ping.status, 200);
+    assert.match(ping.headers.get('set-cookie') || '', /zwin_portal=[^;]+;.*Max-Age=2700/,
+      'and so does every new page read');
+  } finally {
+    child.kill();
+  }
+});

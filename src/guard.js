@@ -10,10 +10,12 @@
 //
 // Two buckets, both needed:
 //
-//   PER PERSON  — five wrong PINs for one employee locks THAT employee's PIN
-//                 for ten minutes. Stops the obvious attack on one person.
+//   PER PERSON  — five wrong PINs for one employee inside fifteen minutes
+//                 locks THAT employee's PIN for ten minutes. Stops the obvious
+//                 attack on one person.
 //   PER SOURCE  — the same address failing over and over locks the address,
-//                 at a higher count. Stops the same script spraying one PIN
+//                 at a higher count inside the same fifteen minutes. Stops the
+//                 same script spraying one PIN
 //                 across every employee, which the per-person bucket never sees
 //                 because no single person accumulates failures.
 //
@@ -41,12 +43,37 @@ CREATE TABLE IF NOT EXISTS auth_attempts (
 );
 `);
 
+// A RUN OF FAILURES, NOT A LIFETIME OF THEM.
+//
+// The count used to only ever go up, and two things followed from that:
+//
+//   1. A lock that had run out never came back. A bucket locks when its count
+//      reaches the limit AND no lock is on the row — but an expired lock is
+//      still on the row, so once the first one ran out nothing locked that
+//      bucket again until the server restarted. Wait it out, then guess freely.
+//   2. The restaurant's one shared address added up every typo from every phone
+//      for as long as the server stayed up. Twenty-five fat fingers spread over
+//      a week locked everybody on the WiFi out of signing in, for fifteen
+//      minutes, at whatever moment the twenty-fifth one happened.
+//
+// So a run ends two ways: its lock runs out, or its first failure is older than
+// the window. Either way the next failure starts a fresh count and the lock can
+// be set again. A script still reaches the limit inside the window, because
+// that is what a script does; a night of ordinary typos never adds up to one.
+// SQLite evaluates every SET expression against the row as it was, so the
+// three CASEs all see the same old values.
+const STALE = `((auth_attempts.locked_until IS NOT NULL AND auth_attempts.locked_until <= datetime('now'))
+        OR (auth_attempts.locked_until IS NULL AND auth_attempts.first_at < datetime('now', @window)))`;
+
 const q = {
   get: db.prepare('SELECT * FROM auth_attempts WHERE scope = ? AND ident = ?'),
   bump: db.prepare(`INSERT INTO auth_attempts (scope, ident, fails)
     VALUES (@scope, @ident, 1)
     ON CONFLICT(scope, ident) DO UPDATE SET
-      fails = auth_attempts.fails + 1, last_at = datetime('now')`),
+      fails = CASE WHEN ${STALE} THEN 1 ELSE auth_attempts.fails + 1 END,
+      first_at = CASE WHEN ${STALE} THEN datetime('now') ELSE auth_attempts.first_at END,
+      locked_until = CASE WHEN ${STALE} THEN NULL ELSE auth_attempts.locked_until END,
+      last_at = datetime('now')`),
   lock: db.prepare(`UPDATE auth_attempts SET locked_until = datetime('now', @secs)
     WHERE scope = @scope AND ident = @ident`),
   clear: db.prepare('DELETE FROM auth_attempts WHERE scope = ? AND ident = ?'),
@@ -69,8 +96,11 @@ const q = {
 // catch one PIN sprayed across the whole roster — which the per-employee bucket
 // never sees, because no single person accumulates the failures.
 //
-// PIN_MAX / PIN_LOCK_SECS / PIN_IP_MAX / PIN_IP_LOCK_SECS override these.
+// PIN_MAX / PIN_LOCK_SECS / PIN_IP_MAX / PIN_IP_LOCK_SECS / PIN_WINDOW_SECS
+// override these.
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+// How long one run of failures counts for, in both buckets. See STALE above.
+const WINDOW_SECS = num(process.env.PIN_WINDOW_SECS, 900);
 const LIMITS = {
   pin: {
     max: num(process.env.PIN_MAX, 5),
@@ -110,7 +140,7 @@ function failed(...buckets) {
   for (const [scope, ident] of buckets) {
     if (!ident) continue;
     const id = String(ident);
-    q.bump.run({ scope, ident: id });
+    q.bump.run({ scope, ident: id, window: `-${WINDOW_SECS} seconds` });
     const row = q.get.get(scope, id);
     const lim = LIMITS[scope] || LIMITS.pin;
     if (row && row.fails >= lim.max && !row.locked_until) {

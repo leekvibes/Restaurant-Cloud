@@ -704,8 +704,14 @@ test('the sidebar lists every section and its pages', async () => {
   const titles = [...side.matchAll(/class="bs-side-h">([^<]+)</g)].map((m) => m[1]);
   assert.ok(titles.length >= 4, `found ${titles.length} section titles`);
   const links = [...side.matchAll(/class="bs-side-i[^"]*" href="([^"]+)"/g)].map((m) => m[1]);
-  for (const href of ['/shifts', '/sales', '/costs', '/cash', '/payroll', '/c/invoices', '/c/vendors', '/employees']) {
+  for (const href of ['/shifts', '/sales', '/costs', '/payroll', '/c/invoices', '/c/vendors', '/employees']) {
     assert.ok(links.some((h) => h === href || h.startsWith(href)), `${href} is in the sidebar`);
+  }
+  // Taken off the sidebar at the owner's request (Sep 2026), and hidden rather
+  // than removed: no link to them, and each page still opens for anybody allowed.
+  for (const href of ['/cash', '/menu', '/c/expirations', '/c/equipment', '/c/notes']) {
+    assert.ok(!links.includes(href), `${href} is off the sidebar`);
+    assert.strictEqual((await fetch(`${BASE}${href}`, { redirect: 'manual' })).status, 200, `and ${href} still opens`);
   }
 });
 

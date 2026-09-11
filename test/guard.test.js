@@ -156,6 +156,51 @@ test('a correct PIN clears the failures behind it', async () => {
     'and getting it right wipes the slate');
 });
 
+// The count is one run of failures inside a window, not a lifetime total. Both
+// halves of that were once wrong: an expired lock stayed on the row and stopped
+// the bucket from ever locking again, and old typos on the restaurant's one
+// shared address kept adding up until they locked everybody out at once.
+test('a lock that ran out comes back: waiting one out does not buy free guesses', async () => {
+  clear();
+  for (let i = 0; i < 3; i++) await post('/tips', { employee_id: String(A), pin: '0000' });
+  const first = db.prepare("SELECT * FROM auth_attempts WHERE scope='pin' AND ident=?").get(String(A));
+  assert.ok(first && first.locked_until, 'locked after the first run');
+  await new Promise((r) => setTimeout(r, 2400));   // PIN_LOCK_SECS=2
+  for (let i = 0; i < 3; i++) await post('/tips', { employee_id: String(A), pin: '0000' });
+  const again = db.prepare("SELECT * FROM auth_attempts WHERE scope='pin' AND ident=?").get(String(A));
+  assert.ok(again && again.locked_until, 'there is a lock on the row');
+  assert.ok(Date.parse(again.locked_until + 'Z') > Date.now(),
+    'and it is a new lock in force now, not the old one that already ran out');
+});
+
+test('typos from hours ago do not add up to a lock', async () => {
+  clear();
+  // Two old failures, one short of PIN_MAX=3, from long before the window.
+  db.prepare(`INSERT INTO auth_attempts (scope, ident, fails, first_at, last_at)
+    VALUES ('pin', ?, 2, datetime('now', '-3 hours'), datetime('now', '-3 hours'))`).run(String(A));
+  await post('/tips', { employee_id: String(A), pin: '0000' });
+  const row = db.prepare("SELECT * FROM auth_attempts WHERE scope='pin' AND ident=?").get(String(A));
+  assert.strictEqual(row.fails, 1, 'the count started over');
+  assert.ok(!row.locked_until, 'so one typo tonight did not lock them out');
+});
+
+test('the shared address forgets old typos too, so one bad week cannot lock out the floor', async () => {
+  clear();
+  await post('/tips/start', { pin: '0000' });          // learn how this address is recorded
+  const ip = db.prepare("SELECT ident FROM auth_attempts WHERE scope='pin-ip'").get();
+  assert.ok(ip, 'the address bucket counted the failure');
+  // One short of PIN_IP_MAX=50, every one of them from yesterday.
+  db.prepare(`UPDATE auth_attempts SET fails = 49, first_at = datetime('now', '-1 day'),
+    last_at = datetime('now', '-1 day') WHERE scope = 'pin-ip' AND ident = ?`).run(ip.ident);
+  const res = await post('/tips/start', { pin: '0000' });
+  assert.match(msgOf(res), /wasn.t recognised/i, 'an ordinary refusal, not a lockout');
+  const row = db.prepare("SELECT * FROM auth_attempts WHERE scope='pin-ip' AND ident=?").get(ip.ident);
+  assert.strictEqual(row.fails, 1, 'a fresh count');
+  assert.ok(!row.locked_until, 'and no lock');
+  const next = await post('/tips/start', { pin: '5353' });
+  assert.ok((next.headers.get('set-cookie') || '').includes('zwin_portal'), 'the next person signs straight in');
+});
+
 test('no PIN is ever written to the database or the log', async () => {
   clear();
   for (const p of ['4242', '9999', '0000']) await post('/tips/start', { pin: p });

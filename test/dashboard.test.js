@@ -686,13 +686,17 @@ test('the index reaches every section, and the account', async () => {
   const sheet = html.slice(from, html.indexOf('</nav>', from));
   assert.ok(sheet.length > 500, 'the index sheet is in the page');
 
-  // Everything the sidebar used to hold has to be in here — it is the only
-  // route to two thirds of the app once the nav row is gone.
-  for (const href of ['/shifts', '/sales', '/costs', '/cash', '/payroll',
-    '/c/invoices', '/c/vendors', '/c/products', '/menu',
-    '/c/expirations', '/c/equipment', '/c/documents', '/c/contacts',
-    '/calendar', '/c/incidents', '/c/notes', '/employees', '/positions', '/policy']) {
+  // Everything the sidebar holds has to be in here — it is the only route to
+  // two thirds of the app once the nav row is gone.
+  for (const href of ['/shifts', '/sales', '/costs', '/payroll', '/schedule', '/timeclock',
+    '/c/invoices', '/c/vendors', '/c/products', '/c/documents', '/c/contacts',
+    '/calendar', '/c/incidents', '/employees', '/positions', '/policy']) {
     assert.ok(sheet.includes(`href="${href}"`), `${href} is reachable from the index`);
+  }
+  // And what the owner took off the sidebar (Sep 2026) is off here too. Hidden,
+  // not removed: the pages themselves still open, which pages.test.js checks.
+  for (const href of ['/cash', '/menu', '/c/expirations', '/c/equipment', '/c/notes']) {
+    assert.ok(!sheet.includes(`href="${href}"`), `${href} is off the index with the sidebar`);
   }
   // A close button that closes. Tapping another tab also works, but a
   // full-screen overlay with no visible way out is a trap.

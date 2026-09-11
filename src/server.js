@@ -585,7 +585,9 @@ const readCookie = (req, name) => {
 // and access control you can't state plainly is access control you can't trust.
 // Areas come from src/nav.js, which the sidebar reads too — one list, so a
 // module cannot appear in navigation without also being gated.
-const { AREAS, areaFor: featureFor, CREATE_ACTIONS, SETTINGS_GROUPS } = require('./nav');
+const { AREAS, areaFor: featureFor, CREATE_ACTIONS, SETTINGS_GROUPS, SECTIONS: NAV_SECTIONS } = require('./nav');
+/** Is this page on the sidebar? A page taken off it takes its panels elsewhere with it. */
+const onSidebar = (href) => NAV_SECTIONS.some((s) => s.links.some((l) => l[0] === href));
 const FEATURES = AREAS;
 const MASTER = { id: 'm', name: 'Owner', role: 'editor', features: [], master: true };
 
@@ -3312,6 +3314,17 @@ app.post('/shifts/:id/resync-clock', (req, res) => {
     : 'Nothing to update: the clock and this service already agree.'));
 });
 
+/**
+ * Has this person been told about this pay before, under any figure? The keys
+ * are prefix:figure, so a range over the prefix answers it without a pattern.
+ */
+const toldBefore = (prefix) => {
+  try {
+    return !!db.prepare('SELECT 1 FROM staff_notified WHERE key >= ? AND key < ? LIMIT 1')
+      .get(prefix, `${prefix}\uffff`);
+  } catch { return false; }
+};
+
 app.post('/shifts/:id/send', async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
@@ -3328,10 +3341,26 @@ app.post('/shifts/:id/send', async (req, res) => {
 
   // Tell each person on the shift, on their portal, that their pay is ready —
   // the same moment the email goes out. Their own event, so only they see it.
+  //
+  // ONCE PER FIGURE, NOT ONCE PER SEND. Sending again after adding somebody
+  // used to tell everybody on the service "your pay is ready" a second time,
+  // including everyone whose pay had not moved. The key is that person's own
+  // inputs and results on this service, so a re-send tells exactly the people
+  // whose numbers changed, and a send with no change tells nobody. It can only
+  // ever send fewer than before, never more.
   const shiftLabel = whenOf(sh.date, sh.daypart);
   for (const p of inp.people) {
-    if (p.employeeId) PORTAL.notify('earnings', `Your pay for ${shiftLabel} is ready`,
-      { employeeId: p.employeeId, href: `/portal/earnings/${sh.id}` });
+    if (!p.employeeId) continue;
+    try {
+      const mine = (list) => (list || []).filter((x) => x.employeeId === p.employeeId);
+      const fig = crypto.createHash('sha1')
+        .update(JSON.stringify([p, mine(r.servers), mine(r.support)])).digest('hex').slice(0, 16);
+      const base = `pay:${sh.id}:${p.employeeId}:`;
+      const told = toldBefore(base);
+      PORTAL.notifyOnce(base + fig, 'earnings',
+        told ? `Your pay for ${shiftLabel} was updated` : `Your pay for ${shiftLabel} is ready`,
+        { employeeId: p.employeeId, href: `/portal/earnings/${sh.id}` });
+    } catch { /* the email already went; a notification must not undo that */ }
   }
 
   // And tell the back office the shift is out the door — the day's sales and
@@ -3843,7 +3872,10 @@ function portalTabForRoute(pathname) {
 
 /** What More holds. Utility screens only — never a tab's own area. */
 const portalMoreItems = (shape) => [
-  { href: '/portal/notifications', label: 'Notifications' },
+  // Notifications is off the drawer at the owner's request (Sep 2026). Only
+  // the row: the page and its history stay at /portal/notifications, Home still
+  // shows the newest few with its own way through to the rest, and nothing
+  // about what is sent to a phone changed.
   { href: '/portal/documents', label: 'Documents' },
   { href: '/portal/requests', label: 'My requests' },
   { href: '/portal/specials', label: 'Specials & 86 board' },
@@ -12281,10 +12313,18 @@ app.post('/payroll/send', async (req, res) => {
   // address on file — they are exactly the people who otherwise hear nothing
   // at all, and the portal is where they can now read the same figures.
   const label = labelFor({ start: from, end: to });
+  // Once per figure, as for one service: sending the period again tells the
+  // people whose summary changed, and nobody whose summary did not.
+  const rowOf = new Map(rows.map((x) => [x.employeeId, x]));
   for (const e of out.sent ? emails : []) {
     if (!e.employeeId) continue;
     try {
-      PORTAL.notify('earnings', `Your pay summary for ${label} is ready`,
+      const fig = crypto.createHash('sha1')
+        .update(JSON.stringify(rowOf.get(e.employeeId) || null)).digest('hex').slice(0, 16);
+      const base = `paysum:${from}:${to}:${e.employeeId}:`;
+      const told = toldBefore(base);
+      PORTAL.notifyOnce(base + fig, 'earnings',
+        told ? `Your pay summary for ${label} was updated` : `Your pay summary for ${label} is ready`,
         { employeeId: e.employeeId, href: `/portal/earnings?p=${from}` });
     } catch { /* the mail already went; a notification must not undo that */ }
   }
@@ -13104,8 +13144,10 @@ app.get('/costs', (req, res) => {
         <script type="application/json" id="perf-readouts">${JSON.stringify(readouts).replace(/</g, '\\u003c')}</script>
       </section>
 
-      <div class="pgrid2">
-        <section class="pcard">
+      ${/* Menu costing is off the sidebar (see nav.js), so its panel is off this
+           page too and Targets takes the row. Back on the sidebar, back here. */''}
+      <div class="${onSidebar('/menu') ? 'pgrid2' : ''}">
+        ${onSidebar('/menu') ? `<section class="pcard">
           <div class="pcard-h"><b>Menu margin alerts</b><a class="panel-link" href="/menu">Menu costing →</a></div>
           ${menuAlerts.length ? menuAlerts.map((c) => `
             <a class="driver" href="/menu/${c.item.id}">
@@ -13114,7 +13156,7 @@ app.get('/costs', (req, res) => {
                 <i>target ${c.target}% · ${money(c.totalCents)} to make, sells for ${money(c.sellCents)}</i></span>
               <span class="driver-go">›</span></a>`).join('')
             : '<div class="panel-empty">No active menu item is over its target. Items without a full cost are not counted.</div>'}
-        </section>
+        </section>` : ''}
         <section class="pcard perf-targets">
           <div class="pcard-h"><b>Targets</b><span class="muted">points, not percent-of</span></div>
           ${canWrite() ? `<form method="post" action="/costs/targets" class="perf-tgt-form">
@@ -15520,6 +15562,22 @@ const calDayLabel = (iso) => new Date(`${iso}T12:00:00`)
   .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
 /** The recurrence, in words. Shown on a detail card, never a rule string. */
+/**
+ * Which option in the composer's Repeat menu an item's rule is, or 'keep' for a
+ * rule the menu cannot say: every six weeks, the last Friday, until June. The
+ * edit sheet offers 'keep' for those, so saving a changed title cannot quietly
+ * flatten a rule nobody touched. Picking a menu option replaces the rule.
+ */
+function calRepeatKey(item) {
+  if (!item.rrule_freq) return '';
+  if (item.rrule_until || item.rrule_count || item.rrule_bymonthday != null
+    || item.rrule_bysetpos != null) return 'keep';
+  const hit = Object.entries(CAL_REPEAT).find(([, v]) => v.rrule_freq === item.rrule_freq
+    && (v.rrule_interval || 1) === (item.rrule_interval || 1)
+    && (v.rrule_byday || null) === (item.rrule_byday || null));
+  return hit ? hit[0] : 'keep';
+}
+
 function calRepeatText(item) {
   if (!item.rrule_freq) return 'Does not repeat';
   const n = item.rrule_interval || 1;
@@ -15788,17 +15846,23 @@ app.get('/calendar', (req, res) => {
       var occ = ${JSON.stringify(occ.map((o) => ({
     i: o.itemId, o: o.occursOn, d: o.date, t: o.title, c: o.category,
     ad: o.allDay ? 1 : 0, sm: o.startMin, em: o.endMin,
-    r: o.recurring ? 1 : 0, k: o.kind, done: o.completed ? 1 : 0,
-  })))};
+    r: o.recurring ? 1 : 0, k: o.kind, done: o.completed ? 1 : 0, n: o.notes || '',
+  }))).replace(/</g, '\\u003c')};
+      // The series as it is stored, for the edit sheet: its own title, first
+      // date, times, repeat and reminder, which one date of it may not show.
       var meta = ${JSON.stringify(Object.fromEntries(
     [...new Set(occ.map((o) => o.itemId))].map((id) => {
       const it = CAL.q.byId.get(id);
+      const rems = it ? CAL.q.remFor.all(id) : [];
       return [id, it ? {
         repeat: calRepeatText(it), who: it.responsible || '', notes: it.notes || '',
         kind: it.kind, cat: it.category || 'Other',
+        title: it.title, start: it.starts_on, ad: it.all_day ? 1 : 0,
+        sm: it.start_min, em: it.end_min, rk: calRepeatKey(it),
+        rem: rems.length ? String(rems[0].offset_min) : '', remN: rems.length,
       } : null];
     }),
-  ))};
+  )).replace(/</g, '\\u003c')};
       var byKey = {};
       occ.forEach(function (o) { byKey[o.i + '|' + o.o] = o; });
 
@@ -15832,9 +15896,55 @@ app.get('/calendar', (req, res) => {
       var detail = document.getElementById('zc-detail');
       window.calClose = function () { sheet(composer, false); sheet(detail, false); };
 
-      // ---- create ----------------------------------------------------------
+      // ---- create and edit share one sheet ---------------------------------
+      //
+      // Edit was a link back to this page with ?edit= on the end, and nothing
+      // read it: clicking it reloaded the calendar, which looked like a freeze,
+      // and the card was gone when the page came back. It opens this sheet now,
+      // filled in from the item, and the sheet posts to /calendar/edit instead.
+      function $f(id) { return document.getElementById(id); }
+      function hhmm(m) {
+        return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+      }
+      // One extra option for a stored value the menu does not offer, so the
+      // select holds what is there instead of silently showing its first choice.
+      function keepOption(sel, value, label) {
+        var old = sel.querySelector('option[data-keep]');
+        if (old) old.parentNode.removeChild(old);
+        if (value == null || value === '') return null;
+        var o = document.createElement('option');
+        o.value = value; o.textContent = label; o.setAttribute('data-keep', '1');
+        sel.appendChild(o);
+        return o;
+      }
+      function setMode(editing, scope) {
+        var one = editing && scope === 'one';
+        $f('zc-f-form').action = editing ? '/calendar/edit' : '/calendar/new';
+        $f('zc-f-head').textContent = !editing ? 'Add to calendar'
+          : scope === 'one' ? 'Edit this date' : scope === 'future' ? 'Edit this date and after' : 'Edit';
+        $f('zc-f-save').textContent = editing ? 'Save changes' : 'Save';
+        // One date of a series carries its own title, date, time and notes and
+        // nothing else; the rest belongs to the series. So the rest is not shown
+        // for one date, rather than shown and then quietly ignored.
+        ['zc-f-kind', 'zc-f-allday-l', 'zc-f-rep-l', 'zc-f-cat-l', 'zc-f-resp-l', 'zc-f-rem-l']
+          .forEach(function (id) { $f(id).hidden = one; });
+        $f('zc-f-note').hidden = !one;
+        if (!editing) $f('zc-f-scope').hidden = true;
+      }
+
       function openAdd(date, min) {
+        if (!composer) return;
         sheet(detail, false);
+        cur = null;
+        setMode(false);
+        $f('zc-f-id').value = '';
+        $f('zc-f-occ').value = '';
+        $f('zc-f-remwas').value = '';
+        keepOption($f('zc-f-repeat'), null);
+        keepOption($f('zc-f-rem'), null);
+        $f('zc-f-cat').selectedIndex = 0;
+        $f('zc-f-rem').value = '';
+        $f('zc-f-date-l').firstChild.nodeValue = 'Date';
         document.getElementById('zc-f-date').value = date;
         document.getElementById('zc-f-title').value = '';
         document.getElementById('zc-f-notes').value = '';
@@ -15845,19 +15955,84 @@ app.get('/calendar', (req, res) => {
         var timed = min != null && min !== '';
         document.getElementById('zc-f-allday').checked = !timed;
         document.getElementById('zc-f-times').hidden = !timed;
-        if (timed) {
-          var hh = function (m) { return String(Math.floor(m / 60)).padStart(2, '0') + ':'
-            + String(m % 60).padStart(2, '0'); };
-          document.querySelector('[name=start_time]').value = hh(Number(min));
-          document.querySelector('[name=end_time]').value = hh(Number(min) + 60);
-        }
+        document.querySelector('#zc-composer [name=start_time]').value = timed ? hhmm(Number(min)) : '';
+        document.querySelector('#zc-composer [name=end_time]').value = timed ? hhmm(Number(min) + 60) : '';
         document.getElementById('zc-f-repeat').value = '';
         var k = document.querySelector('#zc-composer [name=kind][value=task]');
         if (k) k.checked = true;
         document.getElementById('zc-f-more').hidden = true;
+        $f('zc-f-morebtn').textContent = 'More options';
         sheet(composer, true);
         setTimeout(function () { document.getElementById('zc-f-title').focus(); }, 60);
       }
+
+      // ---- edit --------------------------------------------------------------
+      var cur = null;   // { o: the date that was opened, m: its series }
+      function fillEdit(scope) {
+        var o = cur.o, m = cur.m;
+        var one = scope === 'one';
+        var whole = scope === 'all' && !!o.r;
+        setMode(true, scope);
+        var sc = $f('zc-f-scope');
+        sc.hidden = !o.r;
+        var pick = sc.querySelector('[name=scope][value=' + scope + ']');
+        if (pick) pick.checked = true;
+        $f('zc-f-id').value = o.i;
+        $f('zc-f-occ').value = o.o;
+        // One date shows that date as it stands, overrides and all. The whole
+        // series shows the series from its own first date: opening it on the
+        // date that was clicked would quietly move the start of the series there.
+        $f('zc-f-title').value = one ? o.t : (m.title || o.t);
+        $f('zc-f-date').value = whole ? m.start : o.d;
+        $f('zc-f-date-l').firstChild.nodeValue = whole ? 'First date' : 'Date';
+        var timed = !m.ad;
+        $f('zc-f-allday').checked = !timed;
+        $f('zc-f-times').hidden = !timed;
+        var sm = one ? o.sm : m.sm, em = one ? o.em : m.em;
+        document.querySelector('#zc-composer [name=start_time]').value = sm == null ? '' : hhmm(sm);
+        document.querySelector('#zc-composer [name=end_time]').value = em == null ? '' : hhmm(em);
+        $f('zc-f-notes').value = one ? (o.n || '') : (m.notes || '');
+        $f('zc-f-resp').value = m.who || '';
+        var k = document.querySelector('#zc-composer [name=kind][value=' + (m.kind === 'event' ? 'event' : 'task') + ']');
+        if (k) k.checked = true;
+        $f('zc-f-cat').value = m.cat || 'Other';
+        var rep = $f('zc-f-repeat');
+        var keepRep = keepOption(rep, m.rk === 'keep' ? 'keep' : null, 'Keep as it is: ' + (m.repeat || ''));
+        if (keepRep) keepRep.selected = true; else rep.value = m.rk || '';
+        var rem = $f('zc-f-rem');
+        var offered = Array.prototype.some.call(rem.options, function (x) {
+          return x.value === m.rem && !x.hasAttribute('data-keep');
+        });
+        var keepRem = keepOption(rem, m.rem && (!offered || m.remN > 1) ? m.rem : null,
+          m.remN > 1 ? 'Keep its ' + m.remN + ' reminders' : 'Keep its reminder');
+        if (keepRem) keepRem.selected = true; else rem.value = m.rem || '';
+        $f('zc-f-remwas').value = m.rem || '';
+        // Opened, so what is already set is in view rather than behind a button.
+        $f('zc-f-more').hidden = false;
+        $f('zc-f-morebtn').textContent = 'Fewer options';
+      }
+      function openEdit(id, on, scope) {
+        var o = byKey[id + '|' + on];
+        if (!o || !composer) return;
+        cur = { o: o, m: meta[id] || {} };
+        sheet(detail, false);
+        fillEdit(o.r ? scope : 'all');
+        sheet(composer, true);
+        setTimeout(function () { $f('zc-f-title').focus(); }, 60);
+      }
+      var editBtn = document.getElementById('zc-d-edit');
+      if (editBtn) editBtn.addEventListener('click', function () {
+        var sc = document.getElementById('zc-d-scope');
+        var chosen = (!sc.hidden && sc.querySelector('[name=scope]:checked'))
+          ? sc.querySelector('[name=scope]:checked').value : 'all';
+        openEdit(editBtn.getAttribute('data-id'), editBtn.getAttribute('data-occ'), chosen);
+      });
+      // Changing which dates to edit refills the sheet for that choice, because
+      // one date and the whole series start from different values.
+      var fscope = document.getElementById('zc-f-scope');
+      if (fscope) fscope.addEventListener('change', function (e) {
+        if (cur && e.target && e.target.name === 'scope') fillEdit(e.target.value);
+      });
 
       document.addEventListener('click', function (ev) {
         var add = ev.target.closest && ev.target.closest('[data-add]');
@@ -15865,7 +16040,9 @@ app.get('/calendar', (req, res) => {
         var cell = ev.target.closest && ev.target.closest('.zc-cell');
         if (cell && ev.target === cell) { openAdd(cell.dataset.date); return; }
         var more = ev.target.closest && ev.target.closest('[data-day]');
-        if (more) { location.href = '/calendar?v=agenda&m=' + more.dataset.day.slice(0, 7); return; }
+        // The day it belongs to. It opened the agenda, which lists sixty days from
+        // today, so "+2 more" in any other month landed on a list without them.
+        if (more) { location.href = '/calendar?v=day&d=' + more.dataset.day; return; }
         var open = ev.target.closest && ev.target.closest('[data-open]');
         if (open) { showDetail(open.dataset.open, open.dataset.occ); }
       });
@@ -15898,13 +16075,14 @@ app.get('/calendar', (req, res) => {
         who.textContent = m.who || '';
         who.parentNode.hidden = !m.who;
         var notes = document.getElementById('zc-d-notes');
-        notes.textContent = m.notes || '';
-        notes.parentNode.hidden = !m.notes;
+        // This date's own notes when it has some, the series' otherwise.
+        notes.textContent = o.n || m.notes || '';
+        notes.parentNode.hidden = !(o.n || m.notes);
         // Only a task can be completed. An event happened.
         var done = document.getElementById('zc-d-done');
-        done.hidden = m.kind !== 'task' || !!o.done;
+        if (done) done.hidden = m.kind !== 'task' || !!o.done;
         var undo = document.getElementById('zc-d-undone');
-        undo.hidden = m.kind !== 'task' || !o.done;
+        if (undo) undo.hidden = m.kind !== 'task' || !o.done;
         ['zc-d-done-f', 'zc-d-undone-f', 'zc-d-del-f'].forEach(function (f) {
           var el = document.getElementById(f);
           if (el) {
@@ -15913,13 +16091,13 @@ app.get('/calendar', (req, res) => {
             if (occf) occf.value = on;
           }
         });
-        document.getElementById('zc-d-edit').href = '/calendar?v=month&m=' + o.d.slice(0, 7) + '&edit=' + id;
-        // A series asks which occurrences a delete should touch; a one-off does not.
-        // A series asks which occurrences a delete should touch; a one-off does
-        // not, and defaulting a series to "the whole series" is how somebody
-        // loses a year of Mondays to one mis-tap.
+        var eb = document.getElementById('zc-d-edit');
+        if (eb) { eb.setAttribute('data-id', id); eb.setAttribute('data-occ', on); }
+        // A series asks which dates a delete or an edit should touch; a one-off
+        // does not, and defaulting a series to "the whole series" is how somebody
+        // loses a year of Mondays to one mis-tap. No actions, no question.
         var scope = document.getElementById('zc-d-scope');
-        scope.hidden = !o.r;
+        scope.hidden = !o.r || !eb;
         var one = scope.querySelector('[value=one]');
         if (one) one.checked = true;
         sheet(detail, true);
@@ -15975,10 +16153,34 @@ const calMin = (hhmm) => {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ''));
   return m ? (Number(m[1]) * 60) + Number(m[2]) : null;
 };
-const calBack = (res, msg, err) => res.redirect('/calendar?msg=' + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+/**
+ * Back to the view a form was sent from, not always today's month.
+ *
+ * Every write used to land on /calendar, so adding something in October while
+ * looking at October dropped you onto September, where it was not, under an
+ * "added" message. The page puts its own address in each form; anything that
+ * is not a calendar address is ignored and the month view stands in.
+ */
+function calBackUrl(req) {
+  const u = String((req && req.originalUrl) || '/calendar');
+  if (!/^\/calendar(\?|$)/.test(u)) return '/calendar';
+  const i = u.indexOf('?');
+  const kept = new URLSearchParams(i === -1 ? '' : u.slice(i + 1));
+  kept.delete('msg'); kept.delete('err');
+  const s = kept.toString();
+  return '/calendar' + (s ? `?${s}` : '');
+}
+const calBack = (req, res, msg, err) => {
+  const want = String((req.body && req.body.back) || '');
+  const to = /^\/calendar(\?[^\s\\]*)?$/.test(want) ? want : '/calendar';
+  res.redirect(to + (to.includes('?') ? '&' : '?') + 'msg=' + encodeURIComponent(msg) + (err ? '&err=1' : ''));
+};
 
 function calGuard(req, res) {
   if (!navAllowed('/calendar')) { res.status(403).send('Not available on your account.'); return false; }
+  // A view-only account sees the calendar and changes nothing on it. Its
+  // buttons are not drawn; this is what makes that more than a hidden button.
+  if (!canWrite()) { calBack(req, res, 'Your account is view-only.', true); return false; }
   return true;
 }
 
@@ -16000,10 +16202,10 @@ app.post('/calendar/new', (req, res) => {
       ...rep,
     });
     if (req.body.reminder) CAL.setReminders(item.id, [Number(req.body.reminder)]);
-    calBack(res, `${item.title} added.`);
+    calBack(req, res, `${item.title} added.`);
   } catch (e) {
     if (!(e instanceof CAL.CalendarError)) throw e;
-    calBack(res, e.message, true);
+    calBack(req, res, e.message, true);
   }
 });
 
@@ -16013,19 +16215,19 @@ app.post('/calendar/complete', (req, res) => {
     const done = CAL.complete(Number(req.body.id), req.body.occurs_on, tcActor(req));
     // Undo names the completion ROW. The old tracker carried the two dates it
     // had overwritten in an editable querystring that never expired.
-    calBack(res, 'Marked complete.' + (done ? '' : ''));
+    calBack(req, res, 'Marked complete.' + (done ? '' : ''));
   } catch (e) {
     if (!(e instanceof CAL.CalendarError)) throw e;
-    calBack(res, e.message, true);
+    calBack(req, res, e.message, true);
   }
 });
 
 app.post('/calendar/uncomplete', (req, res) => {
   if (!calGuard(req, res)) return;
   const row = CAL.q.doneOn.get(Number(req.body.id), String(req.body.occurs_on || ''));
-  if (!row) return calBack(res, 'That was already undone.', true);
+  if (!row) return calBack(req, res, 'That was already undone.', true);
   CAL.uncomplete(row.id);
-  calBack(res, 'No longer marked complete.');
+  calBack(req, res, 'No longer marked complete.');
 });
 
 app.post('/calendar/delete', (req, res) => {
@@ -16033,12 +16235,87 @@ app.post('/calendar/delete', (req, res) => {
   try {
     const scope = ['one', 'future', 'all'].includes(req.body.scope) ? req.body.scope : 'all';
     CAL.remove(Number(req.body.id), scope, req.body.occurs_on || null);
-    calBack(res, scope === 'one' ? 'That occurrence was removed.'
+    calBack(req, res, scope === 'one' ? 'That occurrence was removed.'
       : scope === 'future' ? 'That one and everything after it were removed.'
         : 'Deleted.');
   } catch (e) {
     if (!(e instanceof CAL.CalendarError)) throw e;
-    calBack(res, e.message, true);
+    calBack(req, res, e.message, true);
+  }
+});
+
+/**
+ * Change an item, or some of its dates.
+ *
+ * A one-off, or "the whole series", rewrites the item. "This date and every one
+ * after" ends the series the day before and starts a new one there, so dates
+ * already past keep what they were. "This date only" stores an override on
+ * that one date, and only for what one date can carry: its title, date, time
+ * and notes. Anything left as the series has it is stored as nothing rather
+ * than as a copy, so the date keeps following the series when the series is
+ * changed later. A copied title would have frozen it.
+ */
+app.post('/calendar/edit', (req, res) => {
+  if (!calGuard(req, res)) return;
+  const b = req.body;
+  const item = CAL.q.byId.get(Number(b.id));
+  if (!item) return calBack(req, res, 'That item is no longer there.', true);
+  const occ = MX.isDate(b.occurs_on) ? b.occurs_on : null;
+  let scope = item.rrule_freq && ['one', 'future', 'all'].includes(b.scope) ? b.scope : 'all';
+  // "From here on" from the very first date IS the whole series. Splitting
+  // there would leave an empty series behind, holding all of its history.
+  if (scope === 'future' && (!occ || occ <= item.starts_on)) scope = 'all';
+  if (scope === 'one' && !occ) return calBack(req, res, 'Which date? Open it on the calendar and try again.', true);
+  try {
+    if (scope === 'one') {
+      const title = String(b.title || '').trim();
+      if (!title) return calBack(req, res, 'Give it a title.', true);
+      const notes = String(b.notes || '').trim();
+      const sm = item.all_day ? null : calMin(b.start_time);
+      const em = item.all_day ? null : calMin(b.end_time);
+      if (sm != null && em != null && em < sm) return calBack(req, res, 'It cannot end before it starts.', true);
+      CAL.update(item.id, {
+        title: title !== item.title ? title : null,
+        notes: notes && notes !== (item.notes || '') ? notes : null,
+        starts_on: MX.isDate(b.starts_on) ? b.starts_on : occ,
+        start_min: sm != null && sm !== item.start_min ? sm : null,
+        end_min: em != null && em !== item.end_min ? em : null,
+      }, 'one', occ);
+      return calBack(req, res, `${title}: changed for ${niceDate(occ)} only.`);
+    }
+    const allDay = b.all_day === '1';
+    const patch = {
+      kind: b.kind === 'event' ? 'event' : 'task',
+      title: b.title,
+      category: b.category,
+      notes: b.notes,
+      responsible: b.responsible,
+      starts_on: b.starts_on,
+      all_day: allDay ? 1 : 0,
+      start_min: allDay ? null : calMin(b.start_time),
+      end_min: allDay ? null : calMin(b.end_time),
+    };
+    // 'keep' is a rule the menu cannot say, left exactly as stored. Anything
+    // picked from the menu replaces the whole rule, its end date included.
+    if (b.repeat !== 'keep') {
+      Object.assign(patch, {
+        rrule_freq: null, rrule_interval: 1, rrule_byday: null, rrule_bymonthday: null,
+        rrule_bysetpos: null, rrule_until: null, rrule_count: null,
+      }, CAL_REPEAT[b.repeat] || {});
+    }
+    // Reminders only when that menu was changed, so an item carrying two from
+    // the old tracker does not lose one by being saved with a new title.
+    const remChanged = String(b.reminder || '') !== String(b.reminder_was || '');
+    const rems = b.reminder ? [Number(b.reminder)] : [];
+    if (remChanged && scope === 'all') patch.reminders = rems;
+    const saved = CAL.update(item.id, patch, scope, occ);
+    if (remChanged && scope === 'future' && saved) CAL.setReminders(saved.id, rems);
+    return calBack(req, res, scope === 'future'
+      ? `${saved.title}: changed from ${niceDate(occ)} on. Earlier dates are as they were.`
+      : `${saved.title} saved.`);
+  } catch (e) {
+    if (!(e instanceof CAL.CalendarError)) throw e;
+    return calBack(req, res, e.message, true);
   }
 });
 
@@ -16047,20 +16324,36 @@ app.post('/calendar/delete', (req, res) => {
 app.get('/c/recurring', (req, res) => res.redirect(301, '/calendar'));
 app.get('/c/recurring/:id', (req, res) => res.redirect(301, `/calendar?item=${encodeURIComponent(req.params.id)}`));
 
-/** The quick composer. Hand-written token: the stamper only runs with a password set. */
+/**
+ * The composer: adds, and edits too, as one sheet so the two can never drift
+ * into asking different questions. The page script switches where it posts.
+ * Hand-written token: the stamper only runs with a password set.
+ */
 function calComposer(req, today) {
   if (!canWrite()) return '';
   const cats = CAL.CATEGORIES.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   return `
   <div class="zc-scrim" onclick="calClose()" hidden></div>
   <aside class="zc-sheet" id="zc-composer" hidden role="dialog" aria-modal="true"
-    aria-label="Add to calendar">
-    <form method="post" action="/calendar/new">
+    aria-labelledby="zc-f-head">
+    <form method="post" action="/calendar/new" id="zc-f-form">
       <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-      <div class="zc-sheet-h"><b>Add to calendar</b>
+      <input type="hidden" name="back" value="${esc(calBackUrl(req))}">
+      <input type="hidden" name="id" id="zc-f-id" value="">
+      <input type="hidden" name="occurs_on" id="zc-f-occ" value="">
+      <input type="hidden" name="reminder_was" id="zc-f-remwas" value="">
+      <div class="zc-sheet-h"><b id="zc-f-head">Add to calendar</b>
         <button class="zc-x" type="button" onclick="calClose()" aria-label="Close">&#10005;</button></div>
       <div class="zc-sheet-b">
-        <fieldset class="zc-kind">
+        <fieldset class="zc-d-scope" id="zc-f-scope" hidden>
+          <legend>This repeats. Change</legend>
+          <label><input type="radio" name="scope" value="one" checked> This date only</label>
+          <label><input type="radio" name="scope" value="future"> This date and every one after</label>
+          <label><input type="radio" name="scope" value="all"> The whole series</label>
+        </fieldset>
+        <p class="zc-f-note" id="zc-f-note" hidden>Just this date: its title, date, time and notes.
+          To change the category, the repeat or who is responsible, choose the whole series.</p>
+        <fieldset class="zc-kind" id="zc-f-kind">
           <legend class="zc-sr">What is this</legend>
           <label><input type="radio" name="kind" value="task" checked>
             <b>Task</b><i>Can be completed, and can fall overdue</i></label>
@@ -16071,16 +16364,16 @@ function calComposer(req, today) {
           <input name="title" id="zc-f-title" required maxlength="120" autocomplete="off"
             placeholder="Hood cleaning"></label>
         <div class="zc-row">
-          <label class="zc-fld">Date<input type="date" name="starts_on" id="zc-f-date" required
+          <label class="zc-fld" id="zc-f-date-l">Date<input type="date" name="starts_on" id="zc-f-date" required
             value="${today}"></label>
-          <label class="zc-check"><input type="checkbox" name="all_day" id="zc-f-allday" value="1" checked>
+          <label class="zc-check" id="zc-f-allday-l"><input type="checkbox" name="all_day" id="zc-f-allday" value="1" checked>
             All day</label>
         </div>
         <div class="zc-row" id="zc-f-times" hidden>
           <label class="zc-fld">Starts<input type="time" name="start_time"></label>
           <label class="zc-fld">Ends<input type="time" name="end_time"></label>
         </div>
-        <label class="zc-fld">Repeat
+        <label class="zc-fld" id="zc-f-rep-l">Repeat
           <select name="repeat" id="zc-f-repeat">
             <option value="">Does not repeat</option>
             <option value="daily">Daily</option>
@@ -16091,15 +16384,15 @@ function calComposer(req, today) {
             <option value="quarterly">Every 3 months</option>
             <option value="yearly">Yearly</option>
           </select></label>
-        <label class="zc-fld">Category
-          <select name="category">${cats}</select></label>
+        <label class="zc-fld" id="zc-f-cat-l">Category
+          <select name="category" id="zc-f-cat">${cats}</select></label>
         <button class="zc-more-b" type="button" id="zc-f-morebtn">More options</button>
         <div id="zc-f-more" hidden>
-          <label class="zc-fld">Responsible
+          <label class="zc-fld" id="zc-f-resp-l">Responsible
             <input name="responsible" id="zc-f-resp" maxlength="80"
               placeholder="A person, or a vendor"></label>
-          <label class="zc-fld">Reminder
-            <select name="reminder">
+          <label class="zc-fld" id="zc-f-rem-l">Reminder
+            <select name="reminder" id="zc-f-rem">
               <option value="">None</option>
               ${CAL.REMINDER_OFFSETS.map((o) => `<option value="${o.min}">${esc(o.label)}</option>`).join('')}
             </select></label>
@@ -16108,7 +16401,7 @@ function calComposer(req, today) {
       </div>
       <div class="zc-sheet-f">
         <button class="btn" type="button" onclick="calClose()">Cancel</button>
-        <button class="btn btn-primary" type="submit">Save</button>
+        <button class="btn btn-primary" type="submit" id="zc-f-save">Save</button>
       </div>
     </form>
   </aside>`;
@@ -16120,9 +16413,12 @@ function calDetail(req) {
   // button can reach one by id without nesting forms. Each carries its own
   // token: the response-level stamper only runs when APP_PASSWORD is set, so a
   // form leaning on it ships with no field at all on a dev machine and breaks
-  // the day a password exists.
-  const t = `<input type="hidden" name="_csrf" value="${csrfFor(req)}">`;
-  const tok = `
+  // the day a password exists. And the page it came from, to go back to.
+  // A view-only account gets the card and no actions: they would be refused.
+  const w = canWrite();
+  const t = `<input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      <input type="hidden" name="back" value="${esc(calBackUrl(req))}">`;
+  const tok = !w ? '' : `
     <form method="post" action="/calendar/complete" id="zc-d-done-f" style="display:none">
       ${t}<input type="hidden" name="id"><input type="hidden" name="occurs_on"></form>
     <form method="post" action="/calendar/uncomplete" id="zc-d-undone-f" style="display:none">
@@ -16148,12 +16444,12 @@ function calDetail(req) {
         <label><input type="radio" name="scope" value="all"> The whole series</label>
       </fieldset>
     </div>
-    <div class="zc-sheet-f">
+    ${w ? `<div class="zc-sheet-f">
       <button class="btn btn-primary" type="submit" form="zc-d-done-f" id="zc-d-done">Mark complete</button>
       <button class="btn" type="submit" form="zc-d-undone-f" id="zc-d-undone" hidden>Undo complete</button>
-      <a class="btn" id="zc-d-edit" href="#">Edit</a>
+      <button class="btn" type="button" id="zc-d-edit">Edit</button>
       <button class="btn zc-del" type="submit" form="zc-d-del-f" id="zc-d-del">Delete</button>
-    </div>
+    </div>` : ''}
   </aside>${tok}`;
 }
 
@@ -29893,6 +30189,31 @@ app.get('/documents/:id', (req, res, next) => {
         </div>
       </div>`;
     }
+    // A new version starts with no boxes. When the one before it had some, the
+    // way to bring them across is offered right here, since that is almost
+    // always what is wanted, and a staff member signing first would lock the
+    // layout with none.
+    const prev = db.prepare(`SELECT v.* FROM doc_versions v
+      WHERE v.document_id = ? AND v.id < ?
+        AND EXISTS (SELECT 1 FROM doc_fields f WHERE f.version_id = v.id)
+      ORDER BY v.id DESC LIMIT 1`).get(d.id, cur.id);
+    const prevN = prev ? DOCS.fieldsFor(prev.id).length : 0;
+    if (prev) {
+      return `<div class="dfe-cta">
+      <div class="dfe-cta-t">
+        <b>Version ${esc(cur.version)} has no signature fields yet</b>
+        <span>Version ${esc(prev.version)} had ${prevN}. A new file can have its pages in different places,
+          so they are not copied on their own: copy them, then check each one still sits where it
+          belongs. Until then staff get a plain acknowledgment panel instead.</span>
+      </div>
+      <form method="post" action="/documents/${d.id}/fields/copy">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <input type="hidden" name="from" value="${prev.id}">
+        <button class="bs-btn bs-btn-go" type="submit">Copy the ${prevN} from version ${esc(prev.version)}</button>
+      </form>
+      <a class="bs-btn" href="/documents/${d.id}/fields">Place fields</a>
+    </div>`;
+    }
     return `<div class="dfe-cta">
       <div class="dfe-cta-t">
         <b>No signature fields placed yet</b>
@@ -29981,6 +30302,10 @@ app.post('/documents/:id/version', docUpload.single('file'), csrfBody, (req, res
       : req.file.mimetype === 'image/png' ? '.png' : '.jpg';
     const stored = `${Date.now()}-${DOCS.crypto.randomBytes(8).toString('hex')}${ext}`;
     DOCS.fs.writeFileSync(DOCS.path.join(DOCS.DOC_DIR, stored), req.file.buffer);
+    // The boxes do not come across on their own (see the copy route), so the
+    // message says so when the version being replaced had some.
+    const was = DOCS.currentVersion(d.id);
+    const hadBoxes = d.kind === 'sign' && was ? DOCS.fieldsFor(was.id).length : 0;
     DOCS.addVersion(d.id, {
       version: String(req.body.version || '').trim() || 'next',
       stored_name: stored, orig_name: req.file.originalname, mime: req.file.mimetype,
@@ -29992,7 +30317,8 @@ app.post('/documents/:id/version', docUpload.single('file'), csrfBody, (req, res
     // a new one starts unsigned by construction. The checkbox is there because
     // NOT requiring it is the case that would need work, and it is not built.
     return res.redirect(`/documents/${d.id}?msg=`
-      + encodeURIComponent('New version uploaded. Earlier signatures stay on the version they were given.'));
+      + encodeURIComponent('New version uploaded. Earlier signatures stay on the version they were given.'
+        + (hadBoxes ? ` It has no signature boxes yet: copy the ${hadBoxes} from version ${was.version} below, or place new ones, before anybody signs it.` : '')));
   } catch (e) {
     return res.redirect(`/documents/${d.id}?err=1&msg=` + encodeURIComponent(e.message || 'Upload failed.'));
   }
@@ -31099,6 +31425,9 @@ app.get('/portal/documents/:id', (req, res) => {
   const ctx = portalDoc(req, res);
   if (!ctx) return;
   const { emp, doc } = ctx;
+  // Opening a document starts a fresh 45 minutes, and each new page read renews
+  // it again (the progress route). See there for the handbook that ran out.
+  setPortalCookie(req, res, emp.id);
   const v = DOCS.currentVersion(doc.id);
   if (!v) {
     return res.send(portalPage(doc.title, `
@@ -31275,6 +31604,13 @@ app.get('/portal/documents/:id/file', (req, res) => {
 app.post('/portal/documents/:id/progress', express.json(), (req, res) => {
   const who = requirePortal(req, res);
   if (!who) return;
+  // READING IS ACTIVITY. A sign-in lasts 45 minutes and renewed only for
+  // somebody on the clock, so a person reading a 60-page handbook off the clock
+  // was signed out while still reading it: measured, the final submit landed
+  // five minutes after the session ran out and was refused, boxes and all.
+  // Each new page read renews it now, as a punch does. Doing nothing for 45
+  // minutes still signs them out, which is what protects a shared phone.
+  setPortalCookie(req, res, who.emp.id);
   const d = DOCS.byId(req.params.id);
   if (!d || !DOCS.canEmployeeSee(d.id, who.emp.id)) return res.status(404).json({ ok: false });
   const v = DOCS.currentVersion(d.id);
@@ -31480,6 +31816,28 @@ app.get('/documents/:id/fields', (req, res, next) => {
 });
 
 /** Place, move and remove — all refused server-side once anything is signed. */
+/**
+ * Bring an earlier version's signature boxes onto the current one.
+ *
+ * Never automatic. A new file can have its pages in different places, and a box
+ * left on a page that no longer exists could never be filled in, so nobody
+ * could sign at all. The owner asks for it, and lands in the editor to check.
+ */
+app.post('/documents/:id/fields/copy', (req, res) => {
+  if (!navAllowed('/documents') || !canWrite()) return res.status(403).end();
+  const d = DOCS.byId(req.params.id);
+  if (!d) return res.status(404).end();
+  const cur = DOCS.currentVersion(d.id);
+  const from = DOCS.versionById(req.body.from);
+  const refuse = (m) => res.redirect(`/documents/${d.id}?err=1&msg=` + encodeURIComponent(m));
+  if (!cur || !from || from.document_id !== d.id || from.id === cur.id) return refuse('There is nothing to copy from.');
+  if (DOCS.fieldLocked(cur.id)) return refuse('This version has been signed, so its fields cannot change.');
+  if (DOCS.fieldsFor(cur.id).length) return refuse('This version already has fields. Move them in the editor instead.');
+  const n = DOCS.copyFields(from.id, cur.id);
+  return res.redirect(`/documents/${d.id}/fields?msg=` + encodeURIComponent(
+    `Copied ${n} field${n === 1 ? '' : 's'} from version ${from.version}. Check each one still sits where it belongs.`));
+});
+
 app.post('/documents/:id/fields', express.json(), (req, res) => {
   if (!navAllowed('/documents') || !canWrite()) return res.status(403).json({ ok: false });
   const d = DOCS.byId(req.params.id);
