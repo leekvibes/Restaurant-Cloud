@@ -2225,6 +2225,7 @@ test('clocked hours held back from a sent service tell the manager, and the serv
   const told = db.prepare(`SELECT * FROM admin_events WHERE kind = 'timeclock'
     AND title LIKE '%did not reach%' ORDER BY id DESC`).get();
   assert.ok(told, 'the manager is told, not only the audit log');
+  assert.ok(told.title.endsWith(require('../src/services').nameOf('dinner')), `naming the service, not just the day: ${told.title}`);
   assert.match(told.body || '', /9\.00h/, 'with what the clock says');
   assert.strictEqual(told.href, `/shifts/${sh.id}`, 'and a way straight to the service');
   const page = await text(`/shifts/${sh.id}`);

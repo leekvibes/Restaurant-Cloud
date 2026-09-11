@@ -908,8 +908,11 @@ function heldNotice(shiftId, employeeId, sh, hours, reason, by) {
     const on = row ? Number(row.hours) || 0 : 0;
     if (Math.abs(on - hours) < 0.01) return;
     const who = (db.prepare('SELECT name FROM employees WHERE id = ?').get(employeeId) || {}).name || 'Somebody';
-    let svc = sh.daypart || '';
-    try { svc = require('./services').nameOf(sh.daypart) || svc; } catch { /* keep the key */ }
+    // The shift row handed in carries no service, so it is read here. Without
+    // it the notice said "did not reach Thu, Sep 10" and never which service.
+    const svcKey = sh.daypart || (db.prepare('SELECT daypart FROM shifts WHERE id = ?').get(shiftId) || {}).daypart || '';
+    let svc = svcKey;
+    try { svc = require('./services').nameOf(svcKey) || svc; } catch { /* keep the key */ }
     const f = (n) => `${(Math.round(n * 100) / 100).toFixed(2)}h`;
     require('./portal').adminNotifyOnce(`held:${shiftId}:${employeeId}:${f(hours)}:${reason}`, 'timeclock',
       `${who}'s clocked hours did not reach ${dayLabel(sh.date)} ${svc}`.trim(), {
