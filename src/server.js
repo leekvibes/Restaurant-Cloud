@@ -14976,7 +14976,12 @@ app.get('/positions/:id/edit', (req, res) => {
     ${flash(req)}
     <a class="back" href="/positions">← Positions</a>
     <h1>Edit ${esc(p.name)}</h1>
-    ${used ? `<div class="flash flash-warn"><div>Used on <b>${used}</b> shift${used === 1 ? '' : 's'}. Changing how tips are handled affects how those shifts calculate from now on — past emails already sent aren't changed.</div></div>` : ''}
+    ${/* A .bs-note, not a .flash: the owner shell hides every .flash outright
+         (broadsheet.css, "the old ones"), so the warning that used to sit here
+         was in the page and never on the screen. */''}
+    ${used ? `<p class="bs-note ask"><b>Used on ${used} shift${used === 1 ? '' : 's'}.</b>
+      <span>A change to how tips are handled applies to services worked out from now on. Services
+      already worked out keep the tip handling they were worked out with, so nobody's past pay changes.</span></p>` : ''}
     <form method="post" action="/positions/${p.id}" class="card form grid">
       <label>Name <input name="name" value="${esc(p.name)}" required></label>
       <label>Tip handling <select name="kind">
@@ -14992,7 +14997,11 @@ app.post('/positions/:id', (req, res) => {
   const name = String(req.body.name || '').trim() || p.name;
   const kind = KINDS[req.body.kind] ? req.body.kind : p.kind;
   positions.update.run({ id: p.id, name, kind, sort: p.sort });
-  res.redirect('/positions?msg=' + encodeURIComponent(`${name} updated.`));
+  // Said on the way out as well as on the form, because it is the one thing
+  // about this save that is easy to assume the wrong way round.
+  res.redirect('/positions?msg=' + encodeURIComponent(kind !== p.kind
+    ? `${name} updated. The new tip handling applies to services worked out from now on; services already worked out keep what they had.`
+    : `${name} updated.`));
 });
 
 app.post('/positions/:id/active', (req, res) => {

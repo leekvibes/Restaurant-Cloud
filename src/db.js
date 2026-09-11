@@ -163,6 +163,41 @@ function positionKinds() {
 const kindOf = (slug) => positionKinds()[slug] || 'support';
 const supportSlugs = () => positions.active.all().filter((p) => p.kind === 'support').map((p) => p.slug);
 
+// Migration: each service keeps the tip handling its jobs had when it was
+// first worked out, the way it keeps its tip-out policy (policy_id).
+//
+// Whether a job is in the pools at all ("Not tipped" on the Positions page) was
+// the one tip setting still read live, so changing it reached back through
+// every night ever settled. Measured: making Busser "Not tipped" took a busser's
+// $26.00 share of a night already worked out down to $0.00, on the service and
+// in payroll alike. Every service that exists when this column arrives is
+// stamped with the handling it has been worked out with all along — today's —
+// and each new one is stamped the first time it is worked out (kindsForShift).
+if (!shiftCols.includes('role_kinds')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN role_kinds TEXT');
+  db.prepare('UPDATE shifts SET role_kinds = ?').run(JSON.stringify(positionKinds()));
+}
+const pinRoleKinds = db.prepare('UPDATE shifts SET role_kinds = ? WHERE id = ? AND role_kinds IS NULL');
+
+/**
+ * The tip handling a SERVICE is worked out with: its jobs as they were the
+ * first time it was worked out, stamped then and never again. A job created
+ * after that has nothing locked on the service, so it follows how it is set
+ * now — which is what lets a Training position added this week be used on
+ * last night's service without being counted as tipped.
+ */
+function kindsForShift(sh) {
+  const live = positionKinds();
+  if (!sh || !sh.id) return live;
+  let pinned = null;
+  if (sh.role_kinds) { try { pinned = JSON.parse(sh.role_kinds); } catch { pinned = null; } }
+  if (!pinned || typeof pinned !== 'object') {
+    pinRoleKinds.run(JSON.stringify(live), sh.id);
+    return live;
+  }
+  return { ...live, ...pinned };
+}
+
 // Migration: total sales for the whole shift, not just what servers rang up.
 // Server sales stay per-person because tip-outs are a percentage of each
 // server's OWN sales. But counter, to-go and bar sales never touch a server's
@@ -588,14 +623,16 @@ function shiftInputs(shiftId) {
   // The shift's OWN policy decides how its people are classified. Lazily
   // required: policy.js reads this module.
   let isNew = false;
+  const shRow = s.shiftById.get(shiftId);
   try {
-    const shRow = s.shiftById.get(shiftId);
     isNew = newModel(require('./policy').policyForShift(shRow));
   } catch { isNew = false; }
   const sales = new Map(w.salesForShift.all(shiftId).map((r) => [r.employee_id, r]));
   const servers = [];
   const support = [];
-  const kinds = positionKinds();
+  // Whether each job is in the pools at all, as it was the first time THIS
+  // service was worked out: locked on like the policy, never read from today.
+  const kinds = kindsForShift(shRow);
   for (const row of workRows) {
     // Wage resolution: salaried → no hourly wage; else the rate recorded on
     // the shift → the wage that was IN FORCE ON THE DAY it was worked → the
@@ -640,7 +677,8 @@ function shiftInputs(shiftId) {
     // be the whole classification, and because kind is not versioned, changing
     // one reached backwards through every service ever settled. The shift's own
     // pinned policy decides now; the only thing kind still says is whether
-    // somebody is in a pool at all (below), which is a fact about the job.
+    // somebody is in a pool at all (below), and even that is read as the job
+    // was when this service was first worked out (kindsForShift), not today.
     const earnsDirect = isNew ? DIRECT_ROLES.has(row.role) : row.role === 'server';
     const canReceive = !earnsDirect || DIRECT_ALSO_RECEIVES.has(row.role);
     if (earnsDirect) {
@@ -678,7 +716,8 @@ function shiftInputs(shiftId) {
         cashTips: earnsDirect ? 0 : (sr.cash_tips_cents || 0) / 100,
         cardTips: earnsDirect ? 0 : (sr.card_tips_cents || 0) / 100,
         // A trainee is on the clock but out of every pool — their hours must
-        // not dilute the split for the people actually earning tips.
+        // not dilute the split for the people actually earning tips. Judged by
+        // the job as it was when this service was first worked out (kinds).
         tipEligible: kinds[row.role] !== 'non_tipped',
         hoursSource: row.hours_source || null,
       });

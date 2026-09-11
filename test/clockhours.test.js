@@ -2338,3 +2338,74 @@ test('sending a service again tells only the people whose pay changed', async ()
   assert.deepStrictEqual(told(b1), ['ready', 'updated'], 'the first busser’s share halved, and they are told it changed');
   assert.deepStrictEqual(told(b2), ['ready'], 'the busser added late hears their pay is ready');
 });
+
+// Whether a job is tipped at all ("Not tipped" on the Positions page) was read
+// live every time a service was worked out, so changing it reached back into
+// every night ever settled: the tip-out policy is locked onto each service and
+// this was the one tip setting that was not. Each service now keeps the tip
+// handling its jobs had when it was first worked out.
+test('changing whether a job is tipped never restates a night already worked out', async () => {
+  const eng = require('../src/engine'); const pol = require('../src/policy');
+  const { shiftInputs } = require('../src/db'); const { aggregatePayroll } = require('../src/reports');
+  const day = '2026-03-30';
+  const later = '2026-03-31';
+  const mk = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1200, 1)`).run(name, role).lastInsertRowid);
+  const srv = mk('Kind Server', 'server');
+  const bus = mk('Kind Busser', 'busser');
+  const helper = mk('Kind Helper', 'kitchen');
+  const service = async (date) => {
+    const made = await post('/shifts', { date, daypart: 'dinner' });
+    const id = Number(String(made.headers.get('location')).split('/').pop());
+    await post(`/shifts/${id}/server`, { employee_id: String(srv), food: '1000', coffee: '0', alcohol: '0',
+      card_tips: '200', hours: '6', wage: '12' });
+    await post(`/shifts/${id}/support`, { employee_id: String(bus), role: 'busser', hours: '4', wage: '12' });
+    return id;
+  };
+  const run = (id) => eng.runShift(shiftInputs(id), pol.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(id)));
+  const share = (r, id) => (r.support.find((x) => x.employeeId === id) || {}).tipShare || 0;
+  const tipsIn = (rows, id) => {
+    const r = rows.find((x) => x.employeeId === id) || {};
+    return { paycheckTips: r.paycheckTips, weeklyCash: r.weeklyCash, tipsEarned: r.tipsEarned };
+  };
+
+  const sid = await service(day);
+  const before = run(sid);
+  assert.ok(share(before, bus) > 0, 'while bussers are tipped, the busser is paid out of the night');
+  const payBefore = tipsIn(aggregatePayroll(day, day).rows, bus);
+
+  const pos = db.prepare("SELECT * FROM positions WHERE slug = 'busser'").get();
+  try {
+    await post(`/positions/${pos.id}`, { name: pos.name, kind: 'non_tipped' });
+    assert.strictEqual(db.prepare("SELECT kind FROM positions WHERE slug = 'busser'").get().kind, 'non_tipped');
+
+    assert.strictEqual(share(run(sid), bus), share(before, bus),
+      'the night already worked out still pays the busser exactly what it did');
+    assert.deepStrictEqual(tipsIn(aggregatePayroll(day, day).rows, bus), payBefore, 'and payroll for that night agrees');
+
+    const sid2 = await service(later);
+    assert.strictEqual(share(run(sid2), bus), 0, 'a night worked out from now on leaves bussers out of the pools');
+
+    // A job that did not exist when the old night was worked out has no setting
+    // locked there, so it follows how it is set now: added late as Not tipped,
+    // it takes nothing, and nobody else's share moves.
+    await post('/positions', { name: 'Kind Trainee', kind: 'non_tipped' });
+    await post(`/shifts/${sid}/support`, { employee_id: String(helper), role: 'kind_trainee', hours: '3', wage: '12' });
+    const again = run(sid);
+    const trainee = again.support.find((x) => x.employeeId === helper);
+    assert.ok(trainee, 'the trainee is on the old night');
+    assert.strictEqual(trainee.tipShare, 0, 'and out of its pools, as the job is set now');
+    assert.strictEqual(share(again, bus), share(before, bus), 'and the busser is still paid what they were');
+
+    const edit = await text(`/positions/${pos.id}/edit`);
+    assert.match(edit, /applies to services worked out from now on/, 'the edit page says what a change will and will not touch');
+    assert.doesNotMatch(edit, /past emails already sent aren/, 'instead of implying the past is safe while it was not');
+    // In a note the owner shell shows. It sat in a .flash box before, which
+    // broadsheet.css hides outright, so nobody had ever seen the warning at all.
+    assert.match(edit, /<p class="bs-note ask"><b>Used on \d+ shifts?\.<\/b>/, 'in a note that is actually on the screen');
+    assert.doesNotMatch(edit, /class="flash flash-warn"/, 'not in the box the shell hides');
+  } finally {
+    db.prepare("UPDATE positions SET kind = ? WHERE slug = 'busser'").run(pos.kind);
+    db.prepare("UPDATE positions SET active = 0 WHERE slug = 'kind_trainee'").run();
+  }
+});
