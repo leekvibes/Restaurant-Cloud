@@ -816,6 +816,38 @@ test('the availability tab honours the switch, and never lies about it', async (
   } finally { P.setSetting('sch_availability', '1'); }
 });
 
+// THE ONE ACTION THIS SECTION EXISTS FOR.
+//
+// "Request time off" shipped as a button that opened nothing: no sheet was ever
+// built for it, it carries no hook, and no script on the page names it — so the
+// tap did nothing at all, which is how it was found. The route behind it has
+// been live and tested the whole time, and Part Three of the Phase 6 contract
+// lists this beside prefer and unavailable as the three actions here.
+test('Request time off opens a form that posts a real request', async () => {
+  const cookie = await signIn(PIN.esther);
+  const html = await text('/portal/schedule?v=avail', { cookie });
+  assert.match(html, /id="myav-req"/, 'the button is there');
+  assert.match(html, /id="myav-off"[^>]*hidden/, 'and a sheet waiting behind it');
+  assert.match(html, /action="\/portal\/timeoff"/, 'that posts a time-off request');
+  assert.match(html, /name="from"/, 'with a first day');
+  assert.match(html, /name="to"/, 'a last day');
+  assert.match(html, /name="all_day"/, 'and the all-day switch the route reads');
+  assert.match(html, /getElementById\('myav-req'\)/, 'and something that opens it');
+});
+
+test('time off can still be asked for when availability is switched off', async () => {
+  // The page has always promised this in words; now it is true of the controls.
+  const P = require('../src/periods');
+  const cookie = await signIn(PIN.esther);
+  try {
+    P.setSetting('sch_availability', '0');
+    const off = await text('/portal/schedule?v=avail', { cookie });
+    assert.match(off, /action="\/portal\/timeoff"/, 'the request sheet is still there');
+    assert.doesNotMatch(off, /action="\/portal\/availability"/, 'and availability still is not');
+    assert.doesNotMatch(off, /data-add=/, 'nor the buttons that add one');
+  } finally { P.setSetting('sch_availability', '1'); }
+});
+
 test('Phase 6 does not leak into Only me or Everyone', async () => {
   const cookie = await signIn(PIN.esther);
   for (const v of ['me', 'all']) {

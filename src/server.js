@@ -7289,6 +7289,7 @@ app.get('/portal/schedule', (req, res) => {
           </li>`).join('')}</ul>`
           : '<p class="myav-sub">You have not asked for any time off.</p>'}
         <button type="button" class="myav-req" id="myav-req">Request time off</button>
+        ${myavOffSheet(req, today)}
 
         ${avOn ? myavSheets(req, today, DAYPARTS) : ''}`
         : (body ? `<div class="ps-days">${body}</div>`
@@ -7302,6 +7303,108 @@ app.get('/portal/schedule', (req, res) => {
     </nav>`));
 });
 
+
+/**
+ * TIME OFF, ASKED FOR.
+ *
+ * The button under "Time off" has been on this screen since Phase 6 and opened
+ * nothing: no sheet was ever built for it, so the one action this section
+ * exists for was a dead tap. Measured, not guessed — the button carries no
+ * hook, sits in no form, and nothing in the page's scripts names it. The route
+ * it posts to has been live and tested the whole time (/portal/timeoff), and
+ * Part Three of the Phase 6 contract lists "request time off" beside prefer and
+ * unavailable as the three actions belonging here.
+ *
+ * Separate from myavSheets on purpose. Those two belong to availability and are
+ * rendered only while the manager is collecting it; time off does not stop
+ * existing when that switch is off, so this ships either way — the same rule
+ * the list above it already follows, and the same thing the page promises when
+ * the switch is off ("you can still request time off").
+ */
+function myavOffSheet(req, today) {
+  const csrf = csrfFor(req);
+  return `
+  <div class="myav-sheet" id="myav-off" hidden aria-hidden="true">
+    <div class="myav-scrim" data-off-close></div>
+    <form class="myav-panel" method="post" action="/portal/timeoff"
+      role="dialog" aria-modal="true" aria-labelledby="myav-off-h">
+      <input type="hidden" name="_csrf" value="${csrf}">
+      <div class="myav-head"><h2 id="myav-off-h">Request time off</h2>
+        <button type="button" class="myav-x" data-off-close aria-label="Close">&times;</button></div>
+
+      <label class="myav-row"><span>First day</span>
+        <input type="date" name="from" id="myav-off-from" value="${esc(today)}" required></label>
+      <label class="myav-row"><span>Last day</span>
+        <input type="date" name="to" id="myav-off-to" value="${esc(today)}" required></label>
+
+      <label class="myav-row"><span>All day</span>
+        <input type="checkbox" name="all_day" value="1" id="myav-off-all" class="myav-sw" checked></label>
+
+      ${/* Disabled rather than hidden, exactly as the availability sheet does
+             it: a range that silently ignores its own values is the failure
+             people actually hit. */''}
+      <div class="myav-times" id="myav-off-times">
+        <label><span class="myav-lab">From</span>
+          <input type="time" name="start" value="09:00" disabled></label>
+        <em>To</em>
+        <label><span class="myav-lab">To</span>
+          <input type="time" name="end" value="17:00" disabled></label>
+      </div>
+      <p class="myav-note-hint" aria-live="polite" id="myav-off-hint"></p>
+
+      <label class="myav-narea"><span class="myav-lab">Reason</span>
+        <textarea name="reason" maxlength="200" rows="3" placeholder="Optional"></textarea></label>
+
+      <p class="pes-fine">Your manager sees this as a request. Nothing changes until they answer.</p>
+      <div class="myav-foot">
+        <button type="button" class="myav-cancel" data-off-close>Cancel</button>
+        <button type="submit" class="myav-confirm">Send request</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+  (function () {
+    var sheet = document.getElementById('myav-off');
+    var opener = document.getElementById('myav-req');
+    if (!sheet || !opener) return;
+    var from = document.getElementById('myav-off-from');
+    var to = document.getElementById('myav-off-to');
+    var all = document.getElementById('myav-off-all');
+    var times = sheet.querySelectorAll('#myav-off-times input');
+    var hint = document.getElementById('myav-off-hint');
+    function show(on) {
+      sheet.hidden = !on;
+      sheet.setAttribute('aria-hidden', on ? 'false' : 'true');
+      document.body.style.overflow = on ? 'hidden' : '';
+      if (on) { var f = sheet.querySelector('input, button'); if (f) f.focus(); }
+      else if (opener.focus) opener.focus();
+    }
+    function sync() {
+      for (var i = 0; i < times.length; i++) times[i].disabled = all.checked;
+      // One day is the common ask, and the last day can never be before the
+      // first: moving the first carries the last while it is equal or behind.
+      if (to.value < from.value) to.value = from.value;
+      to.min = from.value;
+      var a = times[0].value, b = times[1].value;
+      hint.textContent = (!all.checked && from.value === to.value && a && b && b <= a)
+        ? 'That ends before it starts.' : '';
+    }
+    opener.addEventListener('click', function () { sync(); show(true); });
+    sheet.addEventListener('click', function (ev) {
+      if (ev.target.closest && ev.target.closest('[data-off-close]')) { ev.preventDefault(); show(false); }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && !sheet.hidden) { ev.preventDefault(); show(false); }
+    });
+    all.addEventListener('change', sync);
+    from.addEventListener('change', sync);
+    to.addEventListener('change', sync);
+    for (var j = 0; j < times.length; j++) times[j].addEventListener('change', sync);
+    sync();
+  })();
+  </script>`;
+}
 
 /**
  * The two sheets behind "+ Add", in the order the owner asked for.
@@ -9107,14 +9210,45 @@ function pesScript() {
       var c = ev.target.closest && ev.target.closest('[data-pes-close]');
       if (c && c.closest('.pes')) show(c.closest('.pes'), false);
     });
+    // WHY IT WILL NOT SEND, ON THE SCREEN.
+    //
+    // The submit below refuses when the two times do not make a shift, and it
+    // used to refuse in silence: preventDefault, and the sheet sits there
+    // exactly as it was. The only hint was the total row reading "check the
+    // times", and on a phone that row is usually scrolled out of sight by the
+    // time somebody reaches the button — so a mistyped end time read as a dead
+    // button. The line is built here rather than in the markup so both sheets
+    // get it, the shift one and the one for a day that was never clocked.
+    function say(lay) {
+      var b = bits(lay);
+      var p = lay.querySelector('[data-pes-err]');
+      if (!p) {
+        p = document.createElement('p');
+        p.className = 'pes-err';
+        p.setAttribute('data-pes-err', '');
+        p.setAttribute('role', 'alert');
+        var btn = lay.querySelector('button[type="submit"]');
+        if (btn && btn.parentNode) btn.parentNode.insertBefore(p, btn);
+      }
+      var blank = !b.ind || !b.ind.value || !b.int_ || !b.int_.value
+        || !b.outd || !b.outd.value || !b.outt || !b.outt.value;
+      p.textContent = blank
+        ? 'Fill in when the shift started and when it ended, then send it.'
+        : 'The end has to be after the start. Check the times.';
+      p.hidden = false;
+      if (p.scrollIntoView) p.scrollIntoView({ block: 'center' });
+    }
     document.addEventListener('change', function (ev) {
       var lay = ev.target.closest && ev.target.closest('.pes');
-      if (lay) count(lay);
+      if (!lay) return;
+      var ok = count(lay) !== null;
+      var p = lay.querySelector('[data-pes-err]');
+      if (p && ok) p.hidden = true;
     });
     document.addEventListener('submit', function (ev) {
       var lay = ev.target.closest && ev.target.closest('.pes');
       if (!lay) return;
-      if (count(lay) === null) { ev.preventDefault(); return; }
+      if (count(lay) === null) { ev.preventDefault(); say(lay); return; }
       // Only what actually moved travels. An unchanged end is not a request to
       // set the end to what it already is.
       var b = bits(lay);

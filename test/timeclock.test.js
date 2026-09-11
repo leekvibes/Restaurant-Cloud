@@ -1421,6 +1421,21 @@ test('the timesheet still works, and comes back to the clock', async () => {
 // THE FULL-SCREEN TIMESHEET — moving between periods, and signing one off.
 // ===========================================================================
 
+// A REFUSAL THAT SAYS NOTHING IS A DEAD BUTTON.
+//
+// The edit sheet refuses times that do not make a shift, and it used to refuse
+// in silence: preventDefault, and the screen sits exactly as it was. The only
+// hint was the total row reading "check the times", and on a phone that row is
+// usually scrolled out of sight by the time a thumb reaches the button — so a
+// mistyped end time read as a broken app. Found by tapping it.
+test('the shift sheet says why it will not send', async () => {
+  const cookie = await signIn('3111');
+  const html = await text('/portal/timesheet', { cookie });
+  assert.match(html, /The end has to be after the start/, 'it says what is wrong');
+  assert.match(html, /Fill in when the shift started/, 'and what is missing when a time is blank');
+  assert.match(html, /say\(lay\)/, 'and the refusal is what says it');
+});
+
 test('the timesheet moves between pay periods with the arrows', async () => {
   const cookie = await signIn('3333');
   const now = P.currentPeriod();

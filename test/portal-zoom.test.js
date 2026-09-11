@@ -66,6 +66,19 @@ test('the document sheets sit above the tab bar, so Cancel and Back can be tappe
   assert.match(r.body, /z-index:\s*var\(--pt-z-sheet\)/, 'the sheet layer, the one every other portal sheet uses');
 });
 
+test('every sheet capped by height states the one a phone can really show', () => {
+  // vh on iPhone Safari is the TALL height, the one with the address bar
+  // hidden. A sheet capped in vh alone therefore hangs past the bottom of the
+  // screen somebody can see, and because the panel believes it fits, there is
+  // nothing to scroll: on the shift sheet that put the PIN and "Send for
+  // approval" out of reach entirely, which is what "it will not let me edit the
+  // shift" turned out to be. dvh is the visible height; the pair is what .tp
+  // and .pt have used since they hit the same thing.
+  const bare = [...flat.matchAll(/max-height:\s*(\d+)vh\s*;(?!\s*max-height:\s*\d+dvh)/g)]
+    .map((m) => m[0].trim());
+  assert.deepStrictEqual(bare, [], 'each of these needs a dvh companion straight after it');
+});
+
 test('a double tap never zooms the portal, and a pinch still can', () => {
   const r = rules.find((x) => x.sel === '.pt' && /touch-action/.test(x.body));
   assert.ok(r, '.pt sets touch-action');
