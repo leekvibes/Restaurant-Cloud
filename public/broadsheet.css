@@ -4560,6 +4560,19 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .sb-emp + .sb-cell, .sb-corner + .sb-dh { border-left:0; }
 .sb-row:last-child .sb-cell, .sb-row:last-child .sb-emp { border-bottom:0; }
 .sb-row:hover .sb-cell, .sb-row:hover .sb-emp { background:var(--row-hover); }
+/* Position groups: a thin label row over each position's people, with that
+   position's shift count under each day. Quiet on purpose — the cards carry the
+   colour; this only says where one job ends and the next begins. */
+.sb-grp { display:contents; }
+.sb-grp-l, .sb-grp-d { background:var(--panel); border-bottom:1px solid var(--sb-hline);
+  padding:5px 10px 4px; font-family:var(--mono); font-size:10.5px; line-height:1.3;
+  color:var(--muted); letter-spacing:.06em; }
+.sb-grp-l { position:sticky; left:0; z-index:3; border-right:1px solid var(--rule);
+  text-transform:uppercase; }
+.sb-grp-l b { font-weight:650; color:var(--headline); }
+.sb-grp-d { border-left:1px solid var(--sb-vline); }
+.sb-grp-l + .sb-grp-d { border-left:0; }
+.sb-grp-d b { font-weight:650; font-size:11.5px; color:var(--headline); }
 
 /* Today: header accent plus a wash barely there, so it never competes with the
    position colours. Labelled as well as coloured — never colour alone. */

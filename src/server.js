@@ -22903,8 +22903,32 @@ app.get('/schedule', (req, res) => {
     }
   }
   const count = (id) => ((totals.byEmployee[String(id)] || {}).count || 0);
+  // GROUPED BY POSITION, in the order the Positions page keeps. Alphabetical
+  // scattered the same job across the board, so counting how many servers a
+  // night had meant reading every row. A person sits under the position they
+  // are planned in most this week, or their own role with nothing planned;
+  // inside a group the scheduled come first, then A to Z. The label row over
+  // each group (boardRows, below) carries that position's count per day.
+  const posRank = new Map(positions.all.all().map((p) => [p.slug, Number(p.sort)]));
+  const rankOf = (slug) => (posRank.has(slug) ? posRank.get(slug) : Number.MAX_SAFE_INTEGER);
+  const plannedAs = new Map();
+  for (const s of shifts) {
+    if (s.employee_id == null) continue;
+    const m = plannedAs.get(s.employee_id) || new Map();
+    m.set(s.position, (m.get(s.position) || 0) + 1);
+    plannedAs.set(s.employee_id, m);
+  }
+  const groupFor = new Map([...byId.values()].map((e) => {
+    const m = plannedAs.get(e.id);
+    const g = m && m.size
+      ? [...m.entries()].sort((a, b) => b[1] - a[1] || rankOf(a[0]) - rankOf(b[0]))[0][0]
+      : (e.role || '');
+    return [e.id, g];
+  }));
+  const byGroup = (a, b) => rankOf(groupFor.get(a.id)) - rankOf(groupFor.get(b.id))
+    || String(groupFor.get(a.id)).localeCompare(String(groupFor.get(b.id)));
   const staff = [...byId.values()]
-    .sort((a, b) => (count(b.id) ? 1 : 0) - (count(a.id) ? 1 : 0) || a.name.localeCompare(b.name));
+    .sort((a, b) => byGroup(a, b) || (count(b.id) ? 1 : 0) - (count(a.id) ? 1 : 0) || a.name.localeCompare(b.name));
 
   const cells = new Map();
   for (const s of shifts) {
@@ -23039,6 +23063,38 @@ app.get('/schedule', (req, res) => {
         }</div>`;
       }).join('')}
     </div>`;
+  };
+
+  // ONE LABEL ROW PER POSITION: the position, and how many of its shifts are on
+  // each day of THIS board. Counted by the shift's own position, so a busser
+  // covering a server shift counts as a server that night. Not a person and not
+  // a drop target — it carries no data-cell, so the drag code cannot land on it.
+  const posDay = new Map();
+  for (const s of shifts) {
+    const k = `${s.position}|${s.business_date}`;
+    posDay.set(k, (posDay.get(k) || 0) + 1);
+  }
+  const groupRow = (g) => {
+    // A role that is not a position on the Positions page (the owner's own
+    // "manager") names itself by its key; capitalised, so it does not read as
+    // a typo above the person under it.
+    const named = g ? posName(g) : '';
+    const label = !g ? 'No position' : named === g ? g.charAt(0).toUpperCase() + g.slice(1) : named;
+    return `<div class="sb-grp">
+      <div class="sb-grp-l"><b>${esc(label)}</b></div>
+      ${days.map((d) => {
+        const n = posDay.get(`${g}|${d}`) || 0;
+        return `<div class="sb-grp-d${d === today ? ' is-today' : ''}"${n
+          ? ` title="${n} ${esc(label)} shift${n === 1 ? '' : 's'} on ${esc(TC.dayLabel(d))}"` : ''}>${
+          n ? `<b>${n}</b>` : ''}</div>`;
+      }).join('')}
+    </div>`;
+  };
+  const boardRows = () => {
+    const groups = [...new Set([...staff.map((e) => groupFor.get(e.id)), ...shifts.map((s) => s.position)])]
+      .sort((a, b) => rankOf(a) - rankOf(b) || String(a).localeCompare(String(b)));
+    return groups.map((g) => groupRow(g)
+      + staff.filter((e) => groupFor.get(e.id) === g).map(row).join('')).join('');
   };
 
   // The chip was hardcoded to "Draft" and said so even after a week had gone
@@ -23541,7 +23597,7 @@ app.get('/schedule', (req, res) => {
                 </div>
               </div>`; }).join('')}
             </div>
-            ${staff.length ? staff.map(row).join('')
+            ${staff.length ? boardRows()
               : '<div class="sb-empty">Nobody on staff yet. Add people under Staff, then plan their week here.</div>'}
           </div>
         </div>
@@ -24443,7 +24499,7 @@ app.post('/schedule/shift', (req, res) => {
         ? `${n} shift${n === 1 ? '' : 's'} added as drafts — employees cannot see them yet.`
         : 'Nothing added.';
       if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already on the schedule.`;
-      if (refused) msg += ` ${refused} could not be made (${esc(out.skipped.find((x) => !/already/i.test(x.reason)).reason)}).`;
+      if (refused) msg += ` ${refused} could not be made (${out.skipped.find((x) => !/already/i.test(x.reason)).reason}).`;
       if (out.capped) msg += ' That is as far ahead as one repeat goes.';
       return sbBack(req, res, w, msg + (n ? sbElsewhere(req, out.made[0]) + sbAvailNote(out.made[0]) : ''));
     }
@@ -24494,7 +24550,10 @@ app.post('/schedule/shift/:id/delete', (req, res) => {
     // cancel(), not a row delete: a cancelled plan is still a record of what
     // was planned, and it touches no punch.
     SCH.cancel(Number(req.params.id));
-    sbBack(req, res, w, 'Shift removed from the plan.');
+    // Still on the employee's schedule until the week is published — said, as a
+    // move says it. "Removed" alone read as though the person already knew.
+    sbBack(req, res, w, 'Shift removed from the plan.'
+      + (SCH.q.pubById.get(Number(req.params.id)) ? ' It stays on their schedule until you publish the week.' : ''));
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     sbBack(req, res, w, e.message, true);
@@ -24540,7 +24599,8 @@ app.post('/schedule/copy-week', (req, res) => {
   if (!sbGuard(req, res)) return;
   const to = MX.isDate(req.body.to) ? req.body.to : sbWeekOf(req);
   try {
-    const { made, skipped } = SCH.copyWeek(addDays(to, -7), to, { createdBy: 'owner' });
+    const { made, skipped } = SCH.copyWeek(addDays(to, -7), to,
+      { createdBy: 'owner', daypart: svcSlug(req.body.svc) });
     // Every skip says WHY, in the words validate() used, so a manager can act
     // on it rather than wonder what happened to somebody.
     const why = [...new Set(skipped.map((s) => s.why))].slice(0, 2).join(' ');
@@ -24575,8 +24635,15 @@ const schedTmplMsg = (out, what) => {
     : `Nothing was added from ${what}.`;
   const already = by['already on the schedule'] || 0;
   if (already) { msg += ` ${already} ${already === 1 ? 'was' : 'were'} already there.`; delete by['already on the schedule']; }
+  // Already there, on ANOTHER schedule. Named, or "Nothing was added" reads as a
+  // template that did nothing.
+  const elsewhere = out.skipped.filter((x) => /^already on /.test(x.reason));
+  if (elsewhere.length) {
+    msg += ` ${elsewhere.length} ${elsewhere.length === 1 ? 'was' : 'were'} already on ${
+      [...new Set(elsewhere.map((x) => x.reason.replace(/^already on /, '')))].join(' and ')}.`;
+  }
   // Names, not a count, for the stale ones: "2 skipped" sends a manager hunting.
-  const stale = out.skipped.filter((x) => x.reason !== 'already on the schedule');
+  const stale = out.skipped.filter((x) => x.reason !== 'already on the schedule' && !/^already on /.test(x.reason));
   if (stale.length) {
     msg += ' Skipped ' + stale.map((x) => `${x.who} (${x.reason})`).join(', ')
       + '. Nobody was put in their place — that is yours to decide.';
@@ -24588,7 +24655,7 @@ app.post('/schedule/save-day-template', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    const t = SCH.saveScheduleTemplate('day', req.body.name, req.body.from);
+    const t = SCH.saveScheduleTemplate('day', req.body.name, req.body.from, { daypart: svcSlug(req.body.svc) });
     return sbBack(req, res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'}, with who works them.`
       + (t.skippedOpen ? ` ${t.skippedOpen} open shift${t.skippedOpen === 1 ? '' : 's'} left out.` : ''));
   } catch (e) {
@@ -24601,7 +24668,7 @@ app.post('/schedule/save-week-template', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    const t = SCH.saveScheduleTemplate('week', req.body.name, req.body.from || w);
+    const t = SCH.saveScheduleTemplate('week', req.body.name, req.body.from || w, { daypart: svcSlug(req.body.svc) });
     return sbBack(req, res, w, `Saved "${t.name}" — ${t.shifts} shift${t.shifts === 1 ? '' : 's'} across the week, with who works them.`
       + (t.skippedOpen ? ` ${t.skippedOpen} open shift${t.skippedOpen === 1 ? '' : 's'} left out.` : ''));
   } catch (e) {
@@ -24614,8 +24681,16 @@ app.post('/schedule/apply-template', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    const out = SCH.applyScheduleTemplate(req.body.id, req.body.to || w);
-    return sbBack(req, res, w, schedTmplMsg(out, `"${out.template.name}"`));
+    const board = svcSlug(req.body.svc);
+    const out = SCH.applyScheduleTemplate(req.body.id, req.body.to || w, { daypart: board });
+    // A template saved on another schedule puts its shifts back THERE. Said, so
+    // the board this was pressed on is not left looking as if nothing came.
+    const away = board ? out.made.filter((m) => m.daypart !== board) : [];
+    const awayNote = away.length
+      ? ` ${away.length} of them ${away.length === 1 ? 'is' : 'are'} on ${
+        [...new Set(away.map((m) => SERVICES.nameOf(m.daypart)))].join(' and ')} — not this board.`
+      : '';
+    return sbBack(req, res, w, schedTmplMsg(out, `"${out.template.name}"`) + awayNote);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
     return sbBack(req, res, w, e.message, true);
@@ -24642,15 +24717,21 @@ app.post('/schedule/shift/:id/move', (req, res) => {
         ? undefined : req.body.to_employee,
     });
     if (!out.moved) return sbBack(req, res, w, '');          // dropped where it already was
-    const note = sbOverlapNote(out.row) + sbAvailNote(out.row);
+    // sbElsewhere as well as the two warnings, as create and edit have. A move
+    // cannot change schedule any more (edit keeps the stamp), but if a shift
+    // ever lands off the board it was dropped on, the message must say where
+    // rather than report "Moved" over an empty cell.
+    const note = sbElsewhere(req, out.row) + sbOverlapNote(out.row) + sbAvailNote(out.row);
     const who = (sbEmpName.get(out.row.employee_id) || {}).name || 'that shift';
     // Names the person AND the day, because a diagonal drag changed both and a
     // message saying only one of them reads like half the move failed.
     const reassigned = out.was != null && out.was !== out.row.employee_id;
     const from = reassigned ? (sbEmpName.get(out.was) || {}).name : null;
     return sbBack(req, res, w, (reassigned
-      ? `Moved to ${esc(who)}${from ? ` from ${esc(from)}` : ''} — ${esc(TC.dayLabel(out.row.business_date))}.`
-      : `Moved — ${esc(who)}, ${esc(TC.dayLabel(out.row.business_date))}.`)
+      // No esc() here: flash() escapes the whole message when it is shown, so
+      // escaping on the way in as well showed O'Brien as "O&#39;Brien".
+      ? `Moved to ${who}${from ? ` from ${from}` : ''} — ${TC.dayLabel(out.row.business_date)}.`
+      : `Moved — ${who}, ${TC.dayLabel(out.row.business_date)}.`)
       + (SCH.q.pubById.get(out.row.id) ? ' Publish the week to tell them.' : '') + note);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
@@ -24664,16 +24745,28 @@ app.post('/schedule/copy-day', (req, res) => {
   if (!sbGuard(req, res)) return;
   const w = sbWeekOf(req);
   try {
-    const out = SCH.copyDay(req.body.from, req.body.to);
+    // The board's own day only — see copyDay.
+    const out = SCH.copyDay(req.body.from, req.body.to, { daypart: svcSlug(req.body.svc) });
     const n = out.made.length;
-    const already = out.skipped.filter((x) => /already/i.test(x.reason)).length;
+    const already = out.skipped.filter((x) => x.reason === 'already there').length;
+    // Already there, but on ANOTHER schedule: said by name. "Already there" over
+    // a board that shows nothing is the silent failure this change is about.
+    const onOther = out.skipped.filter((x) => /^already on /.test(x.reason));
     const open = out.skipped.filter((x) => /open shift/i.test(x.reason)).length;
-    const refused = out.skipped.length - already - open;
+    const refused = out.skipped.filter((x) => x.reason !== 'already there'
+      && !/^already on /.test(x.reason) && !/open shift/i.test(x.reason));
     let msg = n ? `${n} shift${n === 1 ? '' : 's'} copied as drafts — employees cannot see them yet.`
       : 'Nothing to copy.';
     if (already) msg += ` ${already} ${already === 1 ? 'was' : 'were'} already there.`;
+    if (onOther.length) {
+      msg += ` ${onOther.length} ${onOther.length === 1 ? 'is' : 'are'} already on ${
+        [...new Set(onOther.map((x) => x.reason.replace(/^already on /, '')))].join(' and ')}.`;
+    }
     if (open) msg += ` ${open} open shift${open === 1 ? '' : 's'} skipped.`;
-    if (refused) msg += ` ${refused} could not be copied.`;
+    // WHY, not just how many. "2 could not be copied" sent a manager hunting.
+    if (refused.length) {
+      msg += ` ${refused.length} could not be copied (${[...new Set(refused.map((x) => x.reason))].slice(0, 2).join('; ')}).`;
+    }
     return sbBack(req, res, w, msg);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;
@@ -24715,7 +24808,12 @@ app.post('/schedule/availability', (req, res) => {
   const on = String(req.body.on || '') === '1';
   setSetting('sch_availability', on ? '1' : '0');
   const w = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.w || '')) ? `?w=${req.body.w}&` : '?';
-  return res.redirect(`/schedule${w}msg=` + encodeURIComponent(on
+  // BACK TO THE BOARD IT WAS PRESSED ON. The form has always posted svc and this
+  // dropped it — and /schedule with no schedule is the picker, so switching
+  // availability threw the manager out of the board they were working on.
+  const svc = String(req.body.svc || '');
+  const to = SERVICES.isActive(svc) || svc === 'all' ? `svc=${encodeURIComponent(svc)}&` : '';
+  return res.redirect(`/schedule${w}${to}msg=` + encodeURIComponent(on
     ? 'Availability on — staff can say when they cannot work.'
     : 'Availability off — nothing stated has been deleted, and time off is unaffected.'));
 });
@@ -24738,7 +24836,10 @@ app.post('/schedule/publish-week', (req, res) => {
     const msg = told
       ? `Week published — ${told} ${told === 1 ? 'person was' : 'people were'} told.`
         + (open ? ` ${open} open shift${open === 1 ? '' : 's'} skipped.` : '')
-      : `Week published. Nothing changed for anybody${live || gone ? '' : ' — nothing to publish'}.`;
+      : `Week published. Nothing changed for anybody${live || gone ? '' : ' — nothing to publish'}.`
+        // Open shifts are skipped either way. This said so only when somebody had
+        // also been told, so a week of open shifts "published" without a word.
+        + (open ? ` ${open} open shift${open === 1 ? '' : 's'} skipped — nobody is on ${open === 1 ? 'it' : 'them'} yet.` : '');
     sbBack(req, res, w.start, msg);
   } catch (e) {
     if (!(e instanceof SCH.ScheduleError)) throw e;

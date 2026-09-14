@@ -341,6 +341,10 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_schedtmpl_rows ON schedule_template_rows (template_id, day_offset);
 `);
+// WHICH SCHEDULE each saved shift was on. A template saved before this has NULL
+// here, and applying one files each shift under the board it is applied from
+// rather than guessing from the clock (applyScheduleTemplate).
+try { db.exec('ALTER TABLE schedule_template_rows ADD COLUMN daypart TEXT'); } catch { /* already there */ }
 
 /** Local minutes-from-midnight for a stored UTC instant. */
 const minsOf = (utc) => {
@@ -371,7 +375,7 @@ const templateRows = (id) => db.prepare(
  * @param {string} name
  * @param {string} fromDate  any date in the day, or any date in the week
  */
-function saveScheduleTemplate(kind, name, fromDate) {
+function saveScheduleTemplate(kind, name, fromDate, opts = {}) {
   if (kind !== 'day' && kind !== 'week') throw new ScheduleError('Unknown template kind.', 'kind');
   const label = String(name || '').trim().slice(0, 60);
   if (!label) throw new ScheduleError('Give the template a name.', 'name');
@@ -379,7 +383,11 @@ function saveScheduleTemplate(kind, name, fromDate) {
 
   const anchor = kind === 'week' ? weekWindowFor(fromDate).start : fromDate;
   const last = kind === 'week' ? weekWindowFor(fromDate).end : fromDate;
-  const source = q.inRangeAll.all(anchor, last).filter((r) => r.status !== 'cancelled');
+  // Saved from a schedule, it holds that schedule's shifts only. It took every
+  // schedule's day before, whichever board the button was pressed on.
+  const scope = opts.daypart && knownService(opts.daypart) ? opts.daypart : null;
+  const source = q.inRangeAll.all(anchor, last)
+    .filter((r) => r.status !== 'cancelled' && (!scope || r.daypart === scope));
   const usable = source.filter((r) => r.employee_id != null);
   if (!usable.length) {
     throw new ScheduleError(kind === 'week'
@@ -393,8 +401,8 @@ function saveScheduleTemplate(kind, name, fromDate) {
     const id = Number(db.prepare('INSERT INTO schedule_templates (name, kind) VALUES (?, ?)')
       .run(label, kind).lastInsertRowid);
     const ins = db.prepare(`INSERT INTO schedule_template_rows
-      (template_id, day_offset, employee_id, position, start_min, end_min, break_minutes, break_paid, note)
-      VALUES (@t, @off, @emp, @pos, @a, @b, @brk, @paid, @note)`);
+      (template_id, day_offset, employee_id, position, start_min, end_min, break_minutes, break_paid, note, daypart)
+      VALUES (@t, @off, @emp, @pos, @a, @b, @brk, @paid, @note, @dp)`);
     for (const r of usable) {
       const brk = db.prepare('SELECT minutes, paid FROM scheduled_breaks WHERE scheduled_shift_id = ? LIMIT 1').get(r.id);
       ins.run({ t: id,
@@ -402,7 +410,7 @@ function saveScheduleTemplate(kind, name, fromDate) {
         emp: r.employee_id, pos: r.position,
         a: minsOf(r.starts_at), b: minsOf(r.ends_at),
         brk: brk ? brk.minutes : null, paid: brk && brk.paid ? 1 : 0,
-        note: r.note || null });
+        note: r.note || null, dp: r.daypart || null });
     }
     return id;
   })();
@@ -422,7 +430,7 @@ function saveScheduleTemplate(kind, name, fromDate) {
  * place — either would be the app deciding who works, which the roadmap puts on
  * the deliberately-not-building list.
  */
-function applyScheduleTemplate(id, toDate) {
+function applyScheduleTemplate(id, toDate, opts = {}) {
   const tmpl = db.prepare('SELECT * FROM schedule_templates WHERE id = ?').get(Number(id));
   if (!tmpl) throw new ScheduleError('That template no longer exists.', 'missing');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(toDate))) throw new ScheduleError('Pick a day to apply it to.', 'range');
@@ -433,8 +441,10 @@ function applyScheduleTemplate(id, toDate) {
   const dates = [...new Set(rows.map((r) => addDays(anchor, r.day_offset)))].sort();
   const existing = q.inRangeAll.all(dates[0], dates[dates.length - 1])
     .filter((r) => r.status !== 'cancelled');
-  // The SAME duplicate identity Repeat and Copy Day use.
-  const seen = new Set(existing.map((r) => `${r.employee_id}|${r.starts_at}|${r.position}`));
+  // The SAME duplicate identity Repeat and Copy Day use — remembering which
+  // schedule the existing shift is on, so a skip can say where it is.
+  const seen = new Map(existing.map((r) => [`${r.employee_id}|${r.starts_at}|${r.position}`, r.daypart]));
+  const scope = opts.daypart && knownService(opts.daypart) ? opts.daypart : null;
 
   const active = new Set(db.prepare('SELECT id FROM employees WHERE active = 1').all().map((e) => e.id));
   const heldBy = heldPositionsFor([...new Set(rows.map((r) => r.employee_id))]);
@@ -455,8 +465,23 @@ function applyScheduleTemplate(id, toDate) {
     const startsAt = localToUtc(`${date} ${hhmm(r.start_min)}`);
     const endDate = r.end_min <= r.start_min || r.end_min >= 1440 ? addDays(date, 1) : date;
     const endsAt = localToUtc(`${endDate} ${hhmm(r.end_min % 1440)}`);
+    // WHICH SCHEDULE: the one it was saved from; for a template saved before
+    // templates remembered that, the board it is being applied on. Never the
+    // clock — that is what filed a noon Evening shift under Day Service.
+    const dp = r.daypart && liveSchedule(r.daypart) ? r.daypart : scope;
+    if (!dp) {
+      skipped.push({ employeeId: r.employee_id, who,
+        reason: r.daypart ? `${SERVICES.nameOf(r.daypart)} has been archived`
+          : 'open the schedule this template is for, then apply it there' });
+      continue;
+    }
     const key = `${r.employee_id}|${startsAt}|${r.position}`;
-    if (seen.has(key)) { skipped.push({ employeeId: r.employee_id, who, reason: 'already on the schedule' }); continue; }
+    if (seen.has(key)) {
+      const there = seen.get(key);
+      skipped.push({ employeeId: r.employee_id, who,
+        reason: there && there !== dp ? `already on ${SERVICES.nameOf(there)}` : 'already on the schedule' });
+      continue;
+    }
     try {
       made.push(create({
         employeeId: r.employee_id, position: r.position,
@@ -464,9 +489,10 @@ function applyScheduleTemplate(id, toDate) {
         endsAt: `${endDate} ${hhmm(r.end_min % 1440)}`,
         note: r.note || null,
         breaks: r.break_minutes ? [{ minutes: r.break_minutes, paid: !!r.break_paid }] : undefined,
+        daypart: dp,
         createdBy: `template:${tmpl.kind}`,
       }));
-      seen.add(key);
+      seen.set(key, dp);
     } catch (e) {
       skipped.push({ employeeId: r.employee_id, who, reason: (e && e.message) || 'could not be created' });
     }
@@ -836,11 +862,20 @@ function edit(id, patch) {
   // copyWeek() pass nothing, because both write NEW assignments.
   validate({ employeeId, position, startsAt, endsAt, keepPosition: row.position });
 
-  // Re-stamped only when the START actually moves. An edit to the note or the
-  // end time leaves the service alone, and a service-window change elsewhere
-  // never reaches an existing shift at all.
-  const daypart = patch.daypart !== undefined && knownService(patch.daypart) ? patch.daypart
-    : (startsAt !== row.starts_at ? serviceFor(startsAt) : row.daypart);
+  // THE SCHEDULE IS STAMPED ONCE, and only a manager changes it.
+  //
+  // This used to re-derive it from the clock whenever the START moved, on the
+  // reasoning that a shift moved into the evening "is" an evening shift. That
+  // held while a schedule was a window either side of 4pm. It stopped holding
+  // when schedules became real things with their own people, and it can never
+  // hold for a schedule made next year that no window describes. The drawer
+  // always says which board it came from (sbForm), so the one caller still
+  // reaching the guess was a drag: a noon Evening shift dragged to another day
+  // was re-filed under Day Service, vanished from the board it was dropped on,
+  // and the board said "Moved". Re-adding the shift that had vanished then
+  // double-booked the person across the two boards, which is the overlap the
+  // manager saw next to their name.
+  const daypart = patch.daypart !== undefined && knownService(patch.daypart) ? patch.daypart : row.daypart;
   const businessDate = startsAt !== row.starts_at ? businessDateFor(startsAt) : row.business_date;
   const note = patch.note !== undefined ? (String(patch.note || '').trim() || null) : row.note;
 
@@ -922,14 +957,29 @@ function moveShift(id, { toDate, toEmployeeId } = {}) {
     const off = daysApart(row.business_date, toDate);
     if (!Number.isFinite(off)) throw new ScheduleError('That is not a day.', 'range');
     if (off !== 0) {
-      patch.startsAt = TC.utcToLocalInput(shiftUtcByDays(row.starts_at, off)).replace('T', ' ');
-      patch.endsAt = TC.utcToLocalInput(shiftUtcByDays(row.ends_at, off)).replace('T', ' ');
+      let starts = shiftUtcByDays(row.starts_at, off);
+      let ends = shiftUtcByDays(row.ends_at, off);
+      // IT LANDS IN THE COLUMN IT WAS DROPPED ON. A row whose stored day does
+      // not follow its own start — an early-morning shift saved with a day the
+      // cutoff disagrees with — moved one day further than the drop, because
+      // edit() dates the new start by the cutoff. Measured: a 3am Day Service
+      // shift dragged from Wednesday to Monday was dated the Sunday before and
+      // left the week, so the card was simply gone. One day either way puts it
+      // where the manager put it; the clock time is untouched.
+      const lands = businessDateFor(starts);
+      const fix = lands === toDate ? 0 : daysApart(lands, toDate);
+      if (Math.abs(fix) === 1) { starts = shiftUtcByDays(starts, fix); ends = shiftUtcByDays(ends, fix); }
+      patch.startsAt = TC.utcToLocalInput(starts).replace('T', ' ');
+      patch.endsAt = TC.utcToLocalInput(ends).replace('T', ' ');
     }
   }
   if (toEmployeeId !== undefined && toEmployeeId !== null && String(toEmployeeId) !== ''
       && Number(toEmployeeId) !== row.employee_id) {
     patch.employeeId = Number(toEmployeeId);
   }
+  // No schedule in the patch, so edit() keeps the one the shift is on: a drag
+  // moves a shift within its board, never onto another one.
+  //
   // Dropped where it already was. Not an error, and not a write either — an
   // edit here would stamp changed_after_publish and tell the floor a published
   // shift moved when it did not.
@@ -1328,7 +1378,7 @@ function duplicate(id, opts = {}) {
  * running to 2am Saturday copies as part of Friday — which is what a manager
  * clicking Friday means, and the only reading that keeps a night in one piece.
  */
-function copyDay(fromDate, toDate) {
+function copyDay(fromDate, toDate, opts = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromDate)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(toDate))) {
     throw new ScheduleError('Pick a day to copy from and a day to copy into.', 'range');
   }
@@ -1336,9 +1386,13 @@ function copyDay(fromDate, toDate) {
   const offset = daysApart(fromDate, toDate);
   if (!Number.isFinite(offset) || offset === 0) throw new ScheduleError('Choose a different day.', 'range');
 
-  const source = q.inRangeAll.all(fromDate, fromDate).filter((r) => r.status !== 'cancelled');
+  // The board's own day, exactly as copyWeek: this copied every schedule's
+  // day from whichever board it was pressed on.
+  const scope = opts.daypart && knownService(opts.daypart) ? opts.daypart : null;
+  const source = q.inRangeAll.all(fromDate, fromDate)
+    .filter((r) => r.status !== 'cancelled' && (!scope || r.daypart === scope));
   const existing = q.inRangeAll.all(toDate, toDate).filter((r) => r.status !== 'cancelled');
-  const seen = new Set(existing.map((r) => `${r.employee_id}|${r.starts_at}|${r.position}`));
+  const seen = new Map(existing.map((r) => [`${r.employee_id}|${r.starts_at}|${r.position}`, r.daypart]));
 
   const made = []; const skipped = [];
   for (const src of source) {
@@ -1349,7 +1403,12 @@ function copyDay(fromDate, toDate) {
     if (src.employee_id == null) { skipped.push({ reason: 'open shift' }); continue; }
     const startsAt = shiftUtcByDays(src.starts_at, offset);
     if (seen.has(`${src.employee_id}|${startsAt}|${src.position}`)) {
-      skipped.push({ reason: 'already there' });
+      const there = seen.get(`${src.employee_id}|${startsAt}|${src.position}`);
+      skipped.push({ reason: there && there !== src.daypart ? `already on ${SERVICES.nameOf(there)}` : 'already there' });
+      continue;
+    }
+    if (!liveSchedule(src.daypart)) {
+      skipped.push({ reason: `${SERVICES.nameOf(src.daypart)} has been archived` });
       continue;
     }
     try {
@@ -1359,9 +1418,11 @@ function copyDay(fromDate, toDate) {
         startsAt: TC.utcToLocalInput(startsAt).replace('T', ' '),
         endsAt: TC.utcToLocalInput(shiftUtcByDays(src.ends_at, offset)).replace('T', ' '),
         note: src.note || null,
+        // Carried, never guessed from the clock: see copyWeek.
+        daypart: src.daypart,
         createdBy: 'copy-day',
       }));
-      seen.add(`${src.employee_id}|${startsAt}|${src.position}`);
+      seen.set(`${src.employee_id}|${startsAt}|${src.position}`, src.daypart);
     } catch (e) {
       // Somebody deactivated, or a position retired since. One refusal must not
       // sink the rest of the day.
@@ -1385,9 +1446,18 @@ function copyWeek(fromStart, toStart, opts = {}) {
   if (!Number.isFinite(offset) || offset === 0) {
     throw new ScheduleError('Choose a different week to copy into.', 'range');
   }
-  const source = inRange(from.start, from.end);
+  // THE BOARD'S OWN WEEK. Pressed on a schedule, this copies that schedule and
+  // nothing else. It copied every schedule's week before, whichever board the
+  // button was on, and filed each copy by its clock time — so "Copy last week"
+  // on the Evening board put 109 shifts on Day Service and none on Evening,
+  // and said "Copied 109 shifts". With no schedule named (the all-schedules
+  // board) it still copies every one, each onto its own.
+  const scope = opts.daypart && knownService(opts.daypart) ? opts.daypart : null;
+  const source = inRange(from.start, from.end).filter((s) => !scope || s.daypart === scope);
   const existing = inRange(to.start, to.end);
-  const seen = new Set(existing.map((s) => `${s.employee_id}|${s.starts_at}|${s.position}`));
+  // Keyed across EVERY schedule, so nobody is double-booked at the same time —
+  // but remembering where the existing shift is, so the skip can say.
+  const seen = new Map(existing.map((s) => [`${s.employee_id}|${s.starts_at}|${s.position}`, s.daypart]));
 
   const made = []; const skipped = [];
   db.transaction(() => {
@@ -1417,19 +1487,32 @@ function copyWeek(fromStart, toStart, opts = {}) {
         continue;
       }
       if (seen.has(`${s.employee_id}|${starts}|${s.position}`)) {
+        const there = seen.get(`${s.employee_id}|${starts}|${s.position}`);
         skipped.push({
           id: s.id, who: s.employee_name,
-          why: 'That shift is already on the target week.', code: 'duplicate',
+          why: there && there !== s.daypart
+            ? `That shift is already on ${SERVICES.nameOf(there)} that week.`
+            : 'That shift is already on the target week.',
+          code: 'duplicate',
         });
+        continue;
+      }
+      // An archived schedule shows on no board, so a copy into it would be a
+      // shift nobody can see. Said, not guessed onto another board.
+      if (!liveSchedule(s.daypart)) {
+        skipped.push({ id: s.id, who: s.employee_name,
+          why: `${SERVICES.nameOf(s.daypart)} has been archived.`, code: 'archived' });
         continue;
       }
       const info = q.insert.run({
         employee_id: s.employee_id, position: s.position,
         business_date: businessDateFor(starts),
         starts_at: starts, ends_at: ends,
-        // Re-derived on purpose: a copy is a NEW plan, so it takes the service
-        // rules as they stand today rather than inheriting a months-old stamp.
-        daypart: serviceFor(starts),
+        // CARRIED, like duplicate(). This was re-derived from the clock, "because
+        // a copy is a new plan" — which filed every copied noon Evening shift
+        // under Day Service. The schedule a shift was planned on is not a rule
+        // that drifts; it is where the manager put it.
+        daypart: s.daypart,
         status: 'draft', note: s.note, created_by: opts.createdBy || null,
       });
       const id = Number(info.lastInsertRowid);
@@ -1440,7 +1523,7 @@ function copyWeek(fromStart, toStart, opts = {}) {
         })),
         starts, ends, true,
       ));
-      seen.add(`${s.employee_id}|${starts}|${s.position}`);
+      seen.set(`${s.employee_id}|${starts}|${s.position}`, s.daypart);
       made.push(id);
     }
   })();
@@ -1565,6 +1648,9 @@ const DAYPARTS = ['cafe', 'dinner'];
  */
 const knownService = (slug) => DAYPARTS.includes(slug)
   || SERVICES.all({ includeArchived: true }).some((s) => s.slug === slug);
+// A schedule a board can still show: active, or one of the two built-in keys.
+// The same test svcSlug applies in server.js to what a board posts.
+const liveSchedule = (slug) => SERVICES.isActive(slug) || DAYPARTS.includes(slug);
 
 /**
  * Whole days between two ISO dates.

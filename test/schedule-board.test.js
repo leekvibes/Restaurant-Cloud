@@ -1503,6 +1503,111 @@ test('the drawer offers saved templates, and deleting one leaves its shifts alon
 // Phase 7 — copy a day. copyWeek's smaller sibling, same rules.
 // ===========================================================================
 
+// ===========================================================================
+// THE BOARD YOU ARE ON OWNS WHAT YOU DO THERE.
+//
+// Reported: drag a shift, see "Moved", and the card is gone; re-add it and the
+// person is double-booked. A move that changed the day re-guessed the schedule
+// from the start time, so a noon Evening shift was re-filed under Day Service.
+// Copy last week did the same to every copy, on whichever board it was pressed.
+// ===========================================================================
+
+test('a noon Evening shift dragged to another day stays on the Evening board', async () => {
+  const w = week();
+  const d = dates.addDays(w.start, 1);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${d} 12:00`, endsAt: `${d} 18:00`, daypart: 'dinner' });
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_date: dates.addDays(d, 1), w: w.start, svc: 'dinner' });
+  const f = flashOf(res);
+  assert.ok(!f.err, f.msg);
+  assert.match(f.msg, /^Moved/, 'it says it moved');
+  assert.doesNotMatch(f.msg, / It is on /, 'and does not have to say it went somewhere else');
+  assert.strictEqual(SCH.byId(s.id).daypart, 'dinner', 'still an Evening shift');
+  assert.match(await raw(`/schedule?w=${w.start}&svc=dinner`), new RegExp(`data-drag="${s.id}"`),
+    'so the board it was dropped on still shows it');
+  assert.doesNotMatch(await raw(`/schedule?w=${w.start}&svc=cafe`), new RegExp(`data-drag="${s.id}"`),
+    'and Day Service does not');
+  SCH.cancel(s.id);
+});
+
+test('Copy last week on a schedule copies that schedule, onto it', async () => {
+  const target = SCH.weekWindowFor(dates.addDays(today(), 610)).start;
+  const src = dates.addDays(target, -7);
+  SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${src} 12:00`, endsAt: `${src} 18:00`, daypart: 'dinner' });
+  SCH.create({ employeeId: E.barista, position: 'barista',
+    startsAt: `${src} 07:00`, endsAt: `${src} 11:00`, daypart: 'cafe' });
+  const res = await post('/schedule/copy-week', { w: target, to: target, svc: 'dinner' });
+  assert.match(flashOf(res).msg, /^Copied 1 shift\./, 'pressed on Evening, the Evening week and nothing else');
+  const landed = db.prepare(`SELECT daypart FROM scheduled_shifts
+    WHERE business_date BETWEEN ? AND ? AND status <> 'cancelled'`).all(target, dates.addDays(target, 6));
+  assert.deepStrictEqual(landed.map((r) => r.daypart), ['dinner'],
+    'on Evening, where it was pressed — not filed under Day by its noon start');
+});
+
+test('the board groups people under their position, in the Positions order, with a count per day', async () => {
+  const w = week();
+  const d = dates.addDays(w.start, 2);
+  const k = SCH.create({ employeeId: E.longname, position: 'kitchen', startsAt: `${d} 09:00`, endsAt: `${d} 15:00` });
+  const html = await raw(`/schedule?w=${w.start}&svc=all`);
+  const board = html.slice(html.indexOf('<div class="sb">'));
+  const labels = [...board.matchAll(/<div class="sb-grp-l"><b>([^<]+)<\/b>/g)].map((m) => m[1]);
+  assert.ok(labels.includes('Kitchen') && labels.includes('Barista'), `position labels render (${labels.join(', ')})`);
+  const order = db.prepare('SELECT name FROM positions ORDER BY sort').all().map((p) => p.name);
+  const ranks = labels.map((l) => order.indexOf(l)).filter((i) => i >= 0);
+  assert.deepStrictEqual(ranks, [...ranks].sort((a, b) => a - b), 'in the order the Positions page keeps');
+  const kitchenAt = board.indexOf('<div class="sb-grp-l"><b>Kitchen</b>');
+  const nextLabel = board.indexOf('<div class="sb-grp-l">', kitchenAt + 10);
+  const under = board.slice(kitchenAt, nextLabel < 0 ? undefined : nextLabel);
+  assert.match(under, /<b>Bartholomew Fitzwilliam-Harrington<\/b>/, 'the kitchen person sits under Kitchen');
+  assert.doesNotMatch(under, /<b>Board Barista<\/b>/, 'and the barista does not');
+  assert.match(under, /title="\d+ Kitchen shifts? on /, 'Kitchen carries its count for the day');
+  const labelRows = board.match(/<div class="sb-grp">[\s\S]*?(?=<div class="sb-row">|<div class="sb-grp">)/g) || [];
+  assert.ok(labelRows.length && labelRows.every((r) => !/data-cell|data-drag/.test(r)),
+    'a label row is never a place to drop or pick up a shift');
+  SCH.cancel(k.id);
+});
+
+// The rest of the schedule page's quiet failures, found auditing it.
+
+test('a name with an apostrophe reads as typed in the move message', async () => {
+  const w = week();
+  const d = dates.addDays(w.start, 4);
+  const oneil = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active, pin)
+    VALUES ('Board O''Neil', 'server', 1500, 1, '5299')`).run().lastInsertRowid);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${d} 16:00`, endsAt: `${d} 22:00`, daypart: 'dinner' });
+  const res = await post(`/schedule/shift/${s.id}/move`, { to_employee: String(oneil), w: w.start, svc: 'dinner' });
+  const f = flashOf(res);
+  assert.ok(!f.err, f.msg);
+  assert.match(f.msg, /Moved to Board O'Neil/, 'the name as typed — flash() escapes it, once');
+  assert.doesNotMatch(f.msg, /&#39;|&amp;/, 'not escaped on the way in as well');
+  SCH.cancel(s.id);
+});
+
+test('switching availability comes back to the board it was pressed on', async () => {
+  const res = await post('/schedule/availability', { on: '1', w: week().start, svc: 'dinner' });
+  assert.match(res.headers.get('location') || '', /[?&]svc=dinner&/, 'not thrown out to the schedule picker');
+});
+
+test('removing a published shift says the employee still sees it until publishing', async () => {
+  const w = week();
+  const d = dates.addDays(w.start, 5);
+  const s = SCH.create({ employeeId: E.server, position: 'server',
+    startsAt: `${d} 16:00`, endsAt: `${d} 22:00`, daypart: 'dinner' });
+  SCH.publish(s.id);
+  const res = await post(`/schedule/shift/${s.id}/delete`, { w: w.start, svc: 'dinner' });
+  assert.match(flashOf(res).msg, /stays on their schedule until you publish/i);
+});
+
+test('publishing a week of open shifts says they were skipped', async () => {
+  const far = SCH.weekWindowFor(dates.addDays(today(), 700)).start;
+  SCH.create({ employeeId: null, position: 'server',
+    startsAt: `${far} 16:00`, endsAt: `${far} 22:00`, daypart: 'dinner' });
+  const res = await post('/schedule/publish-week', { w: far, svc: 'dinner' });
+  assert.match(flashOf(res).msg, /1 open shift skipped/, 'even though nobody was told anything');
+});
+
 test('copying a day reproduces its staffing as drafts on the next one', async () => {
   const from = dates.addDays(today(), 200);
   const to = dates.addDays(from, 1);

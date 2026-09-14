@@ -204,13 +204,122 @@ test('INV4: changing the service boundary does not rewrite existing shifts', () 
   TC.saveSettings(before);
 });
 
-test('INV4b: moving the START does re-stamp, because it is a different shift now', () => {
+// INV4b SAID THE OPPOSITE until the owner reported shifts vanishing on drag:
+// "moving the START does re-stamp, because it is a different shift now — a
+// shift moved into dinner IS dinner". That held while a schedule was a window
+// either side of 4pm. It is a board with its own people now, and re-deriving it
+// from the clock is exactly what filed a dragged noon Evening shift under Day
+// Service, off the board it was dropped on. Only a manager changes it.
+test('INV4b: moving the START keeps the schedule; only saying so changes it', () => {
   const day = addDays(TODAY, 7);
   const s = S.create({ employeeId: SERVER, position: 'server',
-    startsAt: at(day, '09:00'), endsAt: at(day, '15:00') });
-  assert.strictEqual(s.daypart, 'cafe');
+    startsAt: at(day, '09:00'), endsAt: at(day, '15:00'), daypart: 'cafe' });
   S.edit(s.id, { startsAt: at(day, '17:00'), endsAt: at(day, '23:00') });
-  assert.strictEqual(S.byId(s.id).daypart, 'dinner', 'a shift moved into dinner IS dinner');
+  assert.strictEqual(S.byId(s.id).daypart, 'cafe', 'a new start time does not re-file it');
+  S.edit(s.id, { daypart: 'dinner' });
+  assert.strictEqual(S.byId(s.id).daypart, 'dinner', 'a manager choosing the schedule does');
+});
+
+test('a dragged shift stays on its own schedule, whatever time it starts — including a new one', () => {
+  const SERVICES = require('../src/services');
+  const brunch = SERVICES.bySlug('sched-test-brunch')
+    || SERVICES.create({ slug: 'sched-test-brunch', name: 'Sched Test Brunch' });
+  const d = addDays(TODAY, 420);
+  // The noon Evening shift is the card from the report. An evening Day Service
+  // shift and a schedule no time window has ever heard of are the same bug from
+  // the other two directions.
+  for (const [daypart, from, to] of [['dinner', '12:00', '17:00'], ['cafe', '18:00', '23:00'], [brunch.slug, '10:00', '15:00']]) {
+    const s = S.create({ employeeId: SERVER, position: 'server', startsAt: at(d, from), endsAt: at(d, to), daypart });
+    assert.strictEqual(S.moveShift(s.id, { toDate: addDays(d, 2) }).moved, true);
+    assert.strictEqual(S.byId(s.id).daypart, daypart, `a ${daypart} shift at ${from}, moved two days, is still ${daypart}`);
+    S.moveShift(s.id, { toEmployeeId: SALARIED, toDate: addDays(d, 3) });
+    assert.strictEqual(S.byId(s.id).daypart, daypart, 'and still, moved to another person and day at once');
+    S.cancel(s.id);
+  }
+});
+
+test('a dragged card lands in the column it was dropped on, even from a row dated off its own start', () => {
+  // Measured on the demo data: a 3am shift stored with its calendar day rather
+  // than the night the 4am cutoff puts it in, dragged from Wednesday to Monday,
+  // was dated the Sunday before and left the week — so the card was gone. The
+  // drop is the answer; the clock time is kept.
+  const wed = addDays(TODAY, 511);
+  const s = S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(wed, '03:00'), endsAt: at(wed, '09:00'), daypart: 'cafe' });
+  db.prepare('UPDATE scheduled_shifts SET business_date = ? WHERE id = ?').run(wed, s.id);
+  const mon = addDays(wed, -2);
+  S.moveShift(s.id, { toDate: mon });
+  const moved = S.byId(s.id);
+  assert.strictEqual(moved.business_date, mon, 'in the Monday column, where it was dropped');
+  assert.strictEqual(TC.utcToLocalInput(moved.starts_at).slice(11, 16), '03:00', 'still starting at 3am');
+  assert.strictEqual(moved.daypart, 'cafe', 'and still on its own schedule');
+  S.cancel(s.id);
+});
+
+test('copying a week from a schedule copies that schedule only, onto itself', () => {
+  const from = addDays(TODAY, 434);
+  S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(from, '12:00'), endsAt: at(from, '19:00'), daypart: 'dinner' });
+  S.create({ employeeId: SALARIED, position: 'server',
+    startsAt: at(addDays(from, 1), '08:00'), endsAt: at(addDays(from, 1), '11:00'), daypart: 'cafe' });
+
+  const scoped = S.copyWeek(from, addDays(from, 7), { daypart: 'dinner' }).made.map((id) => S.byId(id));
+  assert.strictEqual(scoped.length, 1, 'pressed on Evening, only the Evening shift comes');
+  assert.strictEqual(scoped[0].daypart, 'dinner',
+    'and it is still Evening — a noon start is not a reason to file it under Day');
+
+  // No schedule named — the all-schedules board — copies both, each onto its own.
+  const both = S.copyWeek(from, addDays(from, 14)).made.map((id) => S.byId(id));
+  assert.deepStrictEqual(both.map((r) => r.daypart).sort(), ['cafe', 'dinner']);
+});
+
+test('a copy that would double-book somebody says which schedule already has them', () => {
+  const from = addDays(TODAY, 455);
+  const to = addDays(from, 7);
+  S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(from, '12:00'), endsAt: at(from, '18:00'), daypart: 'dinner' });
+  // The same shift is already in the target week — on Day Service, which is
+  // where the old copy used to put it.
+  S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(to, '12:00'), endsAt: at(to, '18:00'), daypart: 'cafe' });
+  const { made, skipped } = S.copyWeek(from, to, { daypart: 'dinner' });
+  assert.strictEqual(made.length, 0, 'not placed twice');
+  const hit = skipped.find((x) => x.code === 'duplicate');
+  assert.ok(hit, 'skipped as a duplicate');
+  assert.match(hit.why, /already on .+ that week/, 'naming where it already is, not just "already"');
+});
+
+test('copying a day from a schedule copies that schedule only, onto itself', () => {
+  const from = addDays(TODAY, 469);
+  S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(from, '12:00'), endsAt: at(from, '18:00'), daypart: 'dinner' });
+  S.create({ employeeId: SALARIED, position: 'server',
+    startsAt: at(from, '07:00'), endsAt: at(from, '11:00'), daypart: 'cafe' });
+  const { made } = S.copyDay(from, addDays(from, 1), { daypart: 'dinner' });
+  assert.strictEqual(made.length, 1, 'one schedule, one shift');
+  assert.strictEqual(made[0].daypart, 'dinner', 'carried, not guessed from its noon start');
+});
+
+test('a template remembers its schedule and puts its shifts back on it', () => {
+  const src = addDays(TODAY, 476);
+  S.create({ employeeId: SERVER, position: 'server',
+    startsAt: at(src, '12:00'), endsAt: at(src, '18:00'), daypart: 'dinner' });
+  S.create({ employeeId: SALARIED, position: 'server',
+    startsAt: at(src, '07:00'), endsAt: at(src, '11:00'), daypart: 'cafe' });
+  const t = S.saveScheduleTemplate('day', 'Sched test Evening day', src, { daypart: 'dinner' });
+  assert.strictEqual(t.shifts, 1, 'saved from the Evening board, it holds the Evening shift only');
+
+  const out = S.applyScheduleTemplate(t.id, addDays(TODAY, 483), { daypart: 'cafe' });
+  assert.strictEqual(out.made.length, 1);
+  assert.strictEqual(out.made[0].daypart, 'dinner', 'applied from another board, it still goes back on Evening');
+
+  // Saved before templates remembered their schedule: the board it is applied on.
+  db.prepare('UPDATE schedule_template_rows SET daypart = NULL WHERE template_id = ?').run(t.id);
+  const legacy = S.applyScheduleTemplate(t.id, addDays(TODAY, 490), { daypart: 'dinner' });
+  assert.strictEqual(legacy.made[0].daypart, 'dinner', 'an old template lands on the board it is applied from');
+  const nowhere = S.applyScheduleTemplate(t.id, addDays(TODAY, 497));
+  assert.strictEqual(nowhere.made.length, 0, 'and with no board to go on, it is not guessed from the clock');
+  assert.match(nowhere.skipped[0].reason, /open the schedule/i, 'it says what to do instead');
 });
 
 // ===========================================================================
