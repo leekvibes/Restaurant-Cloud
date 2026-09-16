@@ -25,6 +25,12 @@
   // own tips by, and the engine would read it as hours — an option that quietly
   // means something else is worse than no option.
   var SHARE_SPLITS = { hours: 'by hours worked', even: 'evenly' };
+  // WHO PAYS A RULE. The one thing the evening policy needs that could not be
+  // typed: "bartenders tip out 3% of their own sales to the barback" came out of
+  // the builder as a rule the servers paid, because there was nowhere to say
+  // otherwise. Only the jobs that ring their own till can pay a percentage of
+  // their own sales, so only they are offered.
+  var PAYERS = { server: 'Servers', bartender: 'Bartenders', barista: 'Baristas' };
 
   function fresh() { return (window.POLICY_RULES || []).map(function (r) { return Object.assign({}, r); }); }
   var rules = fresh();
@@ -34,10 +40,37 @@
   function roleWord(x) { return RECIPIENTS[x] || SHARE_ROLES[x] || x; }
   function plural(x) { var w = roleWord(x); return /s$/i.test(w) ? w : w + 's'; }
 
+  // Does this policy make bartenders and baristas direct earners? The same test
+  // the engine uses (db.js newModel): any rule naming who pays it, a pool naming
+  // its roles, or a pooled-tips rule. It decides what "no payer named" means.
+  function newModel() {
+    return rules.some(function (r) {
+      return (r.type === 'tipout' && r.paidBy) || (r.type === 'pool' && Array.isArray(r.among)) || r.type === 'share';
+    });
+  }
+  // WHAT IT SAID A MOMENT AGO IS WHAT IT MEANS NOW.
+  //
+  // On an older policy a rule with no payer is the servers' — nobody else rings
+  // a till there — and the card says "Servers". Naming a payer on another rule,
+  // or adding pooled tips, makes it a policy where the bar keeps its own tips,
+  // and on that policy "no payer" means everybody who rings one. Left alone,
+  // the busser's 2% the owner had just read as the servers' would start coming
+  // off the bar as well. So at the moment the policy changes kind, every rule
+  // that had no payer is written down as the servers', which is what it was.
+  function keepMeaning(was) {
+    if (was || !newModel()) return;
+    rules.forEach(function (r) { if (r.type === 'tipout' && !r.paidBy && !r.from) r.paidBy = ['server']; });
+  }
+  function payerOf(r) {
+    var who = r.paidBy ? (Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy]) : null;
+    return who && who.length === 1 ? who[0] : who ? 'several' : 'any';
+  }
+
   // The same sentence the read-only page uses, so the builder reads back what
   // was saved rather than a paraphrase of it.
   function payerPhrase(r) {
     if (r.from) return 'The ' + roleWord(r.from).toLowerCase() + ' pot pays';
+    if (!r.paidBy && newModel()) return 'Everyone who rings their own till tips out';
     var who = r.paidBy ? (Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy]) : ['server'];
     var names = who.map(function (x) { return plural(x).toLowerCase(); });
     var joined = names.length === 1 ? names[0]
@@ -66,8 +99,19 @@
           '<div class="rule-row">' + esc(payerPhrase(r)) + ' <b>' + r.percent + '%</b> of ' + esc(label(BASES, r.base)) +
           ' to the <b>' + esc(roleWord(r.recipient).toLowerCase()) + '</b>, split ' + esc(label(SPLITS, r.split)) + '.</div></div>';
       }
+      // Several payers on one rule cannot be said with one select, so it is
+      // shown and kept exactly as saved rather than narrowed to the first.
+      if (payerOf(r) === 'several') {
+        return '<div class="rule-card"><div class="rule-head"><span class="rule-badge badge-tipout">Tip-out</span><button type="button" class="rule-x" data-del="' + i + '">✕</button></div>' +
+          '<div class="rule-row">' + esc(payerPhrase(r)) + ' <b>' + r.percent + '%</b> of their own ' + esc(label(BASES, r.base)) +
+          ' to the <b>' + esc(roleWord(r.recipient).toLowerCase()) + '</b>, split ' + esc(label(SPLITS, r.split)) + '.</div></div>';
+      }
+      // No payer named keeps its own option, worded for what it means on this
+      // policy, so opening and saving a rule never assigns it a payer by itself.
+      var payers = Object.assign({}, PAYERS);
+      if (payerOf(r) === 'any') payers = Object.assign({ any: newModel() ? 'All who ring their own till' : 'Servers' }, PAYERS);
       return '<div class="rule-card"><div class="rule-head"><span class="rule-badge badge-tipout">Tip-out</span><button type="button" class="rule-x" data-del="' + i + '">✕</button></div>' +
-        '<div class="rule-row"><b>' + esc(payerPhrase(r)) + '</b> ' +
+        '<div class="rule-row"><select class="inline" data-i="' + i + '" data-f="paidBy" aria-label="Who pays this">' + opts(payers, payerOf(r)) + '</select> tip out ' +
         '<input class="inline num-in" type="number" step="0.1" min="0" data-i="' + i + '" data-f="percent" value="' + r.percent + '"> % of their ' +
         '<select class="inline" data-i="' + i + '" data-f="base">' + opts(BASES, r.base) + '</select> to the ' +
         '<select class="inline" data-i="' + i + '" data-f="recipient">' + opts(RECIPIENTS, r.recipient) + '</select>, split ' +
@@ -138,6 +182,17 @@
     c.querySelectorAll('[data-f]').forEach(function (el) {
       el.addEventListener(el.tagName === 'INPUT' ? 'input' : 'change', function (e) {
         var i = +e.target.getAttribute('data-i'), f = e.target.getAttribute('data-f');
+        if (f === 'paidBy') {
+          // Stored as the engine reads it: a list of jobs, or nothing at all.
+          var was = newModel();
+          if (e.target.value === 'any') delete rules[i].paidBy;
+          else rules[i].paidBy = [e.target.value];
+          keepMeaning(was);
+          // Naming a payer can make this a policy where the bar keeps its own
+          // tips, which re-words every card and the summary. Redraw, not just sum.
+          render();
+          return;
+        }
         rules[i][f] = f === 'percent' ? (parseFloat(e.target.value) || 0) : e.target.value;
         summarize();
       });
@@ -149,10 +204,25 @@
   }
 
   var addT = document.getElementById('add-tipout'), addP = document.getElementById('add-pool');
-  if (addT) addT.addEventListener('click', function () { rules.push({ type: 'tipout', recipient: 'kitchen', percent: 0, base: 'food', split: 'hours' }); render(); });
+  if (addT) addT.addEventListener('click', function () {
+    // On a policy where the bar keeps its own tips, a rule with no payer is
+    // charged to everybody who rings a till. A new rule starts as the servers',
+    // said out loud, and the select changes it. On an older policy it starts
+    // exactly as it always did, because naming a payer there would change who
+    // keeps their tips across the whole service.
+    var r = { type: 'tipout', recipient: 'kitchen', percent: 0, base: 'food', split: 'hours' };
+    // An empty policy has no older meaning to keep, so it starts the new way.
+    if (newModel() || !rules.length) r.paidBy = ['server'];
+    rules.push(r); render();
+  });
   if (addP) addP.addEventListener('click', function () { rules.push({ type: 'pool', source: 'jar_togo', split: 'hours', among: 'all_support', payout: 'weekly_cash' }); render(); });
   var addS = document.getElementById('add-share');
-  if (addS) addS.addEventListener('click', function () { rules.push({ type: 'share', role: 'bartender', split: 'hours' }); render(); });
+  if (addS) addS.addEventListener('click', function () {
+    var was = newModel();
+    rules.push({ type: 'share', role: 'bartender', split: 'hours' });
+    keepMeaning(was);
+    render();
+  });
 
   var editBtn = document.getElementById('edit-btn'), cancelBtn = document.getElementById('cancel-btn');
   var vr = document.getElementById('view-read'), ve = document.getElementById('view-edit');

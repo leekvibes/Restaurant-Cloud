@@ -492,3 +492,42 @@ test('the policy page says when a service has no policy of its own', async () =>
   const after = await (await fetch(`${BASE}/policy?daypart=weekend-brunch`)).text();
   assert.ok(!/No policy set/.test(after), 'and gone the moment one is saved');
 });
+
+// --- editing a service that is already open -----------------------------------
+
+test('fixing a bartender\'s figures on the service page keeps them a bartender', async () => {
+  // Everybody who rings their own till is edited on the same form, and saving it
+  // wrote role 'server' over whoever it was. A bartender whose bar sales were
+  // corrected became a server: paying the servers' percentages, out of the
+  // bartender pot, with nothing on screen to say it had happened.
+  const { db } = require('../src/db');
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2099-05-01', 'dinner', 'open')`).run().lastInsertRowid);
+  const mk = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1500, 1)`).run(name, role).lastInsertRowid);
+  const bar = mk('Edit Bartender', 'bartender');
+  const bus = mk('Edit Busser', 'busser');
+  const fresh = mk('Edit Newcomer', 'server');
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,6)').run(sh, bar, 'bartender');
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,5)').run(sh, bus, 'busser');
+
+  const save = (emp, fields) => fetch(`${BASE}/shifts/${sh}/server`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ employee_id: String(emp), ...fields }).toString(),
+  });
+  const roleOf = (emp) => db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?').get(sh, emp).role;
+
+  const res = await save(bar, { food: '120', alcohol: '900', card_tips: '300' });
+  assert.strictEqual(res.status, 302);
+  assert.strictEqual(roleOf(bar), 'bartender', 'still behind the bar');
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /Bartender saved/, 'and the page says who was saved');
+  const sales = db.prepare('SELECT alcohol_cents FROM server_sales WHERE shift_id = ? AND employee_id = ?').get(sh, bar);
+  assert.strictEqual(sales.alcohol_cents, 90000, 'with the corrected figure');
+
+  // What the Server tab has always done, it still does.
+  await save(fresh, { food: '50' });
+  assert.strictEqual(roleOf(fresh), 'server', 'somebody new goes on as a server');
+  await save(bus, { food: '10' });
+  assert.strictEqual(roleOf(bus), 'server', 'and support chosen from the Server tab is moved on purpose');
+});

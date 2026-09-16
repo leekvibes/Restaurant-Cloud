@@ -2268,6 +2268,7 @@ app.get('/shifts/:id', (req, res) => {
     : `${esc(sh.date === todayStr ? 'Today' : cashDayLabel(sh.date))} · ${esc(dp(sh.daypart))} — <span class="ok">everything checks out.</span>`;
 
   const statusWord = sh.status === 'emailed' ? 'Emails sent'
+    : sh.reopened_at ? 'Reopened'
     : withHours < people.length ? 'Needs review'
     : people.length ? 'Ready to send' : 'Nobody on it';
   const statusCls = sh.status === 'emailed' ? 'ok' : withHours < people.length ? 'warn' : 'ready';
@@ -2406,6 +2407,48 @@ app.get('/shifts/:id', (req, res) => {
       ${returnToRowScript('edit-', false)}
     </script>`;
 
+  // --- sent, or opened again -------------------------------------------------
+  //
+  // A sent service offers Reopen. A reopened one says so at the top, says what
+  // it is worked out on, and offers the two ways out. Named as plainly as the
+  // money it moves: people have already been paid from this night.
+  const curPol = currentForDaypart(sh.daypart);
+  // What the night is actually worked out on, asked the way the engine asks it
+  // (peek: this is a page, it decides nothing). Unstamped and frozen reads as
+  // the defaults; unstamped and not frozen locks onto the current policy.
+  const onPolicy = sh.policy_id ? (curPol && curPol.id === sh.policy_id ? 'current' : 'earlier')
+    : (curPol && JSON.stringify(policyForShift(sh, { peek: true })) === JSON.stringify(curPol.rules)
+      ? 'current' : 'defaults');
+  const sentWhen = (sh.reopened_at || '').slice(0, 10);
+  const reopenPanel = !canWrite() ? '' : String(sh.status) === 'emailed' ? `
+      <form class="bs-reopen" method="post" action="/shifts/${sh.id}/reopen"
+        onsubmit="return confirm('Reopen ${esc(dp(sh.daypart))} on ${esc(sh.date)}?\\n\\nThis service has been sent and people have been paid from it. Reopening changes nothing by itself: you make your corrections, then send it again or close it without emailing anyone.')">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        <span>Sent. Need to correct something?</span>
+        <button class="bs-btn bs-btn-quiet" type="submit">Reopen this service</button>
+      </form>` : reopenedNow(sh) ? `
+      <div class="bs-reopened" role="status">
+        <p class="bs-reopened-h"><b>Reopened</b>${sh.reopened_by ? ` by ${esc(sh.reopened_by)}` : ''}${
+  sentWhen ? ` on ${esc(sentWhen)}` : ''} &mdash; this service was already sent.</p>
+        <p class="bs-reopened-b">Changes you save here change what people were paid. When you are done,
+          send it again so their emails match, or close it without emailing anyone.</p>
+        ${onPolicy === 'current' ? '' : `<p class="bs-reopened-b">It is worked out on ${
+  onPolicy === 'defaults' ? 'the built-in default rules' : 'an earlier policy'}${
+  curPol ? `, not the current ${esc(dp(sh.daypart))} policy` : ''}.</p>`}
+        <div class="bs-reopened-f">
+          <a class="bs-btn" href="/shifts/${sh.id}/results">Preview &amp; send again →</a>
+          <form method="post" action="/shifts/${sh.id}/close" style="margin:0">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <button class="bs-btn bs-btn-quiet" type="submit">Close without emailing</button>
+          </form>
+          ${onPolicy !== 'current' && curPol ? `<form method="post" action="/shifts/${sh.id}/use-current-policy" style="margin:0"
+            onsubmit="return confirm('Work this service out on the current ${esc(dp(sh.daypart))} policy?\\n\\nEvery tip-out on this night is recalculated with those rules. People were already paid from the old figures, so send it again and carry the difference into the next payroll.')">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <button class="bs-btn bs-btn-quiet" type="submit">Use the current ${esc(dp(sh.daypart))} policy</button>
+          </form>` : ''}
+        </div>
+      </div>` : '';
+
   const body = `
     ${flash(req)}
     <div class="bs-page bs-sheet">
@@ -2434,6 +2477,7 @@ app.get('/shifts/:id', (req, res) => {
         ${sCell('To sort out', String(warn.length), warn.length ? 'see the rows below' : 'nothing outstanding', warn.length ? 'bad' : 'ok')}
       </div>
 
+      ${reopenPanel}
       ${attention}
       ${clockGap && canWrite() ? `<form method="post" action="/shifts/${sh.id}/resync-clock" class="bs-form" style="margin:10px 0 0">
         <input type="hidden" name="_csrf" value="${csrfFor(req)}">
@@ -2693,6 +2737,31 @@ function hoursIfGiven(body) {
     ? parseHours(body.hours) : null;
 }
 
+/**
+ * The hours to write from a service-sheet save, or a refusal.
+ *
+ * A signed timesheet vouches for HOURS. It says nothing about somebody's sales
+ * or tips, and it was refusing those too: the whole row was turned away the
+ * moment the day was on an approved sheet, so correcting a server's card tips
+ * on a sent service came back as "changing the hours underneath a signature"
+ * with the typed figure gone. The owner read it as the page not saving —
+ * which, for every figure on the row, it wasn't.
+ *
+ * The form sends the hours back on every save whether or not they were touched
+ * (it prefills them), so "given" cannot mean "changed". Within half a minute of
+ * what is on file is the same hours: 8:16 typed is 8.2667 parsed, never 8.27.
+ * On a frozen day, unchanged hours are not written at all — not restamped as
+ * typed by a manager, not moved — and only a real change is refused.
+ */
+function hoursForSave(res, shift, empId, body) {
+  const typed = hoursIfGiven(body);
+  if (!sheetCovering(empId, shift.date).frozen) return { ok: true, hours: typed };
+  const had = db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(shift.id, empId);
+  const changes = typed != null && Math.abs((had ? Number(had.hours) || 0 : 0) - typed) >= 0.5 / 60;
+  if (changes && tcFrozen(res, empId, shift.date, `/shifts/${shift.id}`)) return { ok: false };
+  return { ok: true, hours: null };
+}
+
 function writeTipsIfGiven(shiftId, empId, body) {
   const given = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
   if (given('cash_tips')) {
@@ -2737,10 +2806,26 @@ app.post('/shifts/:id/server', (req, res) => {
   // Typing hours in on the shift page writes the same work.hours the timesheet
   // is built from. The Time clock page refuses this on a signed day; this page
   // is the other door to the same number.
-  if (tcFrozen(res, empId, sh.date, `/shifts/${sh.id}`)) return;
+  const hrs = hoursForSave(res, sh, empId, req.body);
+  if (!hrs.ok) return;
+  // THE JOB THEY WERE ON STAYS THE JOB THEY WERE ON.
+  //
+  // Everybody who rings their own till is edited on this form — a bartender and
+  // a barista as well as a server — and this wrote role 'server' over all of
+  // them, because the work row is one row per person per service and the save
+  // replaces its role. Fixing a bartender's bar sales turned them into a server:
+  // paying the servers' busser and bartender percentages instead of the
+  // barback's, and dropping out of the bartender pot they were owed a share of.
+  // Nothing on the page said so, and the figures moved.
+  //
+  // Somebody already on the service in a job that rings its own till keeps it.
+  // Anybody else — somebody new, or support deliberately added from the Server
+  // tab — is put on as a server, as before.
+  const had = db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, empId);
+  const role = had && ['server', 'bartender', 'barista'].includes(had.role) ? had.role : 'server';
   w.upsertWork.run({
-    shift_id: sh.id, employee_id: empId, role: 'server',
-    hours: hoursIfGiven(req.body), hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
+    shift_id: sh.id, employee_id: empId, role,
+    hours: hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
   });
   w.upsertSales.run({
     shift_id: sh.id, employee_id: empId,
@@ -2748,18 +2833,19 @@ app.post('/shifts/:id/server', (req, res) => {
     alcohol_cents: toCents(req.body.alcohol),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
-  logManagerEdit(sh.id, empId, 'server', req.body);
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Server saved.') + `#edit-${empId}`);
+  logManagerEdit(sh.id, empId, role, req.body);
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(`${posName(role)} saved.`) + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/support', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
   const empId = Number(req.body.employee_id);
-  if (tcFrozen(res, empId, sh.date, `/shifts/${sh.id}`)) return;
+  const hrs = hoursForSave(res, sh, empId, req.body);
+  if (!hrs.ok) return;
   w.upsertWork.run({
     shift_id: sh.id, employee_id: empId, role: req.body.role,
-    hours: hoursIfGiven(req.body), hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
+    hours: hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, req.body.role, req.body);
@@ -3341,6 +3427,76 @@ const toldBefore = (prefix) => {
 // Pay-math revisions (db.js, pay_math): a service keeps the arithmetic it was
 // settled under, so a later correction can never restate it.
 const { countsKeptTips, settleShift, settleRange } = require('./db');
+
+// ---------------------------------------------------------------------------
+// REOPENING A SENT SERVICE
+//
+// "I just want to be able to reopen it on services and make my changes right
+// there." A sent service already took a correction — the page says "changed
+// after it was sent" until it goes out again — but two things stayed shut: the
+// one-off tip-out overrides, and staff correcting their own report, whose portal
+// has said "ask a manager to reopen it" with no button anywhere to do so.
+//
+// Reopening is a status change and nothing else. It does not recalculate, it
+// does not re-price the night on a newer policy, it does not unsign anybody's
+// timesheet, and it emails nobody. What was sent stays recorded (sent_fingerprint)
+// so the page can still say the emails are out of date. The way out is either
+// sending it again, or closing it again without emailing anyone.
+// ---------------------------------------------------------------------------
+const reopenedNow = (sh) => !!(sh && sh.reopened_at && String(sh.status) !== 'emailed');
+
+app.post('/shifts/:id/reopen', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  if (String(sh.status) !== 'emailed') {
+    return res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('That service is already open.'));
+  }
+  db.prepare("UPDATE shifts SET status = 'open', reopened_at = datetime('now'), reopened_by = ? WHERE id = ? AND status = 'emailed'")
+    .run(tcActor(req), sh.id);
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(
+    'Reopened. Make your changes, then send it again or close it without emailing anyone.'));
+});
+
+// Put it back as sent, emailing nobody. The emails people already have still
+// show the figures from before; the page keeps saying so until it is sent again.
+app.post('/shifts/:id/close', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  if (!reopenedNow(sh)) return res.redirect(`/shifts/${sh.id}`);
+  s.markEmailed.run(sh.id);
+  // Settle anybody added while it was open, exactly as a send would. Rows that
+  // were settled already keep what they were settled at.
+  try { settleShift(sh.id); } catch (e) { console.warn('[close] could not settle:', e && e.message); }
+  const changed = (() => {
+    try { return !!sh.sent_fingerprint && serviceFingerprint(sh.id) !== sh.sent_fingerprint; } catch { return false; }
+  })();
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(changed
+    ? 'Closed without emailing. The emails people have still show the figures from before.'
+    : 'Closed without emailing. Nothing had changed.'));
+});
+
+// Work this night out on the policy in force now. A deliberate act on one open
+// service — the same move the policy page makes for every open service at once,
+// here for the one in front of you, including a night that went out on the
+// built-in defaults and was never stamped with anything.
+app.post('/shifts/:id/use-current-policy', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const sh = s.shiftById.get(req.params.id);
+  if (!sh) return res.status(404).end();
+  if (String(sh.status) === 'emailed') {
+    return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent('Reopen the service first.'));
+  }
+  const cur = currentForDaypart(sh.daypart);
+  if (!cur) {
+    return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent(
+      `${dp(sh.daypart)} has no policy of its own yet. Set one under Tip-out policy first.`));
+  }
+  db.prepare('UPDATE shifts SET policy_id = ? WHERE id = ?').run(cur.id, sh.id);
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(
+    `This service is now worked out on the current ${dp(sh.daypart)} policy.`));
+});
 
 app.post('/shifts/:id/send', async (req, res) => {
   const sh = s.shiftById.get(req.params.id);
@@ -14447,8 +14603,13 @@ const plural = (x) => {
   return /s$/i.test(w) ? w : w + 's';
 };
 
-function payerPhrase(r) {
+function payerPhrase(r, rules) {
   if (r.from) return `The ${roleWord(r.from).toLowerCase()} pot pays`;
+  // NO PAYER NAMED is not "servers" on every policy. On one where bartenders
+  // and baristas keep their own tips (newModel), the engine charges a rule with
+  // no payer to EVERYBODY who rings their own till — and this said "Servers",
+  // so a rule read as the servers' 2% was quietly taking 2% off the bar too.
+  if (!r.paidBy && rules && keepsOwnCash('bartender', rules)) return 'Everyone who rings their own till tips out';
   const who = r.paidBy ? (Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy]) : ['server'];
   const names = who.map((x) => plural(x).toLowerCase());
   const joined = names.length === 1 ? names[0]
@@ -14493,7 +14654,7 @@ function describeRules(rules) {
     if (r.type === 'tipout') {
       const base = BASE[r.base] || r.base;
       const own = r.from ? '' : ' of their own';
-      items.push(`${payerPhrase(r)} <b>${r.percent}%</b>${own} ${base} to the <b>${roleWord(r.recipient).toLowerCase()}</b>`
+      items.push(`${payerPhrase(r, rules)} <b>${r.percent}%</b>${own} ${base} to the <b>${roleWord(r.recipient).toLowerCase()}</b>`
         + `, split <b>${SLBL[r.split] || r.split}</b>.`);
     } else if (r.type === 'share') {
       // "Bartender tips are pooled and split between them" — the owner's rule,

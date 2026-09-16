@@ -271,6 +271,23 @@ body {
 }
 .bs-btn-quiet:hover { background: var(--row-hover); color: var(--ink); }
 
+/* A sent service, and one opened again. Borders, not shadows: .bs * strips
+   box-shadow, and a marker drawn with one ships invisible. */
+.bs-reopen { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 14px 0 0; padding: 10px 14px; border: 1px solid var(--line);
+  font-size: 13.5px; color: var(--muted); }
+.bs-reopen span { flex: 1 1 auto; }
+.bs-reopened { margin: 14px 0 0; padding: 14px 16px; border: 1px solid var(--warn);
+  border-left-width: 4px; }
+.bs-reopened-h { margin: 0 0 4px; font-size: 15px; color: var(--ink); }
+.bs-reopened-h b { color: var(--warn); text-transform: uppercase; letter-spacing: .06em; font-size: 12.5px; }
+.bs-reopened-b { margin: 0 0 8px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+.bs-reopened-f { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 640px) {
+  .bs-reopen .bs-btn, .bs-reopened-f .bs-btn, .bs-reopened-f form { width: 100%; }
+  .bs-reopened-f form .bs-btn { width: 100%; }
+}
+
 /* ===========================================================================
    MASTHEAD
    ======================================================================== */

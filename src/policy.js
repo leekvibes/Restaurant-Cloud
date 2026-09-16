@@ -162,7 +162,13 @@ function policyForShift(shift, opts) {
     //
     // This changes not one figure on the day it ships. It is a lock, and what
     // it locks is what the service already says.
-    if (String(shift.status) === 'emailed' && !Q.existedBy.get(shift.daypart, shift.date)) {
+    //
+    // Reopening does not undo that. A night opened again to fix one server's
+    // tips is still the night that went out on the defaults; switching it to
+    // today's policy is a separate decision, made on its own button
+    // (/shifts/:id/use-current-policy), which stamps it and so ends this.
+    if ((String(shift.status) === 'emailed' || shift.reopened_at)
+      && !Q.existedBy.get(shift.daypart, shift.date)) {
       return defaultRules();
     }
     row = currentForDaypart(shift.daypart);

@@ -121,6 +121,12 @@ if (!shiftCols.includes('closed_at')) db.exec('ALTER TABLE shifts ADD COLUMN clo
 // is said instead of silently parting from everybody's email (server.js,
 // serviceFingerprint). NULL for services sent before this existed.
 if (!shiftCols.includes('sent_fingerprint')) db.exec('ALTER TABLE shifts ADD COLUMN sent_fingerprint TEXT');
+// A sent service the owner has opened again to correct. Set by /shifts/:id/reopen
+// and kept afterwards as history; "reopened right now" is status 'open' with this
+// set. policyForShift reads it too: a night that went out on the defaults stays
+// on them while it is open again, unless the owner moves it on purpose.
+if (!shiftCols.includes('reopened_at')) db.exec('ALTER TABLE shifts ADD COLUMN reopened_at TEXT');
+if (!shiftCols.includes('reopened_by')) db.exec('ALTER TABLE shifts ADD COLUMN reopened_by TEXT');
 if (!shiftCols.includes('pool_jar_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_jar_cents INTEGER NOT NULL DEFAULT 0');
 if (!shiftCols.includes('pool_togo_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_cents INTEGER NOT NULL DEFAULT 0'); // to-go CASH
 if (!shiftCols.includes('pool_togo_card_cents')) db.exec('ALTER TABLE shifts ADD COLUMN pool_togo_card_cents INTEGER NOT NULL DEFAULT 0');

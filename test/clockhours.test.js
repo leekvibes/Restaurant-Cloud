@@ -953,6 +953,42 @@ test('the shift page is the other door to the same signed hours', async () => {
   thaw(emp, day);
 });
 
+test('a signed day still takes a correction to somebody\'s sales and tips', async () => {
+  // The signature is on the HOURS. It was refusing the whole row, so fixing a
+  // server's card tips on a sent service came back "changing the hours
+  // underneath a signature" with the typed figure gone — and the form sends the
+  // hours back on every save, because it prefills them, so there was no way to
+  // save a tip without tripping it. The owner's word for it: not saving.
+  const emp = E.sent;
+  const day = P2.recentPeriods(3)[1].start;
+  await punch(emp, day, '09:00', '17:00');
+  const sh = shiftOn(day, 'dinner');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'eight to start');
+  const source = workOf(sh.id, emp).hours_source;
+  freeze(emp, day);
+
+  // Exactly what the Edit form posts: the figures, and the hours it was showing.
+  const fixed = await post(`/shifts/${sh.id}/server`, { employee_id: String(emp),
+    food: '250', coffee: '0', alcohol: '0', card_tips: '40', cash_tips: '12', hours: '8:00', wage: '' });
+  assert.doesNotMatch(msgOf(fixed), /already approved/, 'not refused');
+  const row = db.prepare('SELECT * FROM server_sales WHERE shift_id = ? AND employee_id = ?').get(sh.id, emp);
+  assert.strictEqual(row.food_cents, 25000, 'the sales were saved');
+  assert.strictEqual(row.card_tips_cents, 4000, 'and the card tips');
+  assert.strictEqual(row.cash_tips_cents, 1200, 'and the cash');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'the signed hours did not move');
+  assert.strictEqual(workOf(sh.id, emp).hours_source, source, 'and are not restamped as typed by hand');
+
+  // Decimal or h:mm, the same eight hours are the same eight hours.
+  const decimal = await post(`/shifts/${sh.id}/server`, { employee_id: String(emp), card_tips: '41', hours: '8' });
+  assert.doesNotMatch(msgOf(decimal), /already approved/, 'eight written as 8 is not a change');
+
+  // A real change to the hours is still what it was: refused.
+  const moved = await post(`/shifts/${sh.id}/server`, { employee_id: String(emp), card_tips: '42', hours: '8:30' });
+  assert.match(msgOf(moved), /already approved/, 'moving the hours is still refused');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 8, 'and they did not move');
+  thaw(emp, day);
+});
+
 test('clocking out of a signed day closes the punch but holds the hours', async () => {
   // The one case that must NOT be a refusal. Somebody at the end of a real
   // shift has worked those hours and has to be able to close their entry —
