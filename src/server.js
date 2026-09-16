@@ -15650,6 +15650,29 @@ app.get('/policy', (req, res) => {
   const elsewhere = otherDrafts.length ? `<p class="pol-elsewhere">${
   otherDrafts.map((d) => `<a href="/policy?daypart=${d}">${dp(d)} also has a policy waiting &rsaquo;</a>`).join(' ')}</p>` : '';
 
+  // --- a service that has never had a policy of its own --------------------
+  //
+  // The page renders the built-in defaults when there is nothing saved, and it
+  // rendered them exactly as it renders a policy somebody chose: a numbered
+  // list of rules, with nothing to say they were nobody's decision. The only
+  // clue was an empty History table two screens down. Evening Service ran for
+  // weeks like that — a schedule added from the picker gets no policy with it —
+  // and the rules being shown were not the rules that had been agreed.
+  const noPolicyCard = hist.length ? '' : `
+    <div class="card pol-none">
+      <div class="pol-draft-h">
+        <span class="pol-none-tag">No policy set</span>
+        <h2>${dp(daypart)} has no policy of its own</h2>
+      </div>
+      <p class="pol-stale-why">Nothing has ever been saved for this service, so the rules below are ZWIN's
+        built-in defaults &mdash; and they are what every ${esc(dp(daypart))} has been worked out on.
+        They are not a policy anybody chose.${draft
+    ? ` The one waiting above is the one to turn on.`
+    : ` <b>Edit policy</b> and save sets one.`}</p>
+      <p class="pol-stale-safe">Services already sent stay exactly as they went out, on these defaults.
+        Setting a policy decides services that are still open, and everything from here.</p>
+    </div>`;
+
   const histRows = hist.map((h, i) => `
     <tr${i === 0 ? ' class="row-current"' : ''}>
       <td>${esc(h.effective_from)}${i === 0 ? ' <span class="pill pill-ok">current</span>' : ''}</td>
@@ -15662,6 +15685,7 @@ app.get('/policy', (req, res) => {
     <div class="page-head"><div><h1>Tip-out policy</h1>
       <p class="sub">How tips are shared. Editing applies only to shifts created <b>after</b> you save — past shifts never change, and you can revert anytime.</p></div></div>
     <div class="tabs-row">${tabs}</div>
+    ${noPolicyCard}
     ${draftCard}
     ${elsewhere}
     ${strandedCard}

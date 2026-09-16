@@ -410,3 +410,85 @@ test('the cash question tells a pooled bar the truth about their cash', async ()
   assert.match(html, /The bar pools its cash and splits it by the hours/);
   assert.ok(!/It stays yours/.test(html), 'and not the sentence that was wrong');
 });
+
+// --- a service that never had a policy to be stamped with -------------------
+//
+// The stamp on a shift is what stops a policy change reaching backwards, and a
+// service only gets one if a policy existed for its schedule when something
+// touched it. A schedule added from the picker starts with none: Evening
+// Service ran for weeks on the built-in defaults with an empty History and
+// nothing stamped on any of its nights. Payroll re-runs the engine every time
+// it is opened, so the day somebody finally saved an Evening policy, every one
+// of those nights - sent, emailed and paid - would have been re-priced by it.
+
+test('a sent service with nothing stamped is not re-priced by a new policy', () => {
+  const { db } = require('../src/db');
+  const P = require('../src/policy');
+  const shiftRow = (id) => db.prepare('SELECT * FROM shifts WHERE id = ?').get(id);
+  // A schedule of its own, with no policy anywhere.
+  const sent = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2026-09-02', 'late-night', 'emailed')`).run().lastInsertRowid);
+  const open = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2026-09-03', 'late-night', 'open')`).run().lastInsertRowid);
+  const before = JSON.stringify(P.policyForShift(shiftRow(sent), { peek: true }));
+
+  // Somebody sets the policy, weeks later.
+  db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('late-night', ?, 'at last')")
+    .run(JSON.stringify(EVENING));
+
+  assert.strictEqual(JSON.stringify(P.policyForShift(shiftRow(sent))), before,
+    'the night that went out is worked out exactly as it was');
+  assert.strictEqual(shiftRow(sent).policy_id, null,
+    'and it is not stamped now either - that row is history, not a decision');
+  // The service still open is the whole point of setting a policy.
+  const after = P.policyForShift(shiftRow(open));
+  assert.ok(after.some((r) => r.type === 'share'), 'an open service takes the new rules');
+  assert.ok(shiftRow(open).policy_id, 'and is stamped with them');
+});
+
+test('an ordinary unstamped service still locks on, sent or not', () => {
+  // The boundary. A night worked when a policy already existed is not the case
+  // above: it is a backfilled service, or a fixture, and it locks onto the
+  // policy in force for it exactly as it always did. Only a service that had
+  // nothing to be priced by is frozen on the defaults.
+  const { db } = require('../src/db');
+  const P = require('../src/policy');
+  db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('supper-club', ?, 'in force')")
+    .run(JSON.stringify(EVENING));
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2099-01-01', 'supper-club', 'emailed')`).run().lastInsertRowid);
+  const rules = P.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(sh));
+  assert.ok(rules.some((r) => r.type === 'share'), 'the policy that was in force for it');
+  assert.ok(db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(sh).p, 'and it is stamped');
+});
+
+test('and a sent service that WAS stamped still keeps its own version', () => {
+  const { db } = require('../src/db');
+  const P = require('../src/policy');
+  const pid = Number(db.prepare(`INSERT INTO policy_versions (daypart, rules_json, note, staged)
+    VALUES ('late-night', ?, 'the one it was priced under', 1)`)
+    .run(JSON.stringify([{ type: 'tipout', recipient: 'busser', percent: 7, base: 'food', split: 'hours' }]))
+    .lastInsertRowid);
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES ('2026-09-04', 'late-night', 'emailed', ?)`).run(pid).lastInsertRowid);
+  const rules = P.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(sh));
+  assert.strictEqual(rules[0].percent, 7, 'its own version, not the live one');
+});
+
+test('the policy page says when a service has no policy of its own', async () => {
+  // The only sign used to be an empty History table two screens down, while the
+  // defaults were rendered in the same numbered list a chosen policy gets. A
+  // schedule added from the picker is exactly how a service ends up here.
+  const SERVICES = require('../src/services');
+  SERVICES.create({ slug: 'weekend-brunch', name: 'Weekend Brunch' });
+  const bare = await (await fetch(`${BASE}/policy?daypart=weekend-brunch`)).text();
+  assert.match(bare, /No policy set/, 'said plainly when there is none');
+  assert.match(bare, /built-in defaults/, 'and what is on screen instead');
+  assert.match(bare, /stay exactly as they went out/, 'and that what has gone out cannot move');
+
+  const { db } = require('../src/db');
+  db.prepare("INSERT INTO policy_versions (daypart, rules_json, note) VALUES ('weekend-brunch', ?, 'set')")
+    .run(JSON.stringify(EVENING));
+  const after = await (await fetch(`${BASE}/policy?daypart=weekend-brunch`)).text();
+  assert.ok(!/No policy set/.test(after), 'and gone the moment one is saved');
+});

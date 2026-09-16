@@ -52,6 +52,11 @@ const Q = {
   // neither live nor waiting, so no page offers it and no new service can lock
   // onto it, and it stays exactly as it was for the services that did.
   retire: db.prepare('UPDATE policy_versions SET staged = 2 WHERE id = ? AND staged = 1'),
+  // Was there a policy for this schedule at all by the date a service was
+  // worked? Read by policyForShift below, for services that went out without
+  // one — the only way a sent service can have nothing stamped on it.
+  existedBy: db.prepare(`SELECT 1 FROM policy_versions
+    WHERE daypart = ? AND staged = 0 AND date(effective_from) <= ? LIMIT 1`),
 };
 
 // First run of the rule-based system: seed defaults, and reset any old policy
@@ -134,6 +139,32 @@ function discardStaged(id) {
 function policyForShift(shift, opts) {
   let row = shift.policy_id ? byId(shift.policy_id) : null;
   if (!row) {
+    // A SERVICE THAT HAS GONE OUT KEEPS WHAT IT WENT OUT WITH — INCLUDING WHEN
+    // WHAT IT WENT OUT WITH WAS NOTHING.
+    //
+    // The stamp is what protects a sent service, and a service only gets one if
+    // a policy existed for its schedule when something touched it. Evening
+    // Service ran for weeks with no policy of its own — the page showed rules
+    // with an empty History, which is this function falling back to the
+    // built-in defaults — so every one of those nights was worked out on the
+    // defaults and stamped with nothing at all.
+    //
+    // Payroll re-runs the engine every time it is opened. Writing the Evening
+    // policy would therefore have restated services already sent, emailed and
+    // paid, and the stamp could not stop it because there was nothing to stamp.
+    //
+    // Narrow on purpose: only a sent service that had NO policy to be priced by
+    // on the day it was worked. If one existed by then, this is an ordinary
+    // unstamped service — a backfilled night, a fixture — and it locks on as it
+    // always did. Where it does apply it stamps nothing: a policy written today
+    // was not in force that night, and recording it as though it were is the
+    // same untruth by another route.
+    //
+    // This changes not one figure on the day it ships. It is a lock, and what
+    // it locks is what the service already says.
+    if (String(shift.status) === 'emailed' && !Q.existedBy.get(shift.daypart, shift.date)) {
+      return defaultRules();
+    }
     row = currentForDaypart(shift.daypart);
     if (row && !(opts && opts.peek)) s.setPolicy.run(row.id, shift.id);
   }
