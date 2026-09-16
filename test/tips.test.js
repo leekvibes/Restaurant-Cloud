@@ -2070,6 +2070,18 @@ test('and is NOT asked on a policy that never looks at them', async () => {
   assert.ok(labels.some((l) => /Card tips/.test(l)), 'but they still hand tips in');
 });
 
+test('a policy that only says the bar pools still asks the bar for its sales', async () => {
+  // The whole reason the sales boxes were missing on the first real evening
+  // service: nothing in the policy said a bartender was keeping anything, so
+  // the form treated them as support and asked for no sales — and the barback's
+  // 3% had nothing to come out of. A share rule says they keep, on its own.
+  const POOLED = [{ type: 'share', role: 'bartender', split: 'hours' }];
+  const sh = serviceOn('2026-10-07', 'dinner', POOLED, 'pooling only');
+  const labels = await labelsFor('1470', sh, 'bartender');
+  assert.ok(labels.some((l) => /Bar alcohol sales/.test(l)), 'the bar alcohol box is there');
+  assert.ok(labels.some((l) => /Bar food sales/.test(l)), 'and the bar food');
+});
+
 test('a barista is asked for their counter sales, named as the counter', async () => {
   // The day policy charges the barista 1.5% of their OWN sales to the busser.
   // Without this box that rule could never charge one — it was a rule about

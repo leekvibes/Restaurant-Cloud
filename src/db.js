@@ -669,8 +669,13 @@ const DIRECT_ROLES = new Set(['server', 'bartender', 'barista']);
  */
 function newModel(rules) {
   if (!Array.isArray(rules)) return false;
+  // A share rule counts too: "the bartenders pool what their guests leave them"
+  // only means anything if they were keeping it in the first place, so a policy
+  // that says it is describing direct earners — and that is what decides
+  // whether the staff form asks a bartender for their own sales and tips.
   return rules.some((r) => (r.type === 'tipout' && r.paidBy)
-    || (r.type === 'pool' && Array.isArray(r.among)));
+    || (r.type === 'pool' && Array.isArray(r.among))
+    || r.type === 'share');
 }
 
 /**
@@ -826,5 +831,5 @@ function shiftInputs(shiftId, opts) {
   return { servers, support, people, pool, adjustments };
 }
 
-module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, keepsOwnCash, DB_PATH,
+module.exports = { db, q, s, w, users, submissions, positions, positionKinds, kindOf, supportSlugs, shiftInputs, keepsOwnCash, newModel, DB_PATH,
   PAY_MATH, lockPayMath, lockPayMathRange, countsKeptTips, settleShift, settleRange };

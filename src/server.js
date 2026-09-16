@@ -2167,7 +2167,7 @@ app.get('/shifts/:id', (req, res) => {
         <span class="pavatar">${esc(initials(p.name))}</span>
         <div class="pcard-head">
           <div class="pcard-name">${esc(p.name)}${autoOutMark({ auto_closed: autoOutIds.has(p.employeeId) })}</div>
-          <div class="pcard-role">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</div>
+          <div class="pcard-role">${esc(p.role || (isServer ? 'server' : ''))}${p.salaried ? ' · salaried' : ''}</div>
         </div>
         <span class="tstatus ${st.cls}">${esc(st.label)}</span>
       </div>
@@ -2291,13 +2291,16 @@ app.get('/shifts/:id', (req, res) => {
   // what it is about to take with them rather than springing it afterwards.
   const punchMap = TC.punchesOnShift(sh.id);
 
+  // THE JOB THEY WORKED, not the side of the engine they came out of. This said
+  // 'server' for anybody who rings their own till, so the bar read "Zed
+  // Bartender · server" on the sheet the sales are typed into.
   const staffRow = ({ p, st: st2 }, isServer) => {
     const e = entries[p.employeeId] || {};
     const id = `edit-${p.employeeId}`;
     return `<details class="bs-srow" id="${id}">
       <summary class="bs-sr bs-staffrow${st2.key === 'ok' ? '' : ' warn'}">
         <span class="bs-sr-n">${esc(p.name)}</span>
-        <span class="bs-sr-r">${esc(isServer ? 'server' : p.role)}${p.salaried ? ' · salaried' : ''}</span>
+        <span class="bs-sr-r">${esc(p.role || (isServer ? 'server' : ''))}${p.salaried ? ' · salaried' : ''}</span>
         <span class="bs-sr-f">${isServer ? money0(toCents(p.food)) : '<span class="bs-em">—</span>'}</span>
         <span class="bs-sr-f">${isServer ? money0(toCents(p.coffee)) : '<span class="bs-em">—</span>'}</span>
         ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
@@ -3142,11 +3145,18 @@ app.get('/shifts/:id/results', (req, res) => {
 
   const serverCards = r.servers.map((p) => `
     <article class="bs-pay">
-      <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">server · ${p.hours}h</span></div>
+      <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">${
+  esc(posName(p.role || 'server'))} · ${p.hours}h</span></div>
       <dl class="bs-pay-figs">
         <div><dt>Total tips</dt><dd>${money(p.totalTips)}</dd></div>
         <div class="bs-pay-out"><dt>Tip-out</dt><dd>-${money(p.tipoutTotal)}</dd></div>
-        <div class="bs-pay-keep"><dt>Keeps</dt><dd>${money(p.tipsKept)}</dd></div>
+        ${/* Pooled: Keeps is a SHARE, not what they rang, and without this line
+             the three figures on the card stop adding up. */''}
+        ${p.pooled ? `<div><dt>Pooled (${p.pooled.people} on, ${
+  p.pooled.split === 'even' ? 'split evenly' : 'by hours'})</dt><dd>${money(p.pooled.potKept)}</dd></div>` : ''}
+        <div class="bs-pay-keep"><dt>${p.pooled ? 'Share' : 'Keeps'}</dt><dd>${money(p.tipsKept)}</dd></div>
+        ${p.pooled && p.pooled.cashOwed ? `<div class="bs-pay-out"><dt>Cash ${
+  p.pooled.cashOwed > 0 ? 'to hand over' : 'to receive'}</dt><dd>${money(Math.abs(p.pooled.cashOwed))}</dd></div>` : ''}
       </dl>
       ${sendRow(p.employeeId, p.name)}
     </article>`).join('');
@@ -5206,21 +5216,39 @@ const TILL_LABEL = {
     hint: 'What you rang at the counter on this shift. The busser percentage comes off this.' },
 };
 
-function fieldsForShift(caps, shiftId, slug) {
+function fieldsForShift(caps, shiftId, slug, daypart) {
   let fields = fieldsFor(caps);
   const who = slug || caps.position;
   let pools = true;
   let keeps = false;
   let known = false;
+  let shared = false;
   try {
     const sh = shiftId ? s.shiftById.get(shiftId) : null;
-    if (sh) {
-      const rules = policyForShift(sh) || [];
+    // PEEK, ALWAYS. Drawing a form is a read. policyForShift without this
+    // STAMPS the version onto the service, so opening the page at 4pm decided
+    // which rules the night was worked out under - the exact thing the peek
+    // flag exists to prevent, done from the one page a whole crew opens.
+    let rules = sh ? (policyForShift(sh, { peek: true }) || []) : null;
+    // No shift row: somebody reporting a service they were not clocked into.
+    // The service they picked still answers the question, so ask what is live
+    // for that service rather than hiding the figures the math needs. A
+    // bartender who rings their own till could not file their sales at all
+    // through this door, and nothing on screen said why.
+    if (!rules && daypart) {
+      const live = currentForDaypart(daypart);
+      if (live) rules = live.rules || [];
+    }
+    if (rules) {
       pools = rules.some((x) => x.type === 'pool');
       keeps = keepsOwnCash(who, rules);
+      // Their own crew pools what their guests leave them. They still keep it -
+      // it never reaches the house pool - but "it stays yours" is not the whole
+      // truth when the bar adds its cash up and splits it by hours.
+      shared = rules.some((x) => x.type === 'share' && (x.role || 'bartender') === who);
       known = true;
     }
-  } catch { pools = true; keeps = false; known = false; }
+  } catch { pools = true; keeps = false; known = false; shared = false; }
 
   // SALES ARE ONLY ASKED FOR WHERE SALES ARE READ.
   //
@@ -5231,10 +5259,11 @@ function fieldsForShift(caps, shiftId, slug) {
   // appears when, and only when, the service is running a policy that reads
   // it. That also means this stays asleep until the new policy is turned on,
   // with nothing extra to remember.
-  // Asked only when we can SEE that this service reads them. Not knowing which
-  // service it is has to mean not asking: the alternative defaults to
-  // collecting three figures on the chance they are wanted, which is the exact
-  // habit this is here to break.
+  // Asked only when we can SEE that this service reads them - from the shift's
+  // own pinned policy, or, when there is no shift row yet, from what is live
+  // for the service they picked. Not knowing which service it is at all still
+  // means not asking: the alternative collects three figures on the chance they
+  // are wanted, which is the habit this is here to break.
   if (TILL_LABEL[who]) {
     if (!(known && keeps)) fields = fields.filter((f) => f.group !== 'sales');
     else fields = fields.map((f) => (f.group !== 'sales' ? f : {
@@ -5247,9 +5276,12 @@ function fieldsForShift(caps, shiftId, slug) {
   if (pools && !keeps) return fields;
   return fields.map((f) => (f.key !== 'pooled_cash' ? f : {
     ...f,
-    label: keeps ? 'Cash tips you already took home' : 'Cash tips you were handed',
+    label: keeps ? (shared ? 'Cash tips you took' : 'Cash tips you already took home')
+      : 'Cash tips you were handed',
     hint: keeps
-      ? 'Cash your own guests tipped you and you have taken home. It stays yours — it is recorded so it can be left out of the tips paid through payroll.'
+      ? (shared
+        ? 'Cash your own guests tipped you. The bar pools its cash and splits it by the hours each of you worked, so your share may come out more or less than what you are holding.'
+        : 'Cash your own guests tipped you and you have taken home. It stays yours — it is recorded so it can be left out of the tips paid through payroll.')
       : 'Cash a guest put in your hand on this shift. This service has no tip pool, so it stays yours — it is recorded so the totals are right.',
     blank: 'Leave blank if you took none.',
   }));
@@ -5645,7 +5677,7 @@ function tipsWorkspacePage(model, opts = {}) {
       </div>
       <div class="st-f${errs.daypart ? ' is-bad' : ''}">
         <label class="st-lab" for="st-dp">Service</label>
-        <select id="st-dp" name="daypart" required
+        <select id="st-dp" name="daypart" required data-st-svc
                 aria-describedby="st-dp-h${errs.daypart ? ' st-dp-e' : ''}"${
   errs.daypart ? ' aria-invalid="true"' : ''}>
           <option value="">Choose a service</option>
@@ -5710,7 +5742,8 @@ function tipsWorkspacePage(model, opts = {}) {
     </div>`;
 
   // --- the money ------------------------------------------------------------
-  const fields = caps ? fieldsForShift(caps, selected && selected.id, position) : [];
+  const fields = caps ? fieldsForShift(caps, selected && selected.id, position,
+    (selected && selected.daypart) || vals.daypart) : [];
   const sales = fields.filter((f) => f.group === 'sales');
   const tips = fields.filter((f) => f.group === 'tips');
   const valueFor = (f) => {
@@ -5757,7 +5790,8 @@ function tipsWorkspacePage(model, opts = {}) {
         <span class="tcc-state">Previously submitted</span></div>
       <p class="tcc-big">You already sent a report for this shift.</p>
       <div class="tc-rows">
-        ${(caps && fieldsForShift(caps, selected && selected.id, position) || []).map((f) => {
+        ${(caps && fieldsForShift(caps, selected && selected.id, position,
+    (selected && selected.daypart) || vals.daypart) || []).map((f) => {
     const c = stored.sales ? stored.sales[f.stored] : null;
     const txt = f.triState ? cardStateText(stored.cardState, c) : money(c || 0);
     return `<div class="tc-row"><span>${f.label} on file</span><b>${txt}</b></div>`;
@@ -5869,12 +5903,23 @@ const stScript = () => `<script>(function(){
     // Which job decides which fields exist, and which shift decides whether
     // this is a correction. Both are server answers, so ask the server.
     var t = e.target;
-    if (t && (t.hasAttribute('data-st-pos') || t.hasAttribute('data-st-shift'))) {
+    if (t && (t.hasAttribute('data-st-pos') || t.hasAttribute('data-st-shift')
+      || t.hasAttribute('data-st-svc'))) {
       var p = new URLSearchParams();
       var sh = form.querySelector('[data-st-shift]:checked');
       var po = form.querySelector('[data-st-pos]');
+      var sv = form.querySelector('[data-st-svc]');
       if (sh) p.set('shift', sh.value);
       if (po && po.value) p.set('position', po.value);
+      // Reporting a shift with no clock-in: which service decides which figures
+      // the math reads, so the answer travels with the reload the way the job
+      // does, and the date already typed comes back with it.
+      if (sv) {
+        p.set('manual', '1');
+        var dt = form.querySelector('[name="date"]');
+        if (sv.value) p.set('daypart', sv.value);
+        if (dt && dt.value) p.set('date', dt.value);
+      }
       // WHAT THEY TYPED COMES WITH THEM. The job decides which fields exist,
       // so a change reloads the form, and the reload silently threw away every
       // figure already entered. Measured: $111 typed, job changed, gone. Held
@@ -5953,7 +5998,16 @@ const openTips = (req, res) => {
   });
   if (!model.ok) return res.redirect('/portal');
   if (model.mode === 'pick') return res.send(tipsPickerPage(model));
-  res.send(tipsWorkspacePage(model, { manual: model.manual }));
+  // The manual form's own two answers survive the reload its service select
+  // triggers. Money never travels in the URL - that is held in the tab (see
+  // st-keep) - but the date and the service have to come back or the reload
+  // that made the right fields appear would have blanked what they picked.
+  const q = req.query || {};
+  const vals = model.manual ? {
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(q.date || '')) ? String(q.date) : '',
+    daypart: svcKnown(String(q.daypart || '')) ? String(q.daypart) : '',
+  } : {};
+  res.send(tipsWorkspacePage(model, { manual: model.manual, vals }));
 };
 app.get('/portal/tips', openTips);
 app.post('/portal/tips', openTips);
@@ -6269,7 +6323,7 @@ app.get('/portal/tips/receipt/:id', (req, res) => {
           <div class="tc-row"><span>Shift</span><b>${sh ? esc(shiftTitle(sh)) : '—'}</b></div>
           <div class="tc-row"><span>Filing as</span><b>${esc(
     (positions.bySlug.get(row.role) || {}).name || row.role || '—')}</b></div>
-          ${fieldsForShift(caps, sh && sh.id, row.role).map(rowFor).join('')}
+          ${fieldsForShift(caps, sh && sh.id, row.role, sh && sh.daypart).map(rowFor).join('')}
           ${row.note ? `<div class="tc-row"><span>Note</span><b>${esc(row.note)}</b></div>` : ''}
           <div class="tc-row"><span>Recorded</span><b>${esc(when)}</b></div>
         </div>
@@ -6532,9 +6586,21 @@ function shiftBreakdown(x) {
         + line('Total tip-out', `−${money(x.tippedOut)}`, 'bad')
       : line('No tip-out', money(0))}
     ${skipped.length ? `<p class="pt-fine">No ${skipped.join(' or ').toLowerCase()} worked this shift, so no tip-out went to them — you keep it.</p>` : ''}
+    ${d.pooled ? `${head('Pooled at the bar')}
+      ${line('Before pooling, yours was', money((d.totalTips || 0) - (d.tipoutTotal || 0)))}
+      ${line(`Everyone at the bar kept`, money(d.pooled.potKept))}
+      ${line(d.pooled.split === 'even' ? `Split evenly, ${d.pooled.people} ways`
+    : 'Your share, by hours worked', money(d.tipsKept), 'ok')}
+      <p class="pt-fine">The bar pools its tips: what your guests leave and what the
+        servers tip out are added together and split by the hours each of you worked.</p>` : ''}
     ${line('Tips you keep', money(x.kept), 'ok')}
     ${head('How it reaches you')}
-    ${line('Cash you took home', money(x.cash))}
+    ${d.pooled && d.pooled.cashOwed ? `${line('Cash you were handed', money(d.pooled.cashRung))}
+      ${d.pooled.cashOwed > 0
+    ? line('Your share of it is less, so you hand over', `−${money(d.pooled.cashOwed)}`, 'bad')
+    : line('Your share of it is more, so the bar owes you', `+${money(-d.pooled.cashOwed)}`, 'ok')}
+      ${line('Cash you keep', money(x.cash))}`
+    : line('Cash you took home', money(x.cash))}
     ${paycheck >= 0
       ? line('Added to your next paycheck', `+${money(paycheck)}`, 'ok')
       : line('Adjusted from your next paycheck', `−${money(-paycheck)}`, 'bad')}
@@ -14429,11 +14495,20 @@ function describeRules(rules) {
       const own = r.from ? '' : ' of their own';
       items.push(`${payerPhrase(r)} <b>${r.percent}%</b>${own} ${base} to the <b>${roleWord(r.recipient).toLowerCase()}</b>`
         + `, split <b>${SLBL[r.split] || r.split}</b>.`);
+    } else if (r.type === 'share') {
+      // "Bartender tips are pooled and split between them" — the owner's rule,
+      // said in the same shape as the rules around it so the page reads as one
+      // policy rather than a list with an exception bolted on.
+      items.push(`<b>${plural(r.role || 'bartender')}</b> pool the tips their own guests leave them`
+        + ` and split them <b>${SLBL[r.split] || r.split || 'by hours worked'}</b> between themselves.`);
     } else {
       const among = Array.isArray(r.among)
         ? r.among.map((x) => plural(x).toLowerCase()).join(' and the ')
         : (AMG[r.among] || r.among);
-      items.push(`<b>${SRC[r.source] || r.source}</b> &mdash; shared by the <b>${among}</b>, split <b>${SLBL[r.split] || r.split}</b>`
+      // "shared by the all support" — the article belongs to the list of roles,
+      // which only the array branch produces.
+      const artl = Array.isArray(r.among) ? 'the ' : '';
+      items.push(`<b>${SRC[r.source] || r.source}</b> &mdash; shared by ${artl}<b>${among}</b>, split <b>${SLBL[r.split] || r.split}</b>`
         + `, paid <b>${PAY[r.payout] || r.payout}</b>.`);
     }
   }
@@ -15606,6 +15681,7 @@ app.get('/policy', (req, res) => {
         <div class="add-rule-btns">
           <button type="button" class="btn" id="add-tipout">＋ Add tip-out rule</button>
           <button type="button" class="btn" id="add-pool">＋ Add shared pool</button>
+          <button type="button" class="btn" id="add-share">＋ Add pooled tips</button>
         </div>
         <div class="card summary-card"><h3 class="hist-title">In plain English</h3><ol class="plain-list" id="live-summary"></ol></div>
         <label class="wide" style="display:block;margin:14px 0;font-size:13px;color:var(--muted);font-weight:600">Note (why the change?) <input name="note" placeholder="optional" style="display:block;width:100%;margin-top:5px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:15px"></label>
@@ -15623,8 +15699,19 @@ app.get('/policy', (req, res) => {
       <tbody>${histRows}</tbody>
     </table></div>
 
-    <script>window.POLICY_RULES = ${JSON.stringify(rules)};</script>
-    <script src="/static/policy-builder.js"></script>`));
+    ${/* ONE VOCABULARY, SHARED. The builder used to keep its own copy of these
+         maps and had fallen behind the policies it is used to edit — no barback
+         among the recipients, no "total sales" among the bases. Handing over
+         the page's own labels means a rule can always be read back in the words
+         it was saved in, and a job added in Settings appears here too. */''}
+    <script>window.POLICY_RULES = ${JSON.stringify(rules)};
+      window.POLICY_VOCAB = ${JSON.stringify({
+    roles: Object.assign({}, RLBL, Object.fromEntries((() => {
+      try { return positions.active.all().map((p) => [p.slug, p.name]); } catch { return []; }
+    })())),
+    bases: BASE, splits: SLBL, sources: SRC, among: AMG, payouts: PAY,
+  })};</script>
+    <script src="/static/policy-builder.js?v=${BUILD}"></script>`));
 });
 
 app.post('/policy/save', (req, res) => {

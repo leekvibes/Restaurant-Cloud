@@ -807,7 +807,11 @@ const BUILD = (() => {
   // and fonts.css were missing, so a CSS-only change shipped with an unchanged
   // BUILD and every returning browser kept the old stylesheet.
   const files = ['server.js', 'views.js'].map((f) => path.join(__dirname, f))
-    .concat(['styles.css', 'broadsheet.css', 'staff.css', 'fonts.css']
+    .concat(['styles.css', 'broadsheet.css', 'staff.css', 'fonts.css',
+      // The policy builder is a cached FILE, unlike every other script in the
+      // app, which is inlined into its page. Adding a rule type to it and
+      // reloading showed the old choices for an hour. Measured, in the pane.
+      'policy-builder.js']
       .map((f) => path.join(__dirname, '..', 'public', f)));
   const h = require('crypto').createHash('sha1');
   for (const f of files) {

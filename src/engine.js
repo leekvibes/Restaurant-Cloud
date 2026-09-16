@@ -499,6 +499,56 @@ function runShift(shift, rules) {
     };
   });
 
+  // ---------------------------------------------------------------------
+  // A ROLE THAT POOLS WHAT ITS OWN GUESTS LEAVE IT.
+  //
+  // "Bartender tips are pooled and split between them" — the owner's rule, and
+  // one the policy could not say. Their share of the servers' alcohol tip-out
+  // was already pooled (that pot is split by the same hours); what their own
+  // guests handed them was theirs alone, which is not how a bar with two people
+  // behind it works. With one bartender on, this changes nothing.
+  //
+  // Card and cash are pooled SEPARATELY and split by the same weights, so both
+  // halves stay true: the paycheck carries their share of the card, and the
+  // cash figure is their share of the cash rather than whatever happened to
+  // land in their hand. `cashOwed` is the difference — positive means they are
+  // holding more than their share and hand it over at the bar.
+  //
+  // Applied last, on the final kept figures, so anything set by hand earlier is
+  // pooled too: money that reaches a bartender reaches the bar.
+  const sharePools = [];
+  for (const r of rules.filter((x) => x.type === 'share')) {
+    const role = r.role || 'bartender';
+    const crew = serverPayouts.filter((p) => (p.role || 'server') === role);
+    if (crew.length < 2) continue;
+    const split = r.split === 'even' ? 'even' : 'hours';
+    const byHours = crew.map((p) => ({ id: p.employeeId, weight: split === 'even' ? 1 : p.hours }));
+    // Nobody with hours on the clock yet (a shift being built) would otherwise
+    // allocate the whole pot to the first person listed.
+    const weights = byHours.some((w) => w.weight > 0) ? byHours
+      : crew.map((p) => ({ id: p.employeeId, weight: 1 }));
+    // Sign kept aside: a tip-out larger than the tips it comes out of leaves a
+    // negative pot, and allocateByWeight hands leftover pennies upward, which
+    // is right for sharing out and wrong for taking back.
+    const share = (pot) => {
+      const sign = pot < 0 ? -1 : 1;
+      const alloc = new Map(allocateByWeight(Math.abs(pot), weights));
+      return (id) => sign * (alloc.get(id) || 0);
+    };
+    const keptPot = crew.reduce((a, p) => a + p.tipsKept, 0);
+    const cashPot = crew.reduce((a, p) => a + p.cashTips, 0);
+    const keptShare = share(keptPot);
+    const cashShare = share(cashPot);
+    for (const p of crew) {
+      const cashRung = p.cashTips;
+      p.tipsKept = keptShare(p.employeeId);
+      p.cashTips = cashShare(p.employeeId);
+      p.pooled = { role, split, potKept: keptPot, potCash: cashPot, people: crew.length,
+        cashRung, cashOwed: cashRung - p.cashTips };
+    }
+    sharePools.push({ role, split, kept: keptPot, cash: cashPot, people: crew.length });
+  }
+
   const totalTipsCollected = serverPayouts.reduce((a, x) => a + x.totalTips, 0);
   const totalKept = serverPayouts.reduce((a, x) => a + x.tipsKept, 0);
   const totalPots = Object.values(rolePools).reduce((a, b) => a + b, 0);
@@ -506,6 +556,7 @@ function runShift(shift, rules) {
   return {
     servers: serverPayouts, support: supportResult,
     pots: rolePools, transfers, adjusted, personSet, potFrom, pool: { cash, togoCard, total: poolTotal }, orphanedPots, poolConflicts,
+    sharePools,
     skippedPots: Object.entries(skippedPots).filter(([, c]) => c > 0).map(([role, cents]) => ({ role, cents })),
     reconciliation: { totalTipsCollected, totalKept, totalPots, balanced: totalTipsCollected === totalKept + totalPots },
   };

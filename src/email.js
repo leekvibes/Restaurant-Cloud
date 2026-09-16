@@ -149,7 +149,10 @@ function serverEmail(p, ctx) {
 
   body += section('Your tips');
   body += line('Card tips', fmt(p.cardTips), { border: false });
-  body += line('Cash tips', fmt(p.cashTips));
+  // WHAT THEY RANG, not their share of it. On a pooled bar `cashTips` is
+  // already the split figure, and printing it here left card + cash short of
+  // the total on the very next line.
+  body += line('Cash tips', fmt(p.pooled ? p.pooled.cashRung : p.cashTips));
   body += line('Total tips collected', fmt(p.totalTips), { strong: true });
 
   body += section('Tip-out');
@@ -166,6 +169,17 @@ function serverEmail(p, ctx) {
     const list = skipped.length === 1 ? skipped[0]
       : skipped.slice(0, -1).join(', ') + ' or ' + skipped[skipped.length - 1];
     body += hint(`No ${list.toLowerCase()} worked this shift, so no tip-out went to them — you keep it.`);
+  }
+  // THE BAR IS ONE TILL. Everything the bar took in is added up and split by
+  // hours, so the figure they keep is a share and the line above it would
+  // otherwise be the last number that made sense.
+  if (p.pooled) {
+    body += section('Pooled at the bar');
+    body += line('Before pooling, yours was', fmt(p.totalTips - p.tipoutTotal), { border: false });
+    body += line('Everyone at the bar kept', fmt(p.pooled.potKept));
+    body += line(p.pooled.split === 'even' ? `Split evenly, ${p.pooled.people} ways`
+      : 'Your share, by hours worked', fmt(p.tipsKept), { strong: true, color: GREEN });
+    body += hint('The bar pools its tips: what your guests leave and what the servers tip out are added together and split by the hours each of you worked.');
   }
   body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: GREEN });
 
@@ -188,7 +202,17 @@ function serverEmail(p, ctx) {
 
   // The clarity line: you already took the cash home; here's how it nets out.
   body += section('How this reaches you');
-  body += line('Cash you took home tonight', fmt(p.cashTips), { border: false });
+  if (p.pooled && p.pooled.cashOwed) {
+    body += line('Cash you were handed', fmt(p.pooled.cashRung), { border: false });
+    if (p.pooled.cashOwed > 0) {
+      body += line('Your share of it is less, so you hand over', '-' + fmt(p.pooled.cashOwed), { color: RED });
+    } else {
+      body += line('Your share of it is more, so the bar owes you', '+' + fmt(-p.pooled.cashOwed), { color: GREEN });
+    }
+    body += line('Cash you keep', fmt(p.cashTips));
+  } else {
+    body += line('Cash you took home tonight', fmt(p.cashTips), { border: false });
+  }
   if (paycheckAdj >= 0) {
     body += line('Added to your next paycheck', '+' + fmt(paycheckAdj), { color: GREEN });
   } else {

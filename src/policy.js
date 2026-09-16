@@ -79,8 +79,12 @@ const historyForDaypart = (daypart) => Q.history.all(daypart).map(parse);
  */
 function isNewModel(rules) {
   if (!Array.isArray(rules)) return false;
+  // A share rule says a role keeps what its guests leave it and splits it with
+  // the others on that role — which only makes sense for a direct earner, so a
+  // policy carrying one is a new-model policy. Same list as db.js newModel.
   return rules.some((r) => (r.type === 'tipout' && r.paidBy)
-    || (r.type === 'pool' && Array.isArray(r.among)));
+    || (r.type === 'pool' && Array.isArray(r.among))
+    || r.type === 'share');
 }
 
 /** The policy written down for this service but not yet in force, if any. */
@@ -213,7 +217,8 @@ splitJarFromToGoCard();
  */
 function needsNewEngine(rules) {
   if (!Array.isArray(rules)) return false;
-  return rules.some((r) => r.paidBy || r.from || (r.type === 'pool' && Array.isArray(r.among)));
+  return rules.some((r) => r.paidBy || r.from || r.type === 'share'
+    || (r.type === 'pool' && Array.isArray(r.among)));
 }
 
 function stageUnactivatedNewPolicy() {
