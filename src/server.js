@@ -15772,7 +15772,7 @@ app.get('/policy', (req, res) => {
           <i>${x.onDraft ? 'on a draft' : 'on an earlier policy'} · ${x.people} on shift${x.entered ? `, ${x.entered} already reported` : ', nothing reported yet'}</i></li>`).join('')}
       </ul>
       ${canWrite(req) ? `<form method="post" action="/policy/restamp" style="margin:0"
-        onsubmit="return confirm('Move ${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'} onto the current policy?\n\nAnything already sent is not touched. These are still open, so nobody has been paid from them yet \u2014 but if people have already reported, their tip-out will be worked out differently from here.')">
+        onsubmit="return confirm('Move ${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'} onto the current policy?\\n\\nAnything already sent is not touched. These are still open, so nobody has been paid from them yet \u2014 but if people have already reported, their tip-out will be worked out differently from here.')">
         <input type="hidden" name="_csrf" value="${csrfFor(req)}">
         <input type="hidden" name="daypart" value="${esc(daypart)}">
         <button class="btn" type="submit">Move ${stragglers.length === 1 ? 'it' : 'them'} onto the current policy</button>
@@ -15791,7 +15791,7 @@ app.get('/policy', (req, res) => {
       <ol class="plain-list">${describeRules(draft.rules).map((x) => `<li>${x}</li>`).join('')}</ol>
       <div class="pol-draft-f">
         <form method="post" action="/policy/activate" style="margin:0"
-          onsubmit="return confirm('Make this the ${esc(dp(daypart))} policy from now on?\n\nEvery service already closed keeps the policy it was closed under — none of them are recalculated. This decides how the NEXT ${esc(dp(daypart))} is worked out.\n\n${esc(polTabs.filter((d) => d !== daypart).map(dp).join(' and '))} is not affected.')">
+          onsubmit="return confirm('Make this the ${esc(dp(daypart))} policy from now on?\\n\\nEvery service already closed keeps the policy it was closed under — none of them are recalculated. This decides how the NEXT ${esc(dp(daypart))} is worked out.\\n\\n${esc(polTabs.filter((d) => d !== daypart).map(dp).join(' and '))} is not affected.')">
           <input type="hidden" name="_csrf" value="${csrfFor(req)}">
           <input type="hidden" name="id" value="${draft.id}">
           <button class="btn btn-primary" type="submit">Make this live for ${esc(dp(daypart))}</button>
@@ -15846,8 +15846,10 @@ app.get('/policy', (req, res) => {
     <div class="page-head"><div><h1>Tip-out policy</h1>
       <p class="sub">How tips are shared. Editing applies only to shifts created <b>after</b> you save — past shifts never change, and you can revert anytime.</p></div></div>
     <div class="tabs-row">${tabs}</div>
-    ${noPolicyCard}
+    ${/* The button first, like every other service's waiting policy; the note
+         about the defaults after it, where "the one waiting above" is true. */''}
     ${draftCard}
+    ${noPolicyCard}
     ${elsewhere}
     ${strandedCard}
 

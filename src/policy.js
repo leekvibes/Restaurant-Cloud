@@ -343,6 +343,66 @@ try {
   seedPalmDraft();
 } catch { /* settings table not ready on a bare boot; nothing is staged, nothing breaks */ }
 
+/**
+ * THE EVENING POLICY, WAITING FOR ONE BUTTON, ON THE SCHEDULE THAT IS EVENING.
+ *
+ * seedPalmDraft wrote the evening rules against 'dinner', the built-in evening
+ * schedule. The live site's Evening Service is a schedule created in the app,
+ * with a key of its own, so that draft landed on a schedule nobody uses and
+ * Evening Service ran on the built-in defaults with an empty History — while
+ * Day Service sat there with its policy one button from live.
+ *
+ * This finds Evening Service by what it is, not by a guessed key: an ACTIVE
+ * schedule whose name starts "Evening" and that has never had a policy of any
+ * kind — live, waiting or retired. The built-in 'dinner' is also named Evening
+ * Service; it has history, so it is never the one. Exactly one match, or
+ * nothing is done.
+ *
+ * STAGED, never live: it changes no penny until somebody presses "Make this live
+ * for Evening Service". And once — recorded with what it found — so a draft
+ * discarded on purpose does not come back on the next deploy.
+ *
+ * The rules are the agreed evening policy plus the bar pooling the owner asked
+ * for on both services: "bartender tips are pooled and then split between them".
+ */
+const PALM_EVENING_POOLED = {
+  note: 'Palm evening policy: every penny moves by percentage, and bartenders pool their own tips and split them by hours worked.',
+  rules: [
+    { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+    { type: 'tipout', recipient: 'bartender', percent: 9, base: 'alcohol', split: 'hours', paidBy: ['server'] },
+    { type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'] },
+    { type: 'share', role: 'bartender', split: 'hours' },
+  ],
+};
+
+/** Stage the evening draft if there is exactly one schedule it belongs on. Returns what it did. */
+function stageEveningDraft() {
+  const hasServices = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'services'").get();
+  if (!hasServices) return { done: false, why: 'no services table yet' };
+  const found = db.prepare(`SELECT slug FROM services
+      WHERE active = 1 AND lower(trim(name)) LIKE 'evening%'
+        AND NOT EXISTS (SELECT 1 FROM policy_versions pv WHERE pv.daypart = services.slug)`).all();
+  if (found.length !== 1) return { done: true, why: found.length ? `ambiguous: ${found.length}` : 'none' };
+  const slug = found[0].slug;
+  Q.insert.run({ daypart: slug, rules_json: JSON.stringify(PALM_EVENING_POOLED.rules),
+    note: PALM_EVENING_POOLED.note, staged: 1 });
+  return { done: true, why: `staged: ${slug}`, slug };
+}
+
+function seedEveningDraft() {
+  const KEY = 'evening_draft_2026_09_16';
+  if (db.prepare('SELECT value FROM settings WHERE key = ?').get(KEY)) return null;
+  const r = stageEveningDraft();
+  // Only a boot that could see the schedules counts as the one run.
+  if (r.done) {
+    db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(KEY, r.why);
+  }
+  return r;
+}
+
+try { seedEveningDraft(); } catch { /* never let a draft stop the app booting */ }
+
 
 
 // --- one-off adjustments, for the nights the policy does not fit ------------
@@ -459,4 +519,5 @@ module.exports = {
   adjustmentsFor, setAdjustment, clearAdjustment, adjustmentsLocked,
   personAdjustment, setPersonAmount, clearPersonAmount,
   currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo,
-  stagedForDaypart, stageRules, activateStaged, discardStaged, isNewModel, needsNewEngine };
+  stagedForDaypart, stageRules, activateStaged, discardStaged, isNewModel, needsNewEngine,
+  stageEveningDraft, seedEveningDraft, PALM_EVENING_POOLED };

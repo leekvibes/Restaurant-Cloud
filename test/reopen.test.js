@@ -145,3 +145,27 @@ test('the service page offers Reopen on a sent service, and its dialog opens', a
   assert.ok(handler.includes('\\n\\n'), 'the line break is escaped');
   assert.ok(!/\n/.test(handler), 'with no raw newline inside the string');
 });
+
+test('every "are you sure" on the policy page actually asks', async () => {
+  // Two of them had a raw line break inside the quoted question — "Make this
+  // live" and "Move them onto the current policy", the two buttons a policy
+  // change turns on. The browser refused to compile the handler, so each button
+  // went straight through with no question asked. Every inline handler on the
+  // page has to compile.
+  const cur = P.currentForDaypart('dinner');
+  const open = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES ('2099-06-01', 'dinner', 'open', ?)`).run(cur.id).lastInsertRowid);
+  P.saveRules('dinner', cur.rules, 'a newer one, so the open service is on an earlier policy');
+  assert.ok(P.stagedForDaypart('dinner') || P.stageRules('dinner', cur.rules, 'a draft to turn on'));
+
+  const html = await (await fetch(`${BASE}/policy?daypart=dinner`)).text();
+  const decode = (x) => x.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const handlers = [...html.matchAll(/on(?:submit|click)="([^"]*)"/g)].map((m) => decode(m[1]));
+  assert.ok(handlers.some((h) => /Make this the/.test(h)), 'the make-live question is on the page');
+  assert.ok(handlers.some((h) => /onto the current policy\?/.test(h)), 'and the move question');
+  for (const h of handlers) {
+    assert.doesNotThrow(() => new Function(h), `compiles: ${h.slice(0, 60)}`);
+  }
+  db.prepare('DELETE FROM shifts WHERE id = ?').run(open);
+});
