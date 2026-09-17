@@ -2115,8 +2115,24 @@ app.get('/shifts/:id', (req, res) => {
 
   const serverStates = inp.servers.map((p) => ({ p, st: stateOf(p, true) }));
   const supportStates = inp.support.map((p) => ({ p, st: stateOf(p, false) }));
-  const allStates = [...serverStates, ...supportStates];
-  const ready = allStates.filter((x) => x.st.key === 'ok').length;
+
+  // ONE ROW PER PERSON ON SHIFT.
+  //
+  // The engine holds a bartender on both sides — they ring their own till and
+  // they are paid out of the pots — and this sheet printed both sides as two
+  // rows with the same name, the same job and the same dashes. "On shift · 2"
+  // above four rows, and the only reading available from the outside is that
+  // the clock had put everybody on twice. It had not: one punch, one work row,
+  // one person, printed twice by the page.
+  //
+  // The receiving side is already shown where it belongs — "Tipped out to", on
+  // the right — so the row that stays is the one that can be typed into.
+  const directIds = new Set(serverStates.map((x) => x.p.employeeId));
+  const rowStates = [...serverStates, ...supportStates.filter((x) => !directIds.has(x.p.employeeId))];
+  // Counted over the rows on the page, not over both sides of the engine: the
+  // numerator came from one list and the denominator from another, so "2 of 10
+  // ready" could have counted the same bartender twice on the way to ten.
+  const ready = rowStates.filter((x) => x.st.key === 'ok').length;
   const withHours = people.filter((p) => Number(p.hours) || p.salaried).length;
 
   const totalSales = inp.servers.reduce((a, p) => a + toCents(p.food) + toCents(p.coffee) + toCents(p.alcohol), 0);
@@ -2308,14 +2324,11 @@ app.get('/shifts/:id', (req, res) => {
   // stored, the row still reading "—". The owner's words: "I click save but it
   // disappears." So the boxes are not offered there at all, and the row says
   // where they live.
-  const earnsDirect = new Set(inp.servers.map((x) => x.employeeId));
-
   // THE JOB THEY WORKED, not the side of the engine they came out of. This said
   // 'server' for anybody who rings their own till, so the bar read "Zed
   // Bartender · server" on the sheet the sales are typed into.
   const staffRow = ({ p, st: st2 }, isServer) => {
     const e = entries[p.employeeId] || {};
-    const alsoDirect = !isServer && earnsDirect.has(p.employeeId);
     const id = `edit-${p.employeeId}`;
     return `<details class="bs-srow" id="${id}">
       <summary class="bs-sr bs-staffrow${st2.key === 'ok' ? '' : ' warn'}">
@@ -2351,9 +2364,8 @@ app.get('/shifts/:id', (req, res) => {
              the prefill has always carried both — but the form only ever
              offered card, and only to servers. So a cash figure a staff member
              got wrong could be seen and never corrected. -->
-        ${alsoDirect ? '' : `
         <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
-        <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>`}
+        <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>
         <!-- Left EMPTY when the clock owns this figure, and that is deliberate.
              A pre-filled value would be posted back on every save — including a
              save that was only fixing somebody's sales — and each one would
@@ -2368,10 +2380,7 @@ app.get('/shifts/:id', (req, res) => {
         <button class="bs-btn" type="submit">Save</button>
         <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
       </form>
-      ${isServer ? '' : alsoDirect
-    ? `<p class="bs-inline-note">This row is only what ${esc(p.name.split(' ')[0])} is paid out of the pots.
-        Their own sales and tips go on their ${esc(posName(p.role || 'bartender').toLowerCase())} row above.</p>`
-    : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
+      ${isServer ? '' : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
         across support by hours — they are not kept by ${esc(p.name.split(' ')[0])}.</p>`}
       ${p.hoursSource && p.hoursSource !== 'clock' && TC.hasPunch(sh.id, p.employeeId) ? `
       <form class="bs-hours-reset" method="post" action="/shifts/${sh.id}/hours-reset">
@@ -2592,8 +2601,7 @@ app.get('/shifts/:id', (req, res) => {
               <span class="r">Card</span><span class="r">Cash</span><span class="r">Hrs</span><span class="r">Wage</span><span></span>
             </div>
             <div class="bs-srows${anyAlcohol ? ' has-alc' : ''}">
-              ${serverStates.map((x) => staffRow(x, true)).join('')}
-              ${supportStates.map((x) => staffRow(x, false)).join('')}
+              ${rowStates.map((x) => staffRow(x, directIds.has(x.p.employeeId))).join('')}
             </div>`
             : '<p class="bs-clear">Nobody on this service yet. They appear here when they submit, or add them below.</p>'}
 

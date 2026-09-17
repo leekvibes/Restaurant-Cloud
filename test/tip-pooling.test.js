@@ -532,11 +532,12 @@ test('fixing a bartender\'s figures on the service page keeps them a bartender',
   assert.strictEqual(roleOf(bus), 'server', 'and support chosen from the Server tab is moved on purpose');
 });
 
-test('a bartender is asked for their tips once, on the row that shows them', async () => {
-  // Two rows for one person: what they rang, and what the pots owe them. The
-  // second offered a Card tips box that saved and then showed a dash, because a
-  // direct earner's own tips are not carried on the receiving side. $45 typed
-  // there, $45 stored, the row still reading "—".
+test('a bartender is on the sheet once, on the row that can be typed into', async () => {
+  // The engine holds them on both sides — they ring their own till and they are
+  // paid out of the pots — and the sheet printed both: two rows, same name, same
+  // job, same dashes, under a heading that said two people were on. From the
+  // outside that reads as the clock putting everybody on twice. The receiving
+  // side is shown under "Tipped out to" instead, where it belongs.
   const { db } = require('../src/db');
   const pid = Number(db.prepare(`INSERT INTO policy_versions (daypart, rules_json, note, staged)
     VALUES ('dinner', ?, 'pooling', 1)`).run(JSON.stringify(EVENING)).lastInsertRowid);
@@ -551,24 +552,20 @@ test('a bartender is asked for their tips once, on the row that shows them', asy
   work.run(sh, bus, 'busser');
 
   const html = await (await fetch(`${BASE}/shifts/${sh}`)).text();
-  // Each row on its own, cut at its closing tag: splitting alone leaves every
-  // chunk carrying the whole rest of the page, and then every row "contains"
-  // every name.
   const cells = html.split('<details class="bs-srow"').slice(1).map((c) => c.split('</details>')[0]);
   const rowFor = (name) => cells.filter((r) => ((r.match(/class="bs-sr-n">([^<]*)/) || [])[1] || '').trim() === name);
-  const barRows = rowFor('Row Bartender');
-  assert.strictEqual(barRows.length, 2, 'the bar is on the sheet twice: what they rang, what they are owed');
-  const [direct, support] = barRows;
-  assert.ok(/name="card_tips"/.test(direct), 'their tips are asked for on the row that rang them');
-  assert.ok(!/name="card_tips"/.test(support), 'and not on the row that cannot show them');
-  assert.ok(!/name="cash_tips"/.test(support), 'cash neither');
-  assert.match(support, /paid out of the pots/, 'the row says what it is');
-  assert.match(support, /row above/, 'and where the tips go instead');
 
-  // A busser has one row, and it still takes the tips they were handed.
-  const [busRow] = rowFor('Row Busser');
-  assert.ok(/name="card_tips"/.test(busRow), 'support who only receive still have the boxes');
-  assert.match(busRow, /go into the shared pool/, 'with the wording they always had');
+  assert.strictEqual(rowFor('Row Bartender').length, 1, 'the bar is on the sheet once');
+  assert.strictEqual(rowFor('Row Busser').length, 1, 'and so is the busser');
+  assert.strictEqual(cells.length, 2, 'two people on, two rows');
+  assert.match(html, /On shift · 2/, 'and the heading agrees with what is under it');
+
+  const [barRow] = rowFor('Row Bartender');
+  assert.ok(/name="card_tips"/.test(barRow), 'their tips are asked for');
+  assert.ok(/name="food"/.test(barRow), 'and their sales, which only the ringing side has');
+
+  // What the pots owe them is still on the page, on the other side of it.
+  assert.match(html, /Tipped out to/i, 'the receiving side is still shown');
 });
 
 test('a row can put somebody on the right job, servers included', async () => {
