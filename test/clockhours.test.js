@@ -457,6 +457,63 @@ test('the POS fills in hours for somebody with no punch, and defers to everybody
     'the batch left the clocked figure alone — it usually lands after close, so it would win by accident');
 });
 
+test('a batch reporting zero never empties a figure somebody typed', async () => {
+  // The owner: "I type in card tips for someone who forgot to add them, I click
+  // save, and it disappears." Measured: $45 typed on the sheet, the next batch
+  // reports that server with card_tips 0, and the $45 is gone. On the page that
+  // is indistinguishable from a save that did not work.
+  //
+  // A zero out of a till batch means "nothing to say about this" far more often
+  // than "they earned exactly nothing" — and where it really is a zero, nothing
+  // was on file to lose.
+  const day = '2026-03-19';
+  const send = (rows) => fetch(`${BASE}/webhook/benugin`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-secret': SECRET },
+    body: JSON.stringify({ date: day, daypart: 'dinner', servers: rows }),
+  });
+  await send([{ name: 'Case both', food: 800 }]);
+  const sh = shiftOn(day, 'dinner');
+  const sales = () => db.prepare('SELECT food_cents food, card_tips_cents card, cash_tips_cents cash FROM server_sales WHERE shift_id = ? AND employee_id = ?').get(sh.id, E.both) || {};
+
+  // Nothing on file: a zero is simply the figure.
+  await send([{ name: 'Case both', food: 800, card_tips: 0 }]);
+  assert.strictEqual(sales().card, 0, 'zero onto nothing is zero');
+
+  // A manager fills in what the batch never had.
+  const saved = await post(`/shifts/${sh.id}/server`, { employee_id: String(E.both), food: '800', card_tips: '45.00', cash_tips: '20.00', hours: '' });
+  assert.match(msgOf(saved), /card tips \$45\.00/, 'and the page says what it saved');
+  assert.strictEqual(sales().card, 4500);
+
+  // The batch lands again, still reporting zero.
+  const res = await send([{ name: 'Case both', food: 800, card_tips: 0, cash_tips: 0 }]);
+  const body = await res.json();
+  assert.strictEqual(sales().card, 4500, 'the typed card tips stand');
+  assert.strictEqual(sales().cash, 2000, 'and the cash');
+  assert.ok((body.keptExisting || []).some((x) => /Case both/.test(x)), 'and the batch says what it did not overwrite');
+
+  // Sales are the till's own subject, and even there a zero does not empty one.
+  await send([{ name: 'Case both', food: 0 }]);
+  assert.strictEqual(sales().food, 80000, 'the sales stand too');
+
+  // A real correction still lands.
+  await send([{ name: 'Case both', food: 900, card_tips: 60 }]);
+  assert.strictEqual(sales().food, 90000, 'a new sales figure is taken');
+  assert.strictEqual(sales().card, 6000, 'and a new tip figure');
+});
+
+test('a manager saving a row with the tips box empty leaves the tips alone', async () => {
+  const day = '2026-03-20';
+  await fetch(`${BASE}/webhook/benugin`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-secret': SECRET },
+    body: JSON.stringify({ date: day, daypart: 'dinner', servers: [{ name: 'Case both', food: 500, card_tips: 70 }] }),
+  });
+  const sh = shiftOn(day, 'dinner');
+  const card = () => db.prepare('SELECT card_tips_cents c FROM server_sales WHERE shift_id = ? AND employee_id = ?').get(sh.id, E.both).c;
+  assert.strictEqual(card(), 7000);
+  await post(`/shifts/${sh.id}/server`, { employee_id: String(E.both), food: '500', card_tips: '', cash_tips: '', hours: '' });
+  assert.strictEqual(card(), 7000, 'blank means leave it, not zero it');
+});
+
 test('a malformed batch date is refused rather than minting a junk shift', async () => {
   const res = await fetch(`${BASE}/webhook/benugin`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-secret': SECRET },

@@ -2780,6 +2780,25 @@ function hoursForSave(res, shift, empId, body) {
   return { ok: true, hours: null };
 }
 
+/**
+ * What a save actually wrote, said back on the page.
+ *
+ * "Saved." answers a different question from the one somebody asks after typing
+ * a figure into a sheet full of dashes. Naming the figures makes a save that did
+ * nothing impossible to mistake for one that worked, and vice versa.
+ */
+function savedLine(who, body, hours) {
+  const gv = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
+  const said = [];
+  if (gv('food') || gv('coffee') || gv('alcohol')) {
+    said.push(`sales ${money(toCents(body.food) + toCents(body.coffee) + toCents(body.alcohol))}`);
+  }
+  if (gv('card_tips')) said.push(`card tips ${money(toCents(body.card_tips))}`);
+  if (gv('cash_tips')) said.push(`cash tips ${money(toCents(body.cash_tips))}`);
+  if (hours != null) said.push(`${fmtHours(hours)} hours`);
+  return said.length ? `${who} saved — ${said.join(', ')}.` : `${who} saved.`;
+}
+
 function writeTipsIfGiven(shiftId, empId, body) {
   const given = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
   if (given('cash_tips')) {
@@ -2852,7 +2871,7 @@ app.post('/shifts/:id/server', (req, res) => {
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, role, req.body);
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(`${posName(role)} saved.`) + `#edit-${empId}`);
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(savedLine(posName(role), req.body, hrs.hours)) + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/support', (req, res) => {
@@ -2867,7 +2886,8 @@ app.post('/shifts/:id/support', (req, res) => {
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, req.body.role, req.body);
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent('Support saved.') + `#edit-${empId}`);
+  res.redirect(`/shifts/${sh.id}?msg=`
+    + encodeURIComponent(savedLine(posName(req.body.role) || 'Support', req.body, hrs.hours)) + `#edit-${empId}`);
 });
 
 /**
@@ -3002,27 +3022,23 @@ app.post('/shifts/:id/read-report', reportUpload.array('photos', 12), csrfBody, 
   const lc = (v) => String(v || '').trim().toLowerCase();
   const matched = [];
   const unmatched = [];
+  const keptPhoto = [];
   for (const row of data.servers || []) {
     const emp = staff.find((e) => lc(e.name) === lc(row.name))
       || staff.find((e) => lc(e.name).split(' ')[0] === lc(row.name).split(' ')[0] && lc(row.name));
     if (!emp) { unmatched.push(row.name || '(unnamed)'); continue; }
     w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: 'server' });
-    w.upsertSales.run({
-      shift_id: sh.id, employee_id: emp.id,
-      food_cents: toCents(row.food), coffee_cents: toCents(row.coffee),
-      alcohol_cents: toCents(row.alcohol),
-    });
-    // Card tips are written separately now — upsertSales no longer owns them,
-    // so a blank field cannot zero a figure somebody already reported.
-    if (row.card_tips != null && String(row.card_tips).trim() !== '') {
-      w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(row.card_tips) });
-    }
+    // A photograph read as zero is a photograph that could not read it. It fills
+    // figures in and corrects them; it never empties one. See importFigures.
+    const kept = importFigures(sh.id, emp.id, row);
+    if (kept.length) keptPhoto.push(`${emp.name}: ${kept.join(', ')}`);
     matched.push(emp.name);
   }
   let msg = matched.length
     ? `Read ${matched.length} server${matched.length === 1 ? '' : 's'}: ${matched.join(', ')}. Check the numbers below, then send.`
     : 'No servers could be matched from the photo.';
   if (unmatched.length) msg += ` Couldn't match: ${unmatched.join(', ')} (add them under Staff or fix the spelling).`;
+  if (keptPhoto.length) msg += ` Read as zero and left as they were: ${keptPhoto.join('; ')}.`;
   return back(msg, matched.length === 0);
 });
 
@@ -15983,6 +15999,52 @@ app.post('/policy/revert', (req, res) => {
   res.redirect(`/policy?daypart=${row ? row.daypart : 'dinner'}&msg=` + encodeURIComponent('Reverted — this is now the current policy for new shifts.'));
 });
 
+/**
+ * A FIGURE FROM A MACHINE NEVER REPLACES A PERSON'S FIGURE WITH ZERO.
+ *
+ * Both importers — the Benugin batch and the report photo — wrote whatever they
+ * were handed. Measured: a manager types $45 of card tips on the sheet, the next
+ * batch arrives reporting that server with card_tips 0, and the $45 is gone. On
+ * the page it reads exactly like a save that did not work, which is how it was
+ * reported: "I type it in, I click save, it disappears."
+ *
+ * A zero out of a till batch or a photograph almost always means "nothing to say
+ * about this", not "they earned exactly nothing" — and the one case it really is
+ * a zero is the case where nothing was on file anyway, which this still writes.
+ * So an import may fill a figure in and may correct it to another figure; it may
+ * not empty one. What it declined to overwrite is reported, never silent.
+ */
+function importFigures(shiftId, empId, row, opts = {}) {
+  const had = w.salesRow.get(shiftId, empId) || {};
+  const keep = [];
+  const merge = (label, incoming, existing) => {
+    const now = toCents(incoming);
+    const was = existing || 0;
+    if (now === 0 && was > 0) { keep.push(label); return was; }
+    return now;
+  };
+  const given = (v) => v != null && String(v).trim() !== '';
+  w.upsertSales.run({
+    shift_id: shiftId, employee_id: empId,
+    food_cents: merge('food sales', row.food, had.food_cents),
+    coffee_cents: merge('coffee sales', row.coffee, had.coffee_cents),
+    alcohol_cents: merge('alcohol sales', row.alcohol, had.alcohol_cents),
+  });
+  if (given(row.card_tips)) {
+    const cents = merge('card tips', row.card_tips, had.card_tips_cents);
+    if (cents !== (had.card_tips_cents || 0) || !had.card_tips_cents) {
+      w.setCardTips.run({ shift_id: shiftId, employee_id: empId, card_tips_cents: cents });
+    }
+  }
+  if (opts.cash && given(row.cash_tips)) {
+    const cents = merge('cash tips', row.cash_tips, had.cash_tips_cents);
+    if (cents !== (had.cash_tips_cents || 0) || !had.cash_tips_cents) {
+      w.setCashTips.run({ shift_id: shiftId, employee_id: empId, cash_tips_cents: cents, by: opts.by || 'pos' });
+    }
+  }
+  return keep;
+}
+
 // ---------------------------------------------------------------------------
 // Benugin webhook — POS pushes end-of-batch data here
 // ---------------------------------------------------------------------------
@@ -16002,6 +16064,7 @@ app.post('/webhook/benugin', (req, res) => {
 
   const matched = [];
   const unmatched = [];
+  const keptExisting = [];
   for (const row of servers) {
     // Match by Benugin id first, then by exact name.
     let emp = row.pos_id ? q.employeeByPosId.get(String(row.pos_id)) : null;
@@ -16018,22 +16081,13 @@ app.post('/webhook/benugin', (req, res) => {
     if (row.hours != null && parseHours(row.hours) > 0 && !TC.hasPunch(sh.id, emp.id)) {
       w.setPosHours.run({ shift_id: sh.id, employee_id: emp.id, hours: parseHours(row.hours) });
     }
-    w.upsertSales.run({
-      shift_id: sh.id, employee_id: emp.id,
-      food_cents: toCents(row.food), coffee_cents: toCents(row.coffee),
-      alcohol_cents: toCents(row.alcohol),
-    });
-    // Card tips are written separately now — upsertSales no longer owns them,
-    // so a blank field cannot zero a figure somebody already reported.
-    if (row.card_tips != null && String(row.card_tips).trim() !== '') {
-      w.setCardTips.run({ shift_id: sh.id, employee_id: emp.id, card_tips_cents: toCents(row.card_tips) });
-    }
-    if (row.cash_tips != null) {
-      w.setCashTips.run({ shift_id: sh.id, employee_id: emp.id, cash_tips_cents: toCents(row.cash_tips), by: 'pos' });
-    }
+    // Blank fields were already deferred to; a ZERO was not, and that is the
+    // one that wiped what somebody had typed. See importFigures.
+    const kept = importFigures(sh.id, emp.id, row, { cash: true, by: 'pos' });
+    if (kept.length) keptExisting.push(`${emp.name}: ${kept.join(', ')}`);
     matched.push(emp.name);
   }
-  res.json({ ok: true, shift_id: sh.id, matched, unmatched });
+  res.json({ ok: true, shift_id: sh.id, matched, unmatched, keptExisting });
 });
 
 // Mount all the collection modules (expirations, invoices, vendors, contacts,
