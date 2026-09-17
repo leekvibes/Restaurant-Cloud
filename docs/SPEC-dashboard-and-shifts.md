@@ -808,7 +808,15 @@ Each row: `<details class="sub[ sub-old]">` — `sub-old` on every row after the
 
 ---
 
-## 5. The AI photo import — `POST /shifts/:id/read-report` (1583–1619)
+## 5. The AI photo import — REMOVED (September 2026)
+
+> Taken out at the owner's word: used once, and every figure it produced still had
+> to be read and checked by hand on the close screen, which was the work it existed
+> to save. The route answers an old page with a message and nothing else; the close
+> screen is typed into directly. `reader.js` still reads invoices, expenses and
+> documents. What follows describes how it worked, and is history.
+
+### 5.0 As it was — `POST /shifts/:id/read-report` (1583–1619)
 
 ### 5.1 The control (1375–1382)
 

@@ -570,3 +570,52 @@ test('a bartender is asked for their tips once, on the row that shows them', asy
   assert.ok(/name="card_tips"/.test(busRow), 'support who only receive still have the boxes');
   assert.match(busRow, /go into the shared pool/, 'with the wording they always had');
 });
+
+test('a row can put somebody on the right job, servers included', async () => {
+  // The one field on the correction sheet that could not be corrected. Somebody
+  // put on as a server who worked the bar pays the servers' percentages and
+  // stays out of the bar's pot until this can be changed where you are standing.
+  const { db } = require('../src/db');
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2099-08-08', 'dinner', 'open')`).run().lastInsertRowid);
+  const emp = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES ('Job Switcher', 'server', 900, 1)`).run().lastInsertRowid);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,6)').run(sh, emp, 'server');
+  const roleOf = () => db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?').get(sh, emp).role;
+
+  const page = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  const row = page.split('<details class="bs-srow"').slice(1).map((c) => c.split('</details>')[0])
+    .find((c) => c.includes('Job Switcher'));
+  assert.match(row, /<select name="role">/, 'the row offers the job');
+  assert.match(row, /value="server"/, 'servers among them');
+  assert.match(row, /value="bartender"/, 'and the bar');
+
+  const move = await fetch(`${BASE}/shifts/${sh}/server`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ employee_id: String(emp), role: 'bartender', food: '100', card_tips: '30' }).toString(),
+  });
+  assert.strictEqual(move.status, 302);
+  assert.strictEqual(roleOf(), 'bartender', 'moved onto the bar');
+  assert.match(decodeURIComponent(move.headers.get('location') || ''), /card tips \$30\.00/, 'and says what it saved');
+
+  // No job named still means the job they were on — the add-a-server form.
+  await fetch(`${BASE}/shifts/${sh}/server`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ employee_id: String(emp), food: '120' }).toString(),
+  });
+  assert.strictEqual(roleOf(), 'bartender', 'and it stays');
+});
+
+test('the report-photo reader is gone, and an old page is told so', async () => {
+  const { db } = require('../src/db');
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2099-08-09', 'dinner', 'open')`).run().lastInsertRowid);
+  const page = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  assert.ok(!/Read from a report photo/.test(page), 'the button is gone');
+  assert.ok(!/enctype="multipart\/form-data"/.test(page), 'and the upload with it');
+  const old = await fetch(`${BASE}/shifts/${sh}/read-report`, { method: 'POST', redirect: 'manual' });
+  assert.strictEqual(old.status, 302, 'an old tab is answered, not crashed');
+  assert.match(decodeURIComponent(old.headers.get('location') || ''), /has been removed/);
+});

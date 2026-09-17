@@ -206,11 +206,12 @@ test('the sheet keeps every form the workspace had', async () => {
   const h = await html(`/shifts/${sent}`);
   // Moving a control is fine. Losing one is not — each of these is the only
   // route to something the app can do.
+  // "Read from a report photo" was removed at the owner's word — used once, and
+  // its figures still had to be checked by hand. Not a control that went missing.
   const endpoints = [
     [`/shifts/${sent}/server`, 'add or edit a server'],
     [`/shifts/${sent}/support`, 'add or edit support'],
     [`/shifts/${sent}/pool`, 'record what you counted'],
-    [`/shifts/${sent}/read-report`, 'read a report photo'],
     [`/shifts/${sent}/delete`, 'delete the shift'],
   ];
   for (const [action, what] of endpoints) {

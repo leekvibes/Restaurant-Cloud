@@ -45,7 +45,7 @@ try {
   if (moved.migrated) console.log(`  Calendar: ${moved.migrated} recurring task(s) migrated.`);
 } catch (e) { console.error('[calendar] migration skipped:', e && e.message); }
 const GUARD = require('./guard');
-const { readReport, readInvoice, readDocument, readExpense } = require('./reader');
+const { readInvoice, readDocument, readExpense } = require('./reader');
 const { isoDate, startOfToday, addDays } = require('./dates');
 const MX = require('./metrics');
 const CH = require('./charts');
@@ -63,7 +63,6 @@ const CASH = require('./cash');
 const { currentPeriod, recentPeriods, labelFor, isPeriod, periodFor, sendRecord, markSent, anchor, setSetting, getSetting,
   skipRecord, markSkipped, unskipPeriod } = require('./periods');
 const multer = require('multer');
-const reportUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const app = express();
 
@@ -195,7 +194,6 @@ const CSRF_OPEN = new Set(['/login', '/tips/start', '/webhook/benugin']);
 const CSRF_UPLOAD = [
   /^\/documents$/,                 // adding a document (its PDF)
   /^\/documents\/[^/]+\/version$/, // and replacing it with a new version
-  /^\/shifts\/[^/]+\/read-report$/,
   /^\/c\/expenses\/read$/,
   /^\/c\/documents\/read$/,
   /^\/c\/invoices\/read$/,
@@ -2206,6 +2204,13 @@ app.get('/shifts/:id', (req, res) => {
   }
   const staffOptions = staff.map((e) => `<option value="${e.id}" data-role="${e.role}" data-rate="${((e.hourly_rate_cents || 0) / 100).toFixed(2)}">${esc(e.name)} · ${e.role}</option>`).join('');
   const roleOpts = (sel) => shiftRoles().map((x) => `<option value="${x}"${x === sel ? ' selected' : ''}>${esc(posName(x))}</option>`).join('');
+  // Every job, servers included: the row is a correction tool, and "she was put
+  // on as a server and worked the bar" is the correction people actually need.
+  const allRoleOpts = (sel) => {
+    const list = allRoles();
+    if (sel && !list.includes(sel)) list.push(sel);   // a retired job keeps its own name
+    return list.map((x) => `<option value="${x}"${x === sel ? ' selected' : ''}>${esc(posName(x))}</option>`).join('');
+  };
 
   // --- notes as message cards -------------------------------------------
   const noteRows = w.notesForShift.all(sh.id);
@@ -2330,11 +2335,17 @@ app.get('/shifts/:id', (req, res) => {
       ${canWrite() ? `
       <form class="bs-inline" method="post" action="/shifts/${sh.id}/${isServer ? 'server' : 'support'}">
         <input type="hidden" name="employee_id" value="${p.employeeId}">
+        ${/* THE JOB, on either row. A direct earner's row had no way to say
+             "she worked the bar tonight, not the floor" — the one field on this
+             sheet that could not be corrected, on the sheet that exists for
+             corrections. Both rows offer every job now, so somebody put on as
+             the wrong one is fixed where you are already standing. */''}
+        <label class="bs-pill"><span>Job</span><select name="role">${allRoleOpts(p.role)}</select></label>
         ${isServer ? `
           ${num('Kitchen', e.food)}
           ${num('Coffee', e.coffee)}
           ${num('Alcohol', e.alcohol)}
-        ` : `<label class="bs-pill"><span>Role</span><select name="role">${roleOpts(p.role)}</select></label>`}
+        ` : ''}
         <!-- Both tip figures, for everyone. The summary row above has always
              shown card + cash together, the POST has always accepted both, and
              the prefill has always carried both — but the form only ever
@@ -2503,21 +2514,16 @@ app.get('/shifts/:id', (req, res) => {
 
       ${canWrite() ? `<div class="bs-tools">
         <button type="button" class="bs-tool" onclick="bsTool('add-staff')">Add employee to shift</button>
-        <button type="button" class="bs-tool" onclick="bsTool('read-photo')">Read from a report photo</button>
         <button type="button" class="bs-tool" onclick="bsTool('the-record')">The record</button>
         <button type="button" class="bs-tool bs-tool-danger" onclick="bsTool('danger')">Delete this service</button>
       </div>` : ''}
       <div class="bs-toolpanes">
         ${canWrite() ? `
-          <details class="bs-x" id="read-photo">
-            <summary>Read from a report photo</summary>
-            <form method="post" action="/shifts/${sh.id}/read-report" enctype="multipart/form-data" class="bs-form">
-              <p class="bs-clear">Snap the end-of-day report (several photos OK). It fills in each server's sales and card tips for you to check.${process.env.ANTHROPIC_API_KEY ? '' : ' <b>Needs an ANTHROPIC_API_KEY in .env first.</b>'}</p>
-              <label>Photo(s) <input type="file" name="photos" accept="image/*" multiple ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}></label>
-              <button class="bs-btn-quiet" type="submit" ${process.env.ANTHROPIC_API_KEY ? '' : 'disabled'}>Read photo</button>
-            </form>
-          </details>
-
+          ${/* "Read from a report photo" was here. Used once, and every figure
+               it produced still had to be read and checked by hand, which is the
+               work it was meant to save. Removed at the owner's word: the sheet
+               is typed into directly, and that is the path that has to be right.
+               The reader itself lives on for invoices, expenses and documents. */''}
           <details class="bs-x" id="add-staff">
             <summary>Add employee to shift</summary>
             <div class="bs-addemp">
@@ -2859,7 +2865,11 @@ app.post('/shifts/:id/server', (req, res) => {
   // Anybody else — somebody new, or support deliberately added from the Server
   // tab — is put on as a server, as before.
   const had = db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, empId);
-  const role = had && ['server', 'bartender', 'barista'].includes(had.role) ? had.role : 'server';
+  // A job named on the form is a decision; without one, keep the job they were
+  // on if it rings its own till (the add-a-server form sends no job at all).
+  const asked = String(req.body.role || '').trim();
+  const role = positions.bySlug.get(asked) ? asked
+    : (had && ['server', 'bartender', 'barista'].includes(had.role) ? had.role : 'server');
   w.upsertWork.run({
     shift_id: sh.id, employee_id: empId, role,
     hours: hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
@@ -3003,44 +3013,14 @@ app.post('/shifts/:id/pool', (req, res) => {
 });
 
 // Read a photo of the POS report → extract per-server numbers → pre-fill the shift.
-app.post('/shifts/:id/read-report', reportUpload.array('photos', 12), csrfBody, async (req, res) => {
+// The photo reader is gone (see the service page). An old tab still posting to
+// it is answered rather than 404ing into a stack trace.
+app.post('/shifts/:id/read-report', (req, res) => {
   const sh = s.shiftById.get(req.params.id);
-  if (!sh) return res.status(404).end();
-  const back = (msg, err) => res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(msg) + (err ? '&err=1' : ''));
-  const files = (req.files || []).map((f) => ({ buffer: f.buffer, mimetype: f.mimetype }));
-  if (!files.length) return back('Attach at least one photo.', true);
-
-  let data;
-  try {
-    data = await readReport(files);
-  } catch (e) {
-    return back('Could not read the photo — ' + e.message, true);
-  }
-
-  // Match extracted names to staff (exact, then first-name), pre-fill their sales.
-  const staff = q.nonManagerList.all();
-  const lc = (v) => String(v || '').trim().toLowerCase();
-  const matched = [];
-  const unmatched = [];
-  const keptPhoto = [];
-  for (const row of data.servers || []) {
-    const emp = staff.find((e) => lc(e.name) === lc(row.name))
-      || staff.find((e) => lc(e.name).split(' ')[0] === lc(row.name).split(' ')[0] && lc(row.name));
-    if (!emp) { unmatched.push(row.name || '(unnamed)'); continue; }
-    w.insertWorkIfAbsent.run({ shift_id: sh.id, employee_id: emp.id, role: 'server' });
-    // A photograph read as zero is a photograph that could not read it. It fills
-    // figures in and corrects them; it never empties one. See importFigures.
-    const kept = importFigures(sh.id, emp.id, row);
-    if (kept.length) keptPhoto.push(`${emp.name}: ${kept.join(', ')}`);
-    matched.push(emp.name);
-  }
-  let msg = matched.length
-    ? `Read ${matched.length} server${matched.length === 1 ? '' : 's'}: ${matched.join(', ')}. Check the numbers below, then send.`
-    : 'No servers could be matched from the photo.';
-  if (unmatched.length) msg += ` Couldn't match: ${unmatched.join(', ')} (add them under Staff or fix the spelling).`;
-  if (keptPhoto.length) msg += ` Read as zero and left as they were: ${keptPhoto.join('; ')}.`;
-  return back(msg, matched.length === 0);
+  return res.redirect(`/shifts/${sh ? sh.id : ''}?err=1&msg=`
+    + encodeURIComponent('Reading a report photo has been removed. Type the figures on the rows below.'));
 });
+
 
 // ---------------------------------------------------------------------------
 // Results + email preview / send
@@ -19047,7 +19027,6 @@ app.get('/c/documents', (req, res) => {
 });
 
 
-
 app.get('/c/expenses', (req, res) => {
   const all = db.prepare('SELECT * FROM m_expenses ORDER BY spent_on DESC, id DESC').all();
   const today = isoDate(startOfToday());
@@ -19344,7 +19323,6 @@ app.post('/c/expenses/:id/reimburse', (req, res) => {
   db.prepare('UPDATE m_expenses SET reimbursed_on = ?, reimbursed_via = ? WHERE id = ?').run(on, via, id);
   res.redirect('/c/expenses?msg=' + encodeURIComponent('Marked paid back' + (via ? ' · ' + via : '') + '.'));
 });
-
 
 
 app.get('/c/invoices', (req, res) => {
@@ -19768,7 +19746,6 @@ const INV_CATS = Object.keys(INV_CATEGORIES);
 // How an invoice was paid. Accounting detail, not inventory — it lives on the
 // invoice and nowhere near Products.
 const PAY_METHODS = ['Cash', 'Check', 'ACH', 'Credit card', 'Auto pay', 'Other'];
-
 
 
 // The AI step: returns JSON for the drawer to fill in. Kept separate from the

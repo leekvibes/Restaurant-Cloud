@@ -55,7 +55,7 @@ Four call sites, no others:
 
 | Route | Line | Reader |
 |---|---|---|
-| `POST /shifts/:id/read-report` | `server.js:2715` | `readReport` |
+| ~~`POST /shifts/:id/read-report`~~ | removed Sept 2026 | ~~`readReport`~~ — the close screen is typed into directly |
 | `POST /c/expenses/read` | `server.js:12544` | `readExpense` |
 | `POST /c/documents/read` | `server.js:12557` | `readDocument` |
 | `POST /c/invoices/read` | `server.js:14976` | `readInvoice` |

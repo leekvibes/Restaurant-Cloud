@@ -154,7 +154,6 @@ Shifts  /shifts
 │   ├── Remove person       POST /shifts/:id/remove
 │   ├── Reset hours         POST /shifts/:id/hours-reset
 │   ├── Pool settings       POST /shifts/:id/pool
-│   ├── Read floor report   POST /shifts/:id/read-report   (AI reader)
 │   ├── Delete shift        POST /shifts/:id/delete
 │   └── Hours format toggle POST /shifts/hours-format
 ├── Results / review       GET  /shifts/:id/results
