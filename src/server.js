@@ -2292,11 +2292,25 @@ app.get('/shifts/:id', (req, res) => {
   // what it is about to take with them rather than springing it afterwards.
   const punchMap = TC.punchesOnShift(sh.id);
 
+  // SOMEBODY WHO IS ON THIS SHEET TWICE.
+  //
+  // A bartender earns directly AND is paid out of the pots, so they get two
+  // rows: what they rang, and what they are owed. Their own tips belong to the
+  // first. The second offered a Card tips box, prefilled with the same figure,
+  // that saved correctly and then showed a dash — because a direct earner's own
+  // tips are deliberately not carried on the receiving side, or the money would
+  // be counted twice. Measured, on a reopened service: $45 typed there, $45
+  // stored, the row still reading "—". The owner's words: "I click save but it
+  // disappears." So the boxes are not offered there at all, and the row says
+  // where they live.
+  const earnsDirect = new Set(inp.servers.map((x) => x.employeeId));
+
   // THE JOB THEY WORKED, not the side of the engine they came out of. This said
   // 'server' for anybody who rings their own till, so the bar read "Zed
   // Bartender · server" on the sheet the sales are typed into.
   const staffRow = ({ p, st: st2 }, isServer) => {
     const e = entries[p.employeeId] || {};
+    const alsoDirect = !isServer && earnsDirect.has(p.employeeId);
     const id = `edit-${p.employeeId}`;
     return `<details class="bs-srow" id="${id}">
       <summary class="bs-sr bs-staffrow${st2.key === 'ok' ? '' : ' warn'}">
@@ -2326,8 +2340,9 @@ app.get('/shifts/:id', (req, res) => {
              the prefill has always carried both — but the form only ever
              offered card, and only to servers. So a cash figure a staff member
              got wrong could be seen and never corrected. -->
+        ${alsoDirect ? '' : `
         <label class="bs-pill"><span>Card tips</span><input name="card_tips" type="text" inputmode="decimal" value="${e.card_tips || ''}" placeholder="0.00"></label>
-        <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>
+        <label class="bs-pill"><span>Cash tips</span><input name="cash_tips" type="text" inputmode="decimal" value="${e.cash_tips || ''}" placeholder="0.00"></label>`}
         <!-- Left EMPTY when the clock owns this figure, and that is deliberate.
              A pre-filled value would be posted back on every save — including a
              save that was only fixing somebody's sales — and each one would
@@ -2342,7 +2357,10 @@ app.get('/shifts/:id', (req, res) => {
         <button class="bs-btn" type="submit">Save</button>
         <button class="bs-inline-x" type="button" onclick="this.closest('details').open=false">Cancel</button>
       </form>
-      ${isServer ? '' : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
+      ${isServer ? '' : alsoDirect
+    ? `<p class="bs-inline-note">This row is only what ${esc(p.name.split(' ')[0])} is paid out of the pots.
+        Their own sales and tips go on their ${esc(posName(p.role || 'bartender').toLowerCase())} row above.</p>`
+    : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
         across support by hours — they are not kept by ${esc(p.name.split(' ')[0])}.</p>`}
       ${p.hoursSource && p.hoursSource !== 'clock' && TC.hasPunch(sh.id, p.employeeId) ? `
       <form class="bs-hours-reset" method="post" action="/shifts/${sh.id}/hours-reset">

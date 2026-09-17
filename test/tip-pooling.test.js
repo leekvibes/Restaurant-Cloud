@@ -531,3 +531,42 @@ test('fixing a bartender\'s figures on the service page keeps them a bartender',
   await save(bus, { food: '10' });
   assert.strictEqual(roleOf(bus), 'server', 'and support chosen from the Server tab is moved on purpose');
 });
+
+test('a bartender is asked for their tips once, on the row that shows them', async () => {
+  // Two rows for one person: what they rang, and what the pots owe them. The
+  // second offered a Card tips box that saved and then showed a dash, because a
+  // direct earner's own tips are not carried on the receiving side. $45 typed
+  // there, $45 stored, the row still reading "—".
+  const { db } = require('../src/db');
+  const pid = Number(db.prepare(`INSERT INTO policy_versions (daypart, rules_json, note, staged)
+    VALUES ('dinner', ?, 'pooling', 1)`).run(JSON.stringify(EVENING)).lastInsertRowid);
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES ('2099-07-07', 'dinner', 'open', ?)`).run(pid).lastInsertRowid);
+  const mk = (name, role) => Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, ?, 1500, 1)`).run(name, role).lastInsertRowid);
+  const bar = mk('Row Bartender', 'bartender');
+  const bus = mk('Row Busser', 'busser');
+  const work = db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,6)');
+  work.run(sh, bar, 'bartender');
+  work.run(sh, bus, 'busser');
+
+  const html = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  // Each row on its own, cut at its closing tag: splitting alone leaves every
+  // chunk carrying the whole rest of the page, and then every row "contains"
+  // every name.
+  const cells = html.split('<details class="bs-srow"').slice(1).map((c) => c.split('</details>')[0]);
+  const rowFor = (name) => cells.filter((r) => ((r.match(/class="bs-sr-n">([^<]*)/) || [])[1] || '').trim() === name);
+  const barRows = rowFor('Row Bartender');
+  assert.strictEqual(barRows.length, 2, 'the bar is on the sheet twice: what they rang, what they are owed');
+  const [direct, support] = barRows;
+  assert.ok(/name="card_tips"/.test(direct), 'their tips are asked for on the row that rang them');
+  assert.ok(!/name="card_tips"/.test(support), 'and not on the row that cannot show them');
+  assert.ok(!/name="cash_tips"/.test(support), 'cash neither');
+  assert.match(support, /paid out of the pots/, 'the row says what it is');
+  assert.match(support, /row above/, 'and where the tips go instead');
+
+  // A busser has one row, and it still takes the tips they were handed.
+  const [busRow] = rowFor('Row Busser');
+  assert.ok(/name="card_tips"/.test(busRow), 'support who only receive still have the boxes');
+  assert.match(busRow, /go into the shared pool/, 'with the wording they always had');
+});
