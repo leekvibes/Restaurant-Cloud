@@ -616,3 +616,71 @@ test('the report-photo reader is gone, and an old page is told so', async () => 
   assert.strictEqual(old.status, 302, 'an old tab is answered, not crashed');
   assert.match(decodeURIComponent(old.headers.get('location') || ''), /has been removed/);
 });
+
+test('changing somebody\'s job is asked about, and said out loud', async () => {
+  // Chris, a bartender, was saved as a server on the Sep 15 evening and kept
+  // $676 of his own $689 instead of pooling with the bar. The Job box is the
+  // first thing on the row. A change to it now has to be confirmed, and the
+  // page says it happened in words.
+  const { db } = require('../src/db');
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status)
+    VALUES ('2099-10-10', 'dinner', 'open')`).run().lastInsertRowid);
+  const emp = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES ('Chris O''Neil', 'bartender', 283, 1)`).run().lastInsertRowid);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,7)').run(sh, emp, 'bartender');
+
+  const html = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  const decode = (x) => x.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const form = (html.match(/<form class="bs-inline"[^>]*>/) || [''])[0];
+  assert.match(form, /data-was="bartender"/, 'the row remembers the job it opened with');
+  const handler = decode((form.match(/onsubmit="([^"]*)"/) || [])[1] || '');
+  assert.match(handler, /confirm\('Change '/, 'and asks before changing it');
+  assert.doesNotThrow(() => new Function(handler), 'the question compiles, apostrophe in the name and all');
+
+  const res = await fetch(`${BASE}/shifts/${sh}/server`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ employee_id: String(emp), role: 'server', card_tips: '689' }).toString(),
+  });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /moved from Bartender to Server/,
+    'a job change is said first, in words');
+
+  const back = await fetch(`${BASE}/shifts/${sh}/server`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ employee_id: String(emp), role: 'server', card_tips: '689' }).toString(),
+  });
+  assert.doesNotMatch(decodeURIComponent(back.headers.get('location') || ''), /moved from/,
+    'and only when it actually moved');
+});
+
+test('a pooled barista is told about the baristas on their own tip form', async () => {
+  // Day Service pools the baristas as the evening pools the bar, and the form's
+  // cash question has to say whose pool it is.
+  const { db } = require('../src/db');
+  const POOLED_DAY = [
+    { type: 'tipout', recipient: 'barista', percent: 1.5, base: 'coffee', split: 'hours', paidBy: ['server'] },
+    { type: 'share', role: 'barista', split: 'hours' },
+  ];
+  const pid = Number(db.prepare(`INSERT INTO policy_versions (daypart, rules_json, note, staged)
+    VALUES ('cafe', ?, 'day, pooled', 2)`).run(JSON.stringify(POOLED_DAY)).lastInsertRowid);
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES ('2099-12-01', 'cafe', 'open', ?)`).run(pid).lastInsertRowid);
+  const ba = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active, pin)
+    VALUES ('Counter Filer', 'barista', 1500, 1, '6655')`).run().lastInsertRowid);
+  db.exec(`INSERT OR IGNORE INTO employee_services (employee_id, service_slug)
+           SELECT e.id, s.slug FROM employees e, services s`);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,6)').run(sh, ba, 'barista');
+
+  const start = await fetch(`${BASE}/tips/start`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ pin: '6655' }).toString(),
+  });
+  const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
+  const html = await (await fetch(`${BASE}/portal/tips?shift=${sh}&position=barista`, { headers: { cookie } })).text();
+  assert.match(html, /The baristas pool their cash/, 'their pool, in their words');
+  assert.ok(!/The bar pools/.test(html), 'not the bar\'s');
+  assert.match(html, /Counter food sales/, 'and they are asked for what they rang at the counter');
+});

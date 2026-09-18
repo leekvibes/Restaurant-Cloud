@@ -130,6 +130,45 @@ function section(title, opts = {}) {
   return `<div style="margin:${margin};font:600 11px/1 ${MONO};letter-spacing:.12em;text-transform:uppercase;color:${c};border-bottom:1px solid ${c};padding-bottom:7px">${title}</div>`;
 }
 
+/**
+ * HOW A POOL IS SPOKEN ABOUT, BY THE JOB THAT POOLS.
+ *
+ * The pooling words were written for the bar, and the bar's words went to
+ * everybody: a barista whose tips were split with the other baristas would have
+ * read "Pooled at the bar" and "the bar owes you". The bar keeps its words
+ * exactly; the baristas get their own; anybody else gets plain ones built from
+ * the name of their job. One table, read by the email, the earnings page and the
+ * tip form, so the three can never describe the same pool differently.
+ */
+const POOL_WORDS = {
+  bartender: {
+    heading: 'Pooled at the bar',
+    everyone: 'Everyone at the bar kept',
+    how: 'The bar pools its tips: what your guests leave and what the servers tip out are added together and split by the hours each of you worked.',
+    owesYou: 'so the bar owes you',
+    cashHint: 'Cash your own guests tipped you. The bar pools its cash and splits it by the hours each of you worked, so your share may come out more or less than what you are holding.',
+  },
+  barista: {
+    heading: 'Pooled with the baristas',
+    everyone: 'All the baristas on shift kept',
+    how: "The baristas pool their tips: what your guests leave you and the servers' coffee tip-out are added together and split by the hours each of you worked.",
+    owesYou: 'so the other baristas owe you',
+    cashHint: 'Cash your own guests tipped you. The baristas pool their cash and split it by the hours each of you worked, so your share may come out more or less than what you are holding.',
+  },
+};
+function poolWords(role) {
+  if (POOL_WORDS[role]) return POOL_WORDS[role];
+  const w = String(ROLE_LABEL[role] || role || 'staff').toLowerCase();
+  const crew = /s$/.test(w) ? w : `${w}s`;
+  return {
+    heading: `Pooled with the ${crew}`,
+    everyone: `All the ${crew} on shift kept`,
+    how: `The ${crew} pool their tips: what your guests leave you is added together and split by the hours each of you worked.`,
+    owesYou: `so the other ${crew} owe you`,
+    cashHint: `Cash your own guests tipped you. The ${crew} pool their cash and split it by the hours each of you worked, so your share may come out more or less than what you are holding.`,
+  };
+}
+
 /** Build the email for one server. `p` is a server payout object from the engine. */
 function serverEmail(p, ctx) {
   const wage = wageCents(p.hours, ctx.hourlyRate);
@@ -174,12 +213,13 @@ function serverEmail(p, ctx) {
   // hours, so the figure they keep is a share and the line above it would
   // otherwise be the last number that made sense.
   if (p.pooled) {
-    body += section('Pooled at the bar');
+    const words = poolWords(p.pooled.role);
+    body += section(words.heading);
     body += line('Before pooling, yours was', fmt(p.totalTips - p.tipoutTotal), { border: false });
-    body += line('Everyone at the bar kept', fmt(p.pooled.potKept));
+    body += line(words.everyone, fmt(p.pooled.potKept));
     body += line(p.pooled.split === 'even' ? `Split evenly, ${p.pooled.people} ways`
       : 'Your share, by hours worked', fmt(p.tipsKept), { strong: true, color: GREEN });
-    body += hint('The bar pools its tips: what your guests leave and what the servers tip out are added together and split by the hours each of you worked.');
+    body += hint(words.how);
   }
   body += line('Tips you keep', fmt(p.tipsKept), { strong: true, color: GREEN });
 
@@ -207,7 +247,7 @@ function serverEmail(p, ctx) {
     if (p.pooled.cashOwed > 0) {
       body += line('Your share of it is less, so you hand over', '-' + fmt(p.pooled.cashOwed), { color: RED });
     } else {
-      body += line('Your share of it is more, so the bar owes you', '+' + fmt(-p.pooled.cashOwed), { color: GREEN });
+      body += line(`Your share of it is more, ${poolWords(p.pooled.role).owesYou}`, '+' + fmt(-p.pooled.cashOwed), { color: GREEN });
     }
     body += line('Cash you keep', fmt(p.cashTips));
   } else {
@@ -610,4 +650,4 @@ async function sendEmails(emails, opts = {}) {
   return out;
 }
 
-module.exports = { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, periodEmail, PREVIEW_DIR, RESTAURANT };
+module.exports = { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus, friendlyMailError, serverEmail, supportEmail, periodEmail, PREVIEW_DIR, RESTAURANT, poolWords };

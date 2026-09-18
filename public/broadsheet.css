@@ -6089,6 +6089,12 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .epr-pos-h { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
   background: var(--paper); border-bottom: 1px solid var(--rule); }
 .epr-pos-h b { flex: 1; font-size: 14px; font-weight: 650; color: var(--headline); }
+/* A schedule rate for a job the person is not recorded as doing. Border, not
+   shadow: .bs * strips box-shadow. */
+.epr-unheld { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 8px 14px 4px; padding: 10px 12px; border: 1px solid var(--warn);
+  border-left-width: 4px; font-size: 13px; color: var(--ink); }
+.epr-unheld span { flex: 1 1 260px; }
 .epr-rate { display: flex; align-items: center; gap: 14px; padding: 11px 14px;
   border-bottom: 1px solid var(--sb-hline, var(--rule)); }
 .epr-rate:last-child { border-bottom: 0; }

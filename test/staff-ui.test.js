@@ -463,3 +463,65 @@ test('the profile header names the primary position and where they work', async 
   assert.ok(!/Server[^<]*Bartender/.test(html.slice(html.indexOf('epr-line'), html.indexOf('epr-line') + 300)),
     'the header does not spell out every position');
 });
+
+// --- a new job, added on the profile ----------------------------------------------
+
+test('a job added with a rate for one schedule can be scheduled, clocked and filed', async () => {
+  // "I added a new position and rate for someone through Staff, and it isn't
+  // showing up when I go to schedule them." A rate for ONE schedule was written
+  // only to the dated wage history; the schedule, the clock and the tip form ask
+  // employee_roles which jobs somebody does, and it was never written there.
+  const SCH = require('../src/scheduler');
+  assert.ok(!SCH.heldPositions(ANNA).includes('bartender'), 'Anna does not bartend yet');
+
+  const res = await post(`/employees/${ANNA}/roles`, { role: 'bartender', wage: '16.00', svc: 'cafe' });
+  assert.strictEqual(res.status, 302);
+  assert.ok(SCH.heldPositions(ANNA).includes('bartender'), 'she holds the job now');
+  const row = db.prepare("SELECT wage_cents FROM employee_roles WHERE employee_id = ? AND role = 'bartender'").get(ANNA);
+  assert.strictEqual(row.wage_cents, 0, 'with no base rate — the $16 belongs to that one schedule');
+  const hist = db.prepare(`SELECT wage_cents, service_slug FROM wage_history
+    WHERE employee_id = ? AND role = 'bartender'`).all(ANNA);
+  assert.ok(hist.some((h) => h.wage_cents === 1600 && h.service_slug === 'cafe'), 'and the $16 is on that schedule');
+
+  // The schedule board offers it.
+  const board = await text('/schedule?svc=cafe');
+  assert.ok(board.includes('bartender'), 'the board knows about it');
+  const page = await text(`/employees/${ANNA}/edit?tab=pay`);
+  assert.match(page, /Bartender/, 'the pay tab lists the job');
+  assert.doesNotMatch(page, /Base rate<i>All schedules<\/i><\/span>\s*<b>\$0\.00/, 'and does not claim a $0.00 base rate');
+});
+
+test('a rate for a schedule they are not on says so', async () => {
+  const res = await post(`/employees/${ANNA}/roles`, { role: 'barista', wage: '15.00', svc: 'dinner' });
+  const msg = decodeURIComponent(res.headers.get('location') || '');
+  assert.match(msg, /not on the .* schedule yet/, 'rather than a rate nobody can use, silently');
+  const SCH = require('../src/scheduler');
+  assert.ok(SCH.heldPositions(ANNA).includes('barista'), 'the job is still held');
+});
+
+test('a made-up position is refused', async () => {
+  const res = await post(`/employees/${ANNA}/roles`, { role: 'astronaut', wage: '99' });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /Choose a position/);
+  assert.ok(!db.prepare("SELECT 1 FROM employee_roles WHERE employee_id = ? AND role = 'astronaut'").get(ANNA));
+});
+
+test('a rate left behind by the old save is flagged, and one click records the job', async () => {
+  // The owner's existing case: a schedule rate on file, the job never recorded.
+  // Not fixed in bulk — a job somebody was taken off on purpose can still have
+  // an old schedule rate — but shown on the profile with the fix beside it.
+  const WAGES = require('../src/wages');
+  WAGES.setWage(ANNA, 'busser', 1400, '2026-09-17', { by: 'test', service: 'cafe', note: 'the old save' });
+  const SCH = require('../src/scheduler');
+  assert.ok(!SCH.heldPositions(ANNA).includes('busser'), 'the stranded case');
+
+  const page = await text(`/employees/${ANNA}/edit?tab=pay`);
+  assert.match(page, /Not recorded as one of their jobs, so they cannot be scheduled or clock in as busser/);
+  assert.match(page, /Add as one of their jobs/);
+
+  await post(`/employees/${ANNA}/roles`, { role: 'busser' });
+  assert.ok(SCH.heldPositions(ANNA).includes('busser'), 'one click, and it is theirs');
+  const after = await text(`/employees/${ANNA}/edit?tab=pay`);
+  assert.doesNotMatch(after, /cannot be scheduled or clock in as busser/, 'and the warning is gone');
+  const hist = db.prepare(`SELECT wage_cents FROM wage_history WHERE employee_id = ? AND role = 'busser' AND service_slug = 'cafe'`).all(ANNA);
+  assert.ok(hist.some((h) => h.wage_cents === 1400), 'the schedule rate it already had is untouched');
+});

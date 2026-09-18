@@ -403,6 +403,58 @@ function seedEveningDraft() {
 
 try { seedEveningDraft(); } catch { /* never let a draft stop the app booting */ }
 
+/**
+ * DAY SERVICE: THE BARISTAS POOL, LIKE THE BAR.
+ *
+ * "If a barista enters tips from themselves it should be split between the
+ * baristas on shift by hours. Everything else can stay the same — don't mess
+ * with evening, this is just for day." And the owner's earlier word on the bar:
+ * "bartender tips are pooled and then split between them", for "both Day and
+ * Evening".
+ *
+ * So this takes Day Service's policy exactly as it stands — the waiting draft
+ * if there is one, otherwise what is live — and adds the pooling rules it does
+ * not already have: bartenders, then baristas, each split by hours worked. Not
+ * one existing rule is changed, removed or reordered.
+ *
+ * STAGED, never live: it arrives as Day Service's "Ready · not live" card and a
+ * person presses the button. Evening Service is never read or written here.
+ * It will not add pooling to a policy of the older kind — there a pooling rule
+ * would also make bartenders and baristas keep their own tips, which is a far
+ * bigger change than the one asked for — and it runs once, recording what it did.
+ */
+const DAY = 'cafe';
+function stageDayPooling() {
+  const draft = Q.staged.get(DAY);
+  const live = Q.latest.get(DAY);
+  const baseRow = draft || live;
+  if (!baseRow) return { done: true, why: 'no day policy' };
+  const base = parse(baseRow).rules;
+  if (!isNewModel(base)) return { done: true, why: 'day policy is the older kind: left alone' };
+  const pools = (role) => base.some((r) => r.type === 'share' && (r.role || 'bartender') === role);
+  const add = [];
+  if (!pools('bartender')) add.push({ type: 'share', role: 'bartender', split: 'hours' });
+  if (!pools('barista')) add.push({ type: 'share', role: 'barista', split: 'hours' });
+  if (!add.length) return { done: true, why: 'already pooled' };
+  // A note of its own rather than the old one with a sentence stuck on the end:
+  // the Palm day note says "card and cash stay with whoever earned them", which
+  // is exactly what this changes.
+  const note = 'Palm day policy with pooling: every penny moves by percentage, and bartenders and baristas each pool their own tips and split them by hours worked.';
+  const staged = stageRules(DAY, base.concat(add), note);
+  return { done: true, why: `staged: ${add.map((r) => r.role).join(' + ')} pooling on ${draft ? 'the waiting draft' : 'the live policy'}`, id: staged && staged.id, added: add };
+}
+
+function seedDayPooling() {
+  const KEY = 'day_pooling_2026_09_18';
+  if (db.prepare('SELECT value FROM settings WHERE key = ?').get(KEY)) return null;
+  const r = stageDayPooling();
+  db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(KEY, r.why);
+  return r;
+}
+
+try { seedDayPooling(); } catch { /* never let a draft stop the app booting */ }
+
 
 
 // --- one-off adjustments, for the nights the policy does not fit ------------
@@ -520,4 +572,4 @@ module.exports = {
   personAdjustment, setPersonAmount, clearPersonAmount,
   currentForDaypart, byId, historyForDaypart, policyForShift, saveRules, revertTo,
   stagedForDaypart, stageRules, activateStaged, discardStaged, isNewModel, needsNewEngine,
-  stageEveningDraft, seedEveningDraft, PALM_EVENING_POOLED };
+  stageEveningDraft, seedEveningDraft, PALM_EVENING_POOLED, stageDayPooling, seedDayPooling };

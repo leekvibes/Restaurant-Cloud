@@ -8,7 +8,7 @@ const fs = require('fs');
 const express = require('express');
 const { db, q, s, w, users, submissions, positions, kindOf, supportSlugs, shiftInputs, keepsOwnCash } = require('./db');
 const { runShift } = require('./engine');
-const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus } = require('./email');
+const { buildEmails, buildPeriodEmails, managerShiftEmail, sendEmails, sendTest, mailStatus, poolWords } = require('./email');
 const { fmt, toCents } = require('./money');
 const DUPES = require('./dupes');
 const { layout, flash, esc, money, dp, RESTAURANT, BUILD, icon, setViewContext, setAdminUnseenGetter, canWrite, navAllowed, currentPath } = require('./views');
@@ -2346,7 +2346,15 @@ app.get('/shifts/:id', (req, res) => {
         ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
       </summary>
       ${canWrite() ? `
-      <form class="bs-inline" method="post" action="/shifts/${sh.id}/${isServer ? 'server' : 'support'}">
+      ${/* A CHANGED JOB IS ASKED ABOUT, NEVER JUST SAVED. The job decides the
+           whole tip-out — a bartender saved as a server keeps their own tips
+           and drops out of the bar's pool — and the Job box is the first thing
+           on the row, where a stray click or keystroke lands. Names and jobs are
+           read from data attributes, never pasted into the script, so an
+           apostrophe in somebody's name cannot break the question. */''}
+      <form class="bs-inline" method="post" action="/shifts/${sh.id}/${isServer ? 'server' : 'support'}"
+        data-name="${esc(p.name)}" data-was="${esc(p.role || '')}" data-was-label="${esc(posName(p.role || ''))}"
+        onsubmit="var s=this.querySelector('select[name=role]'); var was=this.getAttribute('data-was'); if (s &amp;&amp; was &amp;&amp; s.value !== was) { return confirm('Change ' + this.getAttribute('data-name') + ' from ' + this.getAttribute('data-was-label') + ' to ' + s.options[s.selectedIndex].text + '?\\n\\nTheir job decides how their tips are split on this service.'); } return true;">
         <input type="hidden" name="employee_id" value="${p.employeeId}">
         ${/* THE JOB, on either row. A direct earner's row had no way to say
              "she worked the bar tonight, not the floor" — the one field on this
@@ -2801,9 +2809,12 @@ function hoursForSave(res, shift, empId, body) {
  * a figure into a sheet full of dashes. Naming the figures makes a save that did
  * nothing impossible to mistake for one that worked, and vice versa.
  */
-function savedLine(who, body, hours) {
+function savedLine(who, body, hours, moved) {
   const gv = (k) => body[k] !== undefined && String(body[k]).trim() !== '';
   const said = [];
+  // A job change is the one edit that moves everybody else's money too, so it
+  // is said first and in words, not left to be noticed in the Role column.
+  if (moved) said.push(`moved from ${moved.from} to ${moved.to}`);
   if (gv('food') || gv('coffee') || gv('alcohol')) {
     said.push(`sales ${money(toCents(body.food) + toCents(body.coffee) + toCents(body.alcohol))}`);
   }
@@ -2889,7 +2900,8 @@ app.post('/shifts/:id/server', (req, res) => {
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, role, req.body);
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(savedLine(posName(role), req.body, hrs.hours)) + `#edit-${empId}`);
+  const moved = had && had.role !== role ? { from: posName(had.role), to: posName(role) } : null;
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(savedLine(posName(role), req.body, hrs.hours, moved)) + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/support', (req, res) => {
@@ -2898,14 +2910,17 @@ app.post('/shifts/:id/support', (req, res) => {
   const empId = Number(req.body.employee_id);
   const hrs = hoursForSave(res, sh, empId, req.body);
   if (!hrs.ok) return;
+  const was = db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, empId);
   w.upsertWork.run({
     shift_id: sh.id, employee_id: empId, role: req.body.role,
     hours: hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
   });
   writeTipsIfGiven(sh.id, empId, req.body);
   logManagerEdit(sh.id, empId, req.body.role, req.body);
+  const moved = was && req.body.role && was.role !== req.body.role
+    ? { from: posName(was.role), to: posName(req.body.role) } : null;
   res.redirect(`/shifts/${sh.id}?msg=`
-    + encodeURIComponent(savedLine(posName(req.body.role) || 'Support', req.body, hrs.hours)) + `#edit-${empId}`);
+    + encodeURIComponent(savedLine(posName(req.body.role) || 'Support', req.body, hrs.hours, moved)) + `#edit-${empId}`);
 });
 
 /**
@@ -5458,7 +5473,7 @@ function fieldsForShift(caps, shiftId, slug, daypart) {
       : 'Cash tips you were handed',
     hint: keeps
       ? (shared
-        ? 'Cash your own guests tipped you. The bar pools its cash and splits it by the hours each of you worked, so your share may come out more or less than what you are holding.'
+        ? poolWords(who).cashHint
         : 'Cash your own guests tipped you and you have taken home. It stays yours — it is recorded so it can be left out of the tips paid through payroll.')
       : 'Cash a guest put in your hand on this shift. This service has no tip pool, so it stays yours — it is recorded so the totals are right.',
     blank: 'Leave blank if you took none.',
@@ -6764,19 +6779,18 @@ function shiftBreakdown(x) {
         + line('Total tip-out', `−${money(x.tippedOut)}`, 'bad')
       : line('No tip-out', money(0))}
     ${skipped.length ? `<p class="pt-fine">No ${skipped.join(' or ').toLowerCase()} worked this shift, so no tip-out went to them — you keep it.</p>` : ''}
-    ${d.pooled ? `${head('Pooled at the bar')}
+    ${d.pooled ? `${head(poolWords(d.pooled.role).heading)}
       ${line('Before pooling, yours was', money((d.totalTips || 0) - (d.tipoutTotal || 0)))}
-      ${line(`Everyone at the bar kept`, money(d.pooled.potKept))}
+      ${line(poolWords(d.pooled.role).everyone, money(d.pooled.potKept))}
       ${line(d.pooled.split === 'even' ? `Split evenly, ${d.pooled.people} ways`
     : 'Your share, by hours worked', money(d.tipsKept), 'ok')}
-      <p class="pt-fine">The bar pools its tips: what your guests leave and what the
-        servers tip out are added together and split by the hours each of you worked.</p>` : ''}
+      <p class="pt-fine">${esc(poolWords(d.pooled.role).how)}</p>` : ''}
     ${line('Tips you keep', money(x.kept), 'ok')}
     ${head('How it reaches you')}
     ${d.pooled && d.pooled.cashOwed ? `${line('Cash you were handed', money(d.pooled.cashRung))}
       ${d.pooled.cashOwed > 0
     ? line('Your share of it is less, so you hand over', `−${money(d.pooled.cashOwed)}`, 'bad')
-    : line('Your share of it is more, so the bar owes you', `+${money(-d.pooled.cashOwed)}`, 'ok')}
+    : line(`Your share of it is more, ${poolWords(d.pooled.role).owesYou}`, `+${money(-d.pooled.cashOwed)}`, 'ok')}
       ${line('Cash you keep', money(x.cash))}`
     : line('Cash you took home', money(x.cash))}
     ${paycheck >= 0
@@ -11728,9 +11742,22 @@ function eprPay(req, e, { w, payRoles, mine, today0 }) {
           <input type="hidden" name="role" value="${esc(role)}">
           <button class="epr-x" type="submit">Remove position</button></form>` : ''}
       </header>
+      ${/* A RATE WITH NO JOB BEHIND IT. Shown so money is never paid unseen,
+           but until the job itself is recorded the schedule, the clock and the
+           tip form do not know they do it — which is how "I added a position
+           and can't schedule them" happened. Said here, with the one click that
+           fixes it, rather than guessed at in bulk: a job somebody was taken
+           off on purpose can still have an old schedule rate on file. */''}
+      ${general === null ? `<div class="epr-unheld">
+        <span>Not recorded as one of their jobs, so they cannot be scheduled or clock in as ${esc(posName(role).toLowerCase())}.</span>
+        ${w ? `<form method="post" action="/employees/${e.id}/roles" style="margin:0">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="role" value="${esc(role)}">
+          <button class="bs-btn bs-btn-quiet" type="submit">Add as one of their jobs</button></form>` : ''}
+      </div>` : ''}
       <div class="epr-rate">
         <span>Base rate<i>All schedules</i></span>
-        <b>${general == null ? '<span class="muted">not set</span>' : money(general)}<i>/hr</i></b>
+        <b>${!general ? '<span class="muted">not set</span>' : money(general)}<i>/hr</i></b>
       </div>
       ${overrides.map((o) => `<div class="epr-rate epr-rate--ov">
         <span>${esc(SERVICES.nameOf(o.service_slug))}<i>Overrides the base rate here</i></span>
@@ -12444,24 +12471,51 @@ app.post('/employees/:id/services', (req, res) => {
 app.post('/employees/:id/roles', (req, res) => {
   const id = Number(req.params.id);
   const cents = toCents(req.body.wage);
-  const role = req.body.role;
+  const role = String(req.body.role || '').trim();
+  if (!role || !positions.bySlug.get(role)) {
+    return res.redirect(`/employees/${id}/edit?err=1&msg=` + encodeURIComponent('Choose a position.'));
+  }
   // Blank means every schedule, which is what a role wage has always meant.
   const svc = SERVICES.isActive(req.body.svc) ? req.body.svc : null;
   const wage = cents > 0
     ? applyWageChange(id, role, cents, req.body, tcActor(req), svc) : null;
 
-  // employee_roles is the GENERAL rate for a role and has no schedule column,
-  // so a schedule-specific wage lives only in the dated history — which is
-  // where the resolver looks first anyway. Writing it here as well would make
-  // the Evening rate look like the rate everywhere.
+  // HOLDING A JOB AND ITS BASE RATE ARE TWO FACTS, AND THIS WROTE ONE.
   //
-  // And a wage starting in the future is history, not the current rate: writing
-  // it now would be the retroactive change all over again, pointing forwards.
+  // "I added a new position and rate for someone through Staff, and it isn't
+  // showing up when I go to schedule them." The schedule, the time clock and
+  // the tip form all ask employee_roles which jobs a person does. A rate given
+  // for ONE schedule — or starting on a later date — was written only to the
+  // dated wage history, never here, so the person was paid for a job they
+  // could not be scheduled into, clocked into or file tips under. The profile
+  // listed the job anyway (it shows schedule rates with no base rate, so money
+  // is never paid unseen), which is exactly why it looked saved.
+  //
+  // So the job is ALWAYS recorded as held. Only its base rate follows the old
+  // rules: a schedule rate stays in the dated history alone — writing it here
+  // would make the Evening rate look like the rate everywhere — and a rate that
+  // starts later is history, not today's rate. A job held with no base rate is
+  // stored as 0, which pay already reads as "not set" and falls through to the
+  // catch-all, exactly as it did before for every other schedule.
+  const had = db.prepare('SELECT 1 FROM employee_roles WHERE employee_id = ? AND role = ?').get(id, role);
   if (!svc && (!wage || !wage.future)) q.setRole.run({ employee_id: id, role, wage_cents: cents });
+  else if (!had) q.setRole.run({ employee_id: id, role, wage_cents: 0 });
+
+  // A rate for a schedule they are not on is a rate nobody can use yet. Said,
+  // not done: which schedules somebody works on is its own decision, above.
+  let notOn = '';
+  if (svc) {
+    try {
+      const mine = SERVICES.forEmployee ? SERVICES.forEmployee(id) : null;
+      if (Array.isArray(mine) && !mine.includes(svc)) {
+        notOn = ` They are not on the ${SERVICES.nameOf(svc)} schedule yet — tick it under Assigned schedules to schedule them there.`;
+      }
+    } catch { /* no schedule list to check against */ }
+  }
 
   const where = svc ? ` for ${SERVICES.nameOf(svc)}` : '';
   res.redirect(`/employees/${id}/edit?msg=`
-    + encodeURIComponent(`${posName(role)} wage saved${where}.${wageNote(wage)}`));
+    + encodeURIComponent(`${posName(role)} saved${where}.${wageNote(wage)}${notOn}`));
 });
 
 app.post('/employees/:id/roles/delete', (req, res) => {
