@@ -510,6 +510,53 @@ const DAYPARTS = ['cafe', 'dinner'];
 //             old punch is never forced off the schedule it was made on.
 const svcLive = (slug) => DAYPARTS.includes(slug) || SERVICES.isActive(slug);
 const svcKnown = (slug) => svcLive(slug) || !!SERVICES.bySlug(slug);
+//   svcOpen   may a PERSON choose it, for work being filed now: the services
+//             the restaurant actually runs. The built-in pair counts only while
+//             no services exist at all.
+//
+// Narrower than svcLive on purpose, and learned the hard way. svcLive still
+// passes the original pair so that machines posting it — a POS batch, an old
+// link — keep working. But a person picking from a list must only ever be
+// offered, and only ever be allowed, the services that are running. On the
+// live site the evening service is one the restaurant added (evening-service)
+// and the original dinner is archived under the same name "Evening Service";
+// the staff edit sheet offered the old pair, so every evening clock-out fix
+// asked to move the shift to Day, and approval refused the one move — back to
+// the real Evening — that would have fixed it. Found in the Sep 21 audit.
+const svcOpenList = () => {
+  const live = SERVICES.all().map((x) => x.slug);
+  return live.length ? live : DAYPARTS.slice();
+};
+const svcOpen = (slug) => !!slug && svcOpenList().includes(slug);
+/**
+ * The services a staff member can choose between on their phone: their own
+ * schedules, in the restaurant's order — the list the clock itself offers
+ * them — plus whatever the record is already on, so a sheet always opens on
+ * the truth rather than on whichever option happens to be first.
+ */
+const svcChoicesFor = (empId, keep) => {
+  const open = svcOpenList();
+  const mine = SERVICES.forEmployee(empId).filter((s) => open.includes(s));
+  const list = mine.length ? mine : open;
+  return keep && !list.includes(keep) && svcKnown(keep) ? [keep, ...list] : list;
+};
+/** A service's name, marked when it is no longer running so two can never read the same. */
+const svcLabel = (slug) => `${dp(slug)}${svcOpen(slug) ? '' : ' (no longer used)'}`;
+/**
+ * The RUNNING service a moment of the day belongs to, for work the clock files.
+ *
+ * TC.suggestDaypart answers with the original pair, and the scheduler's
+ * contract (INV6) is written against exactly that, so it is left alone. This
+ * puts the same single boundary onto the services the restaurant actually runs
+ * with a clock: the first of them before it, the last from it on — which on the
+ * live site means Day Service and the added Evening Service, never the
+ * archived dinner.
+ */
+const svcAt = (utc) => {
+  const clocks = SERVICES.withClock().map((x) => x.slug).filter(svcOpen);
+  const list = clocks.length ? clocks : svcOpenList();
+  return TC.suggestDaypart(utc, TC.settings().dinnerFrom) === 'dinner' ? list[list.length - 1] : list[0];
+};
 /** Schedules to offer in a select: the live ones, plus the one a record already has. */
 const svcOptions = (keep) => {
   const live = SERVICES.all().map((x) => x.slug);
@@ -5704,7 +5751,7 @@ function tipsWorkspace(emp, opts = {}) {
     mode: opts.manual ? 'manual' : opts.pick ? 'pick' : 'form',
     eligible: eligibleSlugs.map((slug) => positions.bySlug.get(slug)).filter(Boolean),
     manual: !!opts.manual,
-    dayparts: DAYPARTS,
+    dayparts: svcOpenList(),
   };
 }
 
@@ -9378,7 +9425,16 @@ function pesSheet(e, brs, opts = {}) {
     ? TC.utcToLocalInput(e.clock_out_at)
     : inLocal.slice(0, 10) + 'T';
   const roles = opts.positions || [];
-  const parts = opts.dayparts || DAYPARTS;
+  // THE SHIFT'S OWN SERVICE IS ALWAYS A CHOICE, AND THE ONE IT OPENS ON.
+  //
+  // This list used to be the hard-coded pair, which does not contain the
+  // restaurant's real evening service. An evening shift matched no option, so
+  // the phone showed the first one — Day — and every clock-out fix sent from it
+  // asked to move the shift to Day Service. Approving those moved five evening
+  // shifts onto Day in one week. Guaranteed here rather than trusted to every
+  // caller: whatever list arrives, the shift's own service is in it.
+  const given = opts.dayparts || svcOpenList();
+  const parts = e.daypart && !given.includes(e.daypart) ? [e.daypart, ...given] : given;
   const bLocal = (v) => (v ? TC.utcToLocalInput(v).slice(11, 16) : '');
   const day = inLocal.slice(0, 10);
   return `
@@ -9419,7 +9475,7 @@ function pesSheet(e, brs, opts = {}) {
               </select></label>` : ''}
             <label class="pes-row"><span>Service</span>
               <select name="daypart" class="pes-sel">
-                ${parts.map((d) => `<option value="${esc(d)}"${d === e.daypart ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}
+                ${parts.map((d) => `<option value="${esc(d)}"${d === e.daypart ? ' selected' : ''}>${esc(svcLabel(d))}</option>`).join('')}
               </select></label>
             ${/* Breaks are times on the same day, so only the clock face is
                    asked for — the date comes off the shift. A break that
@@ -9499,7 +9555,12 @@ function pesAddSheet(emp, date, positions_, dayparts) {
           </select></label>
         <label class="pes-row"><span>Service</span>
           <select name="daypart" class="pes-sel" required>
-            ${dayparts.map((d) => `<option value="${esc(d)}">${esc(dp(d))}</option>`).join('')}
+            ${/* Asked, never pre-answered, whenever there is a real choice. An
+                  untouched box used to mean the first service in the list —
+                  Day — which is how an evening added back from a phone would
+                  have landed on the wrong service without anybody choosing it. */''}
+            ${dayparts.length > 1 ? '<option value="">Choose&hellip;</option>' : ''}
+            ${dayparts.map((d) => `<option value="${esc(d)}">${esc(svcLabel(d))}</option>`).join('')}
           </select></label>
 
         ${/* A break, when there was one. Folded away for the same reason it is
@@ -9754,7 +9815,7 @@ app.get('/portal/clock/entry/:id', (req, res) => {
       ${corrOpen ? '<p class="tc-note">You already have a request waiting on this shift.</p>' : ''}
     </div>
 
-    ${canAsk ? pesSheet(e, brs, { positions: clockPositionsFor(emp), dayparts: DAYPARTS }) + pesScript() : ''}`));
+    ${canAsk ? pesSheet(e, brs, { positions: clockPositionsFor(emp), dayparts: svcChoicesFor(emp.id, e.daypart) }) + pesScript() : ''}`));
 });
 
 app.post('/portal/clock/fix', (req, res) => {
@@ -9814,7 +9875,10 @@ app.post('/portal/clock/fix', (req, res) => {
       payload.position = b.position; bits.push(`position ${posName(b.position)}`);
     }
     if (b.daypart && b.daypart !== e.daypart) {
-      if (!svcLive(b.daypart)) return back('err=' + encodeURIComponent('Pick a service that exists.'));
+      // A service the restaurant runs, not merely one it once had: the archived
+      // evening shares its name with the real one, and a stale page or a
+      // hand-made post must not be able to file a move onto it.
+      if (!svcOpen(b.daypart)) return back('err=' + encodeURIComponent('Pick a service that exists.'));
       payload.daypart = b.daypart; bits.push(`service ${dp(b.daypart)}`);
     }
 
@@ -9869,7 +9933,7 @@ app.post('/portal/clock/fix', (req, res) => {
     if (!clockPositionsFor(emp).includes(b.position)) return back('err=1');
     payload = { position: b.position }; summary = `position → ${b.position}`;
   } else if (kind === 'wrong_service') {
-    if (!svcLive(b.daypart)) return back('err=1');
+    if (!svcOpen(b.daypart)) return back('err=1');
     payload = { daypart: b.daypart }; summary = `service → ${dp(b.daypart)}`;
   } else {
     summary = String(b.proposed || '').trim().slice(0, 200) || null;
@@ -9934,7 +9998,7 @@ app.post('/portal/clock/add', (req, res) => {
   // function, so this refuses only a hand-made post.
   const position = clockPositionsFor(emp).includes(b.position) ? b.position : null;
   if (!position) return back('err=' + encodeURIComponent('Pick the position you worked.'));
-  const daypart = svcLive(b.daypart) ? b.daypart : null;
+  const daypart = svcOpen(b.daypart) ? b.daypart : null;
   if (!daypart) return back('err=' + encodeURIComponent('Pick the service you worked.'));
 
   // The optional break. Checked to the same standard the edit sheet's is, and
@@ -10483,7 +10547,7 @@ app.get('/portal/timesheet', (req, res) => {
         </div>
       </form>
     </div>` : ''}
-    ${pesAddSheet(emp, period.start, clockPositionsFor(emp), DAYPARTS)}
+    ${pesAddSheet(emp, period.start, clockPositionsFor(emp), svcChoicesFor(emp.id))}
     ${pesScript()}
     ${req.query.ok ? `<div class="pt-toasts"><div class="pt-toast ok" role="status">${esc(req.query.ok)}</div></div>` : ''}
     <script>
@@ -10586,8 +10650,8 @@ app.get('/portal/timesheet/day/:date', (req, res) => {
       ${pesAddButton(date, list.length ? 'Add another shift' : 'Add a shift')}
     </div>
     ${list.filter((e) => pesCanAsk(e).can).map((e) => pesSheet(e, TC.q.breaks.all(e.id),
-      { positions: clockPositionsFor(emp), dayparts: DAYPARTS })).join('')}
-    ${pesAddSheet(emp, date, clockPositionsFor(emp), DAYPARTS)}
+      { positions: clockPositionsFor(emp), dayparts: svcChoicesFor(emp.id, e.daypart) })).join('')}
+    ${pesAddSheet(emp, date, clockPositionsFor(emp), svcChoicesFor(emp.id))}
     ${pesScript()}`));
 });
 app.post('/portal/timesheet/submit', (req, res) => {
@@ -25778,6 +25842,72 @@ function clockToday(req, res, tcSvc) {
   };
 
   const svNow = SERVICES.bySlug(tcSvc) || { slug: tcSvc, name: SERVICES.nameOf(tcSvc) };
+
+  // EVERYBODY ON THIS SERVICE, NOT ONLY THE ONES WHO PUNCHED IT.
+  //
+  // The owner: "people's shifts aren't popping up with every shift on time
+  // clock and services." A clock page lists punches, so somebody on this
+  // service's sheet with no punch on it simply was not here — a server whose
+  // hours were typed on the service by hand, or somebody whose punch went to
+  // the OTHER service (five evening shifts sat on Day that way, found Sep 21).
+  // Both showed on the Services page and neither showed on the clock. They are
+  // listed now, each with the one action that puts it right: move the punch
+  // that went to the wrong service, or add the times that were never punched.
+  const gaps = [];
+  if (fSvc) {
+    const shs = db.prepare('SELECT * FROM shifts WHERE daypart = ? AND date >= ? AND date <= ? ORDER BY date DESC')
+      .all(fSvc, span.from, span.to);
+    const onSheetQ = db.prepare('SELECT employee_id, role, hours, hours_source FROM work WHERE shift_id = ?');
+    const elsewhereQ = db.prepare(`SELECT * FROM time_entries WHERE employee_id = ? AND business_date = ?
+      AND (shift_id IS NULL OR shift_id <> ?) ORDER BY clock_in_at`);
+    for (const sh of shs) {
+      for (const r of onSheetQ.all(sh.id)) {
+        if (fEmp && String(r.employee_id) !== fEmp) continue;
+        if (TC.hasPunch(sh.id, r.employee_id)) continue;
+        const ss = storedSalesQ.get(sh.id, r.employee_id);
+        const cents = ss ? ['food_cents', 'coffee_cents', 'alcohol_cents', 'card_tips_cents', 'cash_tips_cents']
+          .reduce((a, k) => a + (Number(ss[k]) || 0), 0) : 0;
+        const elsewhere = elsewhereQ.all(r.employee_id, sh.date, sh.id);
+        const hrs = Number(r.hours) || 0;
+        // A line with nothing on it at all — no hours, no money, and no punch
+        // anywhere that day — is not a shift anybody worked, only a name.
+        if (!hrs && !cents && !elsewhere.length) continue;
+        gaps.push({ sh, r, hrs, cents, elsewhere });
+      }
+    }
+  }
+  const hereBack = `/timeclock/${encodeURIComponent(tcSvc)}/today?${qs({})}`;
+  const gapRow = (g) => {
+    const name = tcEmpName(g.r.employee_id);
+    const sheet = [
+      g.hrs ? `${fmtHours(g.hrs)} ${g.r.hours_source === 'clock' ? 'from the clock' : 'typed on the service'}` : 'no hours on the service',
+      g.cents ? `${money(g.cents)} in sales and tips` : '',
+    ].filter(Boolean).join(' · ');
+    const moves = g.elsewhere.map((p) => {
+      const span2 = `${TC.clockFace(p.clock_in_at, TC.zoneFor(p.daypart))} – ${p.clock_out_at
+        ? TC.clockFace(p.clock_out_at, TC.zoneFor(p.daypart)) : 'still on'}`;
+      const what = `Move ${name}'s ${span2} punch from ${dp(p.daypart) || 'no service'} to ${svNow.name}? Their hours move with it.`;
+      return `<div class="tcm-gap-p">
+        <span>Punched into <b>${esc(dp(p.daypart) || 'no service')}</b> · ${esc(span2)} · ${esc(tcPosName(p.position))}</span>
+        ${canWrite() ? `<form method="post" action="/timeclock/${p.id}/service" data-what="${esc(what)}"
+            onsubmit="return confirm(this.getAttribute('data-what'))">
+          <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+          <input type="hidden" name="daypart" value="${esc(tcSvc)}">
+          <input type="hidden" name="back" value="${esc(hereBack)}">
+          <button class="bs-btn-sm" type="submit">Move it to ${esc(svNow.name)}</button>
+        </form>` : ''}
+      </div>`;
+    }).join('');
+    const add = canWrite() ? `<a class="bs-btn-sm" href="${esc(tcNewUrl({ emp: g.r.employee_id, svc: tcSvc,
+      date: g.sh.date, pos: g.r.role, back: hereBack }))}">Add their times</a>` : '';
+    return `<div class="tcm-gap">
+      <div class="tcm-gap-h"><b>${esc(name)}</b>
+        <span>${span.from === span.to ? '' : `${esc(TC.dayLabel(g.sh.date))} · `}${esc(tcPosName(g.r.role))} · ${esc(sheet)}</span>
+        ${add}</div>
+      ${moves}
+    </div>`;
+  };
+
   res.send(layout(`${svNow.name} · time clock`, `
     ${flash(req)}
     ${clockShell(svNow, 'today', `
@@ -25811,6 +25941,14 @@ function clockToday(req, res, tcSvc) {
           <span>${esc(TC.dayLabel(e.business_date))} · in ${esc(TC.clockFace(e.clock_in_at, TC.zoneFor(e.daypart)))}${overnightMark(e, true)}${e.daypart ? ' · ' + esc(dp(e.daypart)) : ''}</span>
           <i>no clock-out</i></a>`).join('')}
         ${openEnded.length > 10 ? `<p class="inc-hint">${openEnded.length - 10} more.</p>` : ''}
+      </section>` : ''}
+
+      ${gaps.length ? `<section class="bs-panel tcm-gaps">
+        <div class="bs-sec-h"><span class="bs-kicker">On ${esc(svNow.name)} with no punch here</span>
+          <span class="bs-sec-note">${gaps.length} to sort out</span></div>
+        <p class="inc-hint">On the ${esc(svNow.name)} sheet on the Services page, but not on this clock.
+          Move a punch that went to the wrong service, or add the times they worked.</p>
+        ${gaps.map(gapRow).join('')}
       </section>` : ''}
 
       ${/* A pointer, not the queue. This panel WAS the queue — ten of them,
@@ -26393,29 +26531,83 @@ app.post('/timeclock/settings', (req, res) => {
     + encodeURIComponent(`Saved${svc ? ` — ${SERVICES.nameOf(svc)}` : ''}.`));
 });
 
+/**
+ * The add form's own address, carrying whatever it was opened with — so a
+ * refusal sends the manager back to the same half-filled form rather than a
+ * blank one that has forgotten who and which service it was for.
+ */
+const tcNewUrl = (src) => {
+  const p = new URLSearchParams();
+  for (const k of ['emp', 'svc', 'date', 'pos', 'back']) if (src[k]) p.set(k, String(src[k]));
+  const q2 = p.toString();
+  return '/timeclock/new' + (q2 ? '?' + q2 : '');
+};
+
 /** Add a punch a manager is entering on someone's behalf. */
 app.get('/timeclock/new', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   const cfg = TC.settings();
   const today = TC.businessDateOf(TC.nowUtc(), cfg.cutoffHour);
   const staff = q.allEmployees.all().filter((e) => e.active);
+  // OPENED FROM SOMEWHERE, IT KNOWS WHERE.
+  //
+  // Every service's time clock has had an "Add a punch" button that passed its
+  // own service along — and this form ignored it and opened on the first
+  // service in the list. From the Evening clock, that is Day: a manager adding
+  // a missed evening punch without looking twice filed it under Day, the same
+  // wrong service the staff edit sheet was choosing. Now the service, the
+  // person, the day and the job it was opened for are already in it, and with
+  // nothing passed the service is asked, never assumed.
+  const pre = {
+    emp: Number(req.query.emp) || null,
+    svc: svcOpen(req.query.svc) ? String(req.query.svc) : '',
+    date: MX.isDate(req.query.date) ? String(req.query.date) : today,
+    pos: allRoles().includes(req.query.pos) ? String(req.query.pos) : '',
+    back: /^\/[A-Za-z0-9/_?=&.%-]*$/.test(String(req.query.back || '')) ? String(req.query.back) : '',
+  };
+  // Their line on that service's sheet, if they are already on it: the job it
+  // has them as, and any hours somebody typed there by hand.
+  let row = null;
+  if (pre.emp && pre.svc) {
+    const sh = s.findShift.get(pre.date, pre.svc);
+    if (sh) row = db.prepare('SELECT role, hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, pre.emp);
+  }
+  const who = pre.emp ? q.employee.get(pre.emp) : null;
+  const pos = pre.pos || (row && allRoles().includes(row.role) ? row.role : '')
+    || (who && allRoles().includes(who.role) ? who.role : '');
+  const typed = row && Number(row.hours) > 0 && row.hours_source && row.hours_source !== 'clock'
+    ? Number(row.hours) : 0;
+  const svcs = svcOpenList();
   res.send(layout('Add a punch', `
     ${flash(req)}
     <div class="bs-page tcm-page">
-      <a class="bs-back" href="/timeclock">← Time clock</a>
+      <a class="bs-back" href="${esc(pre.back || '/timeclock')}">← Time clock</a>
       <h1 class="bs-headline">Add a punch</h1>
-      <p class="bs-subline">For somebody who forgot to clock in or out. It is recorded as entered by you, with your reason.</p>
+      <p class="bs-subline">For somebody who forgot to clock in or out, on any day and any service. It is recorded as entered by you.</p>
       <form method="post" action="/timeclock/new" class="tcm-form">
+        <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+        ${pre.back ? `<input type="hidden" name="back" value="${esc(pre.back)}">` : ''}
         <label class="tcm-f"><span>Employee</span>
           <select name="employee_id" required><option value="">Choose…</option>
-            ${staff.map((s2) => `<option value="${s2.id}">${esc(s2.name)}</option>`).join('')}</select></label>
+            ${staff.map((s2) => `<option value="${s2.id}"${s2.id === pre.emp ? ' selected' : ''}>${esc(s2.name)}</option>`).join('')}</select></label>
         <label class="tcm-f"><span>Service</span>
-          <select name="daypart" required>${svcOptions().map((d) => `<option value="${esc(d)}">${esc(dp(d))}</option>`).join('')}</select></label>
+          <select name="daypart" required>
+            ${svcs.length > 1 ? `<option value=""${pre.svc ? '' : ' selected'}>Choose…</option>` : ''}
+            ${svcs.map((d) => `<option value="${esc(d)}"${d === pre.svc ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}</select></label>
         <label class="tcm-f"><span>Position</span>
           <select name="position" required><option value="">Choose…</option>
-            ${allRoles().map((r) => `<option value="${esc(r)}">${esc(tcPosName(r))}</option>`).join('')}</select></label>
-        <label class="tcm-f"><span>Clocked in</span><input type="datetime-local" name="in" required></label>
-        <label class="tcm-f"><span>Clocked out <i>leave blank to leave them on the clock</i></span><input type="datetime-local" name="out"></label>
+            ${allRoles().map((r) => `<option value="${esc(r)}"${r === pos ? ' selected' : ''}>${esc(tcPosName(r))}</option>`).join('')}</select></label>
+        ${/* A DAY AND TWO TIMES, the way a manager actually thinks about a
+             shift, rather than two full date-and-time boxes. The day is the
+             service's day; an end earlier than the start is the next morning,
+             exactly as on the review grid, so a bar shift to 2am needs nothing
+             explained. */''}
+        <label class="tcm-f"><span>Service date</span><input type="date" name="date" value="${esc(pre.date)}" required></label>
+        <label class="tcm-f"><span>Started</span><input type="time" name="in_time" required></label>
+        <label class="tcm-f"><span>Finished <i>blank leaves them on the clock · earlier than the start means after midnight</i></span>
+          <input type="time" name="out_time"></label>
+        ${typed ? `<label class="tcm-f wide tcm-check"><input type="checkbox" name="use_punch" value="1" checked>
+          <span>Make these times their hours on ${esc(dp(pre.svc))} — replacing the ${esc(fmtHours(typed))} typed on the service by hand</span></label>` : ''}
         <label class="tcm-f wide"><span>Reason <i>required</i></span>
           <input name="reason" required maxlength="300" placeholder="e.g. Forgot to clock in — confirmed start time with the closing manager."></label>
         <button class="bs-btn" type="submit">Add the punch</button>
@@ -26427,25 +26619,50 @@ app.post('/timeclock/new', (req, res) => {
   if (!tcCanEdit(req, res)) return;
   const emp = q.employee.get(Number(req.body.employee_id));
   const reason = String(req.body.reason || '').trim().slice(0, 300);
-  const inAt = TC.localInputToUtc(req.body.in);
-  const outAt = TC.localInputToUtc(req.body.out);
-  const daypart = svcLive(req.body.daypart) ? req.body.daypart : null;
+  // Two shapes arrive. The form sends a service date and two times; older links
+  // and the tests send two full date-times. The times follow the rules the
+  // review grid uses: an end earlier than the start is the next morning, and a
+  // start before the day's cutoff is after midnight on that service's night.
+  let inAt = TC.localInputToUtc(req.body.in);
+  let outAt = TC.localInputToUtc(req.body.out);
+  const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const sDate = MX.isDate(req.body.date) ? String(req.body.date) : null;
+  if (!inAt && sDate && hhmm.test(String(req.body.in_time || ''))) {
+    const tIn = String(req.body.in_time);
+    const inDay = Number(tIn.slice(0, 2)) < TC.settings().cutoffHour ? addDays(sDate, 1) : sDate;
+    inAt = TC.localInputToUtc(`${inDay}T${tIn}`);
+    if (hhmm.test(String(req.body.out_time || ''))) {
+      outAt = TC.localInputToUtc(`${inDay}T${req.body.out_time}`);
+      if (outAt <= inAt) outAt = TC.localInputToUtc(`${addDays(inDay, 1)}T${req.body.out_time}`);
+    }
+  }
+  // A service somebody CHOSE from the list — never the archived one that shares
+  // the real evening's name.
+  const daypart = svcOpen(req.body.daypart) ? req.body.daypart : null;
   const position = allRoles().includes(req.body.position) ? req.body.position : null;
+  const again = tcNewUrl({ emp: emp && emp.id, svc: daypart, date: sDate, pos: position, back: req.body.back });
+  const refuse = (m) => res.redirect(again + (again.includes('?') ? '&' : '?') + 'msg=' + encodeURIComponent(m) + '&err=1');
   // A manager is never asked to justify a correction. The record still says who
   // changed what, when, and what it was before — which is the part anybody
   // reviewing this later actually needs. Typing a sentence about it was friction
   // on the person fixing a mistake, not evidence.
   if (!emp || !inAt || !daypart || !position) {
-    return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Fill in the employee, the times, and the position.'));
+    return refuse('Fill in the employee, the service, the times, and the position.');
   }
-  if (outAt && outAt <= inAt) return res.redirect('/timeclock/new?msg=' + encodeURIComponent('Clock-out must be after clock-in.'));
+  if (outAt && outAt <= inAt) return refuse('Clock-out must be after clock-in.');
   const cfg = TC.settings();
   const bdate = TC.businessDateOf(inAt, cfg.cutoffHour, TC.zoneFor(daypart));
   // The freeze applies to the day this punch would LAND on, which is only
   // knowable here — tcCanEdit was called above with no entry, because there is
   // no entry yet. Adding five hours next to the eight on a signed sheet moves
   // the total just as surely as editing the eight.
-  if (tcFrozen(res, emp.id, bdate, '/timeclock/new')) return;
+  if (tcFrozen(res, emp.id, bdate, again)) return;
+  // Asked on the form, and only offered when somebody had typed hours for this
+  // person on this service: whether the times being added now replace them.
+  // Without it the typed figure would quietly stay the pay while the clock
+  // showed something else — the clock never overrides a manager's number on
+  // its own, so this is the manager saying so.
+  const usePunch = req.body.use_punch === '1';
   const actor = tcActor(req);
   let id;
   try {
@@ -26461,18 +26678,21 @@ app.post('/timeclock/new', (req, res) => {
       TC.logEvent('entry', id, 'manager_added', actor, { after: `${inAt} → ${outAt || 'open'}`, reason });
       // A new punch changes the period's total just as surely as moving one.
       tcTouchDates(emp.id, [bdate], actor, 'a manager added a punch');
-      TC.syncShiftHours(sh.id, emp.id, actor, { role: position });
+      // force only on the manager's say-so, from the box on the form — the one
+      // way the clocked hours replace a figure somebody typed on the service.
+      TC.syncShiftHours(sh.id, emp.id, actor, { role: position, force: usePunch });
     })();
   } catch (e) {
-    if (e instanceof TC.ClockError) {
-      return res.redirect('/timeclock/new?msg=' + encodeURIComponent(e.message));
-    }
+    if (e instanceof TC.ClockError) return refuse(e.message);
     if (/UNIQUE/i.test(e.message)) {
-      return res.redirect('/timeclock/new?msg=' + encodeURIComponent('That person is already on the clock — close their open entry first.'));
+      return refuse('That person is already on the clock — close their open entry first.');
     }
     throw e;
   }
-  res.redirect(punchBack(req, `/timeclock/${id}`, 'Punch added.', `#e-${id}`));
+  // Said with who, which service and which day, so a manager adding several in
+  // a row can see each one landed where they meant it to.
+  res.redirect(punchBack(req, `/timeclock/${id}`,
+    `Punch added — ${emp.name}, ${dp(daypart)}, ${TC.dayLabel(bdate)}.`, `#e-${id}`));
 });
 
 // ---------------------------------------------------------------------------
@@ -26571,7 +26791,10 @@ function decideCorrection(c, decision, actor, note) {
     db.transaction(() => {
       summary = TC.applyCorrection(c, actor, {
         validPositions: allRoles(),
-        validDayparts: DAYPARTS,
+        // The services that are running. This was the hard-coded pair, which
+        // refused a move to the restaurant's real Evening as "not a service
+        // that exists" and allowed one onto the archived evening instead.
+        validDayparts: svcOpenList(),
         // Re-link through the one find-or-create every path uses, so moving a
         // service can never mint a second shift for it.
         relink: relinkEntry,
@@ -26580,6 +26803,13 @@ function decideCorrection(c, decision, actor, note) {
         // apply its policy, put the person on it, then through TC.createEntry
         // so it clears the same overlap check.
         createEntry: (pay) => {
+          // A request filed before the Sep 21 fix could still name the archived
+          // evening. Approving it would make a punch on a service no time clock
+          // shows, so it is refused, and the refusal says what to do instead.
+          if (!svcOpen(pay.daypart)) {
+            throw new TC.ClockError('That request names a service the restaurant no longer runs. '
+              + 'Add the shift on the right service from the time clock instead.');
+          }
           const bdate = pay.business_date || TC.businessDateOf(pay.in, TC.settings().cutoffHour);
           s.getOrIgnore.run(bdate, pay.daypart);
           const sh = s.findShift.get(bdate, pay.daypart);
@@ -27701,6 +27931,55 @@ app.post('/timeclock/:id/edit', (req, res) => {
 });
 
 /**
+ * Move a punch to another service, and nothing else.
+ *
+ * The button on a service's time clock beside somebody who is on that
+ * service's sheet but whose punch that day went to another one — the shape the
+ * Sep 21 audit found five times, every one an evening shift sitting on Day.
+ * The times are not touched: the drawer's form round-trips them through a
+ * minute-only box, which would shave the seconds off every punch it moved.
+ *
+ * The same steps as the review grid's Service cell: through editEntryChecked,
+ * onto the destination's shift, the hours re-synced on BOTH shifts, and the
+ * person taken off the service they left if nothing else keeps them there.
+ */
+app.post('/timeclock/:id/service', (req, res) => {
+  const e = TC.q.byId.get(Number(req.params.id));
+  if (!e) return res.status(404).end();
+  if (!tcCanEdit(req, res, e)) return;
+  const to = String(req.body.daypart || '');
+  const done = (msg, err) => res.redirect(punchBack(req, `/timeclock/${e.id}`, msg) + (err ? '&err=1' : ''));
+  if (!svcOpen(to)) return done('Pick a service the restaurant runs.', true);
+  if (to === e.daypart) return done(`That punch is already on ${dp(to)}.`);
+  // The day it would land on has to be free as well — the same wall the drawer
+  // puts up, so this is not a way around a signed timesheet.
+  const toDate = TC.businessDateOf(e.clock_in_at, TC.settings().cutoffHour, TC.zoneFor(to));
+  if (toDate !== e.business_date && tcFrozen(res, e.employee_id, toDate, `/timeclock/${e.id}`)) return;
+  const actor = tcActor(req);
+  try {
+    db.transaction(() => {
+      TC.editEntryChecked(e, { in: e.clock_in_at, out: e.clock_out_at, daypart: to, position: e.position, by: actor });
+      relinkEntry(TC.q.byId.get(e.id));
+      TC.logEvent('entry', e.id, 'service_corrected', actor,
+        { before: e.daypart || 'none', after: to, reason: 'moved to the service it was worked on, from the time clock' });
+      const fresh = TC.q.byId.get(e.id);
+      tcTouchTimesheet(e.id, actor, 'a manager moved the punch to another service', [e.business_date]);
+      TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
+      if (e.shift_id && e.shift_id !== fresh.shift_id) {
+        TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+        pruneClockOnlyRow(e.shift_id, e.employee_id, actor);
+      }
+    })();
+  } catch (err) {
+    if (err instanceof TC.ClockError) return done(err.message, true);
+    throw err;
+  }
+  const span = `${TC.clockFace(e.clock_in_at, TC.zoneFor(to))}${e.clock_out_at ? ' – ' + TC.clockFace(e.clock_out_at, TC.zoneFor(to)) : ''}`;
+  done(`Moved ${tcEmpName(e.employee_id)}'s ${span} punch from ${dp(e.daypart) || 'no service'} to ${dp(to)}. `
+    + 'Their hours moved with it.');
+});
+
+/**
  * One cell of the review grid.
  *
  * The whole point of the redesign: a reviewer clicks a time, types, and it is
@@ -28010,10 +28289,16 @@ app.post('/timeclock/day-cell', express.json(), (req, res) => {
   // worked, and they joined that service's tip pool. The start time decides it
   // now, exactly as it does when somebody punches in for real — and the row's
   // Service cell still overrides it in one click when the guess is wrong.
-  const daypart = svcKnown(req.body.daypart) ? req.body.daypart
+  //
+  // And the guess is made among the services that are RUNNING. The first
+  // version of this checked the guess with svcKnown, which the archived dinner
+  // passes — so on the live site a 6pm start typed here went onto the archived
+  // evening, a service no time clock shows. Shipped on Sep 21 and caught the
+  // same night by the audit that found the evening shifts filed under Day.
+  const guess = svcAt(inAt);
+  const daypart = svcOpen(req.body.daypart) ? req.body.daypart
     : (svcKnown(from.daypart) ? from.daypart
-      : (svcKnown(TC.suggestDaypart(inAt, TC.settings().dinnerFrom)) ? TC.suggestDaypart(inAt, TC.settings().dinnerFrom)
-        : DAYPARTS[DAYPARTS.length - 1]));
+      : (svcOpen(guess) ? guess : svcOpenList()[svcOpenList().length - 1]));
 
   try {
     let id;

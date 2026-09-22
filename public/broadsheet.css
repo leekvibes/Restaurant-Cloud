@@ -4189,6 +4189,28 @@ textarea.inc-in { resize: vertical; line-height: 1.5; }
 .tcm-dot.brk { background: var(--warning); }
 .tcm-dot.warn { background: var(--danger); }
 
+/* On a service's sheet with no punch on its clock — the sheet read against the
+   clock, each line with the one action that puts it right. Wraps rather than
+   squeezing: a name, a job, the figures and a button have to fit a phone. */
+.tcm-gaps { padding: 4px 0 2px; }
+.tcm-gap { padding: 11px 2px; border-bottom: 1px dotted var(--rule-dotted); }
+.tcm-gap:last-child { border-bottom: 0; }
+.tcm-gap-h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.tcm-gap-h b { font-size: 14px; color: var(--headline); }
+.tcm-gap-h > span { flex: 1 1 220px; min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.tcm-gap-p { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px;
+  margin-top: 8px; padding: 8px 10px; border: 1px solid var(--rule); background: var(--surface); }
+.tcm-gap-p > span { min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--body); }
+.tcm-gap-p b { color: var(--warning); font-weight: 600; }
+.tcm-gap-p form { margin: 0; }
+/* Heavier than `.tcm-form .tcm-f` on purpose: that rule comes later and makes
+   every field a grid, which put this checkbox on a line of its own, centred,
+   away from the sentence it answers. Measured in the pane. */
+.tcm-form .tcm-f.tcm-check { display: flex; align-items: flex-start; gap: 10px; }
+.tcm-form .tcm-f.tcm-check input { width: auto; flex: 0 0 auto; margin: 2px 0 0; }
+.tcm-form .tcm-f.tcm-check span { font-family: inherit; font-size: 13px; letter-spacing: 0;
+  text-transform: none; color: var(--body); }
+
 .tcm-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 16px 0 12px; }
 .tcm-filters label { display: flex; flex-direction: column; gap: 4px; }
 .tcm-filters label span { font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
@@ -5414,7 +5436,11 @@ body.bs { background: var(--paper); }
   padding: 7px var(--s-3); font-family: var(--sans); font-size: 12.5px; font-weight: 500;
   min-height: 34px; box-shadow: none;
 }
-.bs-btn-sm:hover, .bs-btn-quiet:hover { background: var(--surface-3); }
+/* The colour as well as the background. An older rule further up turns the
+   text to --paper on hover for a dark fill; this one lightened the fill and
+   left the text white, so every small button went near-invisible under the
+   mouse — measured: rgb(246,247,249) text on rgb(241,243,245). */
+.bs-btn-sm:hover, .bs-btn-quiet:hover { background: var(--surface-3); color: var(--ink); }
 .bs-btn:focus-visible, .bs-btn-sm:focus-visible, .bs-btn-quiet:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
