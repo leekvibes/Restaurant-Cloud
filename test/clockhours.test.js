@@ -470,7 +470,7 @@ test('a punch too long to count is flagged on the Services row, not left looking
   const sh = shiftOn(day, 'dinner');
   assert.strictEqual(Number(workOf(sh.id, emp).hours), 0, 'an eighteen-hour punch counts for nothing on the service');
   const page = await text(`/shifts/${sh.id}`);
-  assert.match(page, /bs-sr-gap[^>]*>clock (18|18\.00|18:00)</, 'but the row says the clock has eighteen hours');
+  assert.match(page, /bs-sr-gap[^>]*>clock (18|18\.00|18:00) · too long</, 'but the row says the clock has eighteen hours, too long to count');
   assert.match(page, /too long to count/, 'and says why');
 });
 
@@ -554,6 +554,39 @@ test('an edit never replaces a typed number with a total missing a punch too lon
   const after = workOf(sh.id, emp);
   assert.strictEqual(after.hours_source, 'clock', 'once the punch is real, the punch is the hours');
   assert.strictEqual(Number(after.hours), 8, '8.5 hours less the half-hour break');
+});
+
+test('with a punch too long to count, "use the clock" is never offered and is refused if posted', async () => {
+  // Stephannie's Aug 16, the night the one-number rule went live: 7.82h typed
+  // beside a 53-hour punch, and a button reading "Use the clock's 53:12" that
+  // would have paid her 0 — every total leaves that punch out.
+  const emp = 197;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Long Typed Case', PIN(emp));
+  const T = require('../src/timeclock');
+  const day = '2026-03-28';
+  const e = await punch(emp, day, '06:00', '');
+  const sh = shiftOn(day, 'dinner');
+  db.prepare("UPDATE time_entries SET clock_out_at = ?, status = 'complete' WHERE id = ?")
+    .run(T.localInputToUtc(`${require('../src/dates').addDays(day, 1)}T23:00`), e.id);
+  T.recompute(T.q.byId.get(e.id));                                         // 41 hours
+  oldTypedRow(sh.id, emp, 7.817);
+
+  const page = await text(`/shifts/${sh.id}`);
+  const box = page.slice(page.indexOf('Long Typed Case'));
+  assert.match(box, /too long to count/, 'the row says why the clock\u2019s figure is not usable');
+  assert.doesNotMatch(box.slice(0, box.indexOf('</details>')), /Use the clock/, 'and does not offer to pay the clock\u2019s figure');
+  assert.doesNotMatch(await text(`/timeclock/${e.id}`), /Use the punches/, 'nor does the punch page');
+
+  const res = await post(`/shifts/${sh.id}/hours-reset`, { employee_id: String(emp) });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /too long to count/, 'posted anyway, it is refused');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 7.817, 'and the typed hours are untouched');
+
+  await post(`/shifts/${sh.id}/hours-to-punch`, { employee_id: String(emp) });
+  const row = workOf(sh.id, emp);
+  assert.strictEqual(row.hours_source, 'clock', 'keeping the typed hours fixes the punch instead');
+  assert.strictEqual(Number(row.hours), 7.817);
+  assert.strictEqual(T.q.byId.get(e.id).payable_minutes, 469, 'the 41-hour punch is now 7h 49m');
 });
 
 // ===========================================================================

@@ -2407,7 +2407,12 @@ app.get('/shifts/:id', (req, res) => {
     const clockMin = Math.round(Number(pu.minutes) || 0);
     const sheetMin = Math.round((Number(p.hours) || 0) * 60);
     if (Math.abs(clockMin - sheetMin) < 1) return null;
-    return { clockMin, sheetMin, typed: !!(p.hoursSource && p.hoursSource !== 'clock') };
+    // A punch too long to count makes "the clock's figure" two numbers: the one
+    // shown (every punch added up) and the one that would be paid (that punch
+    // left out). So it is said, and the button that would pay nothing is not
+    // offered at all.
+    return { clockMin, sheetMin, typed: !!(p.hoursSource && p.hoursSource !== 'clock'),
+      tooLong: TC.tooLongOn(sh.id, p.employeeId) > 0 };
   };
 
   // SOMEBODY WHO IS ON THIS SHEET TWICE.
@@ -2443,7 +2448,7 @@ app.get('/shifts/:id', (req, res) => {
             : gap ? `The time clock says ${fmtHours(gap.clockMin / 60)} but this service counts ${fmtHours(gap.sheetMin / 60)}. Open the row to see why.` : '';
           return `<span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours)
             ? `${fmtHours(p.hours)}${p.hoursSource === 'clock' && !gap ? '<i class="bs-sr-src" title="Derived from their punches">clock</i>' : ''}`
-            : 'missing'}${gap ? `<i class="bs-sr-src bs-sr-gap" title="${esc(title)}">clock ${esc(fmtHours(gap.clockMin / 60))}</i>` : ''}</span>`;
+            : 'missing'}${gap ? `<i class="bs-sr-src bs-sr-gap" title="${esc(title)}">clock ${esc(fmtHours(gap.clockMin / 60))}${gap.tooLong ? ' · too long' : ''}</i>` : ''}</span>`;
         })()}
         <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
         ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
@@ -2499,6 +2504,18 @@ app.get('/shifts/:id', (req, res) => {
         const clockH = fmtHours(gap.clockMin / 60), sheetH = fmtHours(gap.sheetMin / 60);
         // A typed number beside a punch that says otherwise: settled either
         // way in one click, so both pages end up saying the same thing.
+        if (gap.typed && gap.tooLong) {
+          return `<div class="bs-hours-gap">
+          <span><b>${esc(sheetH)}</b> was typed here. The time clock has a punch too long to count — a missed clock-out — so its
+            <b>${esc(clockH)}</b> is not a figure anyone would be paid; the clock would pay nothing. Keep the typed hours and move that
+            clock-out to match, or fix the punch on the <a href="/timeclock/${encodeURIComponent(sh.daypart)}/today?from=${sh.date}&amp;to=${sh.date}">time clock</a>.</span>
+          <form method="post" action="/shifts/${sh.id}/hours-to-punch">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <input type="hidden" name="employee_id" value="${p.employeeId}">
+            <button type="submit">Keep ${esc(sheetH)} and move the clock-out to match</button>
+          </form>
+        </div>`;
+        }
         if (gap.typed) {
           return `<div class="bs-hours-gap">
           <span><b>${esc(sheetH)}</b> was typed here, but the time clock says <b>${esc(clockH)}</b>. Pick one and both pages will say it.</span>
@@ -3235,6 +3252,18 @@ app.post('/shifts/:id/hours-reset', (req, res) => {
   // punches currently add up to. That is a change to the signed number, even
   // though nobody typed a new one.
   if (tcFrozen(res, empId, shRow.date, `/shifts/${shiftId}`)) return;
+  // NOT while a punch here is too long to count. Every total leaves that punch
+  // out, so "the clock's hours" would be paid as nothing: Stephannie's Aug 16
+  // — 7.82h typed, a 53-hour punch — would have gone to 0 from a button that
+  // read "Use the clock's 53:12". Refused here as well as hidden on the page,
+  // because a page loaded before this fix can still post it.
+  if (TC.tooLongOn(shiftId, empId)) {
+    const back = /^\/timeclock\/\d+$/.test(String(req.body.back || '')) ? req.body.back : null;
+    const why = `${tcEmpName(empId)} has a punch on this service too long to count — a missed clock-out — so the clock's `
+      + 'figure would pay nothing. Fix that punch’s clock-out on the time clock, or keep the typed hours and move the clock-out to match.';
+    return res.redirect(back ? punchBack(req, back, why) + '&err=1'
+      : `/shifts/${shiftId}?err=1&msg=` + encodeURIComponent(why) + `#edit-${empId}`);
+  }
   const actor = tcActor(req);
   db.transaction(() => {
     w.releaseHours.run({ shift_id: shiftId, employee_id: empId });
@@ -28296,13 +28325,18 @@ app.get('/timeclock/:id', (req, res) => {
                  send the manager to find it. The buttons come back here. */''}
             ${w2 && sh && hoursSource === 'manager' && variance != null && Math.abs(variance) >= 0.01 && e.clock_out_at ? `
             <div class="bs-hours-gap tcm-hours-gap">
-              <span>Services pays <b>${esc(fmtHours(entered))}</b>, typed by hand; the punches say <b>${esc(fmtHours(clocked))}</b>.</span>
+              ${TC.tooLongOn(sh.id, e.employee_id)
+                // A punch too long to count: the clock would pay nothing, so the
+                // button that hands the row to the clock is not offered.
+                ? `<span>Services pays <b>${esc(fmtHours(entered))}</b>, typed by hand. A punch here is too long to count —
+                    a missed clock-out — so the clock would pay nothing. Fix that clock-out, or keep the typed hours and move it to match.</span>`
+                : `<span>Services pays <b>${esc(fmtHours(entered))}</b>, typed by hand; the punches say <b>${esc(fmtHours(clocked))}</b>.</span>
               <form method="post" action="/shifts/${sh.id}/hours-reset">
                 <input type="hidden" name="_csrf" value="${csrfFor(req)}">
                 <input type="hidden" name="employee_id" value="${e.employee_id}">
                 <input type="hidden" name="back" value="/timeclock/${e.id}">
                 <button type="submit">Use the punches' ${esc(fmtHours(clocked))}</button>
-              </form>
+              </form>`}
               <form method="post" action="/shifts/${sh.id}/hours-to-punch">
                 <input type="hidden" name="_csrf" value="${csrfFor(req)}">
                 <input type="hidden" name="employee_id" value="${e.employee_id}">

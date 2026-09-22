@@ -834,6 +834,23 @@ const countShiftPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE 
  * "on the shift" compares like with like. Comparing ONE entry against work.hours
  * invented a difference for everybody who clocked out and back in.
  */
+/**
+ * How many of this person's finished punches on a shift are too long to count
+ * (over the service's long-shift limit) — the punches every total leaves out.
+ *
+ * Asked before offering "use the clock's hours": when one of these is there,
+ * the clock's figure a page would show and the figure it would actually pay are
+ * two different numbers. Stephannie's Aug 16, found the night the one-number
+ * rule went live: a 53-hour punch beside 7.82h typed, a button reading "Use the
+ * clock's 53:12" — which would have paid her 0.
+ */
+function tooLongOn(shiftId, employeeId) {
+  if (!shiftId || !employeeId) return 0;
+  const sh = db.prepare('SELECT daypart FROM shifts WHERE id = ?').get(shiftId);
+  const longMin = (Number(settingsOn(sh && sh.daypart).longShift) || 16) * 60;
+  return sumForShift.get({ shift_id: shiftId, employee_id: employeeId, long_min: longMin }).implausible || 0;
+}
+
 function clockedMinutesOn(shiftId, employeeId) {
   if (!shiftId || !employeeId) return null;
   // The clock this shift belongs to sets its own implausible-length bar. A
@@ -2205,7 +2222,7 @@ module.exports = {
   applyCorrection, assertNoEntryOverlap, assertBreakFits,
   createEntry, editEntryChecked, addBreak, startOpenBreak, punchIntegrity, splitWeeks,
   sheetCovering, frozenFor, FROZEN_SHEET,
-  syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, openEnded,
+  syncShiftHours, hasPunch, shiftHasPunches, punchesOnShift, anchorEntryFor, clockedMinutesOn, tooLongOn, openEnded,
   backfillShiftHours, gridCells, breaksInSpan, shiftOnlyHours, shiftOnlyByEmployee,
   autoCloseStale,
   autoClosedOn: (date) => autoClosedOn.all(date),
