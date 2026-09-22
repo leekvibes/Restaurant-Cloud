@@ -495,6 +495,67 @@ test('a service\u2019s own long-shift limit decides what counts, on the service 
   }
 });
 
+// Two guards, from the Sep 22 audit of what the one-number rule could do to
+// figures already on the live site. Both are cases where the typed number is
+// right BECAUSE the punch is wrong.
+
+test('deleting a junk punch never replaces the hours a manager typed', async () => {
+  // Sandra's Jul 28: 9.47h typed beside punches of 0 and 3 minutes. Deleting
+  // the 0-minute one is exactly the clean-up done for Pearl and Marina — and
+  // must not turn into paying her 3 minutes.
+  const emp = 195;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Junk Punch Case', PIN(emp));
+  const day = '2026-03-26';
+  await punch(emp, day, '23:21', '23:24');
+  const sh = shiftOn(day, 'dinner');
+  // The 0-minute one the way it happens on the floor: a double tap at the
+  // clock, in and out in the same instant. The manager's form refuses that.
+  const T = require('../src/timeclock');
+  const at = T.localInputToUtc(`${day}T23:20`);
+  const zero = { id: Number(db.prepare(`INSERT INTO time_entries (employee_id, shift_id, business_date, daypart, position,
+      clock_in_at, clock_out_at, raw_minutes, payable_minutes, status, source, created_by)
+      VALUES (?, ?, ?, 'dinner', 'server', ?, ?, 0, 0, 'complete', 'portal', 'test')`)
+    .run(emp, sh.id, day, at, at).lastInsertRowid) };
+  oldTypedRow(sh.id, emp, 9.467);
+  const res = await post(`/timeclock/${zero.id}/delete`, { reason: 'zero-minute double tap' });
+  assert.strictEqual(res.status, 302);
+  assert.ok(!db.prepare('SELECT 1 FROM time_entries WHERE id = ?').get(zero.id), 'the junk punch is gone');
+  const row = workOf(sh.id, emp);
+  assert.strictEqual(Number(row.hours), 9.467, 'and the 9.47 hours typed for her are exactly where they were');
+  assert.strictEqual(row.hours_source, 'manager');
+});
+
+test('an edit never replaces a typed number with a total missing a punch too long to count', async () => {
+  // Stephannie's Aug 16: 7.82h typed beside a 53-hour punch. The punch is left
+  // out of any total, so forcing would have paid her 0 for an edit that did not
+  // fix the clock-out.
+  const emp = 196;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Too Long Case', PIN(emp));
+  const day = '2026-03-27';
+  const e = await punch(emp, day, '06:00', '');                           // left open
+  const sh = shiftOn(day, 'dinner');
+  // Closed the way a real clock-out or the automatic close leaves it — finished,
+  // not still on the clock, or the hours writer would not look at it at all.
+  db.prepare("UPDATE time_entries SET clock_out_at = ?, status = 'complete' WHERE id = ?")
+    .run(require('../src/timeclock').localInputToUtc(`${require('../src/dates').addDays(day, 1)}T23:00`), e.id);
+  require('../src/timeclock').recompute(require('../src/timeclock').q.byId.get(e.id));   // 41 hours
+  oldTypedRow(sh.id, emp, 7.817);
+  // A manager edit that changes something other than the clock-out: a break.
+  const br = await post(`/timeclock/${e.id}/break`, { start: `${day}T12:00`, end: `${day}T12:30`, paid: '0', reason: 'lunch' });
+  assert.strictEqual(db.prepare('SELECT COUNT(*) n FROM time_breaks WHERE time_entry_id = ?').get(e.id).n, 1,
+    `the break was really added, so the edit really happened (${decodeURIComponent(br.headers.get('location') || '')})`);
+  const row = workOf(sh.id, emp);
+  assert.strictEqual(Number(row.hours), 7.817, 'the typed 7.82 stands while the punch is still too long to count');
+  assert.strictEqual(row.hours_source, 'manager');
+  // Fixing the clock-out is the edit that settles it.
+  await post(`/timeclock/${e.id}/edit`, { in: `${day}T06:00`, out: `${day}T14:30`, position: 'server', daypart: 'dinner', reason: 'real end' });
+  const after = workOf(sh.id, emp);
+  assert.strictEqual(after.hours_source, 'clock', 'once the punch is real, the punch is the hours');
+  assert.strictEqual(Number(after.hours), 8, '8.5 hours less the half-hour break');
+});
+
 // ===========================================================================
 // Things that must not be allowed to destroy the record.
 // ===========================================================================

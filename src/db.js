@@ -541,9 +541,10 @@ const w = {
   /**
    * The same write, WITHOUT the "a manager's number outranks the clock" rule.
    *
-   * Reachable only from a MANAGER acting on a punch — correcting it, moving
-   * it, adding or deleting one, changing a break, approving a request, or
-   * answering "update the service too?". Each is a deliberate statement of
+   * Reachable only from a MANAGER stating what the times were — correcting a
+   * punch, moving it, adding one, changing a break, approving a request, or
+   * answering "update the service too?" — and never over a punch too long to
+   * count, or when a punch is deleted. Each is a deliberate statement of
    * what the times were, newer than any figure typed on the service, so the
    * punch wins and the Services page, the time clock and payroll show one
    * number. A staff clock-out and the automatic close never reach this.

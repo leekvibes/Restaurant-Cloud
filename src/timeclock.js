@@ -1006,8 +1006,10 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
   // ONE NUMBER, AND THE LATEST MANAGER'S WORD IS IT.
   //
   // force uses the statement that does NOT defer to a typed figure. Every
-  // manager edit of a punch passes it — the correction form, the grid, the
-  // move button, breaks, adding or deleting a punch, approving a request —
+  // manager edit that says what the times were passes it — the correction
+  // form, the grid, the move button, breaks, adding a punch, approving a
+  // request. Deleting a punch does not (see the delete route), and neither
+  // does an edit over a punch too long to count (below) —
   // because a manager saying what the times were is the newest and most
   // specific thing anybody has said about the hours. Without it the Services
   // page kept a number typed earlier while the time clock showed the edited
@@ -1018,7 +1020,14 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
   // who punches for sixteen minutes after a shift the manager already typed
   // must not wipe the manager's figure — that is exactly what Sandra's punch
   // would have done. There the typed number stands and every page shows both.
-  const stmt = opts.force ? w.forceClockHours : w.setClockHours;
+  // EXCEPT OVER A PUNCH TOO LONG TO COUNT. That punch is left out of the total,
+  // so forcing here would replace a manager's typed figure with a sum that is
+  // missing it — found in the Sep 22 audit: Stephannie's Aug 16 was typed at
+  // 7.82h beside a 53-hour punch, and any edit to that punch that did not also
+  // fix its clock-out would have paid her 0. The typed figure stands, flagged on
+  // every page, until the punch is fixed; a row the clock already owns is
+  // unaffected, because the ordinary write takes it anyway.
+  const stmt = opts.force && !r.implausible ? w.forceClockHours : w.setClockHours;
   const info = stmt.run({
     shift_id: shiftId, employee_id: employeeId,
     role: opts.role || r.a_position || 'server', hours, by,

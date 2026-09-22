@@ -28712,7 +28712,14 @@ app.post('/timeclock/:id/delete', (req, res) => {
     tcTouchDates(empId, [day], actor, 'a manager deleted a punch');
     // The hours this punch put on the shift go with it, and so does the person,
     // when the punch was the only thing that put them there.
-    TC.syncShiftHours(shiftId, empId, actor, { force: true });
+    //
+    // NOT forced, unlike every other manager edit of a punch. Deleting says a
+    // punch was wrong, not what the hours were — and a wrong punch is often why
+    // somebody typed the hours in the first place. Sandra's Jul 28 was typed at
+    // 9.47h beside punches of 0 and 3 minutes; forcing here would have turned
+    // deleting the 0-minute one into paying her 3 minutes. A row the clock owns
+    // still follows what is left, as it always has.
+    TC.syncShiftHours(shiftId, empId, actor);
     pruneClockOnlyRow(shiftId, empId, actor);
   })();
   // Said in the restaurant's time. `was` is the log record and stays exact;
