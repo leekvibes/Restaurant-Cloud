@@ -283,30 +283,47 @@ test('a punch nobody closed for a day is left out of the hours, and the shift st
 // The override, and the way back.
 // ===========================================================================
 
-test('a typed number wins, and no later clock activity moves it', async () => {
+// ONE NUMBER. The owner, after the Sep 22 audit: "if I edit something on
+// Services and then go edit it on the time clock they should always match, and
+// then payroll should also." These replace the old contract — "a typed number
+// wins, and no later clock activity moves it" — which is exactly what let a
+// typed 7:20 sit on Services beside an 8:42 punch on the time clock.
+
+test('hours typed on Services move the punch, so the time clock says the same', async () => {
   const e = await punch(E.overridden, '2026-03-10', '09:00', '14:00');   // 5h
   const sh = shiftOn('2026-03-10', 'dinner');
   assert.strictEqual(Number(workOf(sh.id, E.overridden).hours), 5, 'the clock filled it');
 
-  await post(`/shifts/${sh.id}/server`, { employee_id: String(E.overridden), hours: '8' });
-  let row = workOf(sh.id, E.overridden);
-  assert.strictEqual(Number(row.hours), 8, 'the manager typed 8');
-  assert.strictEqual(row.hours_source, 'manager', 'and the row is theirs now');
+  const res = await post(`/shifts/${sh.id}/server`, { employee_id: String(E.overridden), hours: '8' });
+  const row = workOf(sh.id, E.overridden);
+  assert.strictEqual(Number(row.hours), 8, 'the service pays the 8 the manager typed');
+  assert.strictEqual(row.hours_source, 'clock', 'and it is still the clock\u2019s number, not a figure beside it');
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.strictEqual(after.payable_minutes, 480, 'because the punch itself is now eight hours');
+  assert.strictEqual(after.clock_in_at, e.clock_in_at, 'the clock-in untouched');
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /clock-out moved/,
+    'and the save says the clock-out moved, rather than doing it quietly');
+});
 
-  // A break would normally drop the hours. It must not touch this row.
+test('a manager editing the punch afterwards takes the service with it', async () => {
+  // The other direction. A break used to leave a typed number exactly where it
+  // was; now any manager edit on the time clock is the newest word on the hours.
+  const sh = shiftOn('2026-03-10', 'dinner');
+  const e = entriesOf(E.overridden).find((x) => x.shift_id === sh.id);
   await post(`/timeclock/${e.id}/break`, {
     start: '2026-03-10T12:00', end: '2026-03-10T12:30', paid: '0', reason: 'lunch',
   });
-  assert.strictEqual(Number(workOf(sh.id, E.overridden).hours), 8,
-    'the clock recomputed and left the typed number exactly where it was');
+  const row = workOf(sh.id, E.overridden);
+  assert.strictEqual(Number(row.hours), 7.5, 'eight hours less the unpaid half-hour, on the service too');
+  assert.strictEqual(row.hours_source, 'clock');
 });
 
-test('saving the row with the hours field blank leaves the typed number alone', async () => {
+test('saving the row with the hours field blank leaves the hours alone', async () => {
   const sh = shiftOn('2026-03-10', 'dinner');
   // A manager fixing SALES posts an empty hours input. parseHours('') is 0, so
   // before this rule that save silently zeroed the hours.
   await post(`/shifts/${sh.id}/server`, { employee_id: String(E.overridden), hours: '', food: '250' });
-  assert.strictEqual(Number(workOf(sh.id, E.overridden).hours), 8, 'still eight');
+  assert.strictEqual(Number(workOf(sh.id, E.overridden).hours), 7.5, 'still seven and a half');
 });
 
 test('a clock-owned row is not claimed by a save that never mentioned hours', async () => {
@@ -317,15 +334,165 @@ test('a clock-owned row is not claimed by a save that never mentioned hours', as
   assert.strictEqual(Number(row.hours), 8, 'and the figure is untouched');
 });
 
+/** A service row typed before this rule existed: a number beside punches that say otherwise. */
+function oldTypedRow(shiftId, empId, hours) {
+  db.prepare("UPDATE work SET hours = ?, hours_source = 'manager', hours_set_by = 'before the rule' WHERE shift_id = ? AND employee_id = ?")
+    .run(hours, shiftId, empId);
+}
+
+test('a typed number that disagrees with the clock is shown on the row, with both ways out', async () => {
+  const sh = shiftOn('2026-03-10', 'dinner');
+  oldTypedRow(sh.id, E.overridden, 9);                      // the punches say 7.5
+  const page = await text(`/shifts/${sh.id}`);
+  // Either way the hours are formatted (7:30 or 7.50) — that is a setting.
+  assert.match(page, /bs-sr-gap[^>]*>clock (7:30|7\.50?)</, 'the row itself shows the clock\u2019s figure beside the typed one');
+  assert.match(page, /Use the clock's (7:30|7\.50?)</, 'one way out: take the clock\u2019s number');
+  assert.match(page, /Keep (9:00|9\.00|9) and move the clock-out to match/, 'the other: keep the typed number, move the punch');
+});
+
+test('saving tips on that row does not move the punch just because the hours box was pre-filled', async () => {
+  const sh = shiftOn('2026-03-10', 'dinner');
+  const e = entriesOf(E.overridden).find((x) => x.shift_id === sh.id);
+  const before = db.prepare('SELECT clock_out_at FROM time_entries WHERE id = ?').get(e.id).clock_out_at;
+  // Exactly what the row posts: the typed 9 sitting in the box, and a tip.
+  await post(`/shifts/${sh.id}/server`, { employee_id: String(E.overridden), hours: '9', card_tips: '20' });
+  assert.strictEqual(db.prepare('SELECT clock_out_at FROM time_entries WHERE id = ?').get(e.id).clock_out_at, before,
+    'the same number posted back is not a decision about hours');
+});
+
 test('handing the row back puts the clock in charge again', async () => {
   const sh = shiftOn('2026-03-10', 'dinner');
-  const page = await text(`/shifts/${sh.id}`);
-  assert.match(page, /Use the clocked hours/, 'the way back is offered on the sheet');
-
   await post(`/shifts/${sh.id}/hours-reset`, { employee_id: String(E.overridden) });
   const row = workOf(sh.id, E.overridden);
   assert.strictEqual(row.hours_source, 'clock', 'the clock has it back');
-  assert.strictEqual(Number(row.hours), 4.5, 'and its own figure returned — 5h less the half-hour break');
+  assert.strictEqual(Number(row.hours), 7.5, 'and its own figure returned');
+});
+
+test('keeping the typed number moves the punch to match it', async () => {
+  const sh = shiftOn('2026-03-10', 'dinner');
+  oldTypedRow(sh.id, E.overridden, 9);
+  const res = await post(`/shifts/${sh.id}/hours-to-punch`, { employee_id: String(E.overridden) });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /Kept 9/);
+  const row = workOf(sh.id, E.overridden);
+  assert.strictEqual(Number(row.hours), 9, 'nine on the service');
+  assert.strictEqual(row.hours_source, 'clock', 'from the clock');
+  const e = entriesOf(E.overridden).find((x) => x.shift_id === sh.id);
+  assert.strictEqual(e.payable_minutes, 540, 'because the punch is nine hours now');
+});
+
+test('typing hours for somebody still clocked in is refused, and nothing moves', async () => {
+  const emp = 188;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4188',1500,1)")
+    .run(emp, 'Still On Case');
+  const day = '2026-03-11';
+  await punch(emp, day, '17:00', '');   // open
+  const sh = shiftOn(day, 'dinner');
+  const res = await post(`/shifts/${sh.id}/server`, { employee_id: String(emp), hours: '6' });
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /still clocked in/);
+  assert.ok(!(Number(workOf(sh.id, emp).hours) > 0), 'no hours were written');
+  assert.ok(!entriesOf(emp)[0].clock_out_at, 'and the punch is still open');
+  db.prepare('DELETE FROM time_entries WHERE employee_id = ?').run(emp);
+});
+
+test('the time clock, the punch page and the timesheet all say when a service pays a typed number', async () => {
+  const emp = 190;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Tagged Case', PIN(emp));
+  const per = P2.recentPeriods(3)[2];
+  const day = require('../src/dates').addDays(per.start, 3);
+  const e = await punch(emp, day, '17:00', '22:00');                       // 5h
+  const sh = shiftOn(day, 'dinner');
+  oldTypedRow(sh.id, emp, 6);
+  const tag = /tcm-tag warn[^>]*>Services (6|6\.00|6:00)</;
+  assert.match(await text(`/timeclock/dinner/today?from=${day}&to=${day}`), tag,
+    'the punch in the time clock list is tagged with what the service pays');
+  assert.match(await text(`/payroll/timesheets/${emp}?p=${per.start}`), tag, 'and so is the row on their timesheet');
+  const pp = await text(`/timeclock/${e.id}`);
+  assert.match(pp, /Use the punches' (5|5\.00|5:00)</, 'the punch page offers the punches');
+  assert.match(pp, /Keep (6|6\.00|6:00) and move the clock-out/, 'or the typed number');
+  const res = await post(`/shifts/${sh.id}/hours-reset`, { employee_id: String(emp), back: `/timeclock/${e.id}` });
+  assert.match(String(res.headers.get('location')), new RegExp(`^/timeclock/${e.id}\\?`), 'and comes back to the punch');
+  assert.strictEqual(workOf(sh.id, emp).hours_source, 'clock');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 5);
+  assert.doesNotMatch(await text(`/timeclock/dinner/today?from=${day}&to=${day}`), tag, 'settled, the tag is gone');
+});
+
+test('the correction form and the grid both carry the punch onto the service over a typed number', async () => {
+  const emp = 191;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Door Case', PIN(emp));
+  const day = '2026-03-21';
+  const e = await punch(emp, day, '17:00', '22:00');                       // 5h
+  const sh = shiftOn(day, 'dinner');
+  oldTypedRow(sh.id, emp, 8);
+  await post(`/timeclock/${e.id}/edit`, { in: `${day}T17:00`, out: `${day}T23:00`, position: 'server', daypart: 'dinner', reason: 'stayed late' });
+  let row = workOf(sh.id, emp);
+  assert.strictEqual(row.hours_source, 'clock', 'the correction form replaced the typed 8');
+  assert.strictEqual(Number(row.hours), 6, 'with the punch\u2019s six hours');
+
+  oldTypedRow(sh.id, emp, 8);
+  const r = await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ field: 'out', value: '22:30' }),
+  });
+  assert.strictEqual(r.status, 200);
+  row = workOf(sh.id, emp);
+  assert.strictEqual(row.hours_source, 'clock', 'and so does the grid');
+  assert.strictEqual(Number(row.hours), 5.5);
+});
+
+test('approving a staff request carries the punch onto the service over a typed number', async () => {
+  const emp = 192;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Request Case', PIN(emp));
+  onAllSchedules();
+  const day = '2026-03-22';
+  const e = await punch(emp, day, '17:00', '21:00');                       // 4h
+  const sh = shiftOn(day, 'dinner');
+  oldTypedRow(sh.id, emp, 7);
+  const cookie = await signIn(PIN(emp));
+  await post('/portal/clock/fix', { entry_id: String(e.id), pin: PIN(emp), kind: 'shift_times',
+    at_in: '', at_out: `${day}T22:00`, reason: 'left at ten' }, { cookie });
+  const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(e.id);
+  assert.ok(c, 'the request was filed');
+  await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  const row = workOf(sh.id, emp);
+  assert.strictEqual(row.hours_source, 'clock', 'approving it is a manager\u2019s word on the times');
+  assert.strictEqual(Number(row.hours), 5, 'so the service pays the corrected five hours, not the typed seven');
+});
+
+test('a punch too long to count is flagged on the Services row, not left looking like a blank', async () => {
+  const emp = 193;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Long Case', PIN(emp));
+  const day = '2026-03-23';
+  await post('/timeclock/new', { employee_id: String(emp), daypart: 'dinner', position: 'server',
+    in: `${day}T06:00`, out: `${require('../src/dates').addDays(day, 1)}T00:00`, reason: 'forgot to clock out' });
+  const sh = shiftOn(day, 'dinner');
+  assert.strictEqual(Number(workOf(sh.id, emp).hours), 0, 'an eighteen-hour punch counts for nothing on the service');
+  const page = await text(`/shifts/${sh.id}`);
+  assert.match(page, /bs-sr-gap[^>]*>clock (18|18\.00|18:00)</, 'but the row says the clock has eighteen hours');
+  assert.match(page, /too long to count/, 'and says why');
+});
+
+test('a service\u2019s own long-shift limit decides what counts, on the service and the punch page alike', async () => {
+  // The writer read the restaurant-wide limit while the punch page read the
+  // service's own, so with a service limit set the two disagreed about one punch.
+  const SVC = require('../src/services');
+  const was = SVC.settingsFor('dinner', {});
+  const emp = 194;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Limit Case', PIN(emp));
+  try {
+    SVC.setSettingsFor('dinner', { ...was, longShift: 10 });
+    const day = '2026-03-24';
+    const e = await punch(emp, day, '08:00', '20:00');                     // 12h, over this service's 10
+    const sh = shiftOn(day, 'dinner');
+    assert.strictEqual(Number(workOf(sh.id, emp).hours), 0, 'the service does not count it');
+    const pp = await text(`/timeclock/${e.id}`);
+    assert.doesNotMatch(pp, /Override/, 'and the punch page agrees — no difference to report');
+  } finally {
+    SVC.setSettingsFor('dinner', was);
+  }
 });
 
 // ===========================================================================
@@ -443,14 +610,15 @@ test('the POS fills in hours for somebody with no punch, and defers to everybody
   assert.strictEqual(Number(row.hours), 6, 'the POS filled the blank');
   assert.strictEqual(row.hours_source, 'pos');
 
-  // Now they punch. The clock is the restaurant's own record and outranks it.
+  // Now they punch. The clock is the restaurant's own record and outranks it —
+  // the POS reports that somebody was on the service, not when. It used to keep
+  // the row, so Services said 6 while the time clock said the punch.
   await punch(E.pos, '2026-03-12', '17:00', '23:00');
-  assert.strictEqual(workOf(sh.id, E.pos).hours_source, 'pos',
-    'the clock does not seize a row the POS already answered for');
+  row = workOf(sh.id, E.pos);
+  assert.strictEqual(row.hours_source, 'clock', 'the punch takes the row the POS had filled');
+  assert.strictEqual(Number(row.hours), 6, 'at the punch\u2019s six hours');
 
   // And a second batch cannot overwrite a person who has punched.
-  await post(`/shifts/${sh.id}/hours-reset`, { employee_id: String(E.pos) });
-  assert.strictEqual(workOf(sh.id, E.pos).hours_source, 'clock', 'handed to the clock');
   res = await send([{ name: 'Case pos', hours: '99' }]);
   assert.strictEqual(res.status, 200);
   assert.strictEqual(Number(workOf(sh.id, E.pos).hours), 6,
@@ -1782,11 +1950,15 @@ test('answering yes updates the service; answering no is simply not asking', asy
 
 test('the ordinary sync still defers to a figure a manager typed', () => {
   // The guard the force path steps around must still be there for everybody
-  // else, or it is not a guard. Only the deliberate answer overrides it.
+  // else, or it is not a guard: a staff clock-out and the automatic close go
+  // through the ordinary write, and must never replace a manager's typed number.
+  // Only a manager acting on a punch takes the force path.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'db.js'), 'utf8');
   const normal = /setClockHours: db\.prepare\(([\s\S]*?)\n  \),/.exec(src)[1];
-  assert.match(normal, /WHERE work\.hours_source IS NULL OR work\.hours_source = 'clock'/,
-    'the ordinary write still refuses to overwrite a typed figure');
+  const where = /WHERE ([^`]*)`/.exec(normal)[1];
+  assert.match(where, /hours_source IS NULL/, 'it writes a row nobody has claimed');
+  assert.match(where, /'clock'/, 'and a row the clock already owns');
+  assert.doesNotMatch(where, /manager|legacy/, 'and never one a manager typed');
   assert.match(src, /forceClockHours/, 'and the override is a separate statement');
 });
 
@@ -2473,19 +2645,52 @@ test('a clock change after the service was sent reaches pay, and the service say
   assert.doesNotMatch(await text(`/shifts/${sh.id}`), /Changed after it was sent/, 'sending again settles it');
 });
 
-test('a number typed over clocked hours is said on the service and on the timesheet', async () => {
+test('hours typed over a punch move it, so the service, the timesheet and pay say one number', async () => {
   const emp = E.corrected;
   await punch(emp, '2026-03-19', '17:00', '20:00');                       // 3h on the clock
   const sh = shiftOn('2026-03-19', 'dinner');
   await post(`/shifts/${sh.id}/server`, { employee_id: String(emp), hours: '5', wage: '15' });
-  assert.strictEqual(Number(workOf(sh.id, emp).hours), 5, 'the typed figure is what pays');
+  const row = workOf(sh.id, emp);
+  assert.strictEqual(Number(row.hours), 5, 'the service pays five');
+  assert.strictEqual(row.hours_source, 'clock', 'because the punch is five hours now');
   const page = await text(`/shifts/${sh.id}`);
-  assert.match(page, /5\.00h typed on this service, 3\.00h on the clock\. Pay uses the typed 5\.00h/,
-    'the service page says both numbers and which one pays');
+  assert.doesNotMatch(page, /typed on this service, \d+\.\d\dh on the clock/, 'nothing to explain: they agree');
   const cookie = await signIn(PIN(emp));
   const start = require('../src/periods').periodFor('2026-03-19').start;
   const ts = await text(`/portal/timesheet?p=${start}`, { cookie });
-  assert.match(ts, /Pay for this shift uses 5h 0m, set by your manager/,
+  assert.doesNotMatch(ts, /set by your manager/, 'and the timesheet they sign says the same five hours');
+  const { aggregatePayroll } = require('../src/reports');
+  const pay = aggregatePayroll('2026-03-19', '2026-03-19').rows.find((r) => r.employeeId === emp);
+  assert.strictEqual(Number(pay.hours), 5, 'and payroll pays five');
+});
+
+test('a staff clock-out never overwrites hours a manager typed, and both numbers are said', async () => {
+  // Sandra, Sep 18: her evening was typed at 7:20, and afterwards she punched
+  // in and out for sixteen minutes. Letting that punch replace the manager's
+  // figure would have paid her a quarter of an hour. So a staff punch defers,
+  // and the difference is said wherever either number appears.
+  const emp = 189;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server',?,1500,1)")
+    .run(emp, 'Typed First Case', PIN(emp));
+  onAllSchedules();
+  const T = require('../src/timeclock');
+  const day = T.businessDateOf(T.nowUtc(), T.settings().cutoffHour);
+  const made = await post('/shifts', { date: day, daypart: 'dinner' });
+  const sid = Number(String(made.headers.get('location')).match(/\/shifts\/(\d+)/)[1]);
+  await post(`/shifts/${sid}/server`, { employee_id: String(emp), hours: '7' });
+  assert.strictEqual(workOf(sid, emp).hours_source, 'manager', 'typed, with no punch yet to match');
+
+  await clockThrough(emp, 0.25);                                          // a quarter-hour punch, from the portal
+  const row = workOf(sid, emp);
+  assert.strictEqual(Number(row.hours), 7, 'the staff punch left the manager\u2019s seven hours alone');
+  assert.strictEqual(row.hours_source, 'manager');
+
+  const page = await text(`/shifts/${sid}`);
+  assert.match(page, /7\.00h typed on this service, 0\.25h on the clock/, 'the service says both numbers');
+  assert.match(page, /bs-sr-gap[^>]*>clock /, 'and the row itself shows the clock\u2019s figure');
+  const cookie = await signIn(PIN(emp));
+  const ts = await text(`/portal/timesheet?p=${require('../src/periods').periodFor(day).start}`, { cookie });
+  assert.match(ts, /Pay for this shift uses 7h 0m, set by your manager/,
     'and the timesheet they sign says pay is not the clock for that shift');
 });
 

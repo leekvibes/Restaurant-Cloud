@@ -824,7 +824,7 @@ const sumForShift = db.prepare(`
 
 // date, because syncShiftHours has to know which day it is about to write to
 // before it can ask whether that day has been signed for.
-const shiftRow = db.prepare('SELECT id, status, date FROM shifts WHERE id = ?');
+const shiftRow = db.prepare('SELECT id, status, date, daypart FROM shifts WHERE id = ?');
 const countPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ? AND employee_id = ?');
 const countShiftPunches = db.prepare('SELECT COUNT(*) n FROM time_entries WHERE shift_id = ?');
 
@@ -952,7 +952,12 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
   const sh = shiftRow.get(shiftId);
   if (!sh) return { written: false, reason: 'no_shift' };
 
-  const longMin = (Number(setting('tc_long_shift')) || 16) * 60;
+  // The SERVICE's own implausible-length bar, the same one clockedMinutesOn and
+  // the punch page use. This read the restaurant-wide setting while they read
+  // the service's, so a service with its own limit would have had the Services
+  // page count a punch the time clock called too long, or the other way round —
+  // two pages disagreeing about the same punch.
+  const longMin = (Number(settingsOn(sh.daypart).longShift) || 16) * 60;
   const r = sumForShift.get({ shift_id: shiftId, employee_id: employeeId, long_min: longMin });
   // Sum integer minutes, divide once. Rounding each entry and then adding drifts
   // — 211 + 241 minutes comes to 7.54h that way and 7.533h this way, and the
@@ -998,9 +1003,21 @@ function syncShiftHours(shiftId, employeeId, by, opts = {}) {
     return { written: gone.changes > 0, hours: 0, ...r };
   }
 
-  // force uses the statement that does NOT defer to a manager's figure. It is
-  // reachable only from a manager answering "update the service too?", which
-  // is exactly an instruction to replace that figure with the clocked hours.
+  // ONE NUMBER, AND THE LATEST MANAGER'S WORD IS IT.
+  //
+  // force uses the statement that does NOT defer to a typed figure. Every
+  // manager edit of a punch passes it — the correction form, the grid, the
+  // move button, breaks, adding or deleting a punch, approving a request —
+  // because a manager saying what the times were is the newest and most
+  // specific thing anybody has said about the hours. Without it the Services
+  // page kept a number typed earlier while the time clock showed the edited
+  // punch, and payroll paid the stale one: Sandra's Sep 18 evening read 7:20
+  // on Services and 8:42 on the clock, found in the Sep 22 audit.
+  //
+  // What never passes it: a staff clock-out and the automatic close. A person
+  // who punches for sixteen minutes after a shift the manager already typed
+  // must not wipe the manager's figure — that is exactly what Sandra's punch
+  // would have done. There the typed number stands and every page shows both.
   const stmt = opts.force ? w.forceClockHours : w.setClockHours;
   const info = stmt.run({
     shift_id: shiftId, employee_id: employeeId,

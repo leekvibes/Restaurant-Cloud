@@ -530,16 +530,23 @@ const w = {
        hours_source = 'clock',
        hours_set_by = excluded.hours_set_by,
        hours_set_at = excluded.hours_set_at
-     WHERE work.hours_source IS NULL OR work.hours_source = 'clock'`
+     WHERE work.hours_source IS NULL OR work.hours_source IN ('clock', 'pos')`
+    // 'pos' as well, since the Sep 22 one-number work: the POS reports that
+    // somebody was on the service, not when, and it already defers to anybody
+    // who punched. A figure it filled in for someone with no punch used to keep
+    // the row even after they clocked, so Services said the POS number and the
+    // time clock said the punch. The clock is the restaurant's own record; a
+    // MANAGER's typed number is the only thing it still defers to.
   ),
   /**
    * The same write, WITHOUT the "a manager's number outranks the clock" rule.
    *
-   * Reachable from exactly one place: a manager answering "the service was
-   * already sent — update it too?" after correcting a punch. That answer is a
-   * deliberate instruction to replace whatever figure is on the service with
-   * the corrected clocked hours, which is the one case where the clock should
-   * win over a typed number.
+   * Reachable only from a MANAGER acting on a punch — correcting it, moving
+   * it, adding or deleting one, changing a break, approving a request, or
+   * answering "update the service too?". Each is a deliberate statement of
+   * what the times were, newer than any figure typed on the service, so the
+   * punch wins and the Services page, the time clock and payroll show one
+   * number. A staff clock-out and the automatic close never reach this.
    *
    * A separate statement rather than a flag on the one above, so the ordinary
    * rule cannot be switched off by passing something wrong — there is simply

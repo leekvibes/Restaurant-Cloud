@@ -2364,6 +2364,21 @@ app.get('/shifts/:id', (req, res) => {
   // What each person has clocked on this shift, so the remove button can say
   // what it is about to take with them rather than springing it afterwards.
   const punchMap = TC.punchesOnShift(sh.id);
+  // WHERE THIS SHEET AND THE TIME CLOCK DISAGREE, SAID ON THE ROW ITSELF.
+  //
+  // The difference used to be written inside the row, visible only once it
+  // was opened, while the row read a plain number — so a typed 7:20 sat on
+  // this page beside an 8:42 punch and nobody could see it without clicking
+  // every name. Nothing is shown while somebody is still clocked in: the live
+  // punch has no end yet, so there is nothing to compare.
+  const rowClockGap = (p) => {
+    const pu = punchMap.get(p.employeeId);
+    if (!pu || !pu.n || pu.open) return null;
+    const clockMin = Math.round(Number(pu.minutes) || 0);
+    const sheetMin = Math.round((Number(p.hours) || 0) * 60);
+    if (Math.abs(clockMin - sheetMin) < 1) return null;
+    return { clockMin, sheetMin, typed: !!(p.hoursSource && p.hoursSource !== 'clock') };
+  };
 
   // SOMEBODY WHO IS ON THIS SHEET TWICE.
   //
@@ -2391,9 +2406,15 @@ app.get('/shifts/:id', (req, res) => {
         ${anyAlcohol ? `<span class="bs-sr-f">${isServer ? money0(toCents(p.alcohol)) : '<span class="bs-em">—</span>'}</span>` : ''}
         <span class="bs-sr-f">${money0(toCents(p.cardTips))}</span>
         <span class="bs-sr-f">${money0(toCents(p.cashTips))}</span>
-        <span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours)
-          ? `${fmtHours(p.hours)}${p.hoursSource === 'clock' ? '<i class="bs-sr-src" title="Derived from their punches">clock</i>' : ''}`
-          : 'missing'}</span>
+        ${(() => {
+          const gap = rowClockGap(p);
+          const title = gap && gap.typed
+            ? `Typed on this page. The time clock says ${fmtHours(gap.clockMin / 60)}. Open the row to use one or the other.`
+            : gap ? `The time clock says ${fmtHours(gap.clockMin / 60)} but this service counts ${fmtHours(gap.sheetMin / 60)}. Open the row to see why.` : '';
+          return `<span class="bs-sr-f${Number(p.hours) ? '' : ' miss'}">${Number(p.hours)
+            ? `${fmtHours(p.hours)}${p.hoursSource === 'clock' && !gap ? '<i class="bs-sr-src" title="Derived from their punches">clock</i>' : ''}`
+            : 'missing'}${gap ? `<i class="bs-sr-src bs-sr-gap" title="${esc(title)}">clock ${esc(fmtHours(gap.clockMin / 60))}</i>` : ''}</span>`;
+        })()}
         <span class="bs-sr-f">${p.hourlyRate ? money(toCents(p.hourlyRate)) : '<span class="bs-em">—</span>'}</span>
         ${canWrite() ? '<span class="bs-sr-e">Edit</span>' : '<span></span>'}
       </summary>
@@ -2442,12 +2463,33 @@ app.get('/shifts/:id', (req, res) => {
       </form>
       ${isServer ? '' : `<p class="bs-inline-note">Tips entered here go into the shared pool and are split
         across support by hours — they are not kept by ${esc(p.name.split(' ')[0])}.</p>`}
-      ${p.hoursSource && p.hoursSource !== 'clock' && TC.hasPunch(sh.id, p.employeeId) ? `
-      <form class="bs-hours-reset" method="post" action="/shifts/${sh.id}/hours-reset">
-        <input type="hidden" name="employee_id" value="${p.employeeId}">
-        <span>These hours were typed over the clock's.</span>
-        <button type="submit">Use the clocked hours</button>
-      </form>` : ''}
+      ${(() => {
+        const gap = rowClockGap(p);
+        if (!gap) return '';
+        const clockH = fmtHours(gap.clockMin / 60), sheetH = fmtHours(gap.sheetMin / 60);
+        // A typed number beside a punch that says otherwise: settled either
+        // way in one click, so both pages end up saying the same thing.
+        if (gap.typed) {
+          return `<div class="bs-hours-gap">
+          <span><b>${esc(sheetH)}</b> was typed here, but the time clock says <b>${esc(clockH)}</b>. Pick one and both pages will say it.</span>
+          <form method="post" action="/shifts/${sh.id}/hours-reset">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <input type="hidden" name="employee_id" value="${p.employeeId}">
+            <button type="submit">Use the clock's ${esc(clockH)}</button>
+          </form>
+          <form method="post" action="/shifts/${sh.id}/hours-to-punch">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <input type="hidden" name="employee_id" value="${p.employeeId}">
+            <button type="submit">Keep ${esc(sheetH)} and move the clock-out to match</button>
+          </form>
+        </div>`;
+        }
+        // On the clock but not counted: a punch longer than this service's
+        // long-shift limit, or a signed timesheet holding the old figure.
+        return `<p class="bs-inline-note bs-hours-gap-note">The time clock says ${esc(clockH)} but this service counts
+          ${esc(sheetH)} — usually a punch too long to count (a missed clock-out) or a signed timesheet.
+          Fix it on the <a href="/timeclock/${encodeURIComponent(sh.daypart)}/today?from=${sh.date}&amp;to=${sh.date}">time clock</a>.</p>`;
+      })()}
       ${(() => {
         const pu = punchMap.get(p.employeeId);
         const first = esc(p.name).replace(/'/g, "\\'");
@@ -2848,13 +2890,79 @@ function hoursIfGiven(body) {
  * typed by a manager, not moved — and only a real change is refused.
  */
 function hoursForSave(res, shift, empId, body) {
-  const typed = hoursIfGiven(body);
-  if (!sheetCovering(empId, shift.date).frozen) return { ok: true, hours: typed };
+  let typed = hoursIfGiven(body);
+  // THE SAME NUMBER POSTED BACK IS NOT AN EDIT.
+  //
+  // A typed figure pre-fills the Hours box, so saving somebody's tips posts
+  // their hours straight back. That was harmless while a typed number only
+  // ever sat on the service; now a typed number moves the punch to match
+  // (alignPunchesTo), and treating an unchanged box as an instruction would
+  // shift a clock-out every time somebody fixed a card tip.
   const had = db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(shift.id, empId);
-  const changes = typed != null && Math.abs((had ? Number(had.hours) || 0 : 0) - typed) >= 0.5 / 60;
-  if (changes && tcFrozen(res, empId, shift.date, `/shifts/${shift.id}`)) return { ok: false };
+  if (typed != null && had && Math.abs((Number(had.hours) || 0) - typed) < 0.5 / 60) typed = null;
+  if (!sheetCovering(empId, shift.date).frozen) return { ok: true, hours: typed };
+  if (typed != null && tcFrozen(res, empId, shift.date, `/shifts/${shift.id}`)) return { ok: false };
   return { ok: true, hours: null };
 }
+
+/**
+ * Hours typed on the Services page, for somebody who has punches on that
+ * service, move their punch so the time clock says the same thing.
+ *
+ * The owner, after the Sep 22 audit: "if I edit something on Services and then
+ * go edit it on the time clock they should always match, and then payroll
+ * should also." A typed number used to sit on the service beside a punch that
+ * said something else — Services and payroll read one, the time clock and the
+ * timesheet the other. Now there is one number: the punch changes to match,
+ * and the row stays on the clock.
+ *
+ * The LAST punch's clock-out moves by the difference, keeping every clock-in.
+ * A forgotten clock-out is the usual reason a typed number disagrees with the
+ * clock, and that is exactly the time this corrects. Refused, in a sentence,
+ * when somebody is still clocked in (their end has not happened) or when the
+ * new end would not fit — before the clock-in, across another punch, or cutting
+ * a break off. Nothing is written in those cases.
+ *
+ * Returns { ok: true, moved } or { ok: false, refuse }. Somebody with no punch
+ * on the service returns { ok: true, none: true }, and the caller keeps the
+ * typed number, because there is nothing to match it to.
+ */
+function alignPunchesTo(sh, empId, hours, actor, role) {
+  const punches = db.prepare(`SELECT * FROM time_entries WHERE shift_id = ? AND employee_id = ?
+    ORDER BY clock_in_at`).all(sh.id, empId);
+  if (!punches.length) return { ok: true, none: true };
+  const name = tcEmpName(empId);
+  if (punches.some((p) => !p.clock_out_at)) {
+    return { ok: false, refuse: `${name} is still clocked in on this service, so there is no clock-out to set yet. `
+      + 'Clock them out first, or change the punch on the time clock.' };
+  }
+  const target = Math.round(hours * 60);
+  const total = punches.reduce((a, p) => a + (p.payable_minutes || 0), 0);
+  const last = punches[punches.length - 1];
+  const delta = target - total;
+  if (delta !== 0) {
+    const newOut = new Date(TC.toDate(last.clock_out_at).getTime() + delta * 60000)
+      .toISOString().slice(0, 19).replace('T', ' ');
+    if (newOut <= last.clock_in_at) {
+      return { ok: false, refuse: `${fmtHours(hours)} is less than ${name}'s other punches on this service add up to. `
+        + 'Change the punches on the time clock instead.' };
+    }
+    // Through the shared door: overlap with their other punches, and breaks
+    // that would no longer sit inside the shift, are refused there.
+    TC.editEntryChecked(last, { in: last.clock_in_at, out: newOut, daypart: last.daypart, position: last.position, by: actor });
+    TC.recompute(TC.q.byId.get(last.id));
+    TC.logEvent('entry', last.id, 'clock_out_corrected', actor, {
+      before: TC.clockFace(last.clock_out_at), after: TC.clockFace(newOut),
+      reason: `set from the Services page: ${fmtHours(hours)} typed`,
+    });
+    tcTouchTimesheet(last.id, actor, 'hours typed on the Services page moved the clock-out', []);
+  }
+  TC.syncShiftHours(sh.id, empId, actor, { role, force: true });
+  return { ok: true, moved: delta !== 0 ? { id: last.id, from: last.clock_out_at, to: TC.q.byId.get(last.id).clock_out_at } : null };
+}
+
+/** The line added to a save's message when typed hours moved a punch. */
+const movedLine = (m) => (m ? ` The clock-out moved from ${TC.clockFace(m.from)} to ${TC.clockFace(m.to)}, so the time clock says the same.` : '');
 
 /**
  * What a save actually wrote, said back on the page.
@@ -2943,19 +3051,37 @@ app.post('/shifts/:id/server', (req, res) => {
   const asked = String(req.body.role || '').trim();
   const role = positions.bySlug.get(asked) ? asked
     : (had && ['server', 'bartender', 'barista'].includes(had.role) ? had.role : 'server');
-  w.upsertWork.run({
-    shift_id: sh.id, employee_id: empId, role,
-    hours: hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
-  });
-  w.upsertSales.run({
-    shift_id: sh.id, employee_id: empId,
-    food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee),
-    alcohol_cents: toCents(req.body.alcohol),
-  });
-  writeTipsIfGiven(sh.id, empId, req.body);
-  logManagerEdit(sh.id, empId, role, req.body);
+  // Hours typed for somebody with punches here move the punch instead of sitting
+  // beside it (alignPunchesTo), and the row stays on the clock — so the typed
+  // figure is not written over the clocked one afterwards. All or nothing.
+  let al = null;
+  try {
+    db.transaction(() => {
+      if (hrs.hours != null) {
+        al = alignPunchesTo(sh, empId, hrs.hours, tcActor(req), role);
+        if (!al.ok) throw new TC.ClockError(al.refuse);
+      }
+      w.upsertWork.run({
+        shift_id: sh.id, employee_id: empId, role,
+        hours: al && !al.none ? null : hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
+      });
+      w.upsertSales.run({
+        shift_id: sh.id, employee_id: empId,
+        food_cents: toCents(req.body.food), coffee_cents: toCents(req.body.coffee),
+        alcohol_cents: toCents(req.body.alcohol),
+      });
+      writeTipsIfGiven(sh.id, empId, req.body);
+      logManagerEdit(sh.id, empId, role, req.body);
+    })();
+  } catch (err) {
+    if (err instanceof TC.ClockError) {
+      return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent(err.message) + `#edit-${empId}`);
+    }
+    throw err;
+  }
   const moved = had && had.role !== role ? { from: posName(had.role), to: posName(role) } : null;
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(savedLine(posName(role), req.body, hrs.hours, moved)) + `#edit-${empId}`);
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(savedLine(posName(role), req.body, hrs.hours, moved)
+    + movedLine(al && al.moved)) + `#edit-${empId}`);
 });
 
 app.post('/shifts/:id/support', (req, res) => {
@@ -2965,16 +3091,32 @@ app.post('/shifts/:id/support', (req, res) => {
   const hrs = hoursForSave(res, sh, empId, req.body);
   if (!hrs.ok) return;
   const was = db.prepare('SELECT role FROM work WHERE shift_id = ? AND employee_id = ?').get(sh.id, empId);
-  w.upsertWork.run({
-    shift_id: sh.id, employee_id: empId, role: req.body.role,
-    hours: hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
-  });
-  writeTipsIfGiven(sh.id, empId, req.body);
-  logManagerEdit(sh.id, empId, req.body.role, req.body);
+  // The same one-number rule as the server row: typed hours move the punch.
+  let al = null;
+  try {
+    db.transaction(() => {
+      if (hrs.hours != null) {
+        al = alignPunchesTo(sh, empId, hrs.hours, tcActor(req), req.body.role);
+        if (!al.ok) throw new TC.ClockError(al.refuse);
+      }
+      w.upsertWork.run({
+        shift_id: sh.id, employee_id: empId, role: req.body.role,
+        hours: al && !al.none ? null : hrs.hours, hourly_rate_cents: toCents(req.body.wage), by: tcActor(req),
+      });
+      writeTipsIfGiven(sh.id, empId, req.body);
+      logManagerEdit(sh.id, empId, req.body.role, req.body);
+    })();
+  } catch (err) {
+    if (err instanceof TC.ClockError) {
+      return res.redirect(`/shifts/${sh.id}?err=1&msg=` + encodeURIComponent(err.message) + `#edit-${empId}`);
+    }
+    throw err;
+  }
   const moved = was && req.body.role && was.role !== req.body.role
     ? { from: posName(was.role), to: posName(req.body.role) } : null;
   res.redirect(`/shifts/${sh.id}?msg=`
-    + encodeURIComponent(savedLine(posName(req.body.role) || 'Support', req.body, hrs.hours, moved)) + `#edit-${empId}`);
+    + encodeURIComponent(savedLine(posName(req.body.role) || 'Support', req.body, hrs.hours, moved)
+      + movedLine(al && al.moved)) + `#edit-${empId}`);
 });
 
 /**
@@ -3055,9 +3197,42 @@ app.post('/shifts/:id/hours-reset', (req, res) => {
   const actor = tcActor(req);
   db.transaction(() => {
     w.releaseHours.run({ shift_id: shiftId, employee_id: empId });
-    TC.syncShiftHours(shiftId, empId, actor);
+    TC.syncShiftHours(shiftId, empId, actor, { force: true });
   })();
-  res.redirect(`/shifts/${shiftId}?msg=` + encodeURIComponent('Back to the hours from the clock.') + `#edit-${empId}`);
+  // Back to the punch page when it was pressed there, otherwise the service.
+  const back = /^\/timeclock\/\d+$/.test(String(req.body.back || '')) ? req.body.back : null;
+  res.redirect(back ? punchBack(req, back, 'Back to the hours from the clock — the service now shows the punch.')
+    : `/shifts/${shiftId}?msg=` + encodeURIComponent('Back to the hours from the clock.') + `#edit-${empId}`);
+});
+
+// The other way out of a typed number that disagrees with the clock: keep the
+// number and move the punch to match it (alignPunchesTo), so the time clock,
+// the timesheet and payroll all say the typed figure. The same refusals as
+// typing it fresh — still clocked in, or a clock-out that would not fit.
+app.post('/shifts/:id/hours-to-punch', (req, res) => {
+  const shiftId = Number(req.params.id);
+  const empId = Number(req.body.employee_id);
+  const shRow = s.shiftById.get(shiftId);
+  if (!shRow) return res.status(404).end();
+  if (tcFrozen(res, empId, shRow.date, `/shifts/${shiftId}`)) return;
+  const row = db.prepare('SELECT role, hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?').get(shiftId, empId);
+  const back = /^\/timeclock\/\d+$/.test(String(req.body.back || '')) ? req.body.back : null;
+  const done = (msg, err) => res.redirect(back
+    ? punchBack(req, back, msg) + (err ? '&err=1' : '')
+    : `/shifts/${shiftId}?msg=` + encodeURIComponent(msg) + (err ? '&err=1' : '') + `#edit-${empId}`);
+  if (!row || !(Number(row.hours) > 0)) return done('There are no hours on this service to match.', true);
+  let al = null;
+  try {
+    db.transaction(() => {
+      al = alignPunchesTo(shRow, empId, Number(row.hours), tcActor(req), row.role);
+      if (!al.ok) throw new TC.ClockError(al.refuse);
+    })();
+  } catch (err) {
+    if (err instanceof TC.ClockError) return done(err.message, true);
+    throw err;
+  }
+  if (al.none) return done('There is no punch on this service to move.', true);
+  done(`Kept ${fmtHours(Number(row.hours))}.${movedLine(al.moved)}`);
 });
 
 app.post('/shifts/:id/pool', (req, res) => {
@@ -25826,8 +26001,30 @@ function clockToday(req, res, tcSvc) {
     </div>`;
   };
 
+  // A SERVICE PAYING A TYPED NUMBER THE PUNCHES DISAGREE WITH, tagged on the
+  // punch itself. Any manager edit settles it now; what can still leave one is a
+  // staff clock-out or the automatic close after somebody typed hours, and this
+  // list is where a manager looks for punches — so it says so here.
+  const typedGap = new Map();
+  {
+    const workQ = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?');
+    const onShift = new Map();
+    for (const e of rows) {
+      if (!e.shift_id) continue;
+      const k = `${e.shift_id}|${e.employee_id}`;
+      if (typedGap.has(k)) continue;
+      const wr = workQ.get(e.shift_id, e.employee_id);
+      if (!wr || wr.hours_source !== 'manager') { typedGap.set(k, null); continue; }
+      if (!onShift.has(e.shift_id)) onShift.set(e.shift_id, TC.punchesOnShift(e.shift_id));
+      const pu = onShift.get(e.shift_id).get(e.employee_id);
+      const clockMin = pu && !pu.open ? Math.round(Number(pu.minutes) || 0) : null;
+      const paidMin = Math.round((Number(wr.hours) || 0) * 60);
+      typedGap.set(k, clockMin != null && Math.abs(clockMin - paidMin) >= 1 ? { paidMin, clockMin } : null);
+    }
+  }
   const row = (e) => {
     const bt = TC.breaksOn(e);
+    const gap = e.shift_id ? typedGap.get(`${e.shift_id}|${e.employee_id}`) : null;
     return `<a class="bs-lr tcm-row" href="/timeclock/${e.id}">
       <span class="tcm-when"><b>${esc(TC.dayLabel(e.business_date).replace(/^\w+, /, ''))}</b>
         <i>${e.daypart ? esc(dp(e.daypart)) : '—'}</i></span>
@@ -25836,7 +26033,8 @@ function clockToday(req, res, tcSvc) {
         ${bt.unpaid || bt.paid ? `<i>${TC.hm(bt.unpaid + bt.paid)} break</i>` : ''}</span>
       <span class="tcm-hrs">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</span>
       <span class="tcm-tags">${TC.isOpen(e) ? '<i class="tcm-tag on">on</i>' : ''}${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}
-        ${e.status === 'correction_pending' ? '<i class="tcm-tag warn">fix asked</i>' : ''}</span>
+        ${e.status === 'correction_pending' ? '<i class="tcm-tag warn">fix asked</i>' : ''}${gap
+          ? `<i class="tcm-tag warn" title="${esc(`The service pays ${fmtHours(gap.paidMin / 60)}, typed by hand; the punches say ${fmtHours(gap.clockMin / 60)}. Open the punch to settle it.`)}">Services ${esc(fmtHours(gap.paidMin / 60))}</i>` : ''}</span>
       <span class="bs-lr-go">›</span>
     </a>`;
   };
@@ -26606,8 +26804,12 @@ app.get('/timeclock/new', (req, res) => {
         <label class="tcm-f"><span>Started</span><input type="time" name="in_time" required></label>
         <label class="tcm-f"><span>Finished <i>blank leaves them on the clock · earlier than the start means after midnight</i></span>
           <input type="time" name="out_time"></label>
-        ${typed ? `<label class="tcm-f wide tcm-check"><input type="checkbox" name="use_punch" value="1" checked>
-          <span>Make these times their hours on ${esc(dp(pre.svc))} — replacing the ${esc(fmtHours(typed))} typed on the service by hand</span></label>` : ''}
+        ${/* Said, not asked. A punch a manager adds IS the hours from now on —
+             the same rule as every other edit on the time clock — so the one
+             thing worth knowing is what it replaces. */''}
+        ${typed ? `<p class="tcm-f wide tcm-note">Their hours on ${esc(dp(pre.svc))} are ${esc(fmtHours(typed))},
+          typed on the Services page. This punch replaces that number, so Services, the time clock and payroll
+          all show the punch.</p>` : ''}
         <label class="tcm-f wide"><span>Reason <i>required</i></span>
           <input name="reason" required maxlength="300" placeholder="e.g. Forgot to clock in — confirmed start time with the closing manager."></label>
         <button class="bs-btn" type="submit">Add the punch</button>
@@ -26657,12 +26859,6 @@ app.post('/timeclock/new', (req, res) => {
   // no entry yet. Adding five hours next to the eight on a signed sheet moves
   // the total just as surely as editing the eight.
   if (tcFrozen(res, emp.id, bdate, again)) return;
-  // Asked on the form, and only offered when somebody had typed hours for this
-  // person on this service: whether the times being added now replace them.
-  // Without it the typed figure would quietly stay the pay while the clock
-  // showed something else — the clock never overrides a manager's number on
-  // its own, so this is the manager saying so.
-  const usePunch = req.body.use_punch === '1';
   const actor = tcActor(req);
   let id;
   try {
@@ -26678,9 +26874,9 @@ app.post('/timeclock/new', (req, res) => {
       TC.logEvent('entry', id, 'manager_added', actor, { after: `${inAt} → ${outAt || 'open'}`, reason });
       // A new punch changes the period's total just as surely as moving one.
       tcTouchDates(emp.id, [bdate], actor, 'a manager added a punch');
-      // force only on the manager's say-so, from the box on the form — the one
-      // way the clocked hours replace a figure somebody typed on the service.
-      TC.syncShiftHours(sh.id, emp.id, actor, { role: position, force: usePunch });
+      // A manager adding a punch is saying what the times were: the punch is
+      // the hours, replacing anything typed on the service (see syncShiftHours).
+      TC.syncShiftHours(sh.id, emp.id, actor, { role: position, force: true });
     })();
   } catch (e) {
     if (e instanceof TC.ClockError) return refuse(e.message);
@@ -26822,7 +27018,7 @@ function decideCorrection(c, decision, actor, note) {
             source: 'employee', created_by: actor,
           });
           tcTouchDates(pay.employee_id, [bdate], actor, 'an approved request added a shift');
-          TC.syncShiftHours(sh.id, pay.employee_id, actor, { role: pay.position });
+          TC.syncShiftHours(sh.id, pay.employee_id, actor, { role: pay.position, force: true });
           return id;
         },
       });
@@ -26842,9 +27038,9 @@ function decideCorrection(c, decision, actor, note) {
       // employee is not paid for. Both ends again — see the edit route.
       const moved = TC.q.byId.get(entryId());
       if (moved) {
-        TC.syncShiftHours(moved.shift_id, moved.employee_id, actor, { role: moved.position });
+        TC.syncShiftHours(moved.shift_id, moved.employee_id, actor, { role: moved.position, force: true });
         if (wasShiftId && wasShiftId !== moved.shift_id) {
-          TC.syncShiftHours(wasShiftId, moved.employee_id, actor);
+          TC.syncShiftHours(wasShiftId, moved.employee_id, actor, { force: true });
         }
       }
       settle();
@@ -27744,8 +27940,29 @@ app.get('/timeclock/:id', (req, res) => {
             <p class="perf-foot">${hoursSource === 'clock'
               ? 'The clock sets the hours on this shift. Type a number on the shift sheet to override it — if you have, the size of that override shows above.'
               : hoursSource
-                ? `These hours were set by hand${workRow && workRow.hours_set_by ? ` (${esc(workRow.hours_set_by)})` : ''} and the clock leaves them alone. The shift sheet has a link to hand them back.`
+                ? `These hours were set by hand${workRow && workRow.hours_set_by ? ` (${esc(workRow.hours_set_by)})` : ''}. A staff clock-out never overwrites them; editing a punch here does.`
                 : 'Nothing is on the shift yet. Hours land here when this punch is closed.'}</p>
+            ${/* BOTH WAYS OUT, HERE AS WELL AS ON THE SERVICE. A typed number that
+                 disagrees with the punches can only survive a staff clock-out or
+                 the automatic close now — any manager edit settles it — but when
+                 it does, this page used to say "the shift sheet has a link" and
+                 send the manager to find it. The buttons come back here. */''}
+            ${w2 && sh && hoursSource === 'manager' && variance != null && Math.abs(variance) >= 0.01 && e.clock_out_at ? `
+            <div class="bs-hours-gap tcm-hours-gap">
+              <span>Services pays <b>${esc(fmtHours(entered))}</b>, typed by hand; the punches say <b>${esc(fmtHours(clocked))}</b>.</span>
+              <form method="post" action="/shifts/${sh.id}/hours-reset">
+                <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                <input type="hidden" name="employee_id" value="${e.employee_id}">
+                <input type="hidden" name="back" value="/timeclock/${e.id}">
+                <button type="submit">Use the punches' ${esc(fmtHours(clocked))}</button>
+              </form>
+              <form method="post" action="/shifts/${sh.id}/hours-to-punch">
+                <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+                <input type="hidden" name="employee_id" value="${e.employee_id}">
+                <input type="hidden" name="back" value="/timeclock/${e.id}">
+                <button type="submit">Keep ${esc(fmtHours(entered))} and move the clock-out</button>
+              </form>
+            </div>` : ''}
           </section>
 
           <section class="bs-panel inc-sec">
@@ -27911,9 +28128,9 @@ app.post('/timeclock/:id/edit', (req, res) => {
     // punch just left still holding its hours, and the same eight hours get
     // paid twice — payroll adds up every shift in the period.
     const moved = TC.q.byId.get(e.id);
-    TC.syncShiftHours(moved.shift_id, e.employee_id, actor, { role: position });
+    TC.syncShiftHours(moved.shift_id, e.employee_id, actor, { role: position, force: true });
     if (wasShiftId && wasShiftId !== moved.shift_id) {
-      TC.syncShiftHours(wasShiftId, e.employee_id, actor);
+      TC.syncShiftHours(wasShiftId, e.employee_id, actor, { force: true });
       // Moved off that service entirely: off it as a person too, not left at 0h.
       pruneClockOnlyRow(wasShiftId, e.employee_id, actor);
     }
@@ -27964,9 +28181,9 @@ app.post('/timeclock/:id/service', (req, res) => {
         { before: e.daypart || 'none', after: to, reason: 'moved to the service it was worked on, from the time clock' });
       const fresh = TC.q.byId.get(e.id);
       tcTouchTimesheet(e.id, actor, 'a manager moved the punch to another service', [e.business_date]);
-      TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
+      TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position, force: true });
       if (e.shift_id && e.shift_id !== fresh.shift_id) {
-        TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+        TC.syncShiftHours(e.shift_id, e.employee_id, actor, { force: true });
         pruneClockOnlyRow(e.shift_id, e.employee_id, actor);
       }
     })();
@@ -28164,9 +28381,9 @@ app.post('/timeclock/:id/cell', express.json(), (req, res) => {
       TC.q.setStatus.run({ id: e.id, status: 'complete', by: actor });
     }
     tcTouchTimesheet(e.id, actor, `a manager corrected the ${summary}`, [e.business_date]);
-    const sync = TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
+    const sync = TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position, force: true });
     if (e.shift_id && e.shift_id !== fresh.shift_id) {
-      TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+      TC.syncShiftHours(e.shift_id, e.employee_id, actor, { force: true });
       // Off that service as a person too, not left on it at 0h — the same
       // tidy-up the drawer does when a punch moves day or service.
       pruneClockOnlyRow(e.shift_id, e.employee_id, actor);
@@ -28314,7 +28531,7 @@ app.post('/timeclock/day-cell', express.json(), (req, res) => {
         { after: `${TC.clockFace(inAt)} → ${outAt ? TC.clockFace(outAt) : 'no clock-out yet'}`,
           reason: carried ? `times put on ${TC.hm(carried)} already recorded for this day` : null });
       tcTouchDates(emp.id, [date], actor, 'a manager put times on this day');
-      TC.syncShiftHours(sh.id, emp.id, actor, { role: position });
+      TC.syncShiftHours(sh.id, emp.id, actor, { role: position, force: true });
     })();
     return res.json({ ok: true, id });
   } catch (err) {
@@ -28344,7 +28561,7 @@ app.post('/timeclock/:id/break', (req, res) => {
     tcTouchTimesheet(e.id, actor, 'a manager added a break');
     // An unpaid break comes straight off the payable minutes, so it comes off
     // the shift's hours too.
-    TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+    TC.syncShiftHours(e.shift_id, e.employee_id, actor, { force: true });
   })();
   } catch (err) {
     if (err instanceof TC.ClockError) {
@@ -28370,7 +28587,7 @@ app.post('/timeclock/break/:bid/delete', (req, res) => {
     // Removing the break somebody was on leaves them working, not stranded.
     if (e && e.status === 'on_break') TC.q.setStatus.run({ id: e.id, status: 'active', by: actor });
     tcTouchTimesheet(b.time_entry_id, actor, 'a manager removed a break');
-    if (e) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+    if (e) TC.syncShiftHours(e.shift_id, e.employee_id, actor, { force: true });
   })();
   res.redirect(punchBack(req, `/timeclock/${b.time_entry_id}`, 'Break removed.', `#e-${b.time_entry_id}`));
 });
@@ -28495,7 +28712,7 @@ app.post('/timeclock/:id/delete', (req, res) => {
     tcTouchDates(empId, [day], actor, 'a manager deleted a punch');
     // The hours this punch put on the shift go with it, and so does the person,
     // when the punch was the only thing that put them there.
-    TC.syncShiftHours(shiftId, empId, actor);
+    TC.syncShiftHours(shiftId, empId, actor, { force: true });
     pruneClockOnlyRow(shiftId, empId, actor);
   })();
   // Said in the restaurant's time. `was` is the log record and stays exact;
@@ -29856,6 +30073,22 @@ function clockTimesheetDetail(req, res, dSvc) {
                 else groups.push({ index: wi, dates: [iso] });
               }
 
+              // A service paying a typed number these punches disagree with —
+              // the one way this timesheet (built from punches) and payroll
+              // (built from the service) can still say different things. Said
+              // on the punch, like everywhere else.
+              const tsGap = new Map();
+              {
+                const workQ = db.prepare('SELECT hours, hours_source FROM work WHERE shift_id = ? AND employee_id = ?');
+                for (const e of v.entries) {
+                  if (!e.shift_id || tsGap.has(e.shift_id)) continue;
+                  const wr = workQ.get(e.shift_id, emp.id);
+                  const pu = wr && wr.hours_source === 'manager' ? TC.punchesOnShift(e.shift_id).get(emp.id) : null;
+                  const clockMin = pu && !pu.open ? Math.round(Number(pu.minutes) || 0) : null;
+                  const paidMin = wr ? Math.round((Number(wr.hours) || 0) * 60) : 0;
+                  tsGap.set(e.shift_id, clockMin != null && Math.abs(clockMin - paidMin) >= 1 ? { paidMin, clockMin } : null);
+                }
+              }
               const punchRows = (d) => d.entries.map((e) => {
                 const brks = TC.q.breaks.all(e.id);
                 const bt = TC.breaksOn(e);
@@ -29899,7 +30132,8 @@ function clockTimesheetDetail(req, res, dSvc) {
                   <b class="tsg-t">${e.payable_minutes != null ? esc(TC.hm(e.payable_minutes)) : '—'}</b>
                   <span class="tsg-reg">${esc(TC.hm(d.regular))}</span>
                   <span class="tsg-ot">${d.overtime ? esc(TC.hm(d.overtime)) : '—'}</span>
-                  <span class="tsg-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? '<i class="tcm-tag warn">asked</i>' : ''}</span>
+                  <span class="tsg-f">${e.edited ? '<i class="tcm-tag ed">edited</i>' : ''}${corr ? '<i class="tcm-tag warn">asked</i>' : ''}${
+                    tsGap.get(e.shift_id) ? `<i class="tcm-tag warn" title="${esc(`The service pays ${fmtHours(tsGap.get(e.shift_id).paidMin / 60)}, typed by hand; these punches say ${fmtHours(tsGap.get(e.shift_id).clockMin / 60)}. Open the punch to settle it.`)}">Services ${esc(fmtHours(tsGap.get(e.shift_id).paidMin / 60))}</i>` : ''}</span>
                 </div>
                 ${brks.length ? `<div class="tsg-brks" data-brks="${e.id}" hidden>
                   ${brks.map((b) => `<div class="tsg-br">

@@ -280,16 +280,16 @@ test('somebody on the Evening sheet with no punch is on the Evening clock, with 
   assert.strictEqual(u.searchParams.get('date'), day);
 });
 
-test('adding their times from there lands on Evening, and can replace the hours typed by hand', async () => {
+test('adding their times from there lands on Evening, and the punch replaces the hours typed by hand', async () => {
   const day = '2026-09-16';
   const form = await page(`/timeclock/new?emp=${HELP.typed}&svc=evening-service&date=${day}&pos=server`);
   const sel = form.match(/<select name="daypart"[\s\S]*?<\/select>/)[0];
   assert.strictEqual(submitted(sel).value, 'evening-service', 'the form opens on Evening Service');
-  assert.match(form, /name="use_punch" value="1" checked/, 'and offers to make the times their hours');
-  assert.match(form, /6\.62|6:37|6h 37/, 'naming the typed figure it would replace');
+  assert.match(form, /This punch replaces that number/, 'and says the punch will replace the typed hours');
+  assert.match(form, /6\.62|6:37|6h 37/, 'naming the figure it replaces');
 
   const res = await post('/timeclock/new', { employee_id: String(HELP.typed), daypart: 'evening-service',
-    position: 'server', date: day, in_time: '16:30', out_time: '23:07', use_punch: '1', reason: 'forgot to clock in' });
+    position: 'server', date: day, in_time: '16:30', out_time: '23:07', reason: 'forgot to clock in' });
   assert.strictEqual(res.status, 302);
   const e = db.prepare('SELECT * FROM time_entries WHERE employee_id = ?').get(HELP.typed);
   assert.ok(e, 'the punch was made');
