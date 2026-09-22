@@ -495,6 +495,29 @@ function minutesBetween(a, b) {
   return Math.max(0, Math.round((B - A) / 60000));
 }
 /**
+ * Moving ONE end of a punch should not take two saves.
+ *
+ * A punch that reads 12:00am-2:00am is nearly always somebody's noon-to-two
+ * typed with the wrong half of the day on it. The manager fixes the start, and
+ * the old answer was "the clock-out has to be after the clock-in" — a refusal
+ * aimed at a correction that was simply half finished. Nothing was wrong with
+ * what they typed; the second half had not happened yet. They had to go back
+ * and retype both ends, which is what got reported as the punch edit "erroring".
+ *
+ * So when the start moves past a clock-out nobody touched, the clock-out
+ * travels exactly as far. The LENGTH of the punch — the part that is money —
+ * comes out unchanged, and the caller says on screen that the end moved too.
+ *
+ * A clock-out the manager typed THEMSELVES is an assertion about when that
+ * person left, and is never quietly moved; callers refuse that case by name.
+ */
+function carryClockOut(wasIn, inAt, outAt) {
+  if (!outAt || !wasIn || !inAt || outAt > inAt) return outAt;
+  const by = toDate(inAt) - toDate(wasIn);
+  if (by <= 0) return outAt;
+  return new Date(toDate(outAt).getTime() + by).toISOString().slice(0, 19).replace('T', ' ');
+}
+/**
  * The trading day a moment belongs to. Local time, with an early-morning
  * cutoff so a shift that runs past midnight stays on the day it started.
  */
@@ -2147,7 +2170,7 @@ const autoClosedFor = db.prepare(`SELECT * FROM time_entries
 module.exports = {
   sheetFor, issuesFor, totalsFor, byDay, sheetStatus, SHEET_LABEL, alerts, setting,
   fingerprintOf, approvalBlockers, approvalBlockersSplit, approvalStale, transferStateOf, TRANSFER_LABEL,
-  q, settings, settingsOn, saveSettings, nowUtc, toDate, minutesBetween, businessDateOf, suggestDaypart,
+  q, settings, settingsOn, saveSettings, nowUtc, toDate, minutesBetween, carryClockOut, businessDateOf, suggestDaypart,
   zone, zoneFor,
   clockFace, stamp, dayLabel, hm, toHours, breakTotals, breaksOn, recompute, elapsedMinutes,
   payableSoFar, logEvent,

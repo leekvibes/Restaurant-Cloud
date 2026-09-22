@@ -199,16 +199,39 @@ test('a server is asked for sales, a barista is not', async () => {
   const both = await tipForm(await signIn('1111'));
   assert.ok(!both.includes('id="st-food"'), 'somebody with a choice to make is asked for neither');
 });
+/**
+ * One shift worked and not reported, reached by id.
+ *
+ * A PUNCH, not a work row: a work row says which job somebody did, and the form
+ * then fills that job in — the opposite of what the test below is about. Dated
+ * well back, so it never becomes the newest month and moves what the Services
+ * list opens on.
+ */
+let __waiting = 0;
+const oneWaiting = (name) => {
+  const date = `2019-02-${String(++__waiting).padStart(2, '0')}`;
+  db.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?, 'dinner', 'open')").run(date);
+  const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'dinner'").get(date).id;
+  const id = db.prepare('SELECT id FROM employees WHERE name = ?').get(name).id;
+  db.prepare(`INSERT INTO time_entries (employee_id, shift_id, business_date, position,
+                clock_in_at, clock_out_at, status, source)
+              VALUES (?, ?, ?, 'server', datetime('now','-8 hours'), datetime('now','-2 hours'), 'complete', 'portal')`)
+    .run(id, sh, date);
+  return sh;
+};
+
 test('one job goes straight through, two get a choice', async () => {
   // Nobody should have to answer "what did you work" when there is only one
   // answer, and nobody with two jobs should have it guessed for them — how
   // they are paid hangs on it.
-  const one = await tipForm(await signIn('3333'));
+  const shAna = oneWaiting('Ana Ortiz');
+  const shBella = oneWaiting('Bella Reyes');
+  const one = await asStaff(`/portal/tips?shift=${shAna}`, await signIn('3333')).then((r) => r.text());
   assert.match(one, /<input type="hidden" name="position" value="barista">/,
     'a barista is simply a barista');
   assert.ok(!/<select id="st-pos"/.test(one), 'and is asked nothing');
 
-  const both = await tipForm(await signIn('1111'));
+  const both = await asStaff(`/portal/tips?shift=${shBella}`, await signIn('1111')).then((r) => r.text());
   assert.match(both, /<select id="st-pos" name="position"/, 'two jobs, so she picks');
   for (const r of ['server', 'barista']) {
     assert.match(both, new RegExp(`<option value="${r}"`), `${r} is on the menu`);

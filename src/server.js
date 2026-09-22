@@ -1507,6 +1507,11 @@ function fmtHours(h, fmt) {
   return `${H}:${String(M).padStart(2, '0')}`;
 }
 const hoursPlaceholder = () => (hoursFmt() === 'hms' ? '0:00' : '0.00');
+// Hours as a label beside a job — "Bartender · 5:16" or "Bartender · 5.27h".
+// The review page printed the stored float instead, "5.266666666666667h", and
+// that one unbreakable line was wider than the card it sat in: every figure
+// below it was pushed under the next card.
+const hrsLabel = (h) => (hoursFmt() === 'hms' ? fmtHours(h) : `${fmtHours(h)}h`);
 
 // ---------------------------------------------------------------------------
 // Shifts — list of all shifts + "log a shift"
@@ -2603,6 +2608,7 @@ app.get('/shifts/:id', (req, res) => {
             </form>` : ''}</div>
 
           ${people.length ? `
+            <div class="bs-ledger">
             <div class="bs-shead bs-staffhead${anyAlcohol ? ' has-alc' : ''}">
               <span>Name</span><span>Role</span><span class="r">Kitchen</span><span class="r">Coffee</span>
               ${anyAlcohol ? '<span class="r">Alcohol</span>' : ''}
@@ -2610,6 +2616,7 @@ app.get('/shifts/:id', (req, res) => {
             </div>
             <div class="bs-srows${anyAlcohol ? ' has-alc' : ''}">
               ${rowStates.map((x) => staffRow(x, directIds.has(x.p.employeeId))).join('')}
+            </div>
             </div>`
             : '<p class="bs-clear">Nobody on this service yet. They appear here when they submit, or add them below.</p>'}
 
@@ -3269,7 +3276,7 @@ app.get('/shifts/:id/results', (req, res) => {
   const serverCards = r.servers.map((p) => `
     <article class="bs-pay">
       <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">${
-  esc(posName(p.role || 'server'))} · ${p.hours}h</span></div>
+  esc(posName(p.role || 'server'))} · ${hrsLabel(p.hours)}</span></div>
       <dl class="bs-pay-figs">
         <div><dt>Total tips</dt><dd>${money(p.totalTips)}</dd></div>
         <div class="bs-pay-out"><dt>Tip-out</dt><dd>-${money(p.tipoutTotal)}</dd></div>
@@ -3294,7 +3301,7 @@ app.get('/shifts/:id/results', (req, res) => {
       .map((k) => `<div><dt>${poolLbl[k] || 'Pool'}</dt><dd>${money(p.poolShares[k])}</dd></div>`).join('');
     return `
     <article class="bs-pay">
-      <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">${esc(p.role)} · ${p.hours}h</span></div>
+      <div class="bs-pay-h"><span class="bs-pay-n">${esc(p.name)}</span><span class="bs-pay-r">${esc(p.role)} · ${hrsLabel(p.hours)}</span></div>
       <dl class="bs-pay-figs">
         ${p.tipShare ? `<div><dt>Tip-out (paycheck)</dt><dd>${money(p.tipShare)}</dd></div>` : ''}
         ${poolLines}
@@ -5491,6 +5498,11 @@ const tipsShiftsQ = db.prepare(`
          wk.role AS work_role,
          (SELECT COUNT(*) FROM tip_submissions ts
             WHERE ts.shift_id = sh.id AND ts.employee_id = @emp) AS subs,
+         -- Theirs, not a manager's or the till's. Only their own report locks
+         -- the shift; a figure somebody else entered is still theirs to state.
+         (SELECT COUNT(*) FROM tip_submissions ts
+            WHERE ts.shift_id = sh.id AND ts.employee_id = @emp
+              AND ts.source = 'staff') AS own_subs,
          (SELECT COUNT(*) FROM time_entries te
             WHERE te.shift_id = sh.id AND te.employee_id = @emp) AS punches,
          (SELECT COUNT(*) FROM time_entries te
@@ -5543,7 +5555,17 @@ const shiftTitle = (sh) => `${dp(sh.daypart)} · ${niceDate(sh.date)}`;
  * correction — is made here from database rows, and repeated on the write.
  */
 /** Today's business date, the same one every other portal page counts by. */
-const tipsToday = () => isoDate(startOfToday());
+// THE BUSINESS DATE, NOT THE CALENDAR ONE.
+//
+// This was isoDate(startOfToday()) — the calendar day. At 12:01am the date
+// rolled over, so the service somebody had just finished stopped being "today":
+// nothing was auto-selected, the form came up with no shift, and with no shift
+// it cannot know whether the policy reads sales — so a bartender closing the bar
+// was asked for tips and nothing else, against the wrong night. Reported three
+// days running, always after midnight, always the bar. The rest of the app has
+// used the 4am business date for services all along (CLAUDE.md's first
+// invariant); this is the one service page that did not.
+const tipsToday = () => serviceToday();
 
 /**
  * Today's shared shifts, whether or not this person has been added to one yet.
@@ -5593,7 +5615,7 @@ function tipsWorkspace(emp, opts = {}) {
       // Carried on every choice so the page can render it rather than finding
       // out at the write, by which point somebody has typed a night's figures in.
       closed: String(r.status) === 'emailed',
-      filed: r.subs > 0, current: r.id === anchorShift && anchorOpen,
+      filed: r.subs > 0, mine: r.own_subs > 0, current: r.id === anchorShift && anchorOpen,
       recorded: r.punches > 0 || !!r.work_role, today: r.date === today,
       title: shiftTitle(r),
     });
@@ -5622,14 +5644,38 @@ function tipsWorkspace(emp, opts = {}) {
   const todayChoices = allToday.filter((c) => c.recorded);
   const pastChoices = choices.filter((c) => !c.today).sort(byRecency);
 
-  // An explicit choice always wins — it is how somebody reaches a past shift
-  // to correct it. Otherwise the hierarchy decides, and it only decides when
-  // there is one answer: a guess here files somebody's money against a night
-  // they did not work.
+  // THE LAST THREE SHIFTS THEY WORKED, WHATEVER THE CLOCK SAYS.
+  //
+  // "Make it so people can always submit for their last three shifts, and if it
+  // was submitted already lock it. If nothing has been submitted they can
+  // always submit." Which is the answer to the 12:01am problem twice over: it
+  // does not matter whether the app calls last night today, because last night
+  // is one of the three either way.
+  const recentChoices = choices
+    .filter((c) => c.recorded)
+    .sort((a, b) => byRecency(a, b) || byService(a, b))
+    .slice(0, 3);
+
+  // An explicit choice always wins — it is how somebody reaches a past shift.
+  // After that, only an unambiguous one is chosen for them: the punch they are
+  // standing in, or a single shift still waiting for a report. Two waiting is a
+  // real question with two answers, and guessing it files a night's money
+  // against the wrong service — so the three are offered and nothing is
+  // assumed. A shift they have already reported is never chosen for them
+  // either; there is nothing left to do on it.
+  const waiting = recentChoices.filter((c) => !c.mine && !c.closed);
+  const waitingToday = waiting.filter((c) => c.today);
   let selected = null;
   if (opts.shiftId) selected = choices.find((c) => c.id === Number(opts.shiftId)) || null;
-  if (!selected) selected = todayChoices.find((c) => c.current) || null;
-  if (!selected && todayChoices.length === 1) selected = todayChoices[0];
+  if (!selected) selected = waiting.find((c) => c.current) || null;
+  // Today's, when today has exactly one waiting: reporting happens at the end
+  // of the shift just worked, and a list to choose from buries the one thing
+  // they came to do. An older shift still unreported does not make today a
+  // question — it stays one tap away underneath.
+  if (!selected && waitingToday.length === 1) selected = waitingToday[0];
+  // Nothing today — the 1am close, or a day off since. One waiting shift is
+  // still not a question.
+  if (!selected && waiting.length === 1) selected = waiting[0];
 
   const eligibleSlugs = gate.eligible;
   let position = null;
@@ -5643,6 +5689,15 @@ function tipsWorkspace(emp, opts = {}) {
 
   return {
     ok: true, emp, selected, position, caps, stored, today,
+    // Already filed by this person: the page shows what they sent and offers no
+    // form, and the write refuses it too. Never on the manual path — that door
+    // is for a shift that is not in this list at all, and the state of the one
+    // the page happened to select says nothing about it.
+    locked: !!(selected && selected.mine) && !opts.manual,
+    recentChoices,
+    // Nothing left to report on any of the three: said plainly rather than
+    // shown as an empty form.
+    allDone: recentChoices.length > 0 && waiting.length === 0,
     // The primary screen never sees `pastChoices`. It is rendered only when
     // somebody asks for it, which is the whole point of this phase's correction.
     todayChoices, pastChoices,
@@ -5829,14 +5884,25 @@ function tipsWorkspacePage(model, opts = {}) {
         ${c.today ? '' : `<i class="st-now-d">${esc(niceDate(c.date))}</i>`}
         ${c.closed ? '<i class="st-now-d">Pay has gone out — this can no longer be changed</i>'
     : c.current ? '<i class="st-now-d">You are clocked in now</i>' : ''}
-        ${!c.closed && c.filed ? '<i class="st-now-d">Already submitted — this will update it</i>' : ''}
+        ${/* Their own report closes it; a figure somebody else put on the
+             service does not — they have still not said what they made. */''}
+        ${!c.closed && c.mine ? '<i class="st-now-d">You have already sent this one in</i>'
+    : !c.closed && c.filed ? '<i class="st-now-d">A figure is already on file — yours goes on top of it</i>' : ''}
       </div>
       <a class="st-change" href="/portal/tips?pick=1">${c.closed ? 'My submissions' : 'Change'}</a>
     </div>`;
 
-  // Only when today genuinely has more than one service they could be filing
-  // for. Today only — old dates never appear here.
-  const todayRow = (c) => (c.closed ? `
+  // The last three shifts they worked. A shift already reported is shown as
+  // done and is not a door — filling a form in and being refused on the far
+  // side is worse than not being offered one. Tapping it shows what they sent.
+  const todayRow = (c) => (c.mine && !c.closed ? `
+    <a class="st-ch st-ch-sm st-ch--done" href="/portal/tips?shift=${c.id}">
+      <span class="st-ch-b">
+        <b>${esc(dp(c.daypart))}${c.today ? '' : ` · ${esc(niceDate(c.date))}`}</b>
+        <i>Sent in — tap to see what you sent</i>
+      </span>
+      <span class="st-pick-lock" aria-hidden="true">&#128274;</span>
+    </a>` : c.closed ? `
     <button type="button" class="st-ch st-ch-sm st-ch--shut" data-shut="${esc(dp(c.daypart))}">
       <span class="st-ch-b">
         <b>${esc(dp(c.daypart))}</b>
@@ -5845,15 +5911,45 @@ function tipsWorkspacePage(model, opts = {}) {
       <span class="st-pick-lock" aria-hidden="true">&#128274;</span>
     </button>` : `
     <label class="st-ch st-ch-sm">
-      <input type="radio" name="shift_id" value="${c.id}" data-st-shift
+      <input type="radio" name="shift" value="${c.id}" data-st-shift
              aria-describedby="st-ch-${c.id}-m">
       <span class="st-ch-b">
-        <b>${c.current ? 'Current shift · ' : ''}${esc(dp(c.daypart))}</b>
+        <b>${c.current ? 'Current shift · ' : ''}${esc(dp(c.daypart))}${
+  c.today ? '' : ` · ${esc(niceDate(c.date))}`}</b>
         <i id="st-ch-${c.id}-m">${c.current ? 'You are clocked in now'
-    : c.filed ? 'Already submitted — you can correct it'
-      : c.role ? `Worked as ${esc(posName(c.role))}` : 'Open today'}</i>
+    : c.role ? `Worked as ${esc(posName(c.role))}` : 'Worked'}</i>
       </span>
     </label>`);
+
+  // The rest of the last three, one tap each. Links, not radios: switching is
+  // a question for the server, and a radio in this form would post as the shift
+  // being filed.
+  const otherRecent = (model.recentChoices || []).filter((c) => !selected || c.id !== selected.id);
+  const othersBlock = !otherRecent.length ? '' : `
+    <div class="st-others">
+      <span class="st-others-l">Another shift</span>
+      ${otherRecent.map((c) => `<a class="st-other${c.mine ? ' is-done' : ''}" href="/portal/tips?shift=${c.id}">
+        <b>${esc(dp(c.daypart))}</b>
+        <i>${esc(niceDate(c.date))} · ${c.closed ? 'closed' : c.mine ? 'sent in' : 'not sent yet'}</i>
+      </a>`).join('')}
+    </div>`;
+
+  // ALREADY SENT BY THEM: what they sent, and no way to send it twice.
+  const lockedRows = model.locked && caps
+    ? fieldsForShift(caps, selected && selected.id, position, selected && selected.daypart).map((f) => {
+      const c = stored && stored.sales ? stored.sales[f.stored] : null;
+      const txt = f.triState ? cardStateText(stored && stored.cardState, c) : money(c || 0);
+      return `<div class="tc-row"><span>${f.label}</span><b>${txt}</b></div>`;
+    }).join('')
+    : '';
+  const lockedBlock = !model.locked ? '' : `
+    <div class="tcc tcc-ok st-locked">
+      <div class="tcc-top"><span class="tcc-dot" aria-hidden="true"></span>
+        <span class="tcc-state">Sent in</span></div>
+      <p class="tcc-big">You have already reported this shift.</p>
+      ${lockedRows ? `<div class="tc-rows">${lockedRows}</div>` : ''}
+      <p class="st-hint">If a figure is wrong, tell a manager — they can change it on the service.</p>
+    </div>`;
 
   const shiftBlock = manual ? `
     <div class="st-sec" id="st-manual">
@@ -5885,13 +5981,16 @@ function tipsWorkspacePage(model, opts = {}) {
     </div>`
     : selected ? `
     ${summaryCard(selected)}
-    <input type="hidden" name="shift_id" value="${selected.id}">`
-      : model.todayChoices.length ? `
+    <input type="hidden" name="shift_id" value="${selected.id}">
+    ${othersBlock}`
+      : model.recentChoices.length ? `
     <div class="st-sec">
-      <h2 class="st-h">Which service</h2>
-      <p class="st-sub">More than one service today, so it is not assumed.</p>
+      <h2 class="st-h">Which shift</h2>
+      <p class="st-sub">${model.allDone
+    ? 'You have reported all three of your last shifts.'
+    : 'Your last three shifts. Which one is this?'}</p>
       <div class="st-chs" role="radiogroup" aria-label="Shift to report">
-        ${model.todayChoices.map(todayRow).join('')}
+        ${model.recentChoices.map(todayRow).join('')}
       </div>
       <a class="st-alt" href="/portal/tips?pick=1">Choose another shift</a>
     </div>`
@@ -6001,6 +6100,38 @@ function tipsWorkspacePage(model, opts = {}) {
       ${errs.confirm ? `<p class="st-err" id="st-confirm-e">${esc(errs.confirm)}</p>` : ''}
     </div>`;
 
+  // NOTHING TO TYPE UNTIL THE SHIFT IS KNOWN.
+  //
+  // With no shift chosen, the form used to render anyway — and since the fields
+  // a shift asks for come from ITS policy, an unknown shift meant the sales
+  // questions were left off and only the tips showed. That is the screen the
+  // owner's staff met after midnight: "it would only ask for tips". So when
+  // there is a real choice to make, the choice is the whole screen, and it is
+  // asked as a question the server answers.
+  if (!manual && !selected && model.recentChoices.length) {
+    return portalPage('Sales & tips', `
+    ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
+    <div class="pt-body tc-body st-body">
+      <h1 class="st-title">Submit sales &amp; tips</h1>
+      <p class="st-lede">${model.allDone
+    ? 'You have reported all three of your last shifts.'
+    : 'Which shift is this? The questions for it come next.'}</p>
+      <form method="get" action="/portal/tips">
+        <div class="st-sec">
+          <h2 class="st-h">Your last three shifts</h2>
+          <div class="st-chs" role="radiogroup" aria-label="Shift to report">
+            ${model.recentChoices.map(todayRow).join('')}
+          </div>
+          ${model.allDone ? '' : `<button class="tc-btn tc-btn-go tc-btn-big st-send" type="submit">Continue</button>`}
+        </div>
+      </form>
+      <div class="st-sec">
+        <a class="st-alt" href="/portal/tips?pick=1">What I have already sent</a>
+        <a class="st-alt" href="/portal/tips?manual=1">Report a shift not listed</a>
+      </div>
+    </div>` + shutToastScript());
+  }
+
   const body = `
     ${portalTop({ href: '/portal', label: 'Home' }, 'Sales & tips')}
     <div class="pt-body tc-body st-body">
@@ -6015,6 +6146,7 @@ function tipsWorkspacePage(model, opts = {}) {
              authentication path that other clients are still using. */''}
         <input type="hidden" name="token" value="${esc(tipsToken(emp.id))}">
         ${shiftBlock}
+        ${model.locked ? lockedBlock : `
         ${posBlock}
         ${caps ? moneyBlock : `<div class="st-sec"><p class="st-sub">Choose the job
           you worked and the fields for it will appear.</p></div>`}
@@ -6026,7 +6158,7 @@ function tipsWorkspacePage(model, opts = {}) {
         <button class="tc-btn tc-btn-go tc-btn-big st-send" type="submit" data-st-send>
           ${correcting ? 'Update report' : 'Submit report'}
         </button>
-        <p class="pt-sr" aria-live="polite" id="st-live"></p>
+        <p class="pt-sr" aria-live="polite" id="st-live"></p>`}
       </form>
     </div>
     ${stScript()}`;
@@ -6316,6 +6448,25 @@ function writeSalesTips(req, emp, opts = {}) {
     return { ok: false, closed: true,
       refuse: `${whenOf(sh.date, sh.daypart)} has been closed and everyone's pay has gone out. `
         + 'Ask a manager to reopen it if something needs changing.' };
+  }
+  // ONE REPORT PER PERSON PER SHIFT.
+  //
+  // The owner's rule: "if it was submitted already, lock it. If nothing has
+  // been submitted they can always submit." A second report from the same
+  // person replaced the first, and what reached the sheet was whichever tab
+  // was submitted last — which is work for somebody else to unpick.
+  //
+  // THEIR OWN report locks it, not anybody's: a figure a manager typed or the
+  // till pushed leaves this open, because the person who worked the shift has
+  // still not said what they made. Their first report is kept; changing it is a
+  // manager's job, on the service, where the tip-out can be seen moving.
+  if (sh) {
+    const mine = db.prepare(`SELECT COUNT(*) n FROM tip_submissions
+      WHERE shift_id = ? AND employee_id = ? AND source = 'staff'`).get(sh.id, emp.id).n;
+    if (mine) {
+      return { ok: false, refuse: `You have already sent your report for ${whenOf(sh.date, sh.daypart)}. `
+        + 'Ask a manager if a figure needs changing — they can correct it on the service.' };
+    }
   }
   if (!sh && opts.clockedInOnly) {
     // A refusal, not a field error: there is no box they could fill in to fix
@@ -27466,8 +27617,29 @@ app.post('/timeclock/:id/edit', (req, res) => {
   if (!tcCanEdit(req, res, e)) return;
   const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
   const inAt = TC.localInputToUtc(req.body.in) || e.clock_in_at;
-  const outAt = TC.localInputToUtc(req.body.out);
-  if (outAt && outAt <= inAt) return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent('Clock-out must be after clock-in.'));
+  let outAt = TC.localInputToUtc(req.body.out);
+  // HALF A CORRECTION IS STILL A CORRECTION.
+  //
+  // Fixing a 12:00am start to 12:00pm used to be refused outright, because the
+  // clock-out sitting in the untouched field below now came first. The end
+  // travels with the start in that case and the punch keeps its length — said
+  // out loud in the message, never silently. A clock-out the manager typed
+  // themselves is left exactly where they put it and the refusal names both
+  // times, so it is clear which field to fix.
+  let carriedTo = null;
+  if (outAt && outAt <= inAt) {
+    const untouched = String(req.body.out || '') === TC.utcToLocalInput(e.clock_out_at);
+    const carried = untouched ? TC.carryClockOut(e.clock_in_at, inAt, e.clock_out_at) : outAt;
+    if (carried > inAt) { outAt = carried; carriedTo = carried; }
+    else {
+      // err=1, so it reads as Refused. The old refusal here came back under a
+      // green "Saved" bar, which is how a punch that had not changed could look
+      // as though it had.
+      return res.redirect(`/timeclock/${e.id}?msg=` + encodeURIComponent(
+        `That clock-out (${TC.stamp(outAt)}) is not after the clock-in (${TC.stamp(inAt)}). `
+        + 'Set the clock-out too — if the shift ran past midnight, put it on the next day.') + '&err=1');
+    }
+  }
   const position = allRoles().includes(req.body.position) ? req.body.position : e.position;
   const daypart = svcKnown(req.body.daypart) ? req.body.daypart : e.daypart;
   // tcCanEdit checked the day this punch is on NOW. Moving a clock-in across
@@ -27522,7 +27694,10 @@ app.post('/timeclock/:id/edit', (req, res) => {
     }
     throw err;
   }
-  res.redirect(punchBack(req, `/timeclock/${e.id}`, 'Correction saved.', `#e-${e.id}`));
+  res.redirect(punchBack(req, `/timeclock/${e.id}`, carriedTo
+    ? `Correction saved. The clock-out moved with it, to ${TC.stamp(carriedTo)}, so the punch is still `
+      + `${TC.hm(TC.minutesBetween(inAt, carriedTo))}. Change the clock-out if they left at another time.`
+    : 'Correction saved.', `#e-${e.id}`));
 });
 
 /**
@@ -27632,13 +27807,30 @@ app.post('/timeclock/:id/cell', express.json(), (req, res) => {
       let inAt = e.clock_in_at, outAt = e.clock_out_at;
       if (field === 'in') {
         inAt = onDay(dayOf(e.clock_in_at), value);
-        if (outAt && outAt <= inAt) outAt = onDay(dayOf(inAt), TC.utcToLocalInput(outAt).slice(11, 16));
+        // The end travels with the start when it would otherwise come first, so
+        // the punch keeps its length. The line this replaces re-anchored the
+        // end to the day it was already on — it never moved, and so every
+        // 12:00am-to-12:00pm correction was refused instead of saved.
+        outAt = TC.carryClockOut(e.clock_in_at, inAt, outAt);
       } else {
         outAt = onDay(dayOf(e.clock_in_at), value);
         if (outAt <= inAt) outAt = onDay(require('./dates').addDays(dayOf(e.clock_in_at), 1), value);
       }
+      // 12:00am and 12:00pm are not the same trading day. Where the new start
+      // lands on another business date the punch has to follow it, or its hours
+      // sit on the service it just left — which the drawer has always done and
+      // this never did, because until now no time edit here could move a day.
+      const toDay = TC.businessDateOf(inAt, TC.settings().cutoffHour, TC.zoneFor(e.daypart));
+      if (toDay !== e.business_date) {
+        const dst = sheetCovering(e.employee_id, toDay);
+        if (dst.frozen) {
+          return res.status(400).json({ error: `That time moves the punch to ${TC.dayLabel(toDay)}, `
+            + `which is on a timesheet that was already ${dst.sheet.status}. Reopen that timesheet first.` });
+        }
+      }
       const wasT = `${TC.clockFace(e.clock_in_at)} → ${e.clock_out_at ? TC.clockFace(e.clock_out_at) : 'open'}`;
       TC.editEntryChecked(e, { in: inAt, out: outAt, daypart: e.daypart, position: e.position, by: actor });
+      if (toDay !== e.business_date) relinkEntry(TC.q.byId.get(e.id));
       TC.logEvent('entry', e.id, field === 'in' ? 'clock_in_corrected' : 'clock_out_corrected', actor,
         { before: wasT, after: `${TC.clockFace(inAt)} → ${outAt ? TC.clockFace(outAt) : 'open'}` });
       summary = field === 'in' ? 'clock-in' : 'clock-out';
@@ -27685,9 +27877,21 @@ app.post('/timeclock/:id/cell', express.json(), (req, res) => {
     const moved = TC.q.byId.get(e.id);
     if (moved.clock_out_at) TC.recompute(moved);
     const fresh = TC.q.byId.get(e.id);
+    // A punch with both ends on it is finished, and should stop describing
+    // itself as one somebody forgot to close. Typing the start on an empty day
+    // makes an open punch on purpose; typing the end here is what finishes it,
+    // and only this route never said so. The drawer has always done this.
+    if (fresh.clock_out_at && fresh.status !== 'locked' && fresh.status !== 'complete') {
+      TC.q.setStatus.run({ id: e.id, status: 'complete', by: actor });
+    }
     tcTouchTimesheet(e.id, actor, `a manager corrected the ${summary}`, [e.business_date]);
     const sync = TC.syncShiftHours(fresh.shift_id, e.employee_id, actor, { role: fresh.position });
-    if (e.shift_id && e.shift_id !== fresh.shift_id) TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+    if (e.shift_id && e.shift_id !== fresh.shift_id) {
+      TC.syncShiftHours(e.shift_id, e.employee_id, actor);
+      // Off that service as a person too, not left on it at 0h — the same
+      // tidy-up the drawer does when a punch moves day or service.
+      pruneClockOnlyRow(e.shift_id, e.employee_id, actor);
+    }
 
     // THE SERVICE MIGHT NOT HAVE FOLLOWED.
     //
@@ -27778,8 +27982,6 @@ app.post('/timeclock/day-cell', express.json(), (req, res) => {
   const from = already[0] || {};
   const position = allRoles().includes(req.body.position) ? req.body.position
     : (allRoles().includes(from.role) ? from.role : emp.role);
-  const daypart = svcKnown(req.body.daypart) ? req.body.daypart
-    : (svcKnown(from.daypart) ? from.daypart : DAYPARTS[DAYPARTS.length - 1]);
 
   const at = TC.localInputToUtc(`${date}T${value}`);
   let inAt, outAt;
@@ -27799,6 +28001,19 @@ app.post('/timeclock/day-cell', express.json(), (req, res) => {
   } else {
     return res.status(400).json({ error: 'Nothing to change.' });
   }
+
+  // WHICH SERVICE THE TYPED HOURS BELONG TO.
+  //
+  // The last service in the list used to be the answer whenever the day had
+  // nothing to copy it from, so a barista whose 9am-3pm was typed in here
+  // landed on Evening Service: their hours showed on a service they never
+  // worked, and they joined that service's tip pool. The start time decides it
+  // now, exactly as it does when somebody punches in for real — and the row's
+  // Service cell still overrides it in one click when the guess is wrong.
+  const daypart = svcKnown(req.body.daypart) ? req.body.daypart
+    : (svcKnown(from.daypart) ? from.daypart
+      : (svcKnown(TC.suggestDaypart(inAt, TC.settings().dinnerFrom)) ? TC.suggestDaypart(inAt, TC.settings().dinnerFrom)
+        : DAYPARTS[DAYPARTS.length - 1]));
 
   try {
     let id;
@@ -30570,7 +30785,7 @@ function tipoutControls(req, sh, inp, r) {
     return `<div class="tpa-row${a ? ' is-adj' : ''}">
       <div class="tpa-what">
         <b>${esc(p.name)}</b>
-        <i>${esc(roleName(p.role))} &middot; ${p.hours}h &middot; from ${esc(payersFor(p.role))}</i>
+        <i>${esc(roleName(p.role))} &middot; ${hrsLabel(p.hours)} &middot; from ${esc(payersFor(p.role))}</i>
         ${a ? `<em class="tpa-note">Set to ${money(a.to)} for tonight${
   a.to !== a.from ? ` &mdash; ${money(Math.abs(a.from - a.to))} ${a.to < a.from ? 'back to' : 'from'} ${esc(payersFor(p.role))}` : ''
 }${a.reason ? ` &middot; ${esc(a.reason)}` : ''}</em>` : ''}

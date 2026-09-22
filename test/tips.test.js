@@ -114,7 +114,15 @@ const signIn = async (pin) => {
   });
   assert.strictEqual(res.status, 200, 'the tip form opens from the hub');
   const html = await res.text();
-  const m = html.match(/name="token" value="([^"]+)"/);
+  // With more than one shift still to report, the first screen is the question
+  // "which one is this?" and carries no form of its own — the fields belong to
+  // a shift and there is not one yet. The token these tests reuse for the old
+  // PIN door is on the form itself, so take it from a screen that has one.
+  let m = html.match(/name="token" value="([^"]+)"/);
+  if (!m) {
+    const withForm = await (await fetch(`${BASE}/portal/tips?manual=1`, { headers: { cookie } })).text();
+    m = withForm.match(/name="token" value="([^"]+)"/);
+  }
   assert.ok(m, 'a token comes back');
   return { html, token: m[1], cookie };
 };
@@ -206,8 +214,9 @@ test('with no JavaScript the whole form is still there', async () => {
   // nothing that fails to appear when it does not run. Every field the write
   // needs is in the markup as sent. The date and service live on the manual
   // path — that is the only page that asks for them.
+  const sh = oneWaiting('Rosa Diaz');
   const { cookie } = await signIn('2468');
-  const main = await (await fetch(`${BASE}/portal/tips`, { headers: { cookie } })).text();
+  const main = await (await fetch(`${BASE}/portal/tips?shift=${sh}`, { headers: { cookie } })).text();
   for (const name of ['token', 'position', 'food', 'coffee', 'alcohol',
     'cash_tips', 'card_tips', 'note']) {
     assert.match(main, new RegExp(`name="${name}"`), `${name} is in the markup`);
@@ -605,6 +614,27 @@ test('2D-1: tip-pool participation is untouched by any of this', async () => {
 const writable = () => new (require('better-sqlite3'))(DB);
 
 /** Everything stored for one person on one shift, or nulls. */
+/**
+ * One shift this person worked and has not reported — the ordinary case a form
+ * is for. Since a report locks its shift and two shifts waiting is a question
+ * rather than a form, a test about the FIELDS needs exactly one waiting; without
+ * it, whichever earlier test filed for them decides what a later one sees.
+ */
+let __waiting = 0;
+const oneWaiting = (name, role = 'server', daypart = 'dinner') => {
+  const w = writable();
+  const id = w.prepare('SELECT id FROM employees WHERE name = ?').get(name).id;
+  // Dated well back, so it can never become the newest month and move what the
+  // Services list opens on. The tests below reach it by id, not by being lucky.
+  const date = `2019-01-${String(++__waiting).padStart(2, '0')}`;
+  w.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?, ?, 'open')").run(date, daypart);
+  const sh = w.prepare('SELECT id FROM shifts WHERE date = ? AND daypart = ?').get(date, daypart).id;
+  w.prepare(`INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours)
+             VALUES (?, ?, ?, 0)`).run(sh, id, role);
+  w.close();
+  return sh;
+};
+
 const stored = (name, date, daypart) => {
   const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, daypart);
   if (!sh) return null;
@@ -707,8 +737,11 @@ test('2F: server cash kept and pooled cash are asked as different questions', as
   const w = writable();
   w.prepare("INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Bea Nolan','barista',1400,1,'2026')").run();
   w.close();
-  const server = (await signIn('2468')).html;
-  const barista = (await signIn('2026')).html;
+  const shServer = oneWaiting('Rosa Diaz');
+  const shBarista = oneWaiting('Bea Nolan', 'barista', 'cafe');
+  const cookies = { server: (await signIn('2468')).cookie, barista: (await signIn('2026')).cookie };
+  const server = await page(cookies.server, `/portal/tips?shift=${shServer}`);
+  const barista = await page(cookies.barista, `/portal/tips?shift=${shBarista}`);
 
   assert.match(server, /already took home/, 'the server is asked what they kept');
   assert.match(server, /excluded from the tips sent through payroll/,
@@ -774,33 +807,36 @@ test('2F: a correction updates the figures and appends to the audit history', as
   assert.strictEqual(after.subs[0].id, first.subs[0].id, 'it is the same row, not a rewrite');
 });
 
-test('2F: the portal will not overwrite an existing report without a confirmation', async () => {
+test('2F: one report per person per shift — the second is refused, ticked or not', async () => {
+  // The owner's rule, after three nights of sorting it out by hand: "if it was
+  // submitted already, lock it." Correcting your own report from the portal
+  // used to be allowed behind a tick-box, and what reached the sheet was
+  // whichever tab was sent last. A figure that needs changing is a manager's
+  // job now, on the service, where the tip-out can be watched moving.
   const date = '2026-09-25';
   const { token, cookie } = await signIn('2468');
   await form('/tips', { token, position: 'server', date, daypart: 'dinner',
     mode: 'manual', cash_tips: '50' });
   const sh = db.prepare('SELECT id FROM shifts WHERE date=? AND daypart=?').get(date, 'dinner');
 
-  // No confirmation ticked: refused, and the stored figure does not move.
-  const res = await fetch(`${BASE}/portal/tips/submit`, {
-    method: 'POST', redirect: 'manual',
-    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ position: 'server', shift_id: String(sh.id), cash_tips: '99' }).toString(),
-  });
-  assert.strictEqual(res.status, 400, 'refused');
-  assert.match(await res.text(), /Tick the box/, 'and says why');
+  for (const extra of [{}, { confirm_update: '1' }]) {
+    const res = await fetch(`${BASE}/portal/tips/submit`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ position: 'server', shift_id: String(sh.id),
+        cash_tips: '99', ...extra }).toString(),
+    });
+    assert.strictEqual(res.status, 403, 'refused');
+    assert.match(await res.text(), /already sent your report/, 'and says so');
+  }
   assert.strictEqual(stored('Rosa Diaz', date, 'dinner').sales.cash_tips_cents, 5000,
-    'nothing was overwritten');
+    'the first report stands');
 
-  // Ticked: it lands.
-  const ok = await fetch(`${BASE}/portal/tips/submit`, {
-    method: 'POST', redirect: 'manual',
-    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ position: 'server', shift_id: String(sh.id),
-      cash_tips: '99', confirm_update: '1' }).toString(),
-  });
-  assert.strictEqual(ok.status, 302);
-  assert.strictEqual(stored('Rosa Diaz', date, 'dinner').sales.cash_tips_cents, 9900);
+  // And the page offers nothing to type into, so nobody fills a form in only
+  // to be turned away on the far side.
+  const html = await page(cookie, `/portal/tips?shift=${sh.id}`);
+  assert.match(html, /You have already reported this shift/);
+  assert.ok(!/name="cash_tips"/.test(html), 'no field to retype');
 });
 
 // --- the receipt ------------------------------------------------------------
@@ -1002,7 +1038,12 @@ test('2F-UX: one recorded shift today is chosen without being asked about', asyn
   assert.ok(!/<div class="st-chs"/.test(html), 'and not offered as a choice');
 });
 
-test('2F-UX: two services today is a compact choice, and only today is on it', async () => {
+test('2F-UX: two services waiting is a compact choice, and the last three are all on it', async () => {
+  // Two things at once. Two services still to report is a real question with
+  // two answers, so nothing is guessed — that has always been true. And the
+  // last three shifts are offered whatever their date: "make it so people can
+  // always submit for their last three shifts", after a bartender closing at
+  // 1am found last night was no longer 'today' and the form came up empty.
   const seed = seedToday('5153', 'Lena Ford', { today: ['cafe', 'dinner'], past: [[3, 'dinner']] });
   const { cookie } = await signIn('5153');
   const html = await page(cookie, '/portal/tips');
@@ -1011,16 +1052,11 @@ test('2F-UX: two services today is a compact choice, and only today is on it', a
   for (const t of seed.today) {
     assert.match(html, new RegExp(`value="${t.id}"`), `${t.daypart} today is on it`);
   }
-  assert.ok(!html.includes(seed.past[0].date), 'the older shift is not');
-  // Compact: small rows, and no radio is preselected, because two services is
-  // a real question with two answers.
+  assert.match(html, new RegExp(`value="${seed.past[0].id}"`), 'and so is the shift before them');
   assert.match(html, /class="st-ch st-ch-sm"/, 'the rows are the compact ones');
-  // Matched against real <input> tags only — a looser regex over the whole
-  // page hits `[data-st-shift]:checked` inside the script and reports a
-  // preselection that is not there.
   const radios = [...html.matchAll(/<input[^>]*data-st-shift[^>]*>/g)].map((m) => m[0]);
-  assert.strictEqual(radios.length, 2, 'two services, two radios');
-  for (const r of radios) assert.ok(!/\bchecked\b/.test(r), `neither is guessed: ${r}`);
+  assert.strictEqual(radios.length, 3, 'the last three, three radios');
+  for (const r of radios) assert.ok(!/\bchecked\b/.test(r), `none is guessed: ${r}`);
 });
 
 test('2F-UX: the second screen is a record of what was sent, not a backlog', async () => {
@@ -1065,10 +1101,15 @@ test('2F-UX: the second screen is a record of what was sent, not a backlog', asy
   assert.match(after, /Go to my timesheet/, 'a missing shift is fixed on the clock, where it belongs');
 });
 
-test('2F-UX: a past shift opens to its own form, correction and all', async () => {
+test('2F-UX: a past shift opens to its own form, and to what was sent once it is in', async () => {
   const seed = seedToday('5155', 'Ivan Boyd', { today: ['dinner'], past: [[3, 'cafe']] });
   const { token, cookie } = await signIn('5155');
   const past = seed.past[0];
+
+  // Not yet reported: it opens to its own form, against that shift.
+  const before = await page(cookie, `/portal/tips?shift=${past.id}`);
+  assert.match(before, /name="cash_tips"/, 'the fields are there');
+  assert.match(before, new RegExp(`name="shift_id" value="${past.id}"`), 'against that shift');
 
   // File it, then reach it again through the picker.
   await form('/tips', { token, position: 'server', shift_id: String(past.id), cash_tips: '30' });
@@ -1076,10 +1117,13 @@ test('2F-UX: a past shift opens to its own form, correction and all', async () =
   assert.match(picker, new RegExp(`href="/portal/tips\\?shift=${past.id}"`), 'listed');
 
   const html = await page(cookie, `/portal/tips?shift=${past.id}`);
-  assert.match(html, /Previously submitted/, 'and opens as a correction');
-  assert.match(html, /Update report/, 'with the right verb on the button');
-  assert.match(html, /data-st-confirm/, 'and a confirmation to tick');
-  assert.match(html, new RegExp(`name="shift_id" value="${past.id}"`), 'against that shift');
+  assert.match(html, /You have already reported this shift/, 'and opens as what was sent');
+  assert.match(html, /\$30\.00/, 'with the figure on it');
+  assert.ok(!/data-st-confirm/.test(html), 'nothing to tick');
+  assert.ok(!/name="cash_tips"/.test(html), 'and no field to retype');
+  // Tonight is still reportable — locking one shift locks nothing else.
+  const tonight = await page(cookie, `/portal/tips?shift=${seed.today[0].id}`);
+  assert.match(tonight, /name="cash_tips"/, "tonight's form is untouched");
 });
 
 test('2F-UX: reaching a shift by id is still checked, whatever the screen shows', async () => {
@@ -1405,7 +1449,7 @@ test('2F-I: a later POS or manager change moves the operational value, not the a
 
 // --- 5. receipts stay the submission they were ------------------------------
 
-test('2F-I: an older receipt keeps its own figures after a correction', async () => {
+test('2F-I: a receipt keeps its figures, and there is no second report to replace them', async () => {
   const date = '2026-11-10';
   const { token, cookie } = await signIn('2468');
   await form('/tips', { token, position: 'server', date, daypart: 'cafe',
@@ -1415,23 +1459,22 @@ test('2F-I: an older receipt keeps its own figures after a correction', async ()
   const first = db.prepare('SELECT id FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id').all(sh.id, me)[0].id;
 
   const b = await signIn('2468');
-  await form('/tips', { token: b.token, position: 'server', shift_id: String(sh.id), cash_tips: '22.22' });
+  const again = await form('/tips', { token: b.token, position: 'server', shift_id: String(sh.id), cash_tips: '22.22' });
+  assert.strictEqual(again.status, 403, 'the second report is refused at the old PIN door too');
   const rows = db.prepare('SELECT id FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id').all(sh.id, me);
-  assert.strictEqual(rows.length, 2, 'the correction has its own row');
+  assert.strictEqual(rows.length, 1, 'one report, one row');
+  assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(sh.id, me).c, 1111, 'and the figure they sent is the figure on file');
 
   const old = await (await fetch(`${BASE}/portal/tips/receipt/${first}`, { headers: { cookie } })).text();
-  assert.match(old, /\$11\.11/, 'the first receipt still shows what was sent first');
-  assert.ok(!old.includes('22.22'), 'not what replaced it');
-  assert.match(old, /Your report was recorded/, 'and reads as the first report');
-
-  const now = await (await fetch(`${BASE}/portal/tips/receipt/${rows[1].id}`, { headers: { cookie } })).text();
-  assert.match(now, /\$22\.22/, 'the correction has its own receipt');
-  assert.match(now, /Your report was updated/, 'which says it is an update');
+  assert.match(old, /\$11\.11/, 'the receipt still shows what was sent');
+  assert.ok(!old.includes('22.22'), 'not what was turned away');
+  assert.match(old, /Your report was recorded/, 'and reads as the report it is');
 });
 
 // --- 6. two stale forms -----------------------------------------------------
 
-test('2F-I: two stale corrections both survive as history; the last one is current', async () => {
+test('2F-I: two stale forms cannot both land — the first one is the report', async () => {
   const date = '2026-11-11';
   const { token, cookie } = await signIn('2468');
   await form('/tips', { token, position: 'server', date, daypart: 'dinner',
@@ -1447,14 +1490,16 @@ test('2F-I: two stale corrections both survive as history; the last one is curre
     body: new URLSearchParams({ position: 'server', shift_id: String(sh.id),
       cash_tips: amount, confirm_update: '1' }).toString(),
   });
-  await send('30');
-  await send('40');
+  const first = await send('30');
+  const second = await send('40');
+  assert.strictEqual(first.status, 403, 'the manual report already landed, so this one is refused');
+  assert.strictEqual(second.status, 403, 'and so is the tab behind it');
 
   const rows = db.prepare('SELECT cash_tips_cents c FROM tip_submissions WHERE shift_id=? AND employee_id=? ORDER BY id')
     .all(sh.id, me).map((r) => r.c);
-  assert.deepStrictEqual(rows, [1000, 3000, 4000], 'every version is still in the history');
+  assert.deepStrictEqual(rows, [1000], 'one report, whatever the tabs do');
   assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
-    .get(sh.id, me).c, 4000, 'and the last completed write is the current value');
+    .get(sh.id, me).c, 1000, 'and it is what is on file');
 });
 
 // --- 7. a forged shift id that genuinely exists ------------------------------
@@ -2201,4 +2246,100 @@ test('a shift that has been sent out cannot be reported on again', async () => {
   const ok = await form('/tips', { token, position: 'server', date: day,
     daypart: 'dinner', cash_tips: '55' });
   assert.strictEqual(ok.status, 302, 'reopened, it takes a correction again');
+});
+
+// --- the 1am close ----------------------------------------------------------
+
+test('after midnight, the shift just worked is still the one the form opens on', async () => {
+  // Reported three nights running, always the bar, always after midnight: the
+  // form came up asking for tips and nothing else, against the wrong night. The
+  // portal's idea of "today" was the CALENDAR date, so at 12:01am the service
+  // somebody had just finished stopped being today, nothing was selected — and
+  // with no shift the form cannot know whether the policy reads sales, so the
+  // sales questions disappeared.
+  //
+  // The hour this test runs at is not something it may depend on, so the CUTOFF
+  // moves rather than the clock (test/business-date.test.js does the same):
+  // put it just past the current hour and "now" falls inside the gap, exactly
+  // as 1am does under the ordinary 4am cutoff.
+  const hourNow = Number(new Intl.DateTimeFormat('en-US',
+    { timeZone: 'America/New_York', hour: 'numeric', hour12: false }).format(new Date()));
+  const setCutoff = (v) => {
+    const w = writable();
+    w.prepare(`INSERT INTO settings (key, value) VALUES ('tc_day_cutoff', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(v));
+    w.close();
+  };
+  setCutoff(hourNow + 1);
+  try {
+    // Last night's service, worked and not yet reported. In calendar terms it
+    // is yesterday; in trading terms the night is still going on.
+    const seed = seedToday('5199', 'Nia Latenight', { past: [[1, 'dinner']] });
+    const { cookie } = await signIn('5199');
+    const html = await page(cookie, '/portal/tips');
+
+    assert.match(html, new RegExp(`name="shift_id" value="${seed.past[0].id}"`),
+      'the service just worked is the one selected');
+    assert.match(html, /name="food"/, 'and the sales questions are on the form');
+    assert.match(html, /name="cash_tips"/, 'with the tips, as always');
+    assert.ok(!/No services worked to submit for/.test(html), 'not an empty form');
+    // And it is TONIGHT to them, not a past date being corrected. This is the
+    // assertion that fails on the calendar date: the three-shift rule alone
+    // would still find the shift, and call it yesterday's.
+    assert.match(html, /Today's shift/, 'the night still going on reads as today');
+
+    // The same date, from the other direction: somebody a manager has not put
+    // on the service yet can still file against it, because it is one of
+    // today's services. On the calendar date it stopped being one at midnight
+    // and the write answered "that shift is not one of yours".
+    const w2 = writable();
+    w2.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(DAYS_AGO(1));
+    const shared = w2.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'cafe'").get(DAYS_AGO(1)).id;
+    w2.prepare("INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Omar Notyet','server',1500,1,'5197')").run();
+    w2.close();
+    const late = await signIn('5197');
+    const res = await fetch(`${BASE}/portal/tips/submit`, {
+      method: 'POST', redirect: 'manual',
+      headers: { cookie: late.cookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ position: 'server', shift_id: String(shared), cash_tips: '25' }).toString(),
+    });
+    assert.strictEqual(res.status, 302, "tonight's service takes their report");
+  } finally {
+    setCutoff(4);
+  }
+});
+
+test('the last three shifts are always offered, and any of them can be filed', async () => {
+  // "Make it so people can always submit for their last three shifts." Four
+  // worked, none reported: the three most recent are on the form, the fourth is
+  // not, and the oldest of the three still takes a report.
+  const seed = seedToday('5198', 'Quinn Farr',
+    { past: [[2, 'dinner'], [5, 'cafe'], [9, 'dinner'], [14, 'cafe']] });
+  const { cookie } = await signIn('5198');
+  const html = await page(cookie, '/portal/tips');
+
+  for (const p of seed.past.slice(0, 3)) {
+    assert.match(html, new RegExp(`value="${p.id}"`), `${p.date} is offered`);
+  }
+  assert.ok(!html.includes(`value="${seed.past[3].id}"`), 'the fourth is not — three is the rule');
+
+  const third = seed.past[2];
+  const res = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(third.id), cash_tips: '40' }).toString(),
+  });
+  assert.strictEqual(res.status, 302, 'the oldest of the three takes a report');
+  assert.strictEqual(db.prepare('SELECT cash_tips_cents c FROM server_sales WHERE shift_id=? AND employee_id=?')
+    .get(third.id, seed.id).c, 4000, 'and it lands on that shift');
+
+  // Now that it is in, it is closed to them and says so.
+  const after = await page(cookie, `/portal/tips?shift=${third.id}`);
+  assert.match(after, /You have already reported this shift/);
+  const again = await fetch(`${BASE}/portal/tips/submit`, {
+    method: 'POST', redirect: 'manual',
+    headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ position: 'server', shift_id: String(third.id), cash_tips: '80' }).toString(),
+  });
+  assert.strictEqual(again.status, 403, 'and a second one is refused');
 });

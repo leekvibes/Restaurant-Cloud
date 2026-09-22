@@ -1464,6 +1464,91 @@ test('an end earlier than the start means the next morning', async () => {
   assert.strictEqual(mins, 315, 'five and a quarter hours — it rolled into the next morning');
 });
 
+// ---------------------------------------------------------------------------
+// The same courtesy, for the OTHER end.
+//
+// Reported by the owner: "im getting an error when trying to mannually fix
+// someones hours in timeclock for evening service and change the start time
+// from 12am to pm." A punch reading 12:00am-2:00am is nearly always a noon
+// shift typed with the wrong half of the day on it. Fixing the start alone was
+// refused — the clock-out in the untouched field now came first — so a half
+// finished correction was treated as a mistake. The end travels with the start
+// instead, and the punch keeps the length it had, which is the part that is pay.
+// ---------------------------------------------------------------------------
+
+test('a start moved from 12:00am to 12:00pm saves, and the punch keeps its length', async () => {
+  const T = require('../src/timeclock');
+  const emp = 183;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4183',1500,1)")
+    .run(emp, 'Wrong Half Case');
+  const day = P2.recentPeriods(4)[3].start;
+  const e = await punch(emp, day, '00:00', '02:00');
+
+  // Exactly what the drawer posts: a new start, and the clock-out untouched in
+  // the field below it, at the value the form put there.
+  const res = await post(`/timeclock/${e.id}/edit`, {
+    position: 'server', daypart: 'dinner',
+    in: `${day}T12:00`, out: T.utcToLocalInput(e.clock_out_at), reason: 'started at noon',
+  });
+  assert.strictEqual(res.status, 302);
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.strictEqual(T.utcToLocalInput(after.clock_in_at), `${day}T12:00`, 'the start is noon');
+  assert.strictEqual(T.utcToLocalInput(after.clock_out_at), `${day}T14:00`, 'and the end came with it');
+  assert.strictEqual(after.payable_minutes, 120, 'two hours before, two hours after — the pay did not move');
+  assert.match(decodeURIComponent(res.headers.get('location') || ''), /clock-out moved with it/i,
+    'and the page says so, rather than doing it quietly');
+});
+
+test('a clock-out the manager typed themselves is never moved for them', async () => {
+  // The flip side, and the reason this is not just "make it fit": a time
+  // somebody typed is an assertion about when that person left. It is left
+  // where they put it, and the refusal names both times so it is obvious which
+  // field is wrong.
+  const emp = 184;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4184',1500,1)")
+    .run(emp, 'Typed Both Case');
+  const day = P2.recentPeriods(4)[3].start;
+  const e = await punch(emp, day, '17:00', '23:00');
+
+  const res = await post(`/timeclock/${e.id}/edit`, {
+    position: 'server', daypart: 'dinner',
+    in: `${day}T17:00`, out: `${day}T14:00`, reason: 'typo',
+  });
+  assert.strictEqual(res.status, 302);
+  const msg = decodeURIComponent(res.headers.get('location') || '');
+  assert.match(msg, /2:00.?PM/i, 'the clock-out they typed is in the message');
+  assert.match(msg, /5:00.?PM/i, 'beside the clock-in it has to come after');
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.strictEqual(after.clock_out_at, e.clock_out_at, 'and nothing moved');
+  assert.strictEqual(after.clock_in_at, e.clock_in_at);
+});
+
+test('the grid moves a punch onto the day its new start belongs to, hours and all', async () => {
+  // 12:00am and 12:00pm are not the same trading day, so this edit changes
+  // which service the hours are on. If the punch does not follow, the hours
+  // stay on the night it left and payroll counts them there.
+  const emp = 185;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4185',1500,1)")
+    .run(emp, 'Day Move Case');
+  const day = P2.recentPeriods(4)[3].start;
+  const e = await punch(emp, day, '00:00', '02:00');
+  const wasShift = e.shift_id;
+  assert.ok(e.business_date < day, 'a midnight punch belongs to the night before');
+
+  const res = await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'in', value: '12:00' }),
+  });
+  assert.strictEqual(res.status, 200, 'the grid takes the same correction the drawer does');
+
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.strictEqual(after.payable_minutes, 120, 'still two hours');
+  assert.strictEqual(after.business_date, day, 'on the day noon belongs to');
+  assert.notStrictEqual(after.shift_id, wasShift, 'and on that day’s service');
+  assert.strictEqual(Number(workOf(after.shift_id, emp).hours), 2, 'the hours are on the service it moved to');
+  assert.ok(!workOf(wasShift, emp), 'and gone from the one it left, not sitting there at 0h');
+});
+
 test('a cell edit is refused by the same guards every other path uses', async () => {
   const emp = E.sent;
   const day = P2.recentPeriods(3)[2].start;
@@ -1516,6 +1601,64 @@ test('a signed period asks once, then reopens and takes the edit', async () => {
   assert.notStrictEqual(db.prepare('SELECT clock_in_at FROM time_entries WHERE id = ?').get(e.id).clock_in_at,
     e.clock_in_at, 'and the edit landed');
   thaw(emp, day);
+});
+
+// ---------------------------------------------------------------------------
+// A day where somebody has no shift at all.
+//
+// Asked for in as many words: "i should be able to go on a timeclock and type
+// in hours on days where someone doesnt have any shift too." The grid has
+// always taken a time on an empty day and made the punch — but the service it
+// filed it under was whichever came last in the list, so a barista's 9am-3pm
+// landed on Evening Service, showed on a service they never worked, and went
+// into that service's tip pool. The time decides it now, the same way it does
+// when somebody punches in for real.
+// ---------------------------------------------------------------------------
+
+const dayCell = (body) => fetch(`${BASE}/timeclock/day-cell`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+});
+
+test('hours typed onto a day with no shift land on the service that time belongs to', async () => {
+  const emp = 186;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'barista','4186',1500,1)")
+    .run(emp, 'No Shift Case');
+  onAllSchedules();
+  const day = P2.recentPeriods(4)[3].start;
+  assert.ok(!entriesOf(emp).length, 'nothing of theirs on the books');
+
+  // The morning start, on a day with nothing at all on it.
+  const made = await dayCell({ employee_id: emp, date: day, field: 'in', value: '09:00' });
+  assert.strictEqual(made.status, 200, 'typing a start on an empty day makes the punch');
+  const [e] = entriesOf(emp);
+  assert.strictEqual(e.daypart, 'cafe', 'a nine o’clock start is the Day service, not the last one in the list');
+  assert.strictEqual(e.business_date, day, 'on the day it was typed on');
+  assert.ok(shiftOn(day, 'cafe'), 'and the service exists now, which it did not before');
+
+  // Then the end, through the cell route the grid uses once the punch is there.
+  const done = await fetch(`${BASE}/timeclock/${e.id}/cell`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ field: 'out', value: '15:00' }),
+  });
+  assert.strictEqual(done.status, 200);
+  const after = db.prepare('SELECT * FROM time_entries WHERE id = ?').get(e.id);
+  assert.strictEqual(after.payable_minutes, 360, 'six hours');
+  assert.strictEqual(after.status, 'complete',
+    'and it stops calling itself a punch somebody forgot to close');
+  assert.strictEqual(Number(workOf(after.shift_id, emp).hours), 6, 'the hours are on that service');
+});
+
+test('an end typed on a day with nothing to measure from is refused, in a sentence', async () => {
+  // The honest answer. Inventing a start to go with it would be fiction in a
+  // payroll record, and the message says which field to fill first.
+  const emp = 187;
+  db.prepare("INSERT OR IGNORE INTO employees (id, name, role, pin, hourly_rate_cents, active) VALUES (?,?,'server','4187',1500,1)")
+    .run(emp, 'End First Case');
+  const day = P2.recentPeriods(4)[3].start;
+  const res = await dayCell({ employee_id: emp, date: day, field: 'out', value: '17:00' });
+  assert.strictEqual(res.status, 400);
+  assert.match((await res.json()).error, /start first/i);
+  assert.ok(!entriesOf(emp).length, 'and no punch was invented');
 });
 
 test('a punch that crosses midnight is marked, and one that does not is not', async () => {

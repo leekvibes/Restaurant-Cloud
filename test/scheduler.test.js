@@ -256,8 +256,18 @@ test('a dragged card lands in the column it was dropped on, even from a row date
   S.cancel(s.id);
 });
 
+/** The Monday of the week containing `date` — the same window copyWeek uses. */
+const weekMonday = (date) => {
+  const dow = new Date(`${date}T00:00:00Z`).getUTCDay();   // 0 = Sunday
+  return addDays(date, -((dow + 6) % 7));
+};
+
 test('copying a week from a schedule copies that schedule only, onto itself', () => {
-  const from = addDays(TODAY, 434);
+  // ANCHORED TO THE MONDAY, not to whatever weekday today happens to be. The
+  // test puts one shift on `from` and one on the day after, and copies the
+  // WEEK — so on a day when TODAY + 434 landed on a Sunday the second shift
+  // was in the next week and never came. It passed for six days out of seven.
+  const from = addDays(weekMonday(addDays(TODAY, 434)), 1);
   S.create({ employeeId: SERVER, position: 'server',
     startsAt: at(from, '12:00'), endsAt: at(from, '19:00'), daypart: 'dinner' });
   S.create({ employeeId: SALARIED, position: 'server',

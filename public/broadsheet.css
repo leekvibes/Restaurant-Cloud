@@ -326,6 +326,16 @@ body {
   color: var(--secondary); text-transform: uppercase; white-space: nowrap;
   margin-left: auto;
 }
+/* On a small laptop the bar could not hold the search, the full date and the
+   account together: at 901px the account menu sat 57px past the edge and every
+   page scrolled sideways. The date is the one thing on the bar that is said
+   again on the pages themselves, so it is the one that steps aside; the search
+   is allowed to narrow rather than push. */
+.bs-search { min-width: 0; }
+@media (min-width: 761px) and (max-width: 1100px) {
+  .bs-masthead .bs-date { display: none; }
+  .bs-masthead .bs-search ~ .bs-theme { margin-left: auto; }
+}
 .bs-theme, .bs-avatar {
   width: 28px; height: 28px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
@@ -995,6 +1005,26 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-lr-miss { display: block; font-style: normal; font-size: 11px; color: var(--danger); }
 .bs-lr-go { color: var(--faint); text-align: right; }
 .bs-lr:hover .bs-lr-go { color: var(--accent); }
+/* THE SERVICES LIST, on a laptop. Its tracks were flat widths totalling about
+   720px, inside a panel that has a month list beside it — at 1100px the panel
+   had 626px and the Hrs, Staff and arrow columns ran past the edge of the page.
+   Each track now has a fixed minimum and a share of the rest (so the header and
+   every row still line up), a long service name or status wraps inside its own
+   column, and on the rare screen where even the minimums do not fit, the list
+   scrolls sideways inside its own panel instead of pushing the whole page.
+   Desktop only: the phone turns these rows into cards below. */
+@media (min-width: 761px) {
+  .bs-shifthead, .bs-shiftrow {
+    grid-template-columns: 70px minmax(96px, 2fr) minmax(92px, 1fr) minmax(84px, 1fr)
+      minmax(78px, 1fr) minmax(64px, .8fr) minmax(40px, .5fr) 20px;
+    column-gap: 10px;
+  }
+  .bs-shiftrow > .bs-lr-s, .bs-shiftrow > .bs-lr-st { min-width: 0; overflow-wrap: anywhere; }
+  .bs-mb-panel { overflow-x: auto; }
+  /* On the rows themselves, not their container: the container's own padding
+     and the week groups inside it made a 622px container hold 590px rows. */
+  .bs-mb-panel > .bs-shifthead, .bs-mb-panel .bs-shiftrow { min-width: 622px; }
+}
 
 /* --- Shifts month browser -------------------------------------------------
    A fixed month list on the left, the selected month's shifts on the right.
@@ -1052,8 +1082,10 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-mb-picker { display: none; }
 
 /* On a phone the fixed column can't fit, so months and the year become a
-   compact pair of native pickers above the shifts. Same swap, phone-shaped. */
-@media (max-width: 900px) {
+   compact pair of native pickers above the shifts. Same swap, phone-shaped.
+   Up to 1150px, not 900: below that, the month column left the list too
+   little room for its figures, and the list is what the page is for. */
+@media (max-width: 1150px) {
   .bs-mb { grid-template-columns: 1fr; border: 0; margin-top: 2px; }
   .bs-mb-side { display: none; }
   .bs-mb-picker { display: flex; gap: 12px; margin: 2px 0 14px; }
@@ -1163,18 +1195,29 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
 .bs-stat.bad { color: var(--danger); }
 .bs-em { font-style: normal; color: var(--faint); }
 
-.bs-cols2 { display: grid; grid-template-columns: 1fr 330px; margin-top: 4px; }
-.bs-cols2 > .bs-col:first-child { padding-left: 0; padding-right: 30px; border-right: 1px solid var(--field-border); }
-.bs-cols2 > .bs-col:last-child { padding-right: 0; padding-left: 30px; border-left: 0; }
-/* The staff table needs about 570px of its own, and the tip-pool column takes
-   330px beside it. Below this width that does not leave enough, and the table
-   spilled UNDER the pool: the pool's figures sat on top of Hrs, Wage and Edit.
-   Reported from a laptop. Stacked instead, so the table gets the full width
-   and the pool follows it. */
-@media (max-width: 1260px) {
-  .bs-cols2 { grid-template-columns: 1fr; }
-  .bs-cols2 > .bs-col:first-child { padding-right: 0; border-right: 0; }
-  .bs-cols2 > .bs-col:last-child { padding-left: 0; margin-top: 22px; padding-top: 18px;
+/* SCOPED TO THE SERVICE SHEET. The Sales page further down this file defines
+   .bs-cols2 again — `1fr 380px`, a 34px gap, stacking only under 1000px — and
+   because it comes later and has the same weight, it won here too. So the
+   sheet never had the layout written for it: the tip-pool column was 380px plus
+   a gap nobody asked for, and the "stack on a laptop" rule below never once
+   applied. Measured at 1280px: the staff table got 576px for 712px of columns,
+   and Hrs, Wage and Edit ran under the pool. Scoping it keeps the Sales page
+   exactly as it is. */
+.bs-sheet .bs-cols2 { display: grid; grid-template-columns: 1fr 330px; gap: 0; margin: 4px 0 0; }
+.bs-sheet .bs-cols2 > .bs-col:first-child { padding-left: 0; padding-right: 30px; border-right: 1px solid var(--field-border); }
+.bs-sheet .bs-cols2 > .bs-col:last-child { padding-right: 0; padding-left: 30px; border-left: 0; }
+/* The staff table needs about 720px of its own with the alcohol column, and
+   the tip-pool column takes 330px beside it. Below this width that does not
+   leave enough, and the table spilled UNDER the pool: the pool's figures sat
+   on top of Hrs, Wage and Edit. Reported from a laptop — twice: this was 1260px
+   when the table was 570px, before Alcohol, Cash and the clock tag, and at
+   1280px the table got 545px for 684px of columns. Measured again for the
+   current table. Stacked instead, so the table gets the full width and the
+   pool follows it. */
+@media (max-width: 1460px) {
+  .bs-sheet .bs-cols2 { grid-template-columns: 1fr; }
+  .bs-sheet .bs-cols2 > .bs-col:first-child { padding-right: 0; border-right: 0; }
+  .bs-sheet .bs-cols2 > .bs-col:last-child { padding-left: 0; margin-top: 22px; padding-top: 18px;
     border-top: 1px solid var(--field-border); }
 }
 .bs-sheet-acts { font-size: 13px; }
@@ -1237,13 +1280,40 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
    The table shares its row with the tip-pool sidebar (~725px, not the page
    width), so the fixed tracks are kept lean — the extra column would otherwise
    crush Name to a couple of characters. */
+/* Every track has a FIXED minimum and a share of what is left, so the header
+   and each row — separate grids — always come out the same widths, and the
+   columns line up; nothing is sized by its own content. The minimums are what
+   the widest ordinary figure needs: "$1,694.99" in Kitchen, "13:00" in Hrs,
+   "$13.00" in Wage. They used to be flat widths chosen for a narrower table,
+   and the Hrs column was 42px for "5:16 CLOCK" (72px) — it ran into Wage on
+   every row. */
 .bs-staffhead, .bs-staffrow {
-  grid-template-columns: minmax(96px, 1fr) 54px 78px 78px 64px 64px 44px 52px 38px;
+  grid-template-columns: minmax(100px, 1.4fr) minmax(64px, .8fr) minmax(78px, 1fr) minmax(78px, 1fr)
+    minmax(78px, 1fr) minmax(62px, .9fr) minmax(46px, .6fr) minmax(56px, .7fr) 36px;
+  column-gap: 10px;
 }
-/* Ten with alcohol. */
+/* Ten with alcohol. The money columns are sized for "$16,944.99". */
 .bs-staffhead.has-alc, .has-alc .bs-staffrow {
-  grid-template-columns: minmax(84px, 1fr) 48px 70px 70px 60px 60px 60px 42px 48px 34px;
+  grid-template-columns: minmax(92px, 1.3fr) minmax(62px, .8fr) minmax(78px, 1fr) minmax(78px, 1fr)
+    minmax(78px, 1fr) minmax(78px, 1fr) minmax(60px, .9fr) minmax(46px, .6fr) minmax(56px, .7fr) 34px;
+  column-gap: 10px;
 }
+/* THE LAST RESORT, NOT THE DESIGN. Above 1000px or so the ledger fits its
+   column. Below that, with the alcohol column, it cannot — and a row wider
+   than its table used to run its last columns under whatever sat beside or
+   over it. So the ledger keeps the width its figures need and scrolls sideways
+   inside its own box instead: nothing is clipped, and nothing lies on top of a
+   number. The tablet and phone layouts below have their own shapes and opt out. */
+.bs-ledger { overflow-x: auto; }
+.bs-ledger > .bs-staffhead, .bs-ledger > .bs-srows { min-width: 680px; }
+.bs-ledger > .bs-staffhead.has-alc, .bs-ledger > .bs-srows.has-alc { min-width: 752px; }
+@media (max-width: 900px) {
+  .bs-ledger > .bs-staffhead, .bs-ledger > .bs-srows,
+  .bs-ledger > .bs-staffhead.has-alc, .bs-ledger > .bs-srows.has-alc { min-width: 0; }
+}
+/* A long name or job wraps inside its own column instead of pushing into the
+   next one. */
+.bs-staffrow > .bs-sr-n, .bs-staffrow > .bs-sr-r { min-width: 0; overflow-wrap: anywhere; }
 .bs-shead {
   padding: 12px 0 8px;
   font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
@@ -1286,6 +1356,9 @@ html.rc-collapsed .bs-side-pin:hover::after { opacity: 1; }
   letter-spacing: .04em; text-transform: uppercase;
   color: var(--muted); margin-left: 6px;
 }
+/* In the ledger the tag sits UNDER the time, so the Hrs column only has to be
+   as wide as "13:00". Beside it, it needed 72px and spilled into Wage. */
+.bs-staffrow .bs-sr-src { display: block; margin: 3px 0 0; font-size: 9.5px; line-height: 1; }
 .bs-sr-e { text-align: right; font-size: 13px; font-weight: 500; color: var(--accent); }
 .bs-srow[open] .bs-sr-e { color: var(--muted); }
 .bs-srow[open] .bs-sr-e::after { content: ''; }
@@ -1932,27 +2005,36 @@ a.person:hover span:last-child { color: var(--accent); text-decoration: underlin
    twin of the shift sheet's person rows, so the review screen and the entry
    screen read as one product rather than two. */
 .bs-sendform { margin: 0; }
-.bs-pays { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; margin: 8px 0 26px; }
+.bs-pays { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin: 8px 0 26px; }
+/* min-width: 0, because a grid item will not shrink below its content by
+   default: one long line — a name, an address, hours printed as a raw float —
+   made a card wider than its column, and the NEXT card was painted over the
+   figures and the Send button. Everything inside now wraps or truncates
+   instead, so the card is always exactly its column. */
 .bs-pay { border: 1px solid var(--rule); border-left: 3px solid var(--rule);
-  background: var(--surface); padding: 15px 16px; display: grid; gap: 12px; }
-.bs-pay-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.bs-pay-n { font-size: 15px; font-weight: 600; color: var(--headline); }
+  background: var(--surface); padding: 15px 16px; display: grid; gap: 12px; min-width: 0; }
+.bs-pay-h { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 3px 10px; }
+.bs-pay-n { font-size: 15px; font-weight: 600; color: var(--headline); min-width: 0; overflow-wrap: anywhere; }
 .bs-pay-r { font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em;
   text-transform: uppercase; color: var(--muted); white-space: nowrap; }
 .bs-pay-figs { margin: 0; display: grid; gap: 7px; }
 .bs-pay-figs > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.bs-pay-figs dt { font-size: 13px; color: var(--secondary); }
-.bs-pay-figs dd { margin: 0; font-family: var(--mono); font-size: 15px; color: var(--ink); }
+/* The words may wrap; the money never breaks across lines or shrinks. */
+.bs-pay-figs dt { font-size: 13px; color: var(--secondary); min-width: 0; }
+.bs-pay-figs dd { margin: 0; font-family: var(--mono); font-size: 15px; color: var(--ink);
+  white-space: nowrap; flex-shrink: 0; }
 .bs-pay-out dd { color: var(--muted); }
 .bs-pay-keep { border-top: 1px solid var(--rule); padding-top: 8px; }
 .bs-pay-keep dt { font-weight: 600; color: var(--headline); font-size: 13.5px; }
 .bs-pay-keep dd { font-size: 17px; font-weight: 600; color: var(--positive); }
-.bs-pay-send { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+/* Address and actions share a line while they fit; when they do not, the
+   buttons drop beneath the address, whole, rather than being clipped. */
+.bs-pay-send { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px;
   border-top: 1px solid var(--rule); padding-top: 11px; }
 .bs-pay-to { font-family: var(--mono); font-size: 11.5px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 140px; }
 .bs-pay-send-none { color: var(--danger); font-size: 12.5px; }
-.bs-pay-acts { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.bs-pay-acts { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
 .bs-pay-acts form { margin: 0; }
 .bs-pay-prev { font-size: 12.5px; padding: 7px 10px; }
 .bs-pay-sendbtn { border: 1px solid var(--ink); background: none; color: var(--ink);

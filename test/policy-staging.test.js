@@ -59,8 +59,13 @@ test('one draft per service — saving again replaces it', () => {
 test('turning it on moves nothing that already happened', () => {
   const draft = P.stageRules('dinner', NEW, 'the new one');
   // Two services already stamped with the old policy — one closed, one open.
-  const closed = mkShift('2026-09-18', 'dinner', 'emailed');
-  const open = mkShift('2026-09-19', 'dinner', 'open');
+  // Dated ahead of the policy written a line ago, because a service worked
+  // BEFORE any policy existed is the other rule entirely: it keeps the built-in
+  // defaults it went out on and is never stamped afterwards (policy.js). These
+  // fixtures used fixed September dates and quietly crossed into that rule the
+  // day the calendar passed them.
+  const closed = mkShift('2099-09-18', 'dinner', 'emailed');
+  const open = mkShift('2099-09-19', 'dinner', 'open');
   for (const id of [closed, open]) P.policyForShift(db.prepare('SELECT * FROM shifts WHERE id = ?').get(id));
   const stamped = (id) => db.prepare('SELECT policy_id p FROM shifts WHERE id = ?').get(id).p;
   const wasClosed = stamped(closed); const wasOpen = stamped(open);
