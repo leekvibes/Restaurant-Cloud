@@ -323,6 +323,28 @@ function setSettingsFor(slug, v) {
 /** Schedules that carry their own time clock. */
 const withClock = () => all().filter((x) => x.has_clock !== 0);
 
+/**
+ * The RUNNING service with a clock on one side of the day's single boundary.
+ *
+ * The boundary ("dinner starts at", TC.suggestDaypart) answers in the two keys
+ * the restaurant started with: 'cafe' before it, 'dinner' from it on. This puts
+ * that answer onto the services actually running with a clock — the first of
+ * them for the day side, the last for the evening side. With the original two
+ * running, that is the same answer. On the live site, where the original dinner
+ * is archived and the evening people clock into is a service added later, it is
+ * Day Service and that added Evening Service — never the archived one, which
+ * also reads "Evening Service" and shows on no board and no clock.
+ *
+ * One definition for every guess made from a clock time: the time clock filing
+ * hours typed onto an empty day (svcAt in server.js), and the schedule stamping
+ * a shift that arrived with no schedule named (create in scheduler.js).
+ */
+function forSide(pairKey) {
+  const clocks = withClock().map((x) => x.slug);
+  const list = clocks.length ? clocks : all().map((x) => x.slug);
+  return pairKey === 'dinner' ? list[list.length - 1] : list[0];
+}
+
 // --- the timekeeping cycle --------------------------------------------------
 //
 // A time clock's own period structure: how long a timesheet period is, which
@@ -700,7 +722,7 @@ function employeesFor(slug) {
 }
 
 module.exports = {
-  BUILT_IN, seed, backfill, addToAll, all, withClock, setClock, LIMITS, limitOf, setLimit,
+  BUILT_IN, seed, backfill, addToAll, all, withClock, forSide, setClock, LIMITS, limitOf, setLimit,
   DAY_LETTERS, DAY_NAMES, hoursFor, hoursOn, setHours, asMin, bySlug,
   CLOCK_SETTINGS, seedSettings, settingsFor, setSettingsFor, nameOf, isActive, create, rename, archive, unarchive,
   isZone,

@@ -505,7 +505,8 @@ const DAYPARTS = ['cafe', 'dinner'];
 // inferred. These answer the question instead, and the original pair still
 // passes both, so nothing that worked before can stop working.
 //
-//   svcLive   may NEW work land on it: a clock-in, a service, a punch
+//   svcLive   may a MACHINE post new work onto it. Only the Benugin POS
+//             webhook asks this now — see the note on svcOpen below.
 //   svcKnown  may an EXISTING record keep it. Archived schedules count, so an
 //             old punch is never forced off the schedule it was made on.
 const svcLive = (slug) => DAYPARTS.includes(slug) || SERVICES.isActive(slug);
@@ -523,6 +524,18 @@ const svcKnown = (slug) => svcLive(slug) || !!SERVICES.bySlug(slug);
 // the staff edit sheet offered the old pair, so every evening clock-out fix
 // asked to move the shift to Day, and approval refused the one move — back to
 // the real Evening — that would have fixed it. Found in the Sep 21 audit.
+//
+// Every door where a PERSON opens new work asks svcOpen: the clock-in, the
+// report a staff member files for a shift that is not listed, and Log a
+// service. Each of those forms lists running services only, so the archived
+// 'dinner' could arrive only from a page cached before it was archived — and
+// on the live site it would have opened a second "Evening Service" sheet that
+// night, holding that person's sales and tips apart from the real one.
+//
+// The POS webhook keeps svcLive, deliberately. The contract handed to Benugin's
+// developer (README) spells the evening batch "daypart": "dinner", nothing on
+// this side can see whether that feed is switched on or what it sends, and a
+// refusal there loses a night's figures rather than asking somebody again.
 const svcOpenList = () => {
   const live = SERVICES.all().map((x) => x.slug);
   return live.length ? live : DAYPARTS.slice();
@@ -550,13 +563,10 @@ const svcLabel = (slug) => `${dp(slug)}${svcOpen(slug) ? '' : ' (no longer used)
  * puts the same single boundary onto the services the restaurant actually runs
  * with a clock: the first of them before it, the last from it on — which on the
  * live site means Day Service and the added Evening Service, never the
- * archived dinner.
+ * archived dinner. The rule itself is SERVICES.forSide, shared with the
+ * schedule, so the two can never disagree about which service 6pm is.
  */
-const svcAt = (utc) => {
-  const clocks = SERVICES.withClock().map((x) => x.slug).filter(svcOpen);
-  const list = clocks.length ? clocks : svcOpenList();
-  return TC.suggestDaypart(utc, TC.settings().dinnerFrom) === 'dinner' ? list[list.length - 1] : list[0];
-};
+const svcAt = (utc) => SERVICES.forSide(TC.suggestDaypart(utc, TC.settings().dinnerFrom));
 /** Schedules to offer in a select: the live ones, plus the one a record already has. */
 const svcOptions = (keep) => {
   const live = SERVICES.all().map((x) => x.slug);
@@ -2001,7 +2011,8 @@ app.get('/shifts/new', (req, res) => {
 
 app.post('/shifts', (req, res) => {
   const { date, daypart } = req.body;
-  if (!date || !svcLive(daypart)) return res.redirect('/shifts/new?err=1&msg=' + encodeURIComponent('Pick a date and service.'));
+  // A service the restaurant runs — the form lists only those (svcOpen, above).
+  if (!date || !svcOpen(daypart)) return res.redirect('/shifts/new?err=1&msg=' + encodeURIComponent('Pick a date and service.'));
   s.getOrIgnore.run(date, daypart);
   const sh = s.findShift.get(date, daypart);
   policyForShift(sh); // lock in the tip-out policy version that's current right now
@@ -6192,7 +6203,11 @@ function tipsWorkspacePage(model, opts = {}) {
                 aria-describedby="st-dp-h${errs.daypart ? ' st-dp-e' : ''}"${
   errs.daypart ? ' aria-invalid="true"' : ''}>
           <option value="">Choose a service</option>
-          ${svcOptions(vals.daypart).map((d) => `<option value="${esc(d)}"${
+          ${/* The running services only, never kept from what was posted. This
+               files NEW work, and a refused post naming the archived evening
+               came back with a second "Evening Service" already selected, so
+               sending again was refused again. */''}
+          ${svcOpenList().map((d) => `<option value="${esc(d)}"${
     vals.daypart === d ? ' selected' : ''}>${esc(dp(d))}</option>`).join('')}
         </select>
         <p class="st-hint" id="st-dp-h">The schedule you worked.</p>
@@ -6552,7 +6567,9 @@ const openTips = (req, res) => {
   const q = req.query || {};
   const vals = model.manual ? {
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(q.date || '')) ? String(q.date) : '',
-    daypart: svcKnown(String(q.daypart || '')) ? String(q.daypart) : '',
+    // A running service, as the form offers — an old link naming the archived
+    // evening must not come back selected.
+    daypart: svcOpen(String(q.daypart || '')) ? String(q.daypart) : '',
   } : {};
   res.send(tipsWorkspacePage(model, { manual: model.manual, vals }));
 };
@@ -6699,7 +6716,10 @@ function writeSalesTips(req, emp, opts = {}) {
   }
   if (!sh) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(vals.date)) errs.date = 'Choose the date you worked.';
-    if (!svcLive(vals.daypart)) errs.daypart = 'Choose which service you worked.';
+    // Running services only, as the form offers. A page cached before the
+    // evening service was replaced still posts the archived 'dinner', and
+    // taking it opened a second "Evening Service" sheet for their money.
+    if (!svcOpen(vals.daypart)) errs.daypart = 'Choose which service you worked.';
     manual = true;
   }
 
@@ -7922,7 +7942,7 @@ app.get('/portal/schedule', (req, res) => {
         <button type="button" class="myav-req" id="myav-req">Request time off</button>
         ${myavOffSheet(req, today)}
 
-        ${avOn ? myavSheets(req, today, DAYPARTS) : ''}`
+        ${avOn ? myavSheets(req) : ''}`
         : (body ? `<div class="ps-days">${body}</div>`
           : (rows.length ? quiet : (view === 'all' ? emptyAll : empty)))}
     </div>
@@ -8045,10 +8065,18 @@ function myavOffSheet(req, today) {
  * look like the same one. THEN the detail sheet, which is the same shape for
  * both and only changes its title and what it posts.
  *
+ * NO SERVICE IN EITHER SHEET, on purpose. Availability is a stretch of the
+ * wall clock — "I can't do evenings" is "unavailable from 4pm" — and the Phase 6
+ * contract refuses a per-service dimension (§38-39). The Issues check measures
+ * it against every planned shift's own hours, whichever schedule it is on, so
+ * it reaches the Evening Service the restaurant added exactly as it reaches
+ * Day. This used to be handed the hard-coded pair of services and never read
+ * it; gone, so nobody mistakes it for a list to wire into the form.
+ *
  * No backticks and no dollar-brace below: this whole function is interpolated
  * into a template literal.
  */
-function myavSheets(req, today, dayparts) {
+function myavSheets(req) {
   const csrf = csrfFor(req);
   return `
   <div class="myav-sheet" id="myav-pick" hidden aria-hidden="true">
@@ -9241,9 +9269,11 @@ app.post('/portal/clock/in', (req, res) => {
 
   const position = allowed.includes(req.body.position) ? req.body.position : (allowed.length === 1 ? allowed[0] : null);
   if (!position) return back('err=' + encodeURIComponent('Choose the position you are working.'));
-  // Any live schedule. Whether THIS person may work it is the canWork gate
-  // right below, which is the real authorisation and always was.
-  const daypart = svcLive(req.body.daypart) ? req.body.daypart : null;
+  // Any running schedule. Whether THIS person may work it is the canWork gate
+  // right below, which is the real authorisation and always was. The archived
+  // 'dinner' was let through to that gate, which refused it as "You are not
+  // set up for Evening Service" — to somebody who is, on the running one.
+  const daypart = svcOpen(req.body.daypart) ? req.body.daypart : null;
   if (!daypart) return back('err=' + encodeURIComponent('Choose which service you are working.'));
   // THE GATE. Not the select on the previous screen — this. A POST naming a
   // service somebody does not work has to be refused where it lands, or the
@@ -16488,6 +16518,15 @@ app.post('/webhook/benugin', (req, res) => {
   const { date, daypart, servers } = req.body || {};
   // The date is checked properly, the way the tips page checks it. A truthy
   // test alone let a malformed batch date mint a junk shift nobody could find.
+  //
+  // svcLive, not svcOpen: this still takes 'cafe' and 'dinner' even after the
+  // restaurant has archived one. The README handed to Benugin's developer spells
+  // the evening batch "daypart": "dinner", and a refusal here drops a night's
+  // figures on the floor. On the live site, where 'dinner' is archived, such a
+  // batch lands on that archived service — shown on the Services page as a
+  // second "Evening Service" that night. Whether to send it to the running
+  // Evening Service instead is the owner's call: raised on Sep 22, not decided
+  // here.
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !svcLive(daypart) || !Array.isArray(servers)) {
     return res.status(400).json({ ok: false, error: 'need { date: YYYY-MM-DD, daypart: a live schedule, servers: [...] }' });
   }
@@ -23419,10 +23458,17 @@ const sbBack = (req, res, weekStart, msg, err) => {
  *
  * 'all' is a board, not a service, and must not become a daypart — a shift
  * stamped 'all' belongs to no schedule and shows on none of them.
+ *
+ * Only a service the restaurant RUNS. This took the built-in pair whatever its
+ * state, so on the live site a post naming the archived 'dinner' was stamped
+ * there: a board nobody can open, under the name "Evening Service". No form
+ * offers it (the drawer lists the running schedules), so only a hand-made or
+ * very old page could send it — and now that falls back to the board the
+ * drawer was on, as a missing value always has.
  */
 const svcSlug = (v) => {
   const s = String(v || '');
-  return s && s !== 'all' && (SERVICES.isActive(s) || SCH.DAYPARTS.includes(s)) ? s : null;
+  return s && s !== 'all' && svcOpen(s) ? s : null;
 };
 
 /**
@@ -27041,6 +27087,14 @@ function decideCorrection(c, decision, actor, note) {
         TC.syncShiftHours(moved.shift_id, moved.employee_id, actor, { role: moved.position, force: true });
         if (wasShiftId && wasShiftId !== moved.shift_id) {
           TC.syncShiftHours(wasShiftId, moved.employee_id, actor, { force: true });
+          // Off the service they left as a person too, the same tidy-up the
+          // drawer, the grid's Service cell and the clock's "Move it" button
+          // do. This was the one path that moved a punch and stopped at the
+          // hours: the person stayed on the old sheet at 0h, the Services page
+          // asked for hours that never existed, and the old service's clock
+          // then listed them under "no punch here" with a button to move the
+          // punch straight back — undoing the request that was just approved.
+          pruneClockOnlyRow(wasShiftId, moved.employee_id, actor);
         }
       }
       settle();

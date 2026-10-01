@@ -28,6 +28,7 @@ const path = require('node:path');
 
 const PORT = 4015;                     // unique across the suite
 const BASE = `http://127.0.0.1:${PORT}`;
+const HOOK = 'eve-pos-secret';         // the POS webhook's shared secret, for this server only
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-eve-'));
 const DB = path.join(dir, 'eve.db');
@@ -69,12 +70,14 @@ function submitted(selectHtml) {
 const EMP = { eve: 501, adder: 502, empty: 503, sheet: 504, moved: 505 };
 // People for the time clock tests further down.
 const HELP = { typed: 511, wrong: 512, fresh: 513 };
+// And for the Sep 22 pass over the places that still knew only the original pair.
+const MORE = { prune: 521, plan: 522, report: 523, clock: 524, pos: 525, avail: 526 };
 const PIN = (id) => String(6000 + id - 500);
 
 test.before(async () => {
   child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'server.js')], {
     env: { ...process.env, PORT: String(PORT), DB_PATH: DB, TZ: 'America/New_York',
-      ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '' },
+      ZWIN_SKIP_BACKFILL: '1', APP_PASSWORD: '', WEBHOOK_SECRET: HOOK },
     stdio: 'ignore',
   });
   for (let i = 0; i < 200; i++) {
@@ -101,6 +104,10 @@ test.before(async () => {
   }
   for (const [k, id] of Object.entries(HELP)) {
     ins.run(id, `Help ${k}`, String(7000 + id));
+    SVC.setForEmployee(id, ['cafe', 'evening-service']);
+  }
+  for (const [k, id] of Object.entries(MORE)) {
+    ins.run(id, `More ${k}`, PIN(id));
     SVC.setForEmployee(id, ['cafe', 'evening-service']);
   }
 });
@@ -354,4 +361,234 @@ test('a day and two times, where an end before the start is after midnight', asy
   assert.strictEqual(e.business_date, '2026-09-18', 'on the night it started');
   assert.strictEqual(e.payable_minutes, 450, 'seven and a half hours, into the next morning');
   assert.match(msgOf(res), /Help fresh, Evening Service/, 'and the message says who and where');
+});
+
+// ===========================================================================
+// Sep 22 — the rest of the places that still knew only the original pair
+//
+// Each one checked on the same live shape: Day renamed, 'dinner' archived as
+// "Evening Service", evening-service added. Where a place misfiled work, the
+// test fails against the code before the fix; where it was already right, the
+// test says so and pins it.
+// ===========================================================================
+
+// --- approving a request that moves a shift to another service --------------
+
+test('approving a move to Evening takes the person off the Day sheet, instead of leaving them there at 0h', async () => {
+  // The drawer, the grid's Service cell and the clock's Move button all take
+  // somebody off the service their punch left. Approving the same move asked
+  // for from the phone re-synced the hours to zero and stopped there: they
+  // stayed on the Day sheet asking for hours that never existed, and the Day
+  // clock then listed them under "no punch here" — with a button to move the
+  // punch straight back to Day.
+  const day = '2026-09-19';
+  const id = MORE.prune;
+  const daySh = onSheet(id, day, 'cafe', {});
+  const utc = (local) => TC.localInputToUtc(`${day}T${local}`);
+  const eid = Number(db.prepare(`INSERT INTO time_entries
+      (employee_id, shift_id, business_date, daypart, position, clock_in_at, clock_out_at, status, source, created_by)
+      VALUES (?, ?, ?, 'cafe', 'server', ?, ?, 'complete', 'portal', 'test')`)
+    .run(id, daySh, day, utc('16:30'), utc('22:30')).lastInsertRowid);
+  TC.recompute(TC.q.byId.get(eid));
+  TC.syncShiftHours(daySh, id, 'test');
+  const hoursOn = (sh) => (db.prepare('SELECT hours FROM work WHERE shift_id = ? AND employee_id = ?').get(sh, id) || {}).hours;
+  assert.strictEqual(Number(hoursOn(daySh)), 6, 'set up: the clock put six hours on Day');
+
+  const cookie = await signIn(id);
+  await post('/portal/clock/fix', { entry_id: String(eid), pin: PIN(id), kind: 'shift_times',
+    at_in: '', at_out: '', daypart: 'evening-service', reason: 'I worked the evening' }, cookie);
+  const c = db.prepare('SELECT * FROM time_corrections WHERE time_entry_id = ? ORDER BY id DESC').get(eid);
+  assert.ok(c, 'the request was filed');
+  const res = await post(`/timeclock/correction/${c.id}`, { decision: 'approved' });
+  assert.doesNotMatch(msgOf(res), /Not applied/, `approved (${msgOf(res)})`);
+
+  const eveSh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'evening-service'").get(day).id;
+  assert.strictEqual(TC.q.byId.get(eid).shift_id, eveSh, 'the punch is on Evening');
+  assert.strictEqual(Number(hoursOn(eveSh)), 6, 'with its six hours');
+  assert.strictEqual(hoursOn(daySh), undefined, 'and they are off the Day sheet, not left on it at 0h');
+  const dayClock = await page(`/timeclock/cafe/today?from=${day}&to=${day}`);
+  assert.strictEqual(gapLine(dayClock, 'More prune'), '',
+    'so the Day clock does not offer to move the punch straight back');
+});
+
+// --- the schedule -------------------------------------------------------------
+
+/** Planned shifts for one person on one day, cancelled ones aside. */
+const plansOn = (empId, date) => db.prepare(`SELECT * FROM scheduled_shifts
+  WHERE employee_id = ? AND business_date = ? AND status <> 'cancelled' ORDER BY id`).all(empId, date);
+
+test('a template saved on the old Evening board, applied on Evening, lands on the Evening Service people work', async () => {
+  // Saved before the restaurant replaced its evening service, a template row
+  // carries 'dinner'. The scheduler counted the built-in pair as running
+  // whatever its state, so applying it made drafts on the archived evening,
+  // and told the manager on the Evening board that they were "on Evening
+  // Service — not this board".
+  const t = Number(db.prepare("INSERT INTO schedule_templates (name, kind) VALUES ('Eve old Friday', 'day')")
+    .run().lastInsertRowid);
+  db.prepare(`INSERT INTO schedule_template_rows (template_id, day_offset, employee_id, position, start_min, end_min, daypart)
+    VALUES (?, 0, ?, 'server', ?, ?, 'dinner')`).run(t, MORE.plan, 17 * 60, 23 * 60);
+  const day = '2026-10-02';
+  const res = await post('/schedule/apply-template', { id: String(t), to: day, svc: 'evening-service', w: day });
+  assert.strictEqual(res.status, 302);
+  const made = plansOn(MORE.plan, day);
+  assert.strictEqual(made.length, 1, `one draft made (${msgOf(res)})`);
+  assert.strictEqual(made[0].daypart, 'evening-service', 'on the Evening Service people work, not the archived one');
+  assert.doesNotMatch(msgOf(res), /not this board/, 'and nothing says it went somewhere else');
+});
+
+test('copying a day from the all-schedules board leaves a shift on the archived evening behind, and says so', async () => {
+  const from = '2026-10-05'; const to = '2026-10-12';
+  // A plan made while 'dinner' still ran.
+  db.prepare(`INSERT INTO scheduled_shifts (employee_id, position, business_date, starts_at, ends_at, daypart, status)
+    VALUES (?, 'server', ?, ?, ?, 'dinner', 'draft')`)
+    .run(MORE.plan, from, TC.localInputToUtc(`${from}T17:00`), TC.localInputToUtc(`${from}T23:00`));
+  const res = await post('/schedule/copy-day', { from, to, svc: 'all', w: from });
+  assert.strictEqual(res.status, 302);
+  assert.deepStrictEqual(plansOn(MORE.plan, to).map((r) => r.daypart), [],
+    'nothing copied onto a board nobody can open');
+  assert.match(msgOf(res), /could not be copied \(it is on the archived Evening Service\)/,
+    `and the message names it as the archived one (${msgOf(res)})`);
+});
+
+test('a shift posted with no schedule, or naming the archived one, lands on a schedule that runs', async () => {
+  // The drawer always sends a running schedule. A hand-made or very old page
+  // need not. With none named the scheduler guesses from the clock, and the
+  // guess answers in the original pair — 'dinner' from 4pm — so an evening
+  // shift posted that way went onto the archived evening. Naming the archived
+  // one outright was taken as given.
+  const d1 = '2026-10-06'; const d2 = '2026-10-07';
+  await post('/schedule/shift', { employee_id: String(MORE.plan), position: 'server',
+    date: d1, start: '17:00', end: '23:00', svc: 'all', w: d1 });
+  assert.deepStrictEqual(plansOn(MORE.plan, d1).map((r) => r.daypart), ['evening-service'],
+    'with no schedule named, a 5pm shift goes on the running Evening Service');
+  // A schedule that no longer runs is read as no schedule named, so the board
+  // it came from answers — before the clock, as it always has. From the Evening
+  // board at 10am the two disagree, which is what makes this say something.
+  await post('/schedule/shift', { employee_id: String(MORE.plan), position: 'server',
+    date: d2, start: '10:00', end: '16:00', daypart: 'dinner', svc: 'evening-service', w: d2 });
+  assert.deepStrictEqual(plansOn(MORE.plan, d2).map((r) => r.daypart), ['evening-service'],
+    'naming the archived evening from the Evening board, it goes on the Evening board');
+});
+
+test('the scheduler itself never stamps new work on the archived evening, or moves a shift onto it', () => {
+  // Beneath the routes, for whatever calls it next: every caller today already
+  // hands it a running schedule, so only a direct call can reach this.
+  const SCH = require('../src/scheduler');
+  const day = '2026-10-09';
+  const made = SCH.create({ employeeId: MORE.plan, position: 'server',
+    startsAt: `${day} 10:00`, endsAt: `${day} 16:00`, daypart: 'dinner', createdBy: 'test' });
+  assert.strictEqual(made.daypart, 'cafe', 'named and archived, it is guessed from the clock like no name at all');
+  const late = SCH.create({ employeeId: MORE.plan, position: 'server',
+    startsAt: `${day} 17:00`, endsAt: `${day} 23:00`, createdBy: 'test' });
+  assert.strictEqual(late.daypart, 'evening-service', 'and the evening guess is the running Evening Service');
+  assert.strictEqual(SCH.serviceFor(TC.localInputToUtc(`${day}T17:00`)), 'dinner',
+    'while the clock boundary itself still answers in the original pair, as INV6 requires');
+  SCH.edit(made.id, { daypart: 'dinner' });
+  assert.strictEqual(SCH.byId(made.id).daypart, 'cafe', 'an edit naming the archived evening leaves the shift where it is');
+  SCH.edit(made.id, { daypart: 'evening-service' });
+  assert.strictEqual(SCH.byId(made.id).daypart, 'evening-service', 'while a running one still moves it');
+});
+
+// --- doors where a person opens new work ------------------------------------
+
+test('a report from an old page naming the archived evening is sent back to choose, and opens no second Evening sheet', async () => {
+  // The report form lists running services only. A phone still holding a page
+  // from before the evening service was replaced posts 'dinner' — and that was
+  // taken: it opened the archived evening's sheet for the night, under the name
+  // "Evening Service", and filed the person's sales and tips there, apart from
+  // the sheet the tip-out runs on.
+  const day = '2026-09-20';
+  const body = { employee_id: String(MORE.report), pin: PIN(MORE.report), mode: 'manual', position: 'server',
+    date: day, food: '120.00', card_tips: '20.00' };
+  const res = await post('/tips', { ...body, daypart: 'dinner' });
+  assert.strictEqual(res.status, 200, 'the form comes back rather than saving');
+  const back = await res.text();
+  assert.match(back, /Choose which service you worked/, 'asking which service');
+  // And the form it comes back as must not hand the same answer straight back.
+  // Its list keeps whatever was posted, which for the archived evening meant a
+  // second "Evening Service", already selected — send again, refused again.
+  const sel = back.match(/<select id="st-dp" name="daypart"[\s\S]*?<\/select>/);
+  assert.ok(sel, 'the service question is on the returned form');
+  const again0 = submitted(sel[0]);
+  assert.ok(!again0.values.includes('dinner'), `the archived evening is not offered back (${again0.values})`);
+  assert.strictEqual(again0.value, '', 'and nothing is chosen for them');
+  const reload = await page(`/portal/tips?manual=1&date=${day}&daypart=dinner`, await signIn(MORE.report));
+  const sel2 = reload.match(/<select id="st-dp" name="daypart"[\s\S]*?<\/select>/);
+  assert.ok(sel2 && !submitted(sel2[0]).values.includes('dinner'),
+    'nor by the reload that keeps a picked date and service');
+  assert.ok(!db.prepare("SELECT 1 FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day),
+    'and no archived-evening sheet was opened for the night');
+  assert.ok(!db.prepare('SELECT 1 FROM server_sales WHERE employee_id = ?').get(MORE.report), 'nothing was filed');
+
+  const again = await post('/tips', { ...body, daypart: 'evening-service' });
+  assert.strictEqual(again.status, 302, 'picked from the running ones, it goes through');
+  const sh = db.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'evening-service'").get(day);
+  assert.strictEqual(db.prepare('SELECT food_cents FROM server_sales WHERE shift_id = ? AND employee_id = ?')
+    .get(sh.id, MORE.report).food_cents, 12000, 'onto the Evening Service sheet');
+});
+
+test('Log a service will not open the archived evening', async () => {
+  const day = '2026-09-23';
+  const res = await post('/shifts', { date: day, daypart: 'dinner' });
+  assert.strictEqual(res.status, 302);
+  assert.match(String(res.headers.get('location')), /^\/shifts\/new\?err=1/, 'sent back to pick a service');
+  assert.ok(!db.prepare("SELECT 1 FROM shifts WHERE date = ? AND daypart = 'dinner'").get(day),
+    'and no sheet was opened on it');
+  const ok = await post('/shifts', { date: day, daypart: 'evening-service' });
+  assert.match(String(ok.headers.get('location')), /^\/shifts\/\d+$/, 'the running Evening Service opens as always');
+});
+
+test('a clock-in naming the archived evening is asked which service, not told they are not set up for Evening', async () => {
+  // Refused before as well — by the gate that asks whether this person works
+  // that service — but in words that told somebody on the running Evening
+  // Service that they were "not set up for Evening Service".
+  const cookie = await signIn(MORE.clock);
+  const res = await post('/portal/clock/in', { daypart: 'dinner', position: 'server' }, cookie);
+  assert.strictEqual(res.status, 302);
+  const where = decodeURIComponent(String(res.headers.get('location')));
+  assert.match(where, /Choose which service you are working/, `asked to choose (${where})`);
+  assert.ok(!db.prepare('SELECT 1 FROM time_entries WHERE employee_id = ?').get(MORE.clock), 'and nothing was punched');
+});
+
+test('the POS feed still takes an evening batch sent as "dinner", as its contract spells it', async () => {
+  // A guard, not a fix. The README handed to Benugin's developer spells the
+  // evening batch "daypart": "dinner". Every door where a PERSON files work now
+  // refuses the archived evening; this one must not, or a night's figures are
+  // dropped. Which sheet such a batch belongs on is the owner's call, so this
+  // pins only that it is taken and kept.
+  const hook = (daypart) => fetch(`${BASE}/webhook/benugin`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-secret': HOOK },
+    body: JSON.stringify({ date: '2026-09-24', daypart, servers: [{ name: 'More pos', food: 150, card_tips: 30 }] }),
+  });
+  for (const d of ['dinner', 'evening-service', 'cafe']) {
+    const r = await hook(d);
+    const out = await r.json();
+    assert.strictEqual(r.status, 200, `a "${d}" batch is accepted (${JSON.stringify(out)})`);
+    assert.deepStrictEqual(out.matched, ['More pos'], 'and matched to the person');
+    assert.ok(db.prepare('SELECT 1 FROM server_sales WHERE shift_id = ? AND employee_id = ?').get(out.shift_id, MORE.pos),
+      'with their figures kept on the sheet it names');
+  }
+});
+
+// --- availability -------------------------------------------------------------
+
+test('availability reaches the Evening Service the restaurant added: no service asked, and the Evening board warns', async () => {
+  // Checked and already right. The sheets were handed the hard-coded pair and
+  // never read it; availability is a stretch of the wall clock, not a service
+  // (Phase 6 §38-39), and the check runs against each planned shift's own
+  // hours — so it reaches the added Evening Service exactly as it reaches Day.
+  const day = '2026-10-08';
+  const cookie = await signIn(MORE.avail);
+  const tab = await page('/portal/schedule?v=avail', cookie);
+  const form = (tab.match(/<form class="myav-panel" method="post" action="\/portal\/availability"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(form, 'the availability sheet is on the page');
+  assert.doesNotMatch(form, /name="daypart"|name="svc"/, 'and asks for no service');
+
+  const said = await post('/portal/availability', { kind: 'unavailable', on_date: day, weekday: '', all_day: '1', note: '' }, cookie);
+  assert.match(msgOf(said), /^Saved/, `their unavailability is saved (${msgOf(said)})`);
+  const res = await post('/schedule/shift', { employee_id: String(MORE.avail), position: 'server',
+    date: day, start: '17:00', end: '23:00', svc: 'evening-service', w: day });
+  assert.match(msgOf(res), /More avail said they cannot work then/, 'saving an Evening shift over it warns');
+  const board = await page(`/schedule?svc=evening-service&w=${day}`);
+  assert.match(board, /More avail said they cannot work then/, 'and the Evening board carries it as an issue');
 });

@@ -471,7 +471,7 @@ function applyScheduleTemplate(id, toDate, opts = {}) {
     const dp = r.daypart && liveSchedule(r.daypart) ? r.daypart : scope;
     if (!dp) {
       skipped.push({ employeeId: r.employee_id, who,
-        reason: r.daypart ? `${SERVICES.nameOf(r.daypart)} has been archived`
+        reason: r.daypart ? `saved on ${boardName(r.daypart)} — open the schedule it is for now, then apply it there`
           : 'open the schedule this template is for, then apply it there' });
       continue;
     }
@@ -479,7 +479,7 @@ function applyScheduleTemplate(id, toDate, opts = {}) {
     if (seen.has(key)) {
       const there = seen.get(key);
       skipped.push({ employeeId: r.employee_id, who,
-        reason: there && there !== dp ? `already on ${SERVICES.nameOf(there)}` : 'already on the schedule' });
+        reason: there && there !== dp ? `already on ${boardName(there)}` : 'already on the schedule' });
       continue;
     }
     try {
@@ -817,7 +817,16 @@ function create(input) {
   // Both stamped from the START of the shift. A shift running to 2am belongs to
   // the night it began on, in both senses — the same rule the clock uses, so a
   // punch against it lands on the same business date.
-  const daypart = knownService(input.daypart) ? input.daypart : serviceFor(startsAt);
+  //
+  // NEW WORK GOES ON A SCHEDULE THAT RUNS. A schedule named and archived is
+  // treated like one not named at all, and the clock guess that follows is put
+  // onto the running services when it names an archived one — which on the
+  // live site is the original 'dinner', so an evening shift with no schedule
+  // lands on the Evening Service people actually work, not on the one nothing
+  // shows. serviceFor itself still answers in the original pair (INV6).
+  const guess = serviceFor(startsAt);
+  const daypart = liveSchedule(input.daypart) ? input.daypart
+    : (liveSchedule(guess) ? guess : SERVICES.forSide(guess));
   const businessDate = businessDateFor(startsAt);
   // Before the transaction, not inside it. A rollback would be correct either
   // way; refusing first means the shift is never half-created in the first
@@ -875,7 +884,11 @@ function edit(id, patch) {
   // and the board said "Moved". Re-adding the shift that had vanished then
   // double-booked the person across the two boards, which is the overlap the
   // manager saw next to their name.
-  const daypart = patch.daypart !== undefined && knownService(patch.daypart) ? patch.daypart : row.daypart;
+  //
+  // A shift already on an archived schedule keeps it — that is history — but
+  // nothing is MOVED onto one: an archived schedule named here is ignored, like
+  // any other value that is not a running schedule.
+  const daypart = patch.daypart !== undefined && liveSchedule(patch.daypart) ? patch.daypart : row.daypart;
   const businessDate = startsAt !== row.starts_at ? businessDateFor(startsAt) : row.business_date;
   const note = patch.note !== undefined ? (String(patch.note || '').trim() || null) : row.note;
 
@@ -1404,11 +1417,11 @@ function copyDay(fromDate, toDate, opts = {}) {
     const startsAt = shiftUtcByDays(src.starts_at, offset);
     if (seen.has(`${src.employee_id}|${startsAt}|${src.position}`)) {
       const there = seen.get(`${src.employee_id}|${startsAt}|${src.position}`);
-      skipped.push({ reason: there && there !== src.daypart ? `already on ${SERVICES.nameOf(there)}` : 'already there' });
+      skipped.push({ reason: there && there !== src.daypart ? `already on ${boardName(there)}` : 'already there' });
       continue;
     }
     if (!liveSchedule(src.daypart)) {
-      skipped.push({ reason: `${SERVICES.nameOf(src.daypart)} has been archived` });
+      skipped.push({ reason: `it is on ${boardName(src.daypart)}` });
       continue;
     }
     try {
@@ -1491,7 +1504,7 @@ function copyWeek(fromStart, toStart, opts = {}) {
         skipped.push({
           id: s.id, who: s.employee_name,
           why: there && there !== s.daypart
-            ? `That shift is already on ${SERVICES.nameOf(there)} that week.`
+            ? `That shift is already on ${boardName(there)} that week.`
             : 'That shift is already on the target week.',
           code: 'duplicate',
         });
@@ -1501,7 +1514,7 @@ function copyWeek(fromStart, toStart, opts = {}) {
       // shift nobody can see. Said, not guessed onto another board.
       if (!liveSchedule(s.daypart)) {
         skipped.push({ id: s.id, who: s.employee_name,
-          why: `${SERVICES.nameOf(s.daypart)} has been archived.`, code: 'archived' });
+          why: `That shift is on ${boardName(s.daypart)}.`, code: 'archived' });
         continue;
       }
       const info = q.insert.run({
@@ -1648,9 +1661,28 @@ const DAYPARTS = ['cafe', 'dinner'];
  */
 const knownService = (slug) => DAYPARTS.includes(slug)
   || SERVICES.all({ includeArchived: true }).some((s) => s.slug === slug);
-// A schedule a board can still show: active, or one of the two built-in keys.
-// The same test svcSlug applies in server.js to what a board posts.
-const liveSchedule = (slug) => SERVICES.isActive(slug) || DAYPARTS.includes(slug);
+/**
+ * A schedule a board can still show, and so the only kind NEW work may land on.
+ *
+ * Active — or one of the two built-in keys the services table has never heard
+ * of, which is a database nobody seeded (every real install seeds both at
+ * boot). A built-in key the restaurant has ARCHIVED does not count. It used to:
+ * this said yes to 'dinner' whatever its state, and on the live site 'dinner'
+ * is archived under the very name of the Evening Service that replaced it, so a
+ * copied day, an applied template or a shift arriving with no schedule named
+ * went onto a board nobody can open — and every message about it read
+ * "Evening Service", which was true and useless. svcSlug in server.js applies
+ * the same test to what a board posts.
+ */
+const liveSchedule = (slug) => SERVICES.isActive(slug)
+  || (DAYPARTS.includes(slug) && !SERVICES.bySlug(slug));
+/**
+ * A schedule's name for a message: "the archived Evening Service" when it no
+ * longer runs, because on the live site a running one has the same name, and
+ * "already on Evening Service" over an Evening board showing nothing is the
+ * confusion these messages exist to prevent.
+ */
+const boardName = (slug) => (liveSchedule(slug) ? '' : 'the archived ') + SERVICES.nameOf(slug);
 
 /**
  * Whole days between two ISO dates.

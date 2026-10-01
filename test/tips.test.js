@@ -958,13 +958,28 @@ test('2F: two people reporting the same service land on one shared shift', async
 // history behind one tap.
 // ===========================================================================
 
-/** Today as the server counts it — same timezone the test server runs in. */
-const TODAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-const DAYS_AGO = (n) => {
-  const d = new Date(`${TODAY}T12:00:00Z`);
+/** The calendar date where the test server runs. Only the late-night test wants this. */
+const CALENDAR_TODAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+/**
+ * Today as the server counts it: the BUSINESS date — the same zone, and the
+ * clock's 4am cutoff, so between midnight and 4am it is still last night.
+ *
+ * This was the calendar date, which the server has never used for a service.
+ * So from midnight to 4am the tests below seeded "today's" shift on a date the
+ * server read as tomorrow, and three of them failed every night in that window
+ * against a server that was right. Found at 12:29am on Sep 22.
+ */
+const TODAY = (() => {
+  const local = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  if (local.getHours() < 4) local.setDate(local.getDate() - 1);
+  return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
+})();
+const daysBefore = (from, n) => {
+  const d = new Date(`${from}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() - n);
   return d.toISOString().slice(0, 10);
 };
+const DAYS_AGO = (n) => daysBefore(TODAY, n);
 
 /** A server with a clean history, so these tests do not read other tests' shifts. */
 function seedToday(pin, name, opts = {}) {
@@ -983,11 +998,14 @@ function seedToday(pin, name, opts = {}) {
                VALUES (?, ?, 'server', 0)`).run(sid, id);
     out.today.push({ id: sid, daypart: dpt });
   }
+  // Counted back from today, or from `opts.from` for a test that moves the
+  // cutoff itself and so has its own idea of which night is still going on.
   for (const [n, dpt] of opts.past || []) {
-    const sid = shiftOn(DAYS_AGO(n), dpt);
+    const date = daysBefore(opts.from || TODAY, n);
+    const sid = shiftOn(date, dpt);
     w.prepare(`INSERT OR IGNORE INTO work (shift_id, employee_id, role, hours)
                VALUES (?, ?, 'server', 6)`).run(sid, id);
-    out.past.push({ id: sid, date: DAYS_AGO(n), daypart: dpt });
+    out.past.push({ id: sid, date, daypart: dpt });
   }
   if (opts.clockedInto) {
     const sid = out.today.find((t) => t.daypart === opts.clockedInto).id;
@@ -2273,8 +2291,11 @@ test('after midnight, the shift just worked is still the one the form opens on',
   setCutoff(hourNow + 1);
   try {
     // Last night's service, worked and not yet reported. In calendar terms it
-    // is yesterday; in trading terms the night is still going on.
-    const seed = seedToday('5199', 'Nia Latenight', { past: [[1, 'dinner']] });
+    // is yesterday; in trading terms the night is still going on. Counted from
+    // the CALENDAR date, because this test moved the cutoff past the current
+    // hour, and that makes the server's today exactly one calendar day back.
+    const lastNight = daysBefore(CALENDAR_TODAY, 1);
+    const seed = seedToday('5199', 'Nia Latenight', { from: CALENDAR_TODAY, past: [[1, 'dinner']] });
     const { cookie } = await signIn('5199');
     const html = await page(cookie, '/portal/tips');
 
@@ -2293,8 +2314,8 @@ test('after midnight, the shift just worked is still the one the form opens on',
     // today's services. On the calendar date it stopped being one at midnight
     // and the write answered "that shift is not one of yours".
     const w2 = writable();
-    w2.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(DAYS_AGO(1));
-    const shared = w2.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'cafe'").get(DAYS_AGO(1)).id;
+    w2.prepare("INSERT OR IGNORE INTO shifts (date, daypart, status) VALUES (?, 'cafe', 'open')").run(lastNight);
+    const shared = w2.prepare("SELECT id FROM shifts WHERE date = ? AND daypart = 'cafe'").get(lastNight).id;
     w2.prepare("INSERT OR IGNORE INTO employees (name, role, hourly_rate_cents, active, pin) VALUES ('Omar Notyet','server',1500,1,'5197')").run();
     w2.close();
     const late = await signIn('5197');
