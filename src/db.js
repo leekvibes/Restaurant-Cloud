@@ -121,6 +121,19 @@ if (!shiftCols.includes('closed_at')) db.exec('ALTER TABLE shifts ADD COLUMN clo
 // is said instead of silently parting from everybody's email (server.js,
 // serviceFingerprint). NULL for services sent before this existed.
 if (!shiftCols.includes('sent_fingerprint')) db.exec('ALTER TABLE shifts ADD COLUMN sent_fingerprint TEXT');
+// FINISHED, AND NOBODY WAS TOLD.
+//
+// A service can be closed off without emailing anyone — the way to clear a
+// backlog of nights without firing a fortnight of "your pay is ready" at every
+// employee at once. It ends up with status 'emailed' like any other finished
+// service, because every count, filter and payroll read in the app means
+// "finished" by that, and a second status word would have to be taught to all
+// of them. This column is what keeps the page honest afterwards: "Finished"
+// rather than "Emails sent", and no claim that anybody's email is out of date
+// when no email was ever sent. Cleared the moment it really is sent.
+if (!shiftCols.includes('finished_quietly')) {
+  db.exec('ALTER TABLE shifts ADD COLUMN finished_quietly INTEGER NOT NULL DEFAULT 0');
+}
 // A sent service the owner has opened again to correct. Set by /shifts/:id/reopen
 // and kept afterwards as history; "reopened right now" is status 'open' with this
 // set. policyForShift reads it too: a night that went out on the defaults stays

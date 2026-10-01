@@ -169,3 +169,134 @@ test('every "are you sure" on the policy page actually asks', async () => {
   }
   db.prepare('DELETE FROM shifts WHERE id = ?').run(open);
 });
+
+// ===========================================================================
+// FINISHING A SERVICE WITHOUT TELLING ANYBODY
+//
+// "I want to send out a bunch of services I've had open for a while silently
+// without giving a bunch of notifications, and turn it on when there's like one
+// left." Sending a service emails everybody on it and puts "your pay is ready"
+// on each of their phones; doing that to a fortnight of nights at once is the
+// burst this avoids. The quiet finish existed already for a service that had
+// been sent and reopened — these are the same move on a night that never went
+// out at all, and the backlog version of it.
+// ===========================================================================
+
+/** A night nobody has ever been told about: people, hours, figures, not sent. */
+function readyNeverSent(date, daypart = 'late-bar') {
+  const sh = Number(db.prepare('INSERT INTO shifts (date, daypart, status) VALUES (?, ?, ?)')
+    .run(date, daypart, 'open').lastInsertRowid);
+  const emp = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES (?, 'server', 1100, 1)`).run(`Quiet ${date}`).lastInsertRowid);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,6)').run(sh, emp, 'server');
+  db.prepare(`INSERT INTO server_sales (shift_id, employee_id, food_cents, coffee_cents, alcohol_cents,
+    card_tips_cents, cash_tips_cents) VALUES (?,?,80000,0,10000,12000,0)`).run(sh, emp);
+  return { sh, emp };
+}
+const events = () => db.prepare('SELECT COUNT(*) n FROM portal_events').get().n;
+
+test('a night that never went out can be finished without emailing anyone', async () => {
+  const { sh, emp } = readyNeverSent('2026-09-17');
+  const before = events();
+
+  const res = await post(`/shifts/${sh}/close`);
+  assert.strictEqual(res.status, 302);
+  assert.match(msgOf(res), /Finished without emailing/);
+  assert.match(msgOf(res), /Nobody was told/);
+
+  const r = row(sh);
+  assert.strictEqual(r.status, 'emailed', 'finished, as every count and payroll read means it');
+  assert.strictEqual(r.finished_quietly, 1, 'and marked as one nobody was emailed about');
+  assert.strictEqual(events(), before, 'nobody was notified');
+  assert.ok(r.sent_fingerprint, 'the figures are fingerprinted, so a later edit still shows up');
+  const w = db.prepare('SELECT settled_rate_cents FROM work WHERE shift_id = ? AND employee_id = ?').get(sh, emp);
+  assert.strictEqual(w.settled_rate_cents, 1100, 'and settled, exactly as a send settles it');
+});
+
+test('the page says Finished, never that emails went out', async () => {
+  const { sh } = readyNeverSent('2026-09-18');
+  await post(`/shifts/${sh}/close`);
+  const page = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  assert.match(page, /FINISHED · NO EMAILS/, 'the status word is honest');
+  assert.doesNotMatch(page, /EMAILS SENT/, 'and never claims an email exists');
+  assert.match(page, /Finished without emailing\. Need to correct something\?/, 'the way back in says it too');
+
+  // And once it is changed afterwards, it must not tell the owner that people
+  // hold an email showing the old figures. They hold nothing.
+  db.prepare('UPDATE server_sales SET card_tips_cents = 20000 WHERE shift_id = ?').run(sh);
+  const after = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  assert.match(after, /Nobody has ever been emailed about this service/);
+  assert.doesNotMatch(after, /the emails people got show the figures from before/);
+});
+
+test('sending it later is still a real send, and the quiet mark goes', async () => {
+  const { sh, emp } = readyNeverSent('2026-09-19');
+  db.prepare('UPDATE employees SET email = ? WHERE id = ?').run('quiet19@example.com', emp);
+  await post(`/shifts/${sh}/close`);
+  assert.strictEqual(row(sh).finished_quietly, 1);
+
+  await post(`/shifts/${sh}/reopen`);
+  const before = events();
+  await post(`/shifts/${sh}/send`);
+  const r = row(sh);
+  assert.strictEqual(r.status, 'emailed');
+  assert.strictEqual(r.finished_quietly, 0, 'it really has been sent now');
+  assert.ok(events() > before, 'and this time the people on it were told');
+  const page = await (await fetch(`${BASE}/shifts/${sh}`)).text();
+  assert.match(page, /EMAILS SENT/, 'the page says so');
+});
+
+test('the backlog button finishes the ready ones and leaves the rest alone', async () => {
+  const { sh: ready } = readyNeverSent('2026-09-20');
+  // Needs review: somebody on it with no hours.
+  const { sh: review } = readyNeverSent('2026-09-21');
+  const noHours = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active)
+    VALUES ('Quiet nohours', 'busser', 1000, 1)`).run().lastInsertRowid);
+  db.prepare('INSERT INTO work (shift_id, employee_id, role, hours) VALUES (?,?,?,0)').run(review, noHours, 'busser');
+  // Today's service, still running.
+  const TC = require('../src/timeclock');
+  const today = TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
+  const { sh: open } = readyNeverSent(today);
+  const before = events();
+
+  const res = await post('/shifts/finish-quiet');
+  assert.strictEqual(res.status, 302);
+  assert.match(msgOf(res), /finished without emailing/i);
+  assert.match(msgOf(res), /left alone/);
+
+  assert.strictEqual(row(ready).status, 'emailed', 'the ready one is finished');
+  assert.strictEqual(row(ready).finished_quietly, 1);
+  assert.strictEqual(row(review).status, 'open', 'the one missing hours is not touched');
+  assert.strictEqual(row(open).status, 'open', 'and neither is tonight');
+  assert.strictEqual(events(), before, 'and nobody, anywhere, was notified');
+});
+
+test('the Services page offers it only while something is ready, and asks first', async () => {
+  const { sh } = readyNeverSent('2026-09-23');
+  const page = await (await fetch(`${BASE}/shifts`)).text();
+  const form = (page.match(/<form[^>]*action="\/shifts\/finish-quiet"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(form, 'the button is there while nights are waiting');
+  assert.match(form, /name="_csrf"/, 'with its own token, hand-written');
+  const handler = (page.match(/action="\/shifts\/finish-quiet"[^>]*onsubmit="([^"]*)"/) || [])[1] || '';
+  assert.ok(handler.includes('\\n\\n'), 'the line break in the question is escaped');
+  assert.ok(!/\n/.test(handler), 'with no raw newline that would stop it compiling');
+  assert.doesNotThrow(() => new Function(handler.replace(/&#39;/g, "'").replace(/&quot;/g, '"')),
+    'and the question compiles, so it actually asks');
+
+  // Nothing waiting, nothing offered: a button that finishes nothing is a
+  // button somebody presses to find out what it does.
+  await post(`/shifts/${sh}/close`);
+  const after = await (await fetch(`${BASE}/shifts`)).text();
+  assert.doesNotMatch(after, /action="\/shifts\/finish-quiet"/, 'gone once the backlog is clear');
+});
+
+test('a sent service is never quietly finished out from under itself', async () => {
+  const { sh } = sentOnDefaults('2026-09-22');
+  const was = row(sh);
+  const res = await post(`/shifts/${sh}/close`);
+  assert.strictEqual(res.status, 302);
+  const now = row(sh);
+  assert.strictEqual(now.status, 'emailed');
+  assert.strictEqual(now.finished_quietly, 0, 'it was emailed for real, and still says so');
+  assert.strictEqual(now.sent_fingerprint, was.sent_fingerprint, 'and what was sent is untouched');
+});

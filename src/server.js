@@ -1615,7 +1615,14 @@ const shiftSales = (x) =>
 const serviceToday = () => TC.businessDateOf(TC.nowUtc(), TC.settings().cutoffHour);
 
 function shiftState(x, today) {
-  if (x.status === 'emailed') return { key: 'sent', label: 'Sent', cls: 's-done' };
+  // Finished either way — the key stays 'sent', because every filter, count and
+  // payroll read in the app means "finished" by it. Only the word changes, so a
+  // night nobody was emailed about does not sit there claiming they were.
+  if (x.status === 'emailed') {
+    return x.finished_quietly
+      ? { key: 'sent', label: 'Finished', cls: 's-done' }
+      : { key: 'sent', label: 'Sent', cls: 's-done' };
+  }
   if (x.date === today) return { key: 'open', label: 'Open', cls: 's-sched' };
   if (!x.people) return { key: 'empty', label: 'Nobody on it', cls: 's-none' };
   if (x.no_hours) return { key: 'review', label: 'Needs review', cls: 's-soon' };
@@ -1844,6 +1851,9 @@ app.get('/shifts', (req, res) => {
   </div>`;
 
   const notSent = st.filter(({ s }) => s.key !== 'sent' && s.key !== 'open').length;
+  // Nights that are finished in every sense except that nobody has pressed
+  // send. The only ones the quiet finish will touch.
+  const readyNow = st.filter(({ s }) => s.key === 'ready').length;
   const headline = all.length
     ? `Services — ${all.length} logged, ${notSent ? `${notSent} still to send.` : 'all sent.'}`
     : 'No services logged yet.';
@@ -1897,7 +1907,16 @@ app.get('/shifts', (req, res) => {
           <h1 class="bs-headline">${esc(headline)}</h1>
           <p class="bs-subline">${esc(subline)}</p>
         </div>
-        ${canWrite() ? '<a class="bs-btn" href="/shifts/new">+ Log a service</a>' : ''}
+        ${canWrite() ? `<div class="bs-head-do">
+          ${/* A backlog, cleared without a fortnight of notifications landing on
+               everybody at once. Ready ones only — see /shifts/finish-quiet. */''}
+          ${readyNow ? `<form method="post" action="/shifts/finish-quiet" style="margin:0"
+            onsubmit="return confirm('Finish ${readyNow} service${readyNow === 1 ? '' : 's'} without emailing?\\n\\nNobody is emailed and nobody is notified. Services still open, needing review, or running today are left alone. The figures are settled and payroll reads them as normal.')">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <button class="bs-btn bs-btn-quiet" type="submit">Finish ${readyNow} without emailing</button>
+          </form>` : ''}
+          <a class="bs-btn" href="/shifts/new">+ Log a service</a>
+        </div>` : ''}
       </div>
       ${body}
     </div>
@@ -2351,7 +2370,7 @@ app.get('/shifts/:id', (req, res) => {
     ? `${esc(sh.date === todayStr ? 'Today' : cashDayLabel(sh.date))} · ${esc(dp(sh.daypart))} — <span class="warn">${warn.length === 1 ? 'one thing to sort out' : `${warn.length} things to sort out`}.</span>`
     : `${esc(sh.date === todayStr ? 'Today' : cashDayLabel(sh.date))} · ${esc(dp(sh.daypart))} — <span class="ok">everything checks out.</span>`;
 
-  const statusWord = sh.status === 'emailed' ? 'Emails sent'
+  const statusWord = sh.status === 'emailed' ? (sh.finished_quietly ? 'Finished · no emails' : 'Emails sent')
     : sh.reopened_at ? 'Reopened'
     : withHours < people.length ? 'Needs review'
     : people.length ? 'Ready to send' : 'Nobody on it';
@@ -2575,7 +2594,7 @@ app.get('/shifts/:id', (req, res) => {
       <form class="bs-reopen" method="post" action="/shifts/${sh.id}/reopen"
         onsubmit="return confirm('Reopen ${esc(dp(sh.daypart))} on ${esc(sh.date)}?\\n\\nThis service has been sent and people have been paid from it. Reopening changes nothing by itself: you make your corrections, then send it again or close it without emailing anyone.')">
         <input type="hidden" name="_csrf" value="${csrfFor(req)}">
-        <span>Sent. Need to correct something?</span>
+        <span>${sh.finished_quietly ? 'Finished without emailing. Need to correct something?' : 'Sent. Need to correct something?'}</span>
         <button class="bs-btn bs-btn-quiet" type="submit">Reopen this service</button>
       </form>` : reopenedNow(sh) ? `
       <div class="bs-reopened" role="status">
@@ -2609,7 +2628,18 @@ app.get('/shifts/:id', (req, res) => {
           <h1 class="bs-headline">${verdict}</h1>
           <p class="bs-status"><span class="bs-status-w ${statusCls}">${esc(statusWord.toUpperCase())}</span> ${esc(statusLine)}</p>
         </div>
-        ${canWrite() ? `<a class="bs-btn" href="/shifts/${sh.id}/results">Preview &amp; send →</a>` : ''}
+        ${canWrite() ? `<div class="bs-head-do">
+          <a class="bs-btn" href="/shifts/${sh.id}/results">Preview &amp; send →</a>
+          ${/* Finish it and tell nobody. Only on a night that has not gone out:
+               a sent one is finished already, and a reopened one has its own
+               "Close without emailing" in the panel below, which keeps saying
+               that the emails people hold are out of date. */''}
+          ${String(sh.status) !== 'emailed' && !sh.reopened_at ? `<form method="post" action="/shifts/${sh.id}/close" style="margin:0"
+            onsubmit="return confirm('Finish ${esc(dp(sh.daypart))} on ${esc(sh.date)} without emailing?\\n\\nNobody is emailed and nobody is notified. The figures are settled and payroll reads them as normal — you can still send it later.')">
+            <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+            <button class="bs-btn bs-btn-quiet" type="submit">Finish without emailing</button>
+          </form>` : ''}
+        </div>` : ''}
       </div>
 
       <div class="bs-strip">
@@ -3447,8 +3477,11 @@ function shiftWarnings(sh, inp, r) {
     try { fpNow = serviceFingerprint(sh.id); } catch { fpNow = null; }  // a page never fails on this
   }
   if (fpNow && fpNow !== sh.sent_fingerprint) {
-    let line = 'Changed after it was sent: the emails people got show the figures from before. '
-      + 'Send it again from Preview & send to update them.';
+    let line = sh.finished_quietly
+      ? 'Changed since you finished it. Nobody has ever been emailed about this service — '
+        + 'send it from Preview & send if you want them to have the figures.'
+      : 'Changed after it was sent: the emails people got show the figures from before. '
+        + 'Send it again from Preview & send to update them.';
     try {
       const per = periodFor(sh.date);
       const went = per && sendRecord(per.start);
@@ -3558,7 +3591,7 @@ app.get('/shifts/:id/results', (req, res) => {
   const verdict = sh.status === 'emailed'
     ? `${esc(dayLbl)} · ${esc(dp(sh.daypart))} — <span class="ok">sent.</span>`
     : `${esc(dayLbl)} · ${esc(dp(sh.daypart))} — <span class="${warn.length ? 'warn' : 'ok'}">review &amp; send.</span>`;
-  const statusWord = sh.status === 'emailed' ? 'Emails sent'
+  const statusWord = sh.status === 'emailed' ? (sh.finished_quietly ? 'Finished · no emails' : 'Emails sent')
     : warn.length ? 'Needs review'
     : mailReady ? 'Ready to send' : 'Preview mode';
   const statusCls = sh.status === 'emailed' ? 'ok' : warn.length ? 'warn' : 'ready';
@@ -3735,23 +3768,78 @@ app.post('/shifts/:id/reopen', (req, res) => {
     'Reopened. Make your changes, then send it again or close it without emailing anyone.'));
 });
 
-// Put it back as sent, emailing nobody. The emails people already have still
-// show the figures from before; the page keeps saying so until it is sent again.
+/**
+ * FINISH A SERVICE WITHOUT TELLING ANYBODY.
+ *
+ * Two nights end up here and they are not the same night:
+ *
+ *   REOPENED — it was sent once, so people already have an email. Closing it
+ *     again emails nobody and what was sent stays recorded (sent_fingerprint),
+ *     so the page keeps saying their email is out of date.
+ *   NEVER SENT — nobody has ever been told about this service at all. That is
+ *     the backlog case: a fortnight of nights to close off without firing
+ *     "your pay is ready" at every employee for every one of them. It is
+ *     stamped finished_quietly so no screen afterwards claims an email exists,
+ *     and the fingerprint is taken now so a later edit can still be spotted.
+ *
+ * Either way this emails nobody, notifies nobody, and changes no figure. The
+ * money is settled exactly as a send settles it, so payroll reads the same
+ * numbers it would have read.
+ */
 app.post('/shifts/:id/close', (req, res) => {
   if (!canWrite(req)) return res.status(403).send('Read-only');
   const sh = s.shiftById.get(req.params.id);
   if (!sh) return res.status(404).end();
-  if (!reopenedNow(sh)) return res.redirect(`/shifts/${sh.id}`);
+  if (String(sh.status) === 'emailed') return res.redirect(`/shifts/${sh.id}`);
+  const neverSent = !reopenedNow(sh) && !sh.sent_fingerprint;
   s.markEmailed.run(sh.id);
   // Settle anybody added while it was open, exactly as a send would. Rows that
   // were settled already keep what they were settled at.
   try { settleShift(sh.id); } catch (e) { console.warn('[close] could not settle:', e && e.message); }
+  if (neverSent) {
+    try {
+      db.prepare('UPDATE shifts SET finished_quietly = 1, sent_fingerprint = ? WHERE id = ?')
+        .run(serviceFingerprint(sh.id), sh.id);
+    } catch (e) { console.warn('[close] could not stamp a quiet finish:', e && e.message); }
+  }
   const changed = (() => {
     try { return !!sh.sent_fingerprint && serviceFingerprint(sh.id) !== sh.sent_fingerprint; } catch { return false; }
   })();
-  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(changed
-    ? 'Closed without emailing. The emails people have still show the figures from before.'
-    : 'Closed without emailing. Nothing had changed.'));
+  res.redirect(`/shifts/${sh.id}?msg=` + encodeURIComponent(neverSent
+    ? 'Finished without emailing. Nobody was told, and the figures are settled.'
+    : changed
+      ? 'Closed without emailing. The emails people have still show the figures from before.'
+      : 'Closed without emailing. Nothing had changed.'));
+});
+
+/**
+ * The same thing for a backlog, in one press.
+ *
+ * READY ONES ONLY, and the list is rebuilt here rather than taken from the
+ * form: a night still open, one missing somebody's hours, and today's service
+ * are exactly the nights somebody still has to look at, and a button that
+ * swept those up too would be a quicker way to make a mistake than to fix one.
+ */
+app.post('/shifts/finish-quiet', (req, res) => {
+  if (!canWrite(req)) return res.status(403).send('Read-only');
+  const today = serviceToday();
+  const ready = shiftRollup.all().filter((x) => shiftState(x, today).key === 'ready');
+  let done = 0;
+  for (const x of ready) {
+    try {
+      db.transaction(() => {
+        s.markEmailed.run(x.id);
+        try { settleShift(x.id); } catch (e) { console.warn('[finish-quiet] settle:', e && e.message); }
+        db.prepare('UPDATE shifts SET finished_quietly = 1, sent_fingerprint = ? WHERE id = ?')
+          .run(serviceFingerprint(x.id), x.id);
+      })();
+      done += 1;
+    } catch (e) { console.warn('[finish-quiet] could not finish', x.id, e && e.message); }
+  }
+  res.redirect('/shifts?msg=' + encodeURIComponent(done
+    ? `${done} service${done === 1 ? '' : 's'} finished without emailing. Nobody was told. `
+      + 'Anything still open, needing review, or running today was left alone.'
+    : 'Nothing was ready to finish.'));
 });
 
 // Work this night out on the policy in force now. A deliberate act on one open
@@ -3786,7 +3874,9 @@ app.post('/shifts/:id/send', async (req, res) => {
   // What was sent, so a later change is said rather than silent. Fenced: a
   // failure to stamp must never be a failure to send, let alone a crash.
   try {
-    db.prepare('UPDATE shifts SET sent_fingerprint = ? WHERE id = ?').run(serviceFingerprint(sh.id), sh.id);
+    // finished_quietly goes with it: this one really has been emailed now.
+    db.prepare('UPDATE shifts SET sent_fingerprint = ?, finished_quietly = 0 WHERE id = ?')
+      .run(serviceFingerprint(sh.id), sh.id);
     // And SETTLE it: each person's rate and whether they were salaried, and
     // the pay-math revision it went out under, so nothing changed later — a
     // raise, a switch to salary, a fix to the arithmetic — can restate it.
