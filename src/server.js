@@ -15239,9 +15239,14 @@ function describeRules(rules) {
   for (const r of rules) {
     if (r.type === 'tipout') {
       const base = BASE[r.base] || r.base;
-      const own = r.from ? '' : ' of their own';
+      // ONE TILL, said out loud. "of their own" is the whole difference between
+      // a bartender paying on what he happened to ring and the bar paying on
+      // what it rang between them, so the sentence has to carry it.
+      const own = r.from ? '' : (r.pooled ? ' of their shared' : ' of their own');
+      const byHours = r.pooled && !r.from
+        ? ` They pay it between themselves <b>by the hours they worked</b>.` : '';
       items.push(`${payerPhrase(r, rules)} <b>${r.percent}%</b>${own} ${base} to the <b>${roleWord(r.recipient).toLowerCase()}</b>`
-        + `, split <b>${SLBL[r.split] || r.split}</b>.`);
+        + `, split <b>${SLBL[r.split] || r.split}</b>.${byHours}`);
     } else if (r.type === 'share') {
       // "Bartender tips are pooled and split between them" — the owner's rule,
       // said in the same shape as the rules around it so the page reads as one

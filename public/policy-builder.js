@@ -115,7 +115,16 @@
         '<input class="inline num-in" type="number" step="0.1" min="0" data-i="' + i + '" data-f="percent" value="' + r.percent + '"> % of their ' +
         '<select class="inline" data-i="' + i + '" data-f="base">' + opts(BASES, r.base) + '</select> to the ' +
         '<select class="inline" data-i="' + i + '" data-f="recipient">' + opts(RECIPIENTS, r.recipient) + '</select>, split ' +
-        '<select class="inline" data-i="' + i + '" data-f="split">' + opts(SPLITS, r.split) + '</select></div></div>';
+        '<select class="inline" data-i="' + i + '" data-f="split">' + opts(SPLITS, r.split) + '</select>' +
+        // ONE TILL. Which of them rang it decides nothing about who worked it,
+        // so the percentage can come off what the role rang between them and be
+        // paid by hours. Offered only where a job is named as the payer: with
+        // nobody named the rule is charged to everybody who rings their own
+        // till, and pooling across different jobs is not a thing anybody means.
+        (payerOf(r) === 'any' ? '' :
+          '<label class="rule-pool"><input type="checkbox" data-i="' + i + '" data-f="pooled"' +
+          (r.pooled ? ' checked' : '') + '> one till &mdash; add their sales up and split what they pay by hours</label>') +
+        '</div></div>';
     }
     if (r.type === 'share') {
       return '<div class="rule-card"><div class="rule-head"><span class="rule-badge badge-pool">Pooled tips</span><button type="button" class="rule-x" data-del="' + i + '">✕</button></div>' +
@@ -159,7 +168,7 @@
     var items = [keepersLine()];
     rules.forEach(function (r) {
       if (r.type === 'tipout') {
-        items.push('<b>' + esc(payerPhrase(r)) + '</b> <b>' + r.percent + '%</b>' + (r.from ? '' : ' of their own') +
+        items.push('<b>' + esc(payerPhrase(r)) + '</b> <b>' + r.percent + '%</b>' + (r.from ? '' : (r.pooled ? ' of their shared' : ' of their own')) +
           ' ' + esc(label(BASES, r.base)) + ' to the <b>' + esc(roleWord(r.recipient).toLowerCase()) +
           '</b>, split <b>' + esc(label(SPLITS, r.split)) + '</b>.');
       } else if (r.type === 'share') {
@@ -191,6 +200,13 @@
           // Naming a payer can make this a policy where the bar keeps its own
           // tips, which re-words every card and the summary. Redraw, not just sum.
           render();
+          return;
+        }
+        if (f === 'pooled') {
+          // Absent rather than false: a rule carries the flag or it does not,
+          // and every policy written before today means "per person".
+          if (e.target.checked) rules[i].pooled = true; else delete rules[i].pooled;
+          summarize();
           return;
         }
         rules[i][f] = f === 'percent' ? (parseFloat(e.target.value) || 0) : e.target.value;

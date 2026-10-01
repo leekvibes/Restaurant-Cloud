@@ -160,6 +160,42 @@ function runShift(shift, rules) {
     : Math.round((total * (i + 1)) / n) - Math.round((total * i) / n));
   const adjusted = [];
 
+  /**
+   * ONE TILL, NOT ONE PER PERSON.
+   *
+   * The owner: "the bartender tip-out that is based off sales isn't per
+   * bartender — Dan shouldn't tip out the barback more because his sales were
+   * higher. The sales should be added up and split by the policy and hours
+   * worked. All sales are shared. Same for the baristas."
+   *
+   * The bar is one till. Which bartender happened to ring a round decides
+   * nothing about who worked it, so a rule marked `pooled` takes its percentage
+   * from what the ROLE rang between them and charges it to the people on that
+   * role BY HOURS. The recipient's pot is identical either way — the same
+   * percentage of the same sales — so this moves nothing out of the barback's
+   * pocket; it only decides which bartender paid which part of it.
+   *
+   * Worth knowing, and asserted in the tests: while that role also POOLS its
+   * tips (a share rule), this changes nobody's take-home at all. The pool is
+   * what they were tipped minus what they paid out, and both totals are the
+   * same however the charge is divided between them. It changes what each
+   * person's receipt says, and it changes the money the moment pooling is off —
+   * or when somebody's own tips cannot cover a charge their sales created.
+   *
+   * Hours, not the rule's `split`: that one says how the RECIPIENTS divide the
+   * pot. allocateByWeight falls back to an even split when nobody logged hours.
+   */
+  const pooledCharges = new Map();   // rule -> Map(employeeId -> cents)
+  for (const r of tipoutRules) {
+    if (!r.pooled || r.from || r.base === 'remaining') continue;
+    const payers = payersOf(r).filter((e) => (e.role || 'server') !== r.recipient);
+    if (!payers.length) continue;
+    const cents = pctOf(payers.reduce((a, e) => a + baseValue(e, r.base), 0), r.percent);
+    if (cents <= 0) continue;
+    pooledCharges.set(r, new Map(allocateByWeight(cents,
+      payers.map((p) => ({ id: p.employeeId, weight: Math.max(0, p.hours || 0) })))));
+  }
+
   const paysThis = (earner, r) => {
     if (!r.paidBy) return true;
     const who = Array.isArray(r.paidBy) ? r.paidBy : [r.paidBy];
@@ -206,6 +242,8 @@ function runShift(shift, rules) {
         const payers = payersOf(r);
         const idx = Math.max(0, payers.findIndex((e) => e.employeeId === s.employeeId));
         amt = Math.max(0, exactShare(Math.max(0, Math.round(adj.cents)), idx, payers.length || 1));
+      } else if (r.pooled && pooledCharges.has(r)) {
+        amt = pooledCharges.get(r).get(s.employeeId) || 0;
       } else {
         amt = pctOf(baseValue(s, r.base), r.percent);
       }

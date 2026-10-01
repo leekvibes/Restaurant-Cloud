@@ -684,3 +684,131 @@ test('a pooled barista is told about the baristas on their own tip form', async 
   assert.ok(!/The bar pools/.test(html), 'not the bar\'s');
   assert.match(html, /Counter food sales/, 'and they are asked for what they rang at the counter');
 });
+
+// ===========================================================================
+// ONE TILL, NOT ONE PER PERSON
+//
+// The owner, looking at Sep 15: "the bartender tip-out that's based off sales
+// isn't per bartender. The sales should be added up total and split out based
+// off the policy and hours worked — so Dan shouldn't tip out the barback more
+// because his sales were higher. All sales are shared. Same for baristas."
+//
+// The numbers below are Sep 26 off the live site, because it is the shape that
+// makes the point: Chris rang $1,095.50 in 8:47 and Matt $404.50 in 9:19. The
+// one who rang more worked less.
+// ===========================================================================
+
+const POOLED_EVENING = EVENING.map((r) => (r.recipient === 'barback' ? { ...r, pooled: true } : r));
+const NO_SHARE = EVENING.filter((r) => r.type !== 'share');
+const NO_SHARE_POOLED = POOLED_EVENING.filter((r) => r.type !== 'share');
+
+const sep26 = (rules) => runShift({
+  servers: [
+    { employeeId: 'SA', name: 'Sandra', role: 'server', hours: 9.8, food: 374, coffee: 10, alcohol: 384, cardTips: 139.65, cashTips: 220 },
+    { employeeId: 'ST', name: 'Steph', role: 'server', hours: 7.55, food: 416, coffee: 0, alcohol: 185, cardTips: 147.95, cashTips: 0 },
+    { employeeId: 'SO', name: 'Soraya', role: 'server', hours: 7.5, food: 330, coffee: 0, alcohol: 119, cardTips: 136.79, cashTips: 0 },
+    bt('CV', 8.783, { food: 120, alcohol: 975.50, cardTips: 275.84 }),
+    bt('MS', 9.317, { food: 65, alcohol: 339.50, cardTips: 75.62 }),
+  ],
+  support: [
+    { employeeId: 'CV', name: 'CV', role: 'bartender', hours: 8.783 },
+    { employeeId: 'MS', name: 'MS', role: 'bartender', hours: 9.317 },
+    { employeeId: 'BB', name: 'Mya', role: 'barback', hours: 9.533 },
+    { employeeId: 'BU', name: 'Joseph', role: 'busser', hours: 10 },
+  ],
+  pool: {},
+}, rules);
+
+test('pooled: the barback’s 3% comes off the bar by hours, not off whoever rang it', () => {
+  const own = sep26(EVENING);
+  const pooled = sep26(POOLED_EVENING);
+
+  // What it was: 3% of each bartender's own sales.
+  assert.strictEqual(who(own, 'CV').tipouts.barback, 3287, 'Chris paid 3% of his own $1,095.50');
+  assert.strictEqual(who(own, 'MS').tipouts.barback, 1214, 'Matt 3% of his own $404.50');
+
+  // What it is: 3% of the till, split by the hours they worked.
+  assert.strictEqual(who(pooled, 'CV').tipouts.barback, 2184, 'Chris pays his hours’ share of 3% of $1,500');
+  assert.strictEqual(who(pooled, 'MS').tipouts.barback, 2316, 'Matt pays his, and he worked longer');
+  assert.ok(who(pooled, 'CV').tipouts.barback < who(own, 'CV').tipouts.barback,
+    'the one who rang more pays less than he used to');
+  assert.ok(who(pooled, 'MS').tipouts.barback > who(own, 'MS').tipouts.barback, 'and the one who worked longer pays more');
+
+  // And the barback is handed the same money either way, give or take the
+  // half-penny the old way rounded twice: 3% of $1,095.50 and 3% of $404.50 are
+  // both a half-cent, each rounded up on its own. Taking 3% of the till rounds
+  // once, which is the more defensible figure of the two.
+  assert.strictEqual(pooled.pots.barback, 4500, '3% of the $1,500 the bar rang, rounded once');
+  assert.strictEqual(own.pots.barback, 4501, 'against a penny more when it was rounded per person');
+});
+
+test('pooled changes nobody’s take-home while the bar also pools its tips', () => {
+  // The honest part, and the reason this is safe to apply to nights already
+  // worked out: the bar pool is what they were tipped less what they paid out,
+  // and both totals are the same however the charge is divided between them.
+  const own = sep26(EVENING);
+  const pooled = sep26(POOLED_EVENING);
+  for (const id of ['CV', 'MS']) {
+    const diff = Math.abs(who(pooled, id).tipsKept - who(own, id).tipsKept);
+    assert.ok(diff <= 1, `${id} takes home the same, to the penny the old rounding cost (${diff}c)`);
+  }
+  assert.ok(Math.abs(pooled.sharePools[0].kept - own.sharePools[0].kept) <= 1, 'the same pot was shared');
+  for (const role of ['busser', 'bartender']) {
+    assert.strictEqual(pooled.pots[role], own.pots[role], `the ${role} pot is untouched`);
+  }
+  // What does change is the line on each receipt, which is what was asked for.
+  assert.notStrictEqual(who(pooled, 'CV').tipoutTotal, who(own, 'CV').tipoutTotal, 'the receipt says something different');
+});
+
+test('with no pooling of tips, it is real money and moves to the hours', () => {
+  const own = sep26(NO_SHARE);
+  const pooled = sep26(NO_SHARE_POOLED);
+  assert.ok(who(pooled, 'CV').tipsKept > who(own, 'CV').tipsKept, 'Chris keeps more than when he paid on his own sales');
+  assert.ok(who(pooled, 'MS').tipsKept < who(own, 'MS').tipsKept, 'Matt keeps less');
+  assert.ok(Math.abs((who(pooled, 'CV').tipsKept + who(pooled, 'MS').tipsKept)
+    - (who(own, 'CV').tipsKept + who(own, 'MS').tipsKept)) <= 1, 'between them, the same money');
+  assert.ok(Math.abs(pooled.pots.barback - own.pots.barback) <= 1, 'and the barback is unaffected either way');
+});
+
+test('one bartender on, or nobody: pooled is the plain percentage, and nothing breaks', () => {
+  const alone = runShift({
+    servers: [server(), bt('CV', 7, { food: 100, alcohol: 500, cardTips: 200 })],
+    support: [{ employeeId: 'CV', name: 'CV', role: 'bartender', hours: 7 },
+      { employeeId: 'BB', name: 'Mya', role: 'barback', hours: 7 },
+      { employeeId: 'BU', name: 'Joseph', role: 'busser', hours: 7 }],
+    pool: {},
+  }, POOLED_EVENING);
+  assert.strictEqual(who(alone, 'CV').tipouts.barback, 1800, '3% of their own $600, which is the whole till');
+
+  const noBar = runShift({
+    servers: [server()],
+    support: [{ employeeId: 'BB', name: 'Mya', role: 'barback', hours: 7 },
+      { employeeId: 'BU', name: 'Joseph', role: 'busser', hours: 7 }],
+    pool: {},
+  }, POOLED_EVENING);
+  assert.ok(!noBar.pots.barback, 'no bartender rang anything, so the barback pot is not invented');
+  assert.ok(noBar.reconciliation.balanced, 'and the night still balances');
+});
+
+test('the same for the baristas, when the counter pays a percentage', () => {
+  // "Same for baristas." They pay nothing under today's day policy, so this is
+  // the rule being ready rather than a change to anybody's money today.
+  const DAY = [
+    { type: 'tipout', recipient: 'busser', percent: 2, base: 'total_sales', split: 'hours', paidBy: ['server'] },
+    { type: 'tipout', recipient: 'busser', percent: 1.5, base: 'total_sales', split: 'hours', paidBy: ['barista'], pooled: true },
+    { type: 'share', role: 'barista', split: 'hours' },
+  ];
+  const ba = (id, hours, over) => ({ employeeId: id, name: id, role: 'barista', hours,
+    food: 0, coffee: 0, alcohol: 0, cardTips: 0, cashTips: 0, ...over });
+  const r = runShift({
+    servers: [server(), ba('B1', 9, { coffee: 200, cardTips: 40 }), ba('B2', 3, { coffee: 600, cardTips: 20 })],
+    support: [{ employeeId: 'B1', name: 'B1', role: 'barista', hours: 9 },
+      { employeeId: 'B2', name: 'B2', role: 'barista', hours: 3 },
+      { employeeId: 'BU', name: 'Busser', role: 'busser', hours: 8 }],
+    pool: {},
+  }, DAY);
+  // 1.5% of the counter's $800 is $12, split 9:3 — not $3 and $9 by who rang.
+  assert.strictEqual(who(r, 'B1').tipouts.busser, 900, 'nine hours, nine tenths of nothing to do with the till');
+  assert.strictEqual(who(r, 'B2').tipouts.busser, 300);
+  assert.ok(r.reconciliation.balanced, 'and it balances');
+});
