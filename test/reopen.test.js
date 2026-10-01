@@ -163,7 +163,11 @@ test('every "are you sure" on the policy page actually asks', async () => {
     .replace(/&gt;/g, '>').replace(/&amp;/g, '&');
   const handlers = [...html.matchAll(/on(?:submit|click)="([^"]*)"/g)].map((m) => decode(m[1]));
   assert.ok(handlers.some((h) => /Make this the/.test(h)), 'the make-live question is on the page');
-  assert.ok(handlers.some((h) => /onto the current policy\?/.test(h)), 'and the move question');
+  // The move question is built in a function now, because it counts what the
+  // date box actually catches. It still has to be on the page, and every
+  // handler still has to compile — which is what this test is for.
+  assert.ok(handlers.some((h) => /onto the current policy\?/.test(h)) || /onto the current policy/.test(html),
+    'and the move question');
   for (const h of handlers) {
     assert.doesNotThrow(() => new Function(h), `compiles: ${h.slice(0, 60)}`);
   }
@@ -299,4 +303,102 @@ test('a sent service is never quietly finished out from under itself', async () 
   assert.strictEqual(now.status, 'emailed');
   assert.strictEqual(now.finished_quietly, 0, 'it was emailed for real, and still says so');
   assert.strictEqual(now.sent_fingerprint, was.sent_fingerprint, 'and what was sent is untouched');
+});
+
+// ===========================================================================
+// MOVING OPEN SERVICES ONTO THE CURRENT POLICY, FROM A DATE
+//
+// "Apply it from September 12th, the first day of the payroll period that ended
+// last, not the one we're in." The button moved every open service it could
+// find, however old — which on the live site would have swept up an August
+// night the owner had said to leave exactly as it was.
+// ===========================================================================
+
+/** A real service, because the route refuses a daypart that is not one. */
+const SVC = require('../src/services');
+const svc = (slug, name) => { try { SVC.create({ slug, name }); } catch { /* already there */ } };
+
+/** An open service stamped with a policy that is not the current one. */
+function openOnOldPolicy(date, oldId) {
+  return Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES (?, 'restamp-svc', 'open', ?)`).run(date, oldId).lastInsertRowid);
+}
+
+test('the restamp button takes a date, and leaves everything before it alone', async () => {
+  svc('restamp-svc', 'Restamp Service');
+  P.saveRules('restamp-svc', EVENING, 'the old one');
+  const old = P.currentForDaypart('restamp-svc');
+  const august = openOnOldPolicy('2026-08-30', old.id);
+  const sep12 = openOnOldPolicy('2026-09-12', old.id);
+  const sep20 = openOnOldPolicy('2026-09-20', old.id);
+  const sent = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES ('2026-09-14', 'restamp-svc', 'emailed', ?)`).run(old.id).lastInsertRowid);
+
+  P.saveRules('restamp-svc', EVENING.concat([{ type: 'tipout', recipient: 'barback', percent: 3, base: 'total_sales', split: 'hours', paidBy: ['bartender'], pooled: true }]), 'one till');
+  const now = P.currentForDaypart('restamp-svc');
+  assert.notStrictEqual(now.id, old.id, 'there is a newer policy to move onto');
+
+  const res = await post('/policy/restamp', { daypart: 'restamp-svc', from: '2026-09-12' });
+  assert.strictEqual(res.status, 302);
+  assert.match(msgOf(res), /2 open .* from 2026-09-12 onward moved/);
+  assert.match(msgOf(res), /nothing before that date/);
+
+  assert.strictEqual(row(sep12).policy_id, now.id, 'the first day of the period moved');
+  assert.strictEqual(row(sep20).policy_id, now.id, 'and the one after it');
+  assert.strictEqual(row(august).policy_id, old.id, 'August is exactly as it was');
+  assert.strictEqual(row(sent).policy_id, old.id, 'and a sent night is never touched, date or no date');
+
+  // Blank still means all of them, which is what the button did before.
+  const all = await post('/policy/restamp', { daypart: 'restamp-svc', from: '' });
+  assert.match(msgOf(all), /1 open .* moved onto the current policy/);
+  assert.strictEqual(row(august).policy_id, now.id, 'with no date, August moves too');
+});
+
+test('a date nobody can read is not treated as the beginning of time', async () => {
+  svc('restamp-junk', 'Restamp Junk');
+  P.saveRules('restamp-junk', EVENING, 'first');
+  const old = P.currentForDaypart('restamp-junk');
+  const sh = Number(db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+    VALUES ('2026-05-01', 'restamp-junk', 'open', ?)`).run(old.id).lastInsertRowid);
+  P.saveRules('restamp-junk', EVENING, 'second');
+  const now = P.currentForDaypart('restamp-junk');
+
+  const res = await post('/policy/restamp', { daypart: 'restamp-junk', from: 'whenever' });
+  assert.strictEqual(res.status, 302);
+  // Unreadable reads as "no date given", which is the old behaviour: move them.
+  assert.strictEqual(row(sh).policy_id, now.id);
+  assert.doesNotMatch(msgOf(res), /whenever/, 'and the message never quotes it back as if it meant something');
+});
+
+test('the question on the button counts what the date actually catches', async () => {
+  svc('restamp-ask', 'Restamp Ask');
+  P.saveRules('restamp-ask', EVENING, 'first');
+  const old = P.currentForDaypart('restamp-ask');
+  for (const d of ['2026-08-30', '2026-09-12', '2026-09-20']) {
+    db.prepare(`INSERT INTO shifts (date, daypart, status, policy_id)
+      VALUES (?, 'restamp-ask', 'open', ?)`).run(d, old.id);
+  }
+  P.saveRules('restamp-ask', EVENING, 'second');
+
+  const html = await (await fetch(`${BASE}/policy?daypart=restamp-ask`)).text();
+  const form = (html.match(/<form[^>]*action="\/policy\/restamp"[\s\S]*?<\/form>/) || [''])[0];
+  assert.ok(form, 'the panel offers the move');
+  assert.match(form, /name="from"[^>]*type="date"|type="date"[^>]*name="from"/, 'with a date box');
+  assert.match(form, /data-dates="2026-09-20,2026-09-12,2026-08-30"/, 'carrying the dates it would move');
+  assert.match(form, /name="_csrf"/, 'and its own token');
+
+  // The question is built in the page, so it has to compile and it has to count.
+  const fn = (html.match(/function polRestampAsk\(f, name\) \{[\s\S]*?\n {8}\}/) || [''])[0];
+  assert.ok(fn, 'the question is on the page');
+  assert.doesNotThrow(() => new Function('return ' + fn), 'and it compiles');
+  const asked = [];
+  const polRestampAsk = new Function('alert', 'confirm', 'return ' + fn)(
+    (m) => asked.push(['alert', m]), (m) => { asked.push(['confirm', m]); return true; });
+  const fake = (from) => ({ querySelector: () => ({ value: from }), getAttribute: () => '2026-09-20,2026-09-12,2026-08-30' });
+  polRestampAsk(fake('2026-09-12'), 'Evening Service');
+  assert.match(asked[0][1], /Move 2 open Evening Services from 2026-09-12 onward/, 'two, not three');
+  polRestampAsk(fake(''), 'Evening Service');
+  assert.match(asked[1][1], /Move 3 open Evening Services onto/, 'blank is all of them');
+  polRestampAsk(fake('2030-01-01'), 'Evening Service');
+  assert.strictEqual(asked[2][0], 'alert', 'and a date that catches nothing says so instead of asking');
 });

@@ -16362,12 +16362,38 @@ app.get('/policy', (req, res) => {
         ${stragglers.map((x) => `<li><a href="/shifts/${x.id}">${esc(niceDate(x.date))}</a>
           <i>${x.onDraft ? 'on a draft' : 'on an earlier policy'} · ${x.people} on shift${x.entered ? `, ${x.entered} already reported` : ', nothing reported yet'}</i></li>`).join('')}
       </ul>
+      ${/* FROM A DATE, NOT ALL OF THEM.
+             A policy change starts on a day the owner decides — "from the first
+             day of the payroll period that just ended" — and this moved every
+             open service it could find, however old. One box, blank for all,
+             and the question counts what the date actually catches. */''}
       ${canWrite(req) ? `<form method="post" action="/policy/restamp" style="margin:0"
-        onsubmit="return confirm('Move ${stragglers.length} open ${esc(dp(daypart))}${stragglers.length === 1 ? '' : 's'} onto the current policy?\\n\\nAnything already sent is not touched. These are still open, so nobody has been paid from them yet \u2014 but if people have already reported, their tip-out will be worked out differently from here.')">
+        data-dates="${esc(stragglers.map((x) => x.date).join(','))}"
+        onsubmit="return polRestampAsk(this, '${esc(dp(daypart))}')">
         <input type="hidden" name="_csrf" value="${csrfFor(req)}">
         <input type="hidden" name="daypart" value="${esc(daypart)}">
+        <label class="pol-stale-from">From
+          <input type="date" name="from" value="">
+          onward &mdash; leave it empty to move all ${stragglers.length}.</label>
         <button class="btn" type="submit">Move ${stragglers.length === 1 ? 'it' : 'them'} onto the current policy</button>
-      </form>` : ''}
+      </form>
+      <script>
+        function polRestampAsk(f, name) {
+          var box = f.querySelector('input[name=from]');
+          var from = box && box.value ? box.value : '';
+          var dates = (f.getAttribute('data-dates') || '').split(',').filter(Boolean);
+          var hit = from ? dates.filter(function (d) { return d >= from; }) : dates;
+          if (!hit.length) {
+            alert('Nothing open on or after ' + from + ' is waiting to move.');
+            return false;
+          }
+          return confirm('Move ' + hit.length + ' open ' + name + (hit.length === 1 ? '' : 's')
+            + (from ? ' from ' + from + ' onward' : '') + ' onto the current policy?\\n\\n'
+            + 'Anything already sent is not touched, and anything before that date is left alone. '
+            + 'These are still open, so nobody has been paid from them yet \u2014 but if people have '
+            + 'already reported, their tip-out will be worked out differently from here.');
+        }
+      </script>` : ''}
       <p class="pol-stale-safe">Services already sent are never listed here and cannot be moved &mdash;
         that money has gone out.</p>
     </div>` : '';
@@ -16530,12 +16556,18 @@ app.post('/policy/restamp', (req, res) => {
   if (!daypart) return res.redirect('/policy?err=1&msg=' + encodeURIComponent('Which service?'));
   const cur = currentForDaypart(daypart);
   if (!cur) return res.redirect(`/policy?daypart=${daypart}&err=1&msg=` + encodeURIComponent('No policy in force.'));
+  // A date, when one is given: the day the owner says the new rules start. An
+  // unreadable one is treated as none rather than as the epoch, which would
+  // sweep up every open night in the book.
+  const from = MX.isDate(req.body.from) ? req.body.from : null;
   const n = db.prepare(`UPDATE shifts SET policy_id = @id
-     WHERE daypart = @dp AND status = 'open' AND policy_id IS NOT NULL AND policy_id <> @id`)
-    .run({ id: cur.id, dp: daypart }).changes;
+     WHERE daypart = @dp AND status = 'open' AND policy_id IS NOT NULL AND policy_id <> @id
+       AND (@from IS NULL OR date >= @from)`)
+    .run({ id: cur.id, dp: daypart, from }).changes;
   res.redirect(`/policy?daypart=${daypart}&msg=` + encodeURIComponent(
-    n ? `${n} open ${dp(daypart)}${n === 1 ? '' : 's'} moved onto the current policy. Nothing already sent was touched.`
-      : 'Nothing to move.'));
+    n ? `${n} open ${dp(daypart)}${n === 1 ? '' : 's'}${from ? ` from ${from} onward` : ''} moved onto the current policy. `
+      + `Nothing already sent was touched${from ? ', and nothing before that date' : ''}.`
+      : `Nothing to move${from ? ` from ${from} onward` : ''}.`));
 });
 
 app.post('/policy/discard', (req, res) => {
