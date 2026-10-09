@@ -2082,6 +2082,15 @@ const OLD_SHAPE = [{ type: 'tipout', recipient: 'busser', percent: 10, base: 'to
  * service is stamped with, which is the only thing the form reads. And a work
  * row, because a service somebody is not on is not one they can file against.
  */
+/**
+ * A service on a date of its own, priced by `rules`.
+ *
+ * The dates these pass are YEARS out on purpose. They used to be a few days
+ * ahead of when they were written, and the 2F-UX tests above seed services
+ * relative to TODAY — so the calendar eventually walked onto them, this plain
+ * INSERT hit shifts' UNIQUE(date, daypart), and four tests started failing on
+ * a date nobody chose. It happened between 1 and 9 October 2026.
+ */
 function serviceOn(date, daypart, rules, note, who, role) {
   const w = new Database(DB);
   const pid = Number(w.prepare("INSERT INTO policy_versions (daypart, rules_json, note, staged) VALUES (?, ?, ?, 1)")
@@ -2116,7 +2125,7 @@ async function labelsFor(pin, shiftId, position) {
 }
 
 test('a bartender is asked for their bar sales, on a policy that reads them', async () => {
-  const sh = serviceOn('2026-10-02', 'dinner', NEW_SHAPE, 'new shape');
+  const sh = serviceOn('2031-03-02', 'dinner', NEW_SHAPE, 'new shape');
   const labels = await labelsFor('1470', sh, 'bartender');   // Tess Blake also bartends
   assert.ok(labels.some((l) => /Bar alcohol sales/.test(l)), 'alcohol, named as bar');
   assert.ok(labels.some((l) => /Bar food sales/.test(l)), 'and food');
@@ -2127,7 +2136,7 @@ test('and is NOT asked on a policy that never looks at them', async () => {
   // The engine reads sales from direct earners only. Under the older policies a
   // bartender is support, so three boxes here would collect numbers no
   // calculation would ever use.
-  const sh = serviceOn('2026-10-03', 'dinner', OLD_SHAPE, 'old shape');
+  const sh = serviceOn('2031-03-03', 'dinner', OLD_SHAPE, 'old shape');
   const labels = await labelsFor('1470', sh, 'bartender');
   assert.ok(!labels.some((l) => /sales/i.test(l)), 'no sales question at all');
   assert.ok(labels.some((l) => /Card tips/.test(l)), 'but they still hand tips in');
@@ -2139,7 +2148,7 @@ test('a policy that only says the bar pools still asks the bar for its sales', a
   // the form treated them as support and asked for no sales — and the barback's
   // 3% had nothing to come out of. A share rule says they keep, on its own.
   const POOLED = [{ type: 'share', role: 'bartender', split: 'hours' }];
-  const sh = serviceOn('2026-10-07', 'dinner', POOLED, 'pooling only');
+  const sh = serviceOn('2031-03-07', 'dinner', POOLED, 'pooling only');
   const labels = await labelsFor('1470', sh, 'bartender');
   assert.ok(labels.some((l) => /Bar alcohol sales/.test(l)), 'the bar alcohol box is there');
   assert.ok(labels.some((l) => /Bar food sales/.test(l)), 'and the bar food');
@@ -2154,7 +2163,7 @@ test('a barista is asked for their counter sales, named as the counter', async (
     { type: 'tipout', recipient: 'busser', percent: 1.5, base: 'total_sales', split: 'hours', paidBy: ['bartender', 'barista'] },
   ]);
   const pin = baristaPin();
-  const sh = serviceOn('2026-10-04', 'cafe', DAY, 'new shape', 'Cleo Barista', 'barista');
+  const sh = serviceOn('2031-03-04', 'cafe', DAY, 'new shape', 'Cleo Barista', 'barista');
   const labels = await labelsFor(pin, sh, 'barista');
   assert.ok(labels.some((l) => /Counter food sales/.test(l)), 'food, named as the counter');
   assert.ok(labels.some((l) => /Coffee/.test(l)), 'and the coffee');
@@ -2163,7 +2172,7 @@ test('a barista is asked for their counter sales, named as the counter', async (
 
 test('a barista is NOT asked on a policy that never looks at their sales', async () => {
   const pin = baristaPin();
-  const sh = serviceOn('2026-10-05', 'cafe', OLD_SHAPE, 'old shape', 'Cleo Barista', 'barista');
+  const sh = serviceOn('2031-03-05', 'cafe', OLD_SHAPE, 'old shape', 'Cleo Barista', 'barista');
   const labels = await labelsFor(pin, sh, 'barista');
   assert.ok(!labels.some((l) => /sales/i.test(l)), 'no sales question at all');
   assert.ok(labels.some((l) => /Card tips/.test(l)), 'but they still hand tips in');
@@ -2193,7 +2202,7 @@ test('the sales a bartender and a barista hand in are the ones the rules charge'
 });
 
 test('what a bartender submits lands where the engine reads it', async () => {
-  const sh = serviceOn('2026-10-06', 'dinner', NEW_SHAPE, 'new shape');
+  const sh = serviceOn('2031-03-06', 'dinner', NEW_SHAPE, 'new shape');
   const start = await form('/tips/start', { pin: '1470' });
   const cookie = (start.headers.get('set-cookie') || '').split(';')[0];
   const open = await fetch(`${BASE}/portal/tips?shift=${sh}&position=bartender`, { headers: { cookie } });

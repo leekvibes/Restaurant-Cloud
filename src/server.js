@@ -19,7 +19,7 @@ const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertT
   personAdjustment, setPersonAmount, clearPersonAmount,
   stagedForDaypart, stageRules, activateStaged, discardStaged } = require('./policy');
 const { defaultRules, bucketsOf } = require('./engine');
-const { aggregatePayroll, buildWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
+const { aggregatePayroll, buildWorkbook, buildPerformanceWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const WAGES = require('./wages');
 const SERVICES = require('./services');
 const OT = require('./overtime');
@@ -13803,6 +13803,33 @@ app.get('/payroll/export', async (req, res) => {
   res.end();
 });
 
+/**
+ * The Performance workbook, for the range on screen.
+ *
+ * Declared BEFORE anything that could match /costs/:something, the same trap
+ * /payroll/export sits behind: Express takes the first route that matches, and
+ * a parameter route declared above this one would swallow "export".
+ *
+ * The range comes in exactly as the page's own links write it — a named range
+ * like "30", or custom with from/to — so the file always holds the period the
+ * owner was looking at when they pressed the button, and the comparison the
+ * page was showing beside it.
+ */
+app.get('/costs/export', async (req, res) => {
+  if (!navAllowed('/costs')) return res.status(403).send('Not your area');
+  const today = isoDate(startOfToday());
+  const key = MX.RANGES.some(([k]) => k === req.query.r) || req.query.r === 'custom' ? req.query.r : '30';
+  const r = MX.range(key, today, { from: req.query.from, to: req.query.to });
+  const cmpMode = MX.COMPARE_MODES.some(([k]) => k === req.query.c) ? req.query.c : 'prev';
+  const wb = await buildPerformanceWorkbook(r.from, r.to, {
+    restaurant: RESTAURANT, compare: MX.compare(r.from, r.to, cmpMode),
+  });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="performance_${r.from}_to_${r.to}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+});
+
 // ---------------------------------------------------------------------------
 // Cost dashboard — the calculated numbers (labor %, food cost %, prime cost)
 // ---------------------------------------------------------------------------
@@ -14099,6 +14126,12 @@ app.get('/costs', (req, res) => {
           <h1 class="bs-headline">Performance</h1>
           <p class="bs-subline">What changed, why, and what to look at next. Costs and profit live here; revenue detail is on <a class="bs-act" href="/sales">Sales</a>.</p>
         </div>
+        ${/* The period on screen, as a workbook somebody outside the app can
+             read: sales, costs and the ratios on one summary sheet, with the
+             services, the shifts, the bills and the expenses behind it. The
+             range travels on the link, so the file is always what you were
+             looking at when you pressed it. */''}
+        <a class="bs-btn" href="/costs/export?${qs}">Download Excel</a>
       </div>
 
       <form class="perf-controls" method="get" action="/costs" id="perf-controls">

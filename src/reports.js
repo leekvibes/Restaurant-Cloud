@@ -313,4 +313,365 @@ async function buildWorkbook(from, to, restaurant) {
   return wb;
 }
 
-module.exports = { shiftTotalSales, salesAndLabor, aggregatePayroll, buildWorkbook, aggregateCosts, WAGE_RATE_SQL };
+
+// ---------------------------------------------------------------------------
+// PERFORMANCE EXPORT — sales and what they cost, for somebody who does not use
+// the app.
+//
+// The owner: "my boss is asking for sales for X amount of time and costs, so
+// like invoices payroll etc." That reader opens one file, reads the top sheet,
+// and asks questions from it — so the first sheet answers "how did the period
+// do, against the period before it" in full sentences, and the sheets behind
+// it are the evidence for every figure on it, in the order somebody would ask.
+//
+// Every figure here comes from the same functions the Performance page draws,
+// so the spreadsheet and the screen cannot disagree. Money is cents until the
+// moment it is written.
+// ---------------------------------------------------------------------------
+
+/**
+ * PREPARED ON FIRST USE, NOT AT LOAD.
+ *
+ * These name tables that src/modules.js creates — m_invoices, m_vendors,
+ * m_expenses. This file is required by metrics.js and by tests that want
+ * nothing but payroll, so preparing at module scope dies on any database that
+ * has not loaded modules.js yet, which is every fresh one. metrics.js answers
+ * the same problem by requiring ./modules outright; this file stays clear of
+ * the upload machinery and simply waits until somebody asks for a workbook.
+ * Measured the hard way: it took out ten unrelated tests.
+ */
+let invSt = null;
+const invoiceDetail = (from, to) => {
+  if (!invSt) {
+    invSt = db.prepare(`SELECT i.invoice_date AS date,
+        COALESCE(v.name, 'Unknown vendor') AS vendor, COALESCE(i.category, 'Uncategorised') AS category,
+        COALESCE(i.invoice_number, '') AS number, COALESCE(i.status, '') AS status,
+        COALESCE(i.payment_method, '') AS method, i.due_date AS due,
+        COALESCE(i.amount_cents, 0) AS cents
+      FROM m_invoices i LEFT JOIN m_vendors v ON CAST(v.id AS REAL) = CAST(i.vendor_id AS REAL)
+      WHERE i.invoice_date >= ? AND i.invoice_date <= ?
+      ORDER BY i.invoice_date, v.name`);
+  }
+  return invSt.all(from, to);
+};
+
+let expSt = null;
+const expenseDetail = (from, to) => {
+  if (!expSt) {
+    expSt = db.prepare(`SELECT spent_on AS date, COALESCE(name, '') AS name,
+        COALESCE(where_bought, '') AS vendor, COALESCE(category, 'Uncategorised') AS category,
+        COALESCE(paid_by, '') AS paidBy, COALESCE(paid_with, '') AS paidWith,
+        reimbursed_on AS reimbursed, COALESCE(amount_cents, 0) AS cents
+      FROM m_expenses WHERE spent_on >= ? AND spent_on <= ?
+      ORDER BY spent_on, name`);
+  }
+  return expSt.all(from, to);
+};
+
+const PCT_FMT = '0.0"%"';
+// NO MINUS SIGNS ON THIS SHEET.
+//
+// The owner: "I just don't want it to be a negative symbol." A column of
+// figures with minuses in it reads to somebody skimming as though something is
+// broken, and the direction is the thing they actually want anyway. Excel's
+// number format has three parts — positive; negative; zero — and the negative
+// part formats the absolute value unless you ask for the sign, so these show
+// the movement with an arrow and no minus, while the cell still holds the real
+// signed number underneath for sorting, charting and anybody's own sums.
+const UP_DOWN_MONEY = '"▲ "$#,##0.00;"▼ "$#,##0.00;"no change"';
+const UP_DOWN_NUM = '"▲ "#,##0.##;"▼ "#,##0.##;"no change"';
+const PTS_FMT = '"▲ "0.0" pts";"▼ "0.0" pts";"no change"';
+const UP_DOWN_PCT = '"▲ "0.0"%";"▼ "0.0"%";"flat"';
+// A level, not a movement. A loss is a real thing and must not be dressed up
+// as a gain, so it goes in brackets the way an accountant writes it.
+const MONEY_LEVEL = '$#,##0.00;($#,##0.00)';
+/** 'emailed' is how the database says it, not how anybody reads it. */
+const statusWord = (st) => (String(st) === 'emailed' ? 'Sent' : 'Not sent yet');
+const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const dowOf = (iso) => DOW[new Date(`${iso}T12:00:00Z`).getUTCDay()];
+const niceDay = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US',
+  { timeZone: 'UTC', day: 'numeric', month: 'short', year: 'numeric' });
+
+/** A band of column headers, dark, frozen above the rows it names. */
+function sheetHead(ws, cells, widths) {
+  const row = ws.addRow(cells);
+  styleHeader(row);
+  if (widths) ws.columns = widths.map((width) => ({ width }));
+  ws.views = [{ state: 'frozen', ySplit: row.number }];
+  return row;
+}
+
+/** A section title inside a sheet — grey, bold, its own line. */
+function sectionRow(ws, label, span) {
+  const row = ws.addRow([label]);
+  row.font = { bold: true, size: 11 };
+  row.eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } }; });
+  if (span) ws.mergeCells(row.number, 1, row.number, span);
+  return row;
+}
+
+/**
+ * Build the Performance workbook for [from, to].
+ *
+ * @param {object} opts  { restaurant, compare: { from, to, label } | null }
+ */
+async function buildPerformanceWorkbook(from, to, opts = {}) {
+  // Required HERE, not at the top: metrics.js requires this file for
+  // WAGE_RATE_SQL, so importing it at module scope is a cycle, and the half
+  // of it that loaded first wins. By the time anybody calls this, both are up.
+  const MX = require('./metrics');
+  // Same reason, and so a service added later is named by the restaurant's own
+  // word for it rather than its internal key.
+  const SERVICES = require('./services');
+  const serviceName = (slug) => SERVICES.nameOf(slug) || slug;
+  const restaurant = opts.restaurant || 'Restaurant';
+  const cmp = opts.compare && opts.compare.from ? opts.compare : null;
+
+  const cur = MX.period(from, to);
+  const prev = cmp ? MX.period(cmp.from, cmp.to) : null;
+  const expenses = expenseDetail(from, to);
+  const prevExpenses = cmp ? expenseDetail(cmp.from, cmp.to) : [];
+  const expTotal = expenses.reduce((a, e) => a + e.cents, 0);
+  const prevExpTotal = prevExpenses.reduce((a, e) => a + e.cents, 0);
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = restaurant;
+  wb.created = new Date();
+
+  // =========================================================================
+  // 1. Summary — the sheet somebody actually reads
+  // =========================================================================
+  const sum = wb.addWorksheet('Summary');
+  sum.columns = [{ width: 34 }, { width: 16 }, { width: 16 }, { width: 14 }, { width: 12 }];
+  sum.mergeCells('A1:E1');
+  sum.getCell('A1').value = `${restaurant} — Performance`;
+  sum.getCell('A1').font = { bold: true, size: 16 };
+  sum.mergeCells('A2:E2');
+  sum.getCell('A2').value = `${niceDay(from)} to ${niceDay(to)}`
+    + (cmp ? `, against ${cmp.label} (${niceDay(cmp.from)} to ${niceDay(cmp.to)})` : '');
+  sum.getCell('A2').font = { size: 11, color: { argb: 'FF4B5563' } };
+  sum.mergeCells('A3:E3');
+  sum.getCell('A3').value = `Prepared ${niceDay(new Date().toISOString().slice(0, 10))}`;
+  sum.getCell('A3').font = { size: 10, color: { argb: 'FF6B7280' } };
+  sum.addRow([]);
+
+  const headCells = ['', 'This period', cmp ? 'Previous' : '', cmp ? 'Change' : '', cmp ? 'Change %' : ''];
+  const sumHead = sum.addRow(headCells);
+  styleHeader(sumHead);
+  sum.views = [{ state: 'frozen', ySplit: sumHead.number }];
+
+  /** One line: the figure, the same figure before, and the movement. */
+  const line = (label, now, before, kind) => {
+    const fmt = kind === 'money' ? MONEY_FMT : kind === 'pct' ? PCT_FMT : null;
+    const val = (v) => (v === null || v === undefined ? null : kind === 'money' ? toDollars(v) : v);
+    const row = sum.addRow([label, val(now), cmp ? val(before) : null, null, null]);
+    if (cmp && now !== null && before !== null && before !== undefined) {
+      row.getCell(4).value = val(now - before);
+      if (kind !== 'pct' && before) row.getCell(5).value = ((now - before) / Math.abs(before)) * 100;
+    }
+    // Levels in their own format; the movement in an arrow format.
+    const levelFmt = kind === 'money' ? MONEY_LEVEL : kind === 'pct' ? PCT_FMT : null;
+    if (levelFmt) [2, 3].forEach((i) => { row.getCell(i).numFmt = levelFmt; });
+    // A percentage that moves does not move by a percentage, it moves by
+    // POINTS. Labour going from 66.3% to 42.5% is 23.8 points, and writing
+    // "23.8%" there invites the reader to take 23.8% off 66.3 and get 50.5.
+    row.getCell(4).numFmt = kind === 'pct' ? PTS_FMT
+      : kind === 'money' ? UP_DOWN_MONEY : UP_DOWN_NUM;
+    if (row.getCell(5).value !== null) row.getCell(5).numFmt = UP_DOWN_PCT;
+    return row;
+  };
+
+  sectionRow(sum, 'SALES', 5);
+  line('Total sales', cur.sales, prev && prev.sales, 'money');
+  line('— Food', cur.mix.food, prev && prev.mix.food, 'money');
+  line('— Coffee', cur.mix.coffee, prev && prev.mix.coffee, 'money');
+  line('— Alcohol', cur.mix.alcohol, prev && prev.mix.alcohol, 'money');
+  line('— Other', cur.mix.other, prev && prev.mix.other, 'money');
+  if (cur.mix.unsplit || (prev && prev.mix.unsplit)) {
+    line('— Not split by category', cur.mix.unsplit, prev && prev.mix.unsplit, 'money');
+  }
+  // Services WITH SALES, said so: the Services sheet lists every service in the
+  // range, and a reader who counts its rows must not find a different number
+  // here and wonder which one is the lie.
+  line('Services with sales', cur.completedShifts, prev && prev.completedShifts, 'number');
+  line('Services in the period', cur.shiftCount, prev && prev.shiftCount, 'number');
+  line('Days with sales', cur.dayCount, prev && prev.dayCount, 'number');
+  line('Average sales a day', cur.avgDaily, prev && prev.avgDaily, 'money');
+  line('Average sales a service', cur.avgShift, prev && prev.avgShift, 'money');
+  line('Sales per labour hour', cur.salesPerHour, prev && prev.salesPerHour, 'money');
+  sum.addRow([]);
+
+  sectionRow(sum, 'COSTS', 5);
+  line('Labour (wages)', cur.wages, prev && prev.wages, 'money');
+  line('Labour hours', Math.round(cur.hours * 100) / 100, prev && Math.round(prev.hours * 100) / 100, 'number');
+  line('Food & drink invoices', cur.cogs, prev && prev.cogs, 'money');
+  line('Other invoices', cur.invoiceTotal - cur.cogs, prev && (prev.invoiceTotal - prev.cogs), 'money');
+  line('Out-of-pocket expenses', expTotal, prevExpTotal, 'money');
+  const totalCost = cur.wages + cur.invoiceTotal + expTotal;
+  const prevTotalCost = prev ? prev.wages + prev.invoiceTotal + prevExpTotal : null;
+  const costRow = line('Total costs recorded', totalCost, prevTotalCost, 'money');
+  costRow.font = { bold: true };
+  sum.addRow([]);
+
+  sectionRow(sum, 'RATIOS AND PROFIT', 5);
+  line('Labour % of sales', cur.laborPct, prev && prev.laborPct, 'pct');
+  line('Food cost % of sales', cur.foodPct, prev && prev.foodPct, 'pct');
+  line('Prime cost % of sales', cur.primePct, prev && prev.primePct, 'pct');
+  const gp = line('Gross profit (sales − labour − food)', cur.grossProfit, prev && prev.grossProfit, 'money');
+  gp.font = { bold: true };
+  const margin = cur.sales ? Math.round((cur.grossProfit / cur.sales) * 1000) / 10 : null;
+  const prevMargin = prev && prev.sales ? Math.round((prev.grossProfit / prev.sales) * 1000) / 10 : null;
+  line('Gross margin %', margin, prevMargin, 'pct');
+  sum.addRow([]);
+
+  const note = sum.addRow(['Sales are what the services recorded. Labour is wages only — no tips, no payroll taxes. '
+    + 'Food cost counts invoices dated in the range in the Food, Coffee, Beverage and Alcohol categories. '
+    + 'Tips are not a cost to the business and are not counted here; they are on the Labour sheet for reference.']);
+  note.font = { italic: true, size: 9, color: { argb: 'FF6B7280' } };
+  sum.mergeCells(note.number, 1, note.number, 5);
+  note.alignment = { wrapText: true, vertical: 'top' };
+  sum.getRow(note.number).height = 42;
+
+  // =========================================================================
+  // 2. Daily sales
+  // =========================================================================
+  const daily = wb.addWorksheet('Daily sales');
+  sheetHead(daily, ['Date', 'Day', 'Services', 'Sales', 'Tips', 'Labour hours', 'Wages', 'Labour % of sales'],
+    [12, 11, 9, 14, 12, 13, 14, 17]);
+  for (const d of MX.days(from, to)) {
+    const row = daily.addRow([d.date, dowOf(d.date), d.shifts, toDollars(d.sales), toDollars(d.tips),
+      Math.round(d.hours * 100) / 100, toDollars(d.wages),
+      d.sales ? Math.round((d.wages / d.sales) * 1000) / 10 : null]);
+    [4, 5, 7].forEach((i) => { row.getCell(i).numFmt = MONEY_FMT; });
+    row.getCell(8).numFmt = PCT_FMT;
+  }
+  const dTot = daily.addRow(['TOTAL', '', cur.shiftCount, toDollars(cur.sales), toDollars(cur.tips),
+    Math.round(cur.hours * 100) / 100, toDollars(cur.wages), cur.laborPct]);
+  dTot.font = { bold: true };
+  [4, 5, 7].forEach((i) => { dTot.getCell(i).numFmt = MONEY_FMT; });
+  dTot.getCell(8).numFmt = PCT_FMT;
+
+  // =========================================================================
+  // 3. Services — one line per service, the grain everything else sums from
+  // =========================================================================
+  const svc = wb.addWorksheet('Services');
+  sheetHead(svc, ['Date', 'Day', 'Service', 'Status', 'Food', 'Coffee', 'Alcohol', 'Other',
+    'Total sales', 'Tips', 'People', 'Hours', 'Wages', 'Labour %'],
+  [12, 11, 16, 13, 12, 12, 12, 12, 14, 12, 8, 9, 13, 10]);
+  for (const r of cur.rows) {
+    const row = svc.addRow([r.date, dowOf(r.date), serviceName(r.daypart), statusWord(r.status),
+      toDollars(r.food), toDollars(r.coffee), toDollars(r.alcohol), toDollars(r.other),
+      toDollars(r.sales), toDollars(r.tips), r.people, Math.round(r.hours * 100) / 100,
+      toDollars(r.wages), r.sales ? Math.round((r.wages / r.sales) * 1000) / 10 : null]);
+    [5, 6, 7, 8, 9, 10, 13].forEach((i) => { row.getCell(i).numFmt = MONEY_FMT; });
+    row.getCell(14).numFmt = PCT_FMT;
+  }
+  const sTot = svc.addRow(['TOTAL', '', '', '', toDollars(cur.mix.food), toDollars(cur.mix.coffee),
+    toDollars(cur.mix.alcohol), toDollars(cur.mix.other), toDollars(cur.sales), toDollars(cur.tips),
+    '', Math.round(cur.hours * 100) / 100, toDollars(cur.wages), cur.laborPct]);
+  sTot.font = { bold: true };
+  [5, 6, 7, 8, 9, 10, 13].forEach((i) => { sTot.getCell(i).numFmt = MONEY_FMT; });
+  sTot.getCell(14).numFmt = PCT_FMT;
+
+  // =========================================================================
+  // 4. Labour — the same figures payroll reports, for the same range
+  // =========================================================================
+  const lab = wb.addWorksheet('Labour');
+  const pay = aggregatePayroll(from, to);
+  sheetHead(lab, ['Person', 'Role(s)', 'Shifts', 'Hours', 'Wages', 'Card tips', 'Cash tips', 'On the check'],
+    [22, 20, 8, 10, 13, 13, 13, 14]);
+  for (const r of pay.rows) {
+    const row = lab.addRow([r.name, r.roles, r.shifts, r.hours, toDollars(r.wage),
+      toDollars(r.paycheckTips), toDollars(r.cashTips), toDollars(r.takeHome)]);
+    [5, 6, 7, 8].forEach((i) => { row.getCell(i).numFmt = MONEY_FMT; });
+  }
+  const lTot = lab.addRow(['TOTAL', '', pay.totals.shifts, pay.totals.hours, toDollars(pay.totals.wage),
+    toDollars(pay.totals.paycheckTips), toDollars(pay.totals.cashTips), toDollars(pay.totals.takeHome)]);
+  lTot.font = { bold: true };
+  [5, 6, 7, 8].forEach((i) => { lTot.getCell(i).numFmt = MONEY_FMT; });
+  const labNote = lab.addRow(['Wages are the only figure that counts as a cost on the Summary sheet. '
+    + 'Card tips are money guests left that rides the paycheck; cash tips were already taken home.']);
+  labNote.font = { italic: true, size: 9, color: { argb: 'FF6B7280' } };
+
+  // =========================================================================
+  // 5. Costs summary — where the money went, three ways
+  // =========================================================================
+  const cost = wb.addWorksheet('Costs summary');
+  cost.columns = [{ width: 30 }, { width: 10 }, { width: 15 }, { width: 15 }, { width: 13 }];
+  sectionRow(cost, 'INVOICES BY CATEGORY', 5);
+  const catHead = cost.addRow(['Category', 'Bills', 'Total', '% of invoices', '% of sales']);
+  styleHeader(catHead);
+  const byCat = [...MX.spendByCategory(from, to).entries()].sort((a, b) => b[1] - a[1]);
+  const invCount = {};
+  for (const i of invoiceDetail(from, to)) invCount[i.category] = (invCount[i.category] || 0) + 1;
+  for (const [cat, cents] of byCat) {
+    const row = cost.addRow([cat, invCount[cat] || 0, toDollars(cents),
+      cur.invoiceTotal ? Math.round((cents / cur.invoiceTotal) * 1000) / 10 : null,
+      cur.sales ? Math.round((cents / cur.sales) * 1000) / 10 : null]);
+    row.getCell(3).numFmt = MONEY_FMT;
+    [4, 5].forEach((i) => { row.getCell(i).numFmt = PCT_FMT; });
+  }
+  const catTot = cost.addRow(['All invoices', Object.values(invCount).reduce((a, b) => a + b, 0),
+    toDollars(cur.invoiceTotal), null, cur.sales ? Math.round((cur.invoiceTotal / cur.sales) * 1000) / 10 : null]);
+  catTot.font = { bold: true };
+  catTot.getCell(3).numFmt = MONEY_FMT;
+  catTot.getCell(5).numFmt = PCT_FMT;
+  cost.addRow([]);
+
+  sectionRow(cost, 'INVOICES BY VENDOR', 5);
+  const venHead = cost.addRow(['Vendor', 'Bills', 'Total', 'Largest bill', '% of invoices']);
+  styleHeader(venHead);
+  for (const v of MX.spendByVendor(from, to)) {
+    const row = cost.addRow([v.name, v.count, toDollars(v.cents), toDollars(v.max),
+      cur.invoiceTotal ? Math.round((v.cents / cur.invoiceTotal) * 1000) / 10 : null]);
+    [3, 4].forEach((i) => { row.getCell(i).numFmt = MONEY_FMT; });
+    row.getCell(5).numFmt = PCT_FMT;
+  }
+  cost.addRow([]);
+
+  sectionRow(cost, 'OUT-OF-POCKET EXPENSES BY CATEGORY', 5);
+  const expHead = cost.addRow(['Category', 'Items', 'Total', '', '']);
+  styleHeader(expHead);
+  const expByCat = new Map();
+  for (const e of expenses) {
+    const was = expByCat.get(e.category) || { n: 0, cents: 0 };
+    was.n++; was.cents += e.cents; expByCat.set(e.category, was);
+  }
+  for (const [cat, v] of [...expByCat.entries()].sort((a, b) => b[1].cents - a[1].cents)) {
+    const row = cost.addRow([cat, v.n, toDollars(v.cents)]);
+    row.getCell(3).numFmt = MONEY_FMT;
+  }
+  const expTotRow = cost.addRow(['All expenses', expenses.length, toDollars(expTotal)]);
+  expTotRow.font = { bold: true };
+  expTotRow.getCell(3).numFmt = MONEY_FMT;
+
+  // =========================================================================
+  // 6 & 7. The bills themselves
+  // =========================================================================
+  const inv = wb.addWorksheet('Invoices');
+  sheetHead(inv, ['Date', 'Vendor', 'Category', 'Invoice no.', 'Status', 'Paid with', 'Due', 'Amount'],
+    [12, 26, 16, 16, 12, 14, 12, 14]);
+  for (const i of invoiceDetail(from, to)) {
+    const row = inv.addRow([i.date, i.vendor, i.category, i.number, i.status, i.method, i.due || '', toDollars(i.cents)]);
+    row.getCell(8).numFmt = MONEY_FMT;
+  }
+  const iTot = inv.addRow(['TOTAL', '', '', '', '', '', '', toDollars(cur.invoiceTotal)]);
+  iTot.font = { bold: true };
+  iTot.getCell(8).numFmt = MONEY_FMT;
+
+  const exp = wb.addWorksheet('Expenses');
+  sheetHead(exp, ['Date', 'What', 'Where', 'Category', 'Paid by', 'Paid with', 'Reimbursed', 'Amount'],
+    [12, 26, 20, 16, 16, 14, 13, 14]);
+  for (const e of expenses) {
+    const row = exp.addRow([e.date, e.name, e.vendor, e.category, e.paidBy, e.paidWith, e.reimbursed || '', toDollars(e.cents)]);
+    row.getCell(8).numFmt = MONEY_FMT;
+  }
+  const eTot = exp.addRow(['TOTAL', '', '', '', '', '', '', toDollars(expTotal)]);
+  eTot.font = { bold: true };
+  eTot.getCell(8).numFmt = MONEY_FMT;
+
+  return wb;
+}
+
+module.exports = { shiftTotalSales, salesAndLabor, aggregatePayroll, buildWorkbook, aggregateCosts,
+  buildPerformanceWorkbook, WAGE_RATE_SQL };
