@@ -6110,6 +6110,15 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .rst-acc--ok { color: var(--muted); font-weight: 400; }
 .rst-acc--na { color: var(--muted); font-weight: 400; }
 .rst-acc--bad { color: var(--danger, #a3341f); }
+/* Access taken away on purpose: the warning colour, not the danger one — this
+   is a decision somebody made, not something broken. */
+.rst-acc--off { color: var(--warning); }
+
+/* Removing portal access: its own card under the PIN, because it is an act
+   with a date on it rather than a detail you edit. */
+.epr-access .epr-hint { margin-top: 0; }
+.epr-access .epr-access-off { border-color: var(--warning); color: var(--warning); }
+.epr-access .epr-access-off:hover { background: var(--warning); color: var(--paper); }
 .rst-dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%;
   background: var(--rule); vertical-align: middle; }
 .rst-dot--on { background: #2e7d5b; }

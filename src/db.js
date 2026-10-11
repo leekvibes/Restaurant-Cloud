@@ -107,6 +107,24 @@ if (!empCols.includes('salary_cents')) db.exec('ALTER TABLE employees ADD COLUMN
 if (!empCols.includes('schedule_visible_from_at')) {
   db.exec('ALTER TABLE employees ADD COLUMN schedule_visible_from_at TEXT');
 }
+// Migration: portal access, held apart from `active`.
+//
+// Taking somebody off the portal is not taking them off the roster. The owner:
+// "I don't want to kick them out, but from the admin side I want to be able to
+// remove access, and if they try to log in on the portal it gives them an
+// access denied message." So they keep their PIN, their jobs, their schedule
+// and their pay; the one thing that stops is the portal door. Clearing the PIN
+// was the only way before, and it destroyed the PIN to do it — nothing said
+// why afterwards, and giving access back meant inventing a new code.
+//
+// 1 for everybody, so nothing changes until somebody is actually turned off.
+if (!empCols.includes('portal_access')) {
+  db.exec('ALTER TABLE employees ADD COLUMN portal_access INTEGER NOT NULL DEFAULT 1');
+}
+if (!empCols.includes('portal_access_at')) db.exec('ALTER TABLE employees ADD COLUMN portal_access_at TEXT');
+if (!empCols.includes('portal_access_by')) db.exec('ALTER TABLE employees ADD COLUMN portal_access_by TEXT');
+// The manager's own words about why, shown to them and never to the person.
+if (!empCols.includes('portal_access_note')) db.exec('ALTER TABLE employees ADD COLUMN portal_access_note TEXT');
 
 // Migration: add the tip-out policy stamp + shared-pool columns to shifts.
 const shiftCols = db.prepare('PRAGMA table_info(shifts)').all().map((c) => c.name);

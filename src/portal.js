@@ -330,8 +330,16 @@ const q = {
       VALUES (@employee_id, @endpoint, @sub)
     ON CONFLICT(endpoint) DO UPDATE SET employee_id = excluded.employee_id, sub = excluded.sub`),
   delPush: db.prepare('DELETE FROM portal_push WHERE endpoint = ?'),
-  pushAll: db.prepare('SELECT endpoint, sub FROM portal_push'),
-  pushFor: db.prepare('SELECT endpoint, sub FROM portal_push WHERE employee_id = @id'),
+  // NOT to a phone whose owner has had the portal taken away: the banner would
+  // open a door that answers "access denied". The join is left-side tolerant so
+  // a device with no employee attached (there should be none) still gets sent
+  // to rather than silently dropped.
+  pushAll: db.prepare(`SELECT p.endpoint, p.sub FROM portal_push p
+    LEFT JOIN employees e ON e.id = p.employee_id
+    WHERE COALESCE(e.portal_access, 1) = 1`),
+  pushFor: db.prepare(`SELECT p.endpoint, p.sub FROM portal_push p
+    LEFT JOIN employees e ON e.id = p.employee_id
+    WHERE p.employee_id = @id AND COALESCE(e.portal_access, 1) = 1`),
   pushCountFor: db.prepare('SELECT COUNT(*) n FROM portal_push WHERE employee_id = @id'),
 
   // --- admin notifications (back office) -----------------------------------

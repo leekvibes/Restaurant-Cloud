@@ -3976,12 +3976,30 @@ const CLOCK_GRACE = 16 * 60 * 60 * 1000;
  * The signature is still required, so this is the same person's own session,
  * only older than 45 minutes.
  */
-function readTipsToken(raw) {
+/**
+ * Has this person's portal access been taken away?
+ *
+ * Separate from `active`, which is whether they work here at all. This is the
+ * door only: they keep their PIN, their jobs, their schedule and their pay, and
+ * the portal stops opening for them. Asked at the two places every portal door
+ * passes through — the signed session token below, and the PIN sign-in — so no
+ * route can forget it.
+ */
+const portalBlocked = (emp) => !!emp && emp.portal_access === 0;
+/** What they are told, and all they are told: never the manager's note. */
+const PORTAL_DENIED = 'Access denied — your access to the staff portal has been turned off. '
+  + 'Ask your manager. Your hours and pay are not affected.';
+
+function readTipsToken(raw, opts = {}) {
   const [id, exp, sig] = String(raw || '').split('.');
   if (!id || !exp || !sig) return null;
   if (sig !== sign(`tips:${id}:${exp}`)) return null;
   const emp = q.employee.get(Number(id));
   if (!emp || !emp.active) return null;
+  // A session made before access was taken away dies at its next request; the
+  // caller that wants to SAY so asks with { blocked: true } and gets the person
+  // back, so "access denied" can be shown instead of "that timed out".
+  if (portalBlocked(emp) && !opts.blocked) return null;
   if (Number(exp) >= Date.now()) return emp;
   const late = Date.now() - Number(exp);
   if (late > CLOCK_GRACE) return null;
@@ -4193,6 +4211,11 @@ function setPortalCookie(req, res, empId) {
     + `Max-Age=${Math.round(TIPS_TTL / 1000)}${https ? '; Secure' : ''}`);
 }
 
+/** Sign the portal out: the one spelling of it, used by /portal/out and by the
+    access check, so a session that is no longer allowed is not left half-open. */
+const clearPortalCookie = (res) => res.setHeader('Set-Cookie',
+  `${PORTAL_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+
 /** The person this request belongs to, or null. Same token, same expiry. */
 const portalUser = (req) => readTipsToken(readCookie(req, PORTAL_COOKIE));
 /**
@@ -4253,6 +4276,15 @@ function requirePortal(req, res) {
   }
   portalShape = null;
   portalMe = null;
+  // ACCESS TAKEN AWAY, SAID AS THAT. Without this the session simply stops
+  // working and the portal says "that timed out — enter your PIN again", which
+  // sends somebody round the PIN screen wondering what they have done wrong.
+  // The cookie goes with it, so the next tap starts clean.
+  if (portalBlocked(readTipsToken(readCookie(req, PORTAL_COOKIE), { blocked: true }))) {
+    clearPortalCookie(res);
+    res.redirect('/tips?err=1&msg=' + encodeURIComponent(PORTAL_DENIED));
+    return null;
+  }
   // "Nothing you sent was lost" was true for a GET and a lie for a POST. The
   // POST body is gone the moment this redirect goes out, so a clock-out tapped
   // against a dead session vanished — and the sentence told the person it had
@@ -7034,7 +7066,7 @@ app.post('/portal/push/test', async (req, res) => {
 });
 
 app.get('/portal/out', (req, res) => {
-  res.setHeader('Set-Cookie', `${PORTAL_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  clearPortalCookie(res);
   res.redirect('/tips');
 });
 
@@ -11094,6 +11126,13 @@ app.post('/tips/start', (req, res) => {
         ? 'That PIN is set up for more than one person. Tell your manager so it can be fixed.'
         : "That PIN wasn't recognised. Check it and try again, or ask your manager."));
   }
+  // THE DOOR, FOR SOMEBODY WHOSE ACCESS WAS TAKEN AWAY. The PIN is right — this
+  // is not a failed guess and is not counted as one — so they are told plainly
+  // what happened instead of being sent round the PIN screen again.
+  if (portalBlocked(matches[0])) {
+    GUARD.passed('pin', matches[0].id);
+    return res.redirect('/tips?err=1&msg=' + encodeURIComponent(PORTAL_DENIED));
+  }
   GUARD.passed('pin', matches[0].id);
   // The ONE door that turns a PIN into a session, so the one place a sign-in
   // is recorded. The refreshes that keep somebody on the clock signed in go
@@ -11127,6 +11166,9 @@ function legacyAuth(body, req) {
   if (!id || !pin) return null;
   const e = q.employee.get(id);
   if (!e || !e.active) return null;
+  // The old door — a name and a PIN posted straight at the tip form — is a
+  // portal door too, and shuts with the rest.
+  if (portalBlocked(e)) return null;
   // Throttled like every other PIN door. This one takes an employee id
   // outright, so it would otherwise be the easiest of the lot to grind.
   if (!req) return String(e.pin || '') === pin ? e : null;
@@ -11138,6 +11180,15 @@ app.post('/tips', (req, res) => {
   const fail = (msg) => res.redirect('/tips?err=1&msg=' + encodeURIComponent(msg));
   const emp = readTipsToken(req.body.token) || legacyAuth(req.body, req);
   if (!emp) {
+    // Access taken away is its own answer. Both doors here refuse such a person
+    // by returning nobody, and "that PIN doesn't match" would be a lie that
+    // sends them hunting for a typo in a PIN that is perfectly correct.
+    // Only to somebody who proved who they are — a signed token, or the right
+    // PIN. Otherwise posting a name would tell a stranger whose access is off.
+    const byToken = readTipsToken(req.body.token, { blocked: true });
+    const byPin = !byToken && req.body.employee_id ? q.employee.get(Number(req.body.employee_id)) : null;
+    const who = byToken || (byPin && pinMatches(byPin, req.body.pin) ? byPin : null);
+    if (portalBlocked(who)) return fail(PORTAL_DENIED);
     // Distinguish a genuinely stale token from a wrong PIN on an old page.
     return fail(req.body.employee_id
       ? "That PIN doesn't match the name selected. Check it and try again — nothing was saved."
@@ -11206,6 +11257,13 @@ app.get('/employees', (req, res) => {
     (byPin[e.pin] = byPin[e.pin] || []).push(e.name);
   }
   const access = (e) => {
+    // Taken away on purpose comes first: it explains the row whatever else is
+    // true of the PIN, and it is the one state somebody chose.
+    if (e.portal_access === 0) {
+      return { k: 'off', t: 'Access removed',
+        why: `${e.name} is told access is denied at the portal${e.portal_access_by ? `. Removed by ${e.portal_access_by}` : ''}${
+          e.portal_access_note ? ` — ${e.portal_access_note}` : ''}. They keep their schedule and pay.` };
+    }
     if (!e.pin) return { k: 'bad', t: 'No PIN', why: `${e.name} cannot sign in to the portal until they have one.` };
     if ((byPin[e.pin] || []).length > 1) {
       return { k: 'bad', t: 'PIN clash', why: `Shared with ${esc(byPin[e.pin].filter((n) => n !== e.name).join(', '))} — neither can sign in.` };
@@ -12592,6 +12650,16 @@ function eprActivity(req, e) {
       items.push({ at: r.created_at, t: `Added to ${SERVICES.nameOf(r.service_slug)}`, d: '', by: '' });
     }
   } catch { /* older database */ }
+  // The portal door, when somebody has moved it. Only the latest act is kept on
+  // the employee row, which is the one that explains today's state.
+  if (e.portal_access_at) {
+    items.push({
+      at: e.portal_access_at,
+      t: e.portal_access === 0 ? 'Portal access removed' : 'Portal access given back',
+      d: e.portal_access === 0 && e.portal_access_note ? esc(e.portal_access_note) : '',
+      by: e.portal_access_by || '',
+    });
+  }
   items.sort((a, b) => String(b.at).localeCompare(String(a.at)));
 
   return `${eprOnApp(e)}
@@ -12647,8 +12715,17 @@ app.get('/employees/:id/edit', (req, res) => {
   const sub = headerLine(e, mine);
 
   // --- left column: who they are, and how they get in -------------------------
-  const pinState = !e.pin ? { k: 'bad', t: 'No PIN — they cannot sign in to the portal' }
+  // Three states, in the order they matter: access taken away outranks a
+  // missing PIN, because it is the thing somebody did on purpose.
+  const blocked = e.portal_access === 0;
+  const pinState = blocked
+    ? { k: 'bad', t: `Access removed${e.portal_access_by ? ` by ${e.portal_access_by}` : ''}${
+      e.portal_access_at ? ` · ${TC.stamp(e.portal_access_at)}` : ''} — the portal says access denied` }
+    : !e.pin ? { k: 'bad', t: 'No PIN — they cannot sign in to the portal' }
       : { k: 'ok', t: 'Can sign in to the staff portal' };
+  // On the clock while being shut out is worth saying once, here, where the
+  // button is: they cannot clock themselves out afterwards.
+  const onClockNow = !!TC.q.active.get(e.id);
 
   const side = `
     <form method="post" action="/employees/${e.id}" class="epr-card">
@@ -12678,10 +12755,39 @@ app.get('/employees/:id/edit', (req, res) => {
           aria-describedby="pin-hint">
       </label>
       <p class="epr-hint" id="pin-hint">They sign in to the staff portal with this. Four digits, and no
-        two people can share one. Change it here and tell them the new one; clearing the box removes
-        their access${w ? '' : ' — your account is view-only'}.</p>
+        two people can share one. Change it here and tell them the new one${w ? '' : ' — your account is view-only'}.</p>
 
       ${w ? '<button class="bs-btn epr-save" type="submit">Save details</button>' : ''}
+    </form>
+    ${/* THE DOOR, ON ITS OWN. Its own form because the card above is one — a
+         form inside a form is not a thing browsers agree on — and its own card
+         because this is not a detail you edit, it is an act with a date on it.
+         Taking access away leaves everything else alone, and the sentence says
+         so: the alternative people reach for is deactivating somebody, which
+         takes them off the schedule and out of payroll. */''}
+    <form method="post" action="/employees/${e.id}/portal-access" class="epr-card epr-access"
+      data-what="${esc(blocked ? '' : `Remove ${e.name}'s access to the staff portal?`
+        + '\n\nThey keep their PIN, their jobs, their schedule and their pay. The portal will tell them access is denied.'
+        + (onClockNow ? `\n\n${e.name} is clocked in right now and will not be able to clock out — close their punch on the time clock.` : ''))}"
+      ${blocked ? '' : "onsubmit=\"return confirm(this.getAttribute('data-what'))\""}>
+      <input type="hidden" name="_csrf" value="${csrfFor(req)}">
+      ${/* Named for the ACT, not the subject: the card above is already headed
+           "Portal access", and two cards under one heading read as one thing
+           split in half — on screen it looked like the PIN section had grown a
+           second, emptier copy of itself. */''}
+      <h2 class="epr-h">${blocked ? 'Turn the portal back on' : 'Turn the portal off'}</h2>
+      <p class="epr-hint">${blocked
+        ? `They are still on the roster, the schedule and payroll — only the portal is shut.
+           They see “access denied” when they try to sign in.`
+        : `Shuts the portal for them — signing in, clocking in or out, submitting sales and tips.
+           They stay on the roster, the schedule and payroll, and keep their PIN.`}</p>
+      ${blocked && e.portal_access_note ? `<p class="epr-acc epr-acc--na">Reason noted: “${esc(e.portal_access_note)}”</p>` : ''}
+      ${w ? `${blocked ? '' : `<label class="epr-f">Why <i>optional, for you — never shown to them</i>
+        <input name="note" maxlength="200" placeholder="e.g. on leave until November"></label>`}
+      <input type="hidden" name="access" value="${blocked ? 'on' : 'off'}">
+      <button class="bs-btn-sm${blocked ? '' : ' epr-access-off'}" type="submit">${
+        blocked ? 'Give access back' : 'Remove access'}</button>`
+        : '<p class="epr-hint">Your account is view-only.</p>'}
     </form>`;
 
   // --- tab: employment --------------------------------------------------------
@@ -13056,6 +13162,33 @@ app.post('/employees/:id/reactivate', (req, res) => {
   q.setActive.run({ id: Number(req.params.id), active: 1 });
   res.redirect('/employees?msg=' + encodeURIComponent(
     'Staff member reactivated. Their upcoming published shifts are back.'));
+});
+
+/**
+ * Take the portal away from somebody, or give it back.
+ *
+ * Deliberately NOT deactivation. Deactivating takes them off the schedule and
+ * out of payroll, which is the wrong tool for "stop them signing in" — and the
+ * only other way to do it was to delete their PIN, which destroyed the code
+ * they knew and left nothing on the page saying why. This flips one flag, keeps
+ * everything else, and records who did it and when.
+ */
+app.post('/employees/:id/portal-access', (req, res) => {
+  const e = q.employee.get(Number(req.params.id));
+  if (!e) return res.status(404).end();
+  const off = String(req.body.access || '') === 'off';
+  const note = off ? String(req.body.note || '').trim().slice(0, 200) || null : null;
+  const actor = tcActor(req);
+  db.prepare(`UPDATE employees SET portal_access = ?, portal_access_at = datetime('now'),
+    portal_access_by = ?, portal_access_note = ? WHERE id = ?`)
+    .run(off ? 0 : 1, actor, note, e.id);
+  // Their session stops working at its next tap on its own — readTipsToken
+  // refuses a blocked person — so there is nothing to expire here.
+  const onClock = off && TC.q.active.get(e.id);
+  res.redirect(`/employees/${e.id}/edit?msg=` + encodeURIComponent(off
+    ? `${e.name} can no longer sign in to the portal. They are still on the roster, the schedule and payroll.`
+      + (onClock ? ` They are clocked in right now and cannot clock out themselves — close the punch on the time clock.` : '')
+    : `${e.name} can sign in to the portal again, with the same PIN.`));
 });
 
 // ---------------------------------------------------------------------------
