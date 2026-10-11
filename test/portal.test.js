@@ -435,7 +435,14 @@ test('history starts where the manager says it starts', async () => {
     .run(older, bella, 'server', 6);
 
   // This suite runs with the floor wide open, so the old shift shows.
-  const wide = await (await asStaff('/portal/earnings', await signIn('1111'))).text();
+  //
+  // Asked of the ARCHIVE, not of Pay. Pay shows one pay period, and this half
+  // of the test asked Pay for a shift dated in June — which passed only while
+  // the calendar itself was still in June, and went red on its own months
+  // later with nothing broken. The floor is a statement about history, so both
+  // halves now ask the page history lives on. (The other half below already
+  // carried this correction; this one was missed.)
+  const wide = await (await asStaff('/portal/earnings/shifts', await signIn('1111'))).text();
   assert.match(wide, /Jun 2/, 'with no floor, June is in the history');
 
   // A server booted with a floor must not show it. Same database, same person.
