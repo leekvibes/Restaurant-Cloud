@@ -82,7 +82,14 @@ const Q = {
   // Everybody who has ever had a salary recorded, whatever they are paid now:
   // somebody moved off salary in March still cost the business a salary in
   // February, and a report covering February has to say so.
-  everHad: db.prepare('SELECT DISTINCT employee_id FROM salary_history'),
+  //
+  // JOINED to employees, so a dated amount belonging to a staff member who no
+  // longer exists charges nothing. Deleting somebody outright is rare — the app
+  // deactivates instead — but a left-behind row would have gone on costing the
+  // business money every month forever, under a name no page could print. Found
+  // by accident, with a cost showing against "#356" and nobody by that number.
+  everHad: db.prepare(`SELECT DISTINCT h.employee_id AS employee_id FROM salary_history h
+    JOIN employees e ON e.id = h.employee_id`),
   rowsFor: db.prepare(`SELECT cents, effective_from FROM salary_history
     WHERE employee_id = ? ORDER BY effective_from, id`),
   // Salaried right now with nothing on record — the state the reports have to

@@ -152,3 +152,19 @@ test('the money is whole cents, however the arithmetic falls', () => {
     'a whole pay period of it is the amount itself, exactly');
   SALARY.setSalary({ employeeId: EMP.cook, cents: 0, from: '2026-09-01', by: 'test' });
 });
+
+test('a dated amount whose person is gone charges nothing', () => {
+  // Deleting somebody is rare — the app deactivates instead — but a salary row
+  // left behind by one would otherwise cost the business money every month
+  // forever, against a name no page could print. Found by accident: a scratch
+  // database showed $6,399 of salary belonging to "#356", who did not exist.
+  const ghost = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active, pay_type, salary_cents)
+    VALUES ('Gone Greg', 'manager', 0, 1, 'salary', 280000)`).run().lastInsertRowid);
+  SALARY.setSalary({ employeeId: ghost, cents: 280000, from: '2026-09-01', by: 'test' });
+  const withThem = period().salary;
+  assert.ok(withThem > PER_DAY * 7, 'they cost something while they exist');
+  db.prepare('DELETE FROM employees WHERE id = ?').run(ghost);
+  assert.strictEqual(period().salary, PER_DAY * 7, 'and nothing once the person is gone');
+  assert.ok(!period().salaryPeople.some((x) => /^#/.test(x.name)), 'nothing is charged to a number');
+  db.prepare('DELETE FROM salary_history WHERE employee_id = ?').run(ghost);
+});

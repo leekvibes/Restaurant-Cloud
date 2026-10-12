@@ -14106,6 +14106,12 @@ app.post('/costs/targets', (req, res) => {
   setSetting('target_labor_pct', String(clamp(req.body.labor, 30)));
   setSetting('target_food_pct', String(clamp(req.body.food, 32)));
   setSetting('target_prime_pct', String(clamp(req.body.prime, 60)));
+  // The employer's share of payroll taxes, as a percentage of pay. Zero is a
+  // real answer here — it means "not counted", which is what every figure said
+  // before anybody typed one — so this is clamped separately from the targets
+  // above, which may not be zero.
+  const tax = Number(req.body.payroll_tax);
+  setSetting('payroll_tax_pct', String(isFinite(tax) && tax > 0 ? Math.min(tax, 100) : 0));
   const back = String(req.body.back || '').replace(/[^a-z0-9=&_-]/gi, '');
   res.redirect('/costs' + (back ? '?' + back : ''));
 });
@@ -14202,18 +14208,62 @@ app.get('/costs', (req, res) => {
   // row: "$2,176.50 hourly wages + $7,844.29 salaried" gets cut off mid-figure
   // there, and half a number is worse than none. It also keeps the tile's
   // against-target line, which is what the owner reads it for.
-  const laborSplit = cur.salary > 0 ? `<p class="perf-note"><b>Labor is ${money(cur.labor)}</b>:
-      ${money(cur.wages)} in hourly wages and ${money(cur.salary)} of salary, charged over
-      ${cur.salaryPeople.length === 1 ? '' : 'each of '}${esc(cur.salaryPeople.map((x) => x.name).join(', '))}&rsquo;s
-      ${cur.salaryPeople.length === 1 ? 'pay periods' : 'pay periods'} in this range.</p>` : '';
-  // Somebody salaried with no start date on record costs nothing here, because
-  // the alternative is to invent one. Said out loud, with the amount, so it is
-  // a known gap rather than a silent zero.
-  const salaryGap = cur.salaryUndated.length ? `<p class="perf-note perf-note--warn">
-      ${cur.salaryUndated.length === 1 ? '<b>One salaried person is</b>' : `<b>${cur.salaryUndated.length} salaried people are</b>`}
-      not counted in these figures: ${esc(cur.salaryUndated.map((u) => u.name).join(', '))}.
-      Their salary has no start date on record, and this page will not guess one.
-      Set it on their Staff page and every figure here includes them from that day on.</p>` : '';
+  const parts = [`${money(cur.wages)} in hourly wages`];
+  if (cur.salary > 0) parts.push(`${money(cur.salary)} of salary`);
+  if (cur.overtime > 0) parts.push(`${money(cur.overtime)} of overtime premium`);
+  if (cur.payrollTax > 0) parts.push(`${money(cur.payrollTax)} of employer payroll tax`);
+  const laborSplit = parts.length > 1 ? `<p class="perf-note"><b>Labor is ${money(cur.labor)}</b>:
+      ${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}.${cur.overtimeApportioned
+  ? ' Overtime is earned by the week, so a range that cuts a week carries that week&rsquo;s share of it.' : ''}</p>` : '';
+  // WHAT IS NOT IN THESE FIGURES — one box, above the numbers it is about.
+  //
+  // There was a Data quality panel for some of this already, at the very foot
+  // of the page, below every chart: three sentences nobody scrolls to, while
+  // the ratios sat at the top looking complete. The gaps belong where the
+  // figures are, and the services belong by name, because "3 shifts have no
+  // sales entered" cannot be acted on and "Jul 19 Evening Service" can.
+  const gapRow = (g) => `${esc(niceDate(g.date))} ${esc(svcLabel(g.daypart))}`;
+  const andMore = (list, n) => (list.length > n ? ` and ${list.length - n} more` : '');
+  const missing = [];
+  if (cur.gaps.noFigures.length) {
+    missing.push(`<b>${cur.gaps.noFigures.length} service${cur.gaps.noFigures.length === 1 ? '' : 's'}
+      with no sales entered</b> — ${cur.gaps.noFigures.slice(0, 6).map((g) => `<a href="/sales#s${g.id}">${gapRow(g)}</a>`).join(', ')}${
+  andMore(cur.gaps.noFigures, 6)}. Every figure here leaves ${cur.gaps.noFigures.length === 1 ? 'it' : 'them'} out.`);
+  }
+  if (cur.gaps.noHours.length) {
+    missing.push(`<b>Somebody has no hours</b> on ${cur.gaps.noHours.slice(0, 6).map((g) => `<a href="/shifts/${g.id}">${gapRow(g)}</a>`).join(', ')}${
+  andMore(cur.gaps.noHours, 6)} — labor is understated by whatever they worked.`);
+  }
+  if (cur.salaryUndated.length) {
+    missing.push(`<b>${cur.salaryUndated.length === 1 ? 'A salaried person is' : `${cur.salaryUndated.length} salaried people are`}
+      not counted</b> — ${esc(cur.salaryUndated.map((u) => u.name).join(', ')) || ''}. Their salary has no start date on
+      record and this page will not guess one. Set it on their Staff page.`);
+  }
+  if (!cur.payrollTaxPct) {
+    missing.push(`<b>Employer payroll taxes</b> — your share of FICA and unemployment, typically another
+      8&ndash;10% on top of wages. <a href="#perf-targets">Set your rate below</a> and it counts from then on.`);
+  }
+  if (cur.sales > 0 && cur.invoices.length === 0) {
+    missing.push('<b>No invoices entered for this range</b>, so food cost and prime cost cannot be shown and profit is overstated.');
+  } else if (cur.invoices.length > 0 && cur.invoices.length < 5) {
+    missing.push(`<b>Only ${cur.invoices.length} invoice${cur.invoices.length === 1 ? '' : 's'} entered</b> — food cost,
+      prime cost and profit may all be understated in cost terms.`);
+  }
+  const dataGap = missing.length ? `<section class="perf-dq perf-dq--top">
+      <div class="perf-dq-h">${icon('incidents')}<span>Not in these figures</span></div>
+      <ul>${missing.map((m) => `<li>${m}</li>`).join('')}</ul></section>` : '';
+
+  // THE WATERFALL, in one line. "Profit" is now a figure with five things
+  // behind it, and a number that big should show where it came from without
+  // making anybody open the spreadsheet to find out.
+  const otherBills = cur.invoiceTotal - cur.cogs;
+  const profitBits = [`sales ${money(cur.sales)}`, `labor ${money(cur.labor)}`];
+  if (cur.cogs) profitBits.push(`food &amp; drink ${money(cur.cogs)}`);
+  if (otherBills) profitBits.push(`other bills ${money(otherBills)}`);
+  if (cur.expenses) profitBits.push(`out of pocket ${money(cur.expenses)}`);
+  const profitLine = `<p class="perf-note"><b>Profit ${money(cur.netProfit)}</b>:
+      ${profitBits[0]} less ${profitBits.slice(1, -1).join(', ')}${profitBits.length > 2 ? ' and ' : ''}${profitBits[profitBits.length - 1]}.
+      ${cur.cogs ? `Gross profit — before the bills that are not food and drink — is ${money(cur.grossProfit)}.` : ''}</p>`;
 
   const summary = `<section class="perf-summary">
     ${bigTile('blue', 'Sales', money(cur.sales), prev ? pctLine(cur.sales, prev.sales) : '', '', salesSpark)}
@@ -14221,14 +14271,17 @@ app.get('/costs', (req, res) => {
       prev ? ptsLine(cur.laborPct, prev.laborPct) : '', vsTarget(cur.laborPct, TGT.labor), laborSpark)}
     ${bigTile(cur.primePct === null ? 'flat' : band(cur.primePct, TGT.prime), 'Prime cost', cur.primePct === null ? '—' : cur.primePct + '%',
       prev ? ptsLine(cur.primePct, prev.primePct) : '', cur.primePct === null ? 'needs invoices' : vsTarget(cur.primePct, TGT.prime), '')}
-    ${bigTile('good', 'Gross profit', money(cur.grossProfit),
-      prev ? pctLine(cur.grossProfit, prev.grossProfit) : '', `after labor${cur.cogs ? ' &amp; goods' : ''}, before overhead`, '')}
+    ${/* AFTER EVERYTHING. This tile used to stop after labour and food, with
+         rent, utilities, insurance and every out-of-pocket receipt sitting
+         outside it — a profit figure that was never the profit. */''}
+    ${bigTile(cur.netProfit >= 0 ? 'good' : 'bad', 'Profit', money(cur.netProfit),
+      prev ? pctLine(cur.netProfit, prev.netProfit) : '', 'after every cost recorded', '')}
     ${smTile(cur.foodPct === null ? 'flat' : band(cur.foodPct, TGT.food), 'Food cost', cur.foodPct === null ? '—' : cur.foodPct + '%',
       cur.foodPct === null ? 'no invoices tagged' : vsTarget(cur.foodPct, TGT.food))}
     ${smTile('flat', 'Avg daily sales', cur.avgDaily === null ? '—' : money(cur.avgDaily),
       cur.dayCount ? `over ${cur.dayCount} day${cur.dayCount === 1 ? '' : 's'} traded` : 'nothing traded yet')}
   </section>
-  ${laborSplit}${salaryGap}`;
+  ${profitLine}${laborSplit}${dataGap}`;
 
   // --- what's driving performance ------------------------------------------
   // Deterministic, prioritized, and never a cause the data can't support — a
@@ -14295,17 +14348,10 @@ app.get('/costs', (req, res) => {
         : `<div class="panel-empty">Nothing moved much${cmpLabel ? ` versus ${esc(cmpLabel)}` : ', and no comparison is selected'}.</div>`}
     </section>`;
 
-  // --- data-quality notice (only when something is actually incomplete) -----
-  const noSalesShifts = cur.rows.filter((x) => x.sales === 0).length;
-  const noHours = cur.rows.reduce((a, x) => a + (x.no_hours || 0), 0);
-  const dq = [];
-  if (cur.sales > 0 && cur.invoices.length === 0) dq.push('No invoices entered for this period, so food and prime cost cannot be shown.');
-  else if (cur.invoices.length > 0 && cur.invoices.length < 5) dq.push(`Only ${cur.invoices.length} invoice${cur.invoices.length === 1 ? '' : 's'} entered — food and prime cost may be understated.`);
-  if (noSalesShifts) dq.push(`${noSalesShifts} shift${noSalesShifts === 1 ? '' : 's'} ${noSalesShifts === 1 ? 'has' : 'have'} no sales entered.`);
-  if (noHours) dq.push(`${noHours} staff shift${noHours === 1 ? '' : 's'} ${noHours === 1 ? 'is' : 'are'} missing hours.`);
-  const dqNotice = dq.length ? `
-    <section class="perf-dq"><div class="perf-dq-h">${icon('incidents')}<span>Data quality</span></div>
-      <ul>${dq.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></section>` : '';
+  // The Data quality panel that used to sit here has moved to the top of the
+  // page and gained the names of what is missing — see `dataGap`. It said the
+  // same things from under the last chart, where the figures it qualified were
+  // two screens away.
 
   // --- sales comparison: this period against the comparison, by weekday -----
   // AVERAGE per traded weekday, not the total: a 30-day window holds five
@@ -14529,19 +14575,26 @@ app.get('/costs', (req, res) => {
             : '<div class="panel-empty">No active menu item is over its target. Items without a full cost are not counted.</div>'}
         </section>` : ''}
         <section class="pcard perf-targets">
-          <div class="pcard-h"><b>Targets</b><span class="muted">points, not percent-of</span></div>
+          <div class="pcard-h" id="perf-targets"><b>Targets</b><span class="muted">points, not percent-of</span></div>
           ${canWrite() ? `<form method="post" action="/costs/targets" class="perf-tgt-form">
             <input type="hidden" name="back" value="${esc(qs)}">
             <label>Labor %<input type="number" name="labor" min="1" max="199" value="${TGT.labor}"></label>
             <label>Food %<input type="number" name="food" min="1" max="199" value="${TGT.food}"></label>
             <label>Prime %<input type="number" name="prime" min="1" max="199" value="${TGT.prime}"></label>
+            ${/* Not a target — a rate. It sits here because this is the form
+                 that governs what the figures above mean, and a number the
+                 owner has to supply belongs next to the ones they already do. */''}
+            <label class="perf-tgt-tax">Employer payroll tax %<input type="number" name="payroll_tax" min="0" max="100"
+              step="0.1" value="${cur.payrollTaxPct || ''}" placeholder="0"></label>
             <button class="bs-btn-sm" type="submit">Save</button>
           </form>` : `<div class="perf-facts">${fact('Labor', TGT.labor + '%')}${fact('Food', TGT.food + '%')}${fact('Prime', TGT.prime + '%')}</div>`}
-          <p class="perf-foot">Gross profit is sales minus wages and goods, before rent, utilities and other overhead — it is not net profit.</p>
+          <p class="perf-foot">Profit is sales minus every cost recorded for the range: labor of all kinds,
+            every bill whatever its category, and out-of-pocket spending. It is not a tax figure — it counts
+            what was entered, so anything never entered is not in it.</p>
         </section>
       </div>
 
-      ${dqNotice}
+
     </div>
     <script>
       (function () {

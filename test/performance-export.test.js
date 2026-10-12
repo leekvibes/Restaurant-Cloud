@@ -152,6 +152,17 @@ test('the summary totals are the same figures the Performance page shows', async
   // in them is ALL of labour, which is what the ratios below are built on.
   assert.strictEqual(valueFor(sum, 'Total costs recorded'),
     (page.labor + page.invoiceTotal + 6000) / 100, 'labour + every bill + out-of-pocket');
+  assert.strictEqual(valueFor(sum, 'Total costs recorded'), page.allCosts / 100,
+    'and that is the same thing the page calls all costs');
+  // The two profit lines mean different things and both have to be here: one
+  // stops after labour and food, the other stops nowhere.
+  assert.strictEqual(valueFor(sum, 'Profit after all costs'), page.netProfit / 100);
+  assert.strictEqual(valueFor(sum, 'Gross profit'), page.grossProfit / 100);
+  assert.ok(page.netProfit <= page.grossProfit, 'and the one after everything is never the larger');
+  // Overtime and employer tax are lines of their own, even at zero — a reader
+  // has to be able to see that they were considered and came to nothing.
+  assert.strictEqual(valueFor(sum, 'Labour — overtime premium'), page.overtime / 100);
+  assert.strictEqual(valueFor(sum, 'Labour — employer payroll tax'), page.payrollTax / 100);
 });
 
 test('nothing outside the range gets in', async () => {

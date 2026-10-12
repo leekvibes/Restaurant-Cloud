@@ -508,14 +508,18 @@ async function buildPerformanceWorkbook(from, to, opts = {}) {
   // check.
   line('Labour — hourly wages', cur.wages, prev && prev.wages, 'money');
   line('Labour — salaried', cur.salary, prev && prev.salary, 'money');
+  // The overtime premium payroll pays and this report never counted: straight
+  // time for every hour is in the wages line above, so this is only the extra.
+  line('Labour — overtime premium', cur.overtime, prev && prev.overtime, 'money');
+  line('Labour — employer payroll tax', cur.payrollTax, prev && prev.payrollTax, 'money');
   const laborRow = line('Labour (total)', cur.labor, prev && prev.labor, 'money');
   laborRow.font = { bold: true };
   line('Labour hours (hourly staff)', Math.round(cur.hours * 100) / 100, prev && Math.round(prev.hours * 100) / 100, 'number');
   line('Food & drink invoices', cur.cogs, prev && prev.cogs, 'money');
   line('Other invoices', cur.invoiceTotal - cur.cogs, prev && (prev.invoiceTotal - prev.cogs), 'money');
   line('Out-of-pocket expenses', expTotal, prevExpTotal, 'money');
-  const totalCost = cur.labor + cur.invoiceTotal + expTotal;
-  const prevTotalCost = prev ? prev.labor + prev.invoiceTotal + prevExpTotal : null;
+  const totalCost = cur.allCosts;
+  const prevTotalCost = prev ? prev.allCosts : null;
   const costRow = line('Total costs recorded', totalCost, prevTotalCost, 'money');
   costRow.font = { bold: true };
   sum.addRow([]);
@@ -529,14 +533,41 @@ async function buildPerformanceWorkbook(from, to, opts = {}) {
   const margin = cur.sales ? Math.round((cur.grossProfit / cur.sales) * 1000) / 10 : null;
   const prevMargin = prev && prev.sales ? Math.round((prev.grossProfit / prev.sales) * 1000) / 10 : null;
   line('Gross margin %', margin, prevMargin, 'pct');
+  // AFTER EVERYTHING, which is the figure the owner asked this sheet to end on.
+  // Gross profit stops after labour and food; this one stops nowhere.
+  const np = line('Profit after all costs', cur.netProfit, prev && prev.netProfit, 'money');
+  np.font = { bold: true };
+  const nMargin = cur.sales ? Math.round((cur.netProfit / cur.sales) * 1000) / 10 : null;
+  const prevNMargin = prev && prev.sales ? Math.round((prev.netProfit / prev.sales) * 1000) / 10 : null;
+  line('Profit margin %', nMargin, prevNMargin, 'pct');
   // THE GAP, ON THE SHEET. A salaried person with no start date on record is
   // not in any figure above. Leaving that off the export and only showing it on
   // screen would mean handing somebody a spreadsheet that quietly understates
   // labour, which is the exact fault this change exists to fix.
+  const warnRow = (text) => {
+    const row = sum.addRow([text, null, null, null, null]);
+    row.font = { italic: true, color: { argb: 'FFB45309' } };
+  };
   if (cur.salaryUndated && cur.salaryUndated.length) {
-    const warn = sum.addRow([`Not included: ${cur.salaryUndated.map((u) => u.name).join(', ')} `
-      + `— salaried, no start date on record`, null, null, null, null]);
-    warn.font = { italic: true, color: { argb: 'FFB45309' } };
+    warnRow(`Not included: ${cur.salaryUndated.map((u) => u.name).join(', ')} `
+      + '— salaried, no start date on record');
+  }
+  if (!cur.payrollTaxPct) {
+    warnRow('Not included: employer payroll taxes — no rate recorded (set one on the Performance page)');
+  }
+  // WHAT THE RANGE COULD NOT ADD UP. A spreadsheet is read away from the app,
+  // where nobody can see that a week of sales was never entered, so the figures
+  // have to carry their own gaps.
+  const gaps = cur.gaps || { noFigures: [], noHours: [] };
+  if (gaps.noFigures.length) {
+    warnRow(`${gaps.noFigures.length} service${gaps.noFigures.length === 1 ? '' : 's'} in this range `
+      + `${gaps.noFigures.length === 1 ? 'has' : 'have'} no sales entered and ${gaps.noFigures.length === 1 ? 'is' : 'are'} `
+      + `not in any figure above: ${gaps.noFigures.map((g) => `${g.date} ${serviceName(g.daypart)}`).join(', ')}`);
+  }
+  if (gaps.noHours.length) {
+    warnRow(`${gaps.noHours.length} service${gaps.noHours.length === 1 ? '' : 's'} `
+      + `${gaps.noHours.length === 1 ? 'has' : 'have'} somebody with no hours, so labour is understated: `
+      + gaps.noHours.map((g) => `${g.date} ${serviceName(g.daypart)}`).join(', '));
   }
   sum.addRow([]);
 
@@ -544,17 +575,23 @@ async function buildPerformanceWorkbook(from, to, opts = {}) {
   // "Labour is wages only" — true at the time and the reason the ratios were
   // wrong, since a salaried manager appeared nowhere in them.
   const note = sum.addRow(['Sales are what the services recorded. '
-    + 'Labour is hourly wages plus salaried cost — no tips, no payroll taxes. '
+    + 'Labour is hourly wages, salaried cost, the overtime premium and '
+    + (cur.payrollTaxPct
+      ? `employer payroll tax at ${cur.payrollTaxPct}% of pay. `
+      : 'employer payroll tax, which is nil here because no rate has been recorded. ')
     + 'Salaried cost is the salary on record for each person, spread evenly over the days in a pay period '
     + 'and charged from the date that salary started; it is not taken from payroll. '
+    + 'Overtime is the premium only — straight time for every hour is in the wages line — and it is earned '
+    + 'by the week, so a range that cuts a week carries that week\u2019s share of it. '
     + 'Food cost counts invoices dated in the range in the Food, Coffee, Beverage and Alcohol categories. '
+    + 'Profit after all costs is sales less labour, every invoice whatever its category, and out-of-pocket spending. '
     + 'Tips are not a cost to the business and are not counted here; they are on the Labour sheet for reference.']);
   note.font = { italic: true, size: 9, color: { argb: 'FF6B7280' } };
   sum.mergeCells(note.number, 1, note.number, 5);
   note.alignment = { wrapText: true, vertical: 'top' };
   // Taller than it was: the method note gained the sentence that explains how
   // salaried cost is worked out, and a wrapped row with a fixed height clips.
-  sum.getRow(note.number).height = 70;
+  sum.getRow(note.number).height = 104;
 
   // =========================================================================
   // 2. Daily sales

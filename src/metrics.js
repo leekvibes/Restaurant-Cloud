@@ -25,6 +25,11 @@ const { db } = require('./db');
 require('./modules');
 const { WAGE_RATE_SQL } = require('./reports');
 const { addDays } = require('./dates');
+// Overtime is a weekly rule and a real cost; the workweeks it is measured
+// against are the payroll period's own halves, so both come from their owners
+// rather than being re-derived here.
+const OT = require('./overtime');
+const PERIODS = require('./periods');
 
 // Sales for a shift: what was rung overall, or what servers rang if the
 // totals were never entered. Matches the shifts list exactly.
@@ -61,6 +66,21 @@ const shiftRows = db.prepare(`
   WHERE sh.date >= ? AND sh.date <= ?
   ORDER BY sh.date, sh.daypart`);
 
+/**
+ * Employer payroll taxes as a percentage of pay — the owner's share of FICA,
+ * unemployment and the rest.
+ *
+ * The app cannot know this: it depends on the state, the year and the filing.
+ * So it is a number the owner records, and until they do it is 0 and every
+ * page says plainly that tax is not in the figure. A guessed 9% in a report an
+ * accountant reads is worse than a stated gap.
+ */
+const payrollTaxPct = () => {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('payroll_tax_pct');
+  const v = row ? Number(row.value) : 0;
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 100) : 0;
+};
+
 const COGS_CATEGORIES = ['Food', 'Coffee', 'Beverage', 'Alcohol'];
 const invoiceRows = db.prepare(`SELECT invoice_date AS date, category, COALESCE(amount_cents,0) AS cents
   FROM m_invoices WHERE invoice_date >= ? AND invoice_date <= ?`);
@@ -89,11 +109,26 @@ function period(from, to) {
   // percentages are asked about.
   const sal = SALARY.costBetween(from, to);
   const salary = sal.cents;
-  const labor = wages + salary;
+  // The overtime premium payroll pays. `wages` is straight time for every
+  // hour, so this is only the extra half on the hours above the weekly line.
+  const ot = overtimePremium(from, to);
+  // Employer payroll taxes, at the rate the owner has recorded. 0 until they
+  // set one, and the page says so rather than implying labour is complete.
+  const taxPct = payrollTaxPct();
+  const payrollTax = Math.round(((wages + salary + ot.cents) * taxPct) / 100);
+  const labor = wages + salary + ot.cents + payrollTax;
   const hours = sum((r) => r.hours);
   const tips = sum((r) => r.tips);
   const cogs = inv.filter((i) => COGS_CATEGORIES.includes(i.category)).reduce((a, i) => a + i.cents, 0);
   const invoiceTotal = inv.reduce((a, i) => a + i.cents, 0);
+  // Money spent out of pocket, which lived only on the Performance page's cost
+  // chart and in the export — never in a profit figure, so "profit" stopped
+  // before a whole category of real spending.
+  const expenses = expenseRows.all(from, to).reduce((a, e) => a + e.cents, 0);
+  // EVERY cost the app holds for the range: labour of all kinds, every bill
+  // whatever its category, and out-of-pocket spending. Not only the food and
+  // drink that prime cost is built from.
+  const allCosts = labor + invoiceTotal + expenses;
 
   // A percentage of nothing is not zero, it is unanswerable.
   const pct = (n, d) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null);
@@ -102,9 +137,22 @@ function period(from, to) {
   return {
     from, to, rows, invoices: inv,
     sales, wages, hours, tips, cogs, invoiceTotal,
-    // What labour actually cost, and the two halves of it kept apart so a
-    // report can show its working rather than asking to be believed.
+    // What labour actually cost, and every part of it kept apart so a report
+    // can show its working rather than asking to be believed.
     salary, labor, salaryPeople: sal.people, salaryUndated: sal.undated,
+    overtime: ot.cents, overtimeHours: ot.hours, overtimeOn: ot.enabled,
+    overtimeApportioned: ot.apportioned,
+    payrollTax, payrollTaxPct: taxPct,
+    // Every cost the app knows about, and what is left after them. Gross
+    // profit stops after labour and goods; this does not stop.
+    expenses, allCosts, netProfit: sales - allCosts,
+    // Services inside the range that cannot be adding up — the ratios above
+    // are only as complete as what was entered, and until now nothing said so.
+    gaps: {
+      noFigures: rows.filter((r) => !r.sales).map((r) => ({ id: r.id, date: r.date, daypart: r.daypart })),
+      noHours: rows.filter((r) => r.sales > 0 && r.no_hours > 0)
+        .map((r) => ({ id: r.id, date: r.date, daypart: r.daypart, people: r.no_hours })),
+    },
     shiftCount: rows.length,
     completedShifts: rows.filter((r) => r.sales > 0).length,
     dayCount,
@@ -124,6 +172,78 @@ function period(from, to) {
       unsplit: sum((r) => (r.food + r.coffee + r.alcohol + r.other > 0 ? 0 : r.server_sales)),
     },
   };
+}
+
+/**
+ * The workweek a date belongs to: the pay period's first or second half.
+ *
+ * The same split payroll uses (periods.js anchors it, reports.js divides the
+ * fortnight at day seven), because an overtime figure measured against a
+ * different week to the one payroll pays on is not a cost, it is a second
+ * opinion.
+ */
+function weekStartOf(date) {
+  const { start } = PERIODS.periodFor(date);
+  return date < addDays(start, 7) ? start : addDays(start, 7);
+}
+
+const otRows = db.prepare(`
+  SELECT w.employee_id AS id, sh.date AS date, COALESCE(w.hours, 0) AS hours,
+    COALESCE(w.hours, 0) * ${WAGE_RATE_SQL} AS wage
+  FROM work w
+  JOIN shifts sh ON sh.id = w.shift_id
+  JOIN employees e ON e.id = w.employee_id
+  LEFT JOIN employee_roles er ON er.employee_id = w.employee_id AND er.role = w.role
+  WHERE sh.date >= ? AND sh.date <= ?
+    AND COALESCE(w.hours, 0) > 0
+    AND COALESCE(w.settled_salaried, COALESCE(e.pay_type, 'hourly') = 'salary') = 0
+    AND COALESCE(e.ot_exempt, 0) = 0`);
+
+/**
+ * The overtime premium earned in a range — the half-rate on hours over the
+ * weekly threshold, which payroll pays and this report never counted.
+ *
+ * Straight time for every hour, overtime hours included, is already in
+ * `wages`; this is only the extra, exactly as overtime.js computes it for
+ * payroll, so nothing is counted twice.
+ *
+ * APPORTIONED, because overtime is earned in a WEEK and a report range can cut
+ * one in half. The whole workweek is measured — including days outside the
+ * range, or a Monday-to-Wednesday range would show somebody as never reaching
+ * forty hours — and the range is charged the share of that week's hours that
+ * fall inside it. Charging a whole week's premium to a range holding two of its
+ * days would be the opposite error.
+ */
+function overtimePremium(from, to) {
+  const rule = OT.rule();
+  const empty = { cents: 0, hours: 0, apportioned: false, enabled: rule.enabled };
+  if (!rule.enabled || !isDate(from) || !isDate(to) || from > to) return empty;
+
+  // Whole workweeks, so a week the range only clips is still measured in full.
+  const first = weekStartOf(from);
+  const last = addDays(weekStartOf(to), 6);
+  const weeks = new Map();                       // `${id}|${weekStart}` → totals
+  for (const r of otRows.all(first, last)) {
+    const key = `${r.id}|${weekStartOf(r.date)}`;
+    const wk = weeks.get(key) || { hours: 0, wage: 0, inHours: 0 };
+    wk.hours += r.hours;
+    wk.wage += r.wage;
+    if (r.date >= from && r.date <= to) wk.inHours += r.hours;
+    weeks.set(key, wk);
+  }
+  let cents = 0;
+  let hours = 0;
+  let apportioned = false;
+  for (const wk of weeks.values()) {
+    if (!wk.inHours) continue;
+    const ot = OT.overtimeFor([{ hours: wk.hours, wage: wk.wage }], rule);
+    if (!ot.otPay) continue;
+    const share = wk.inHours / wk.hours;
+    if (share < 1) apportioned = true;
+    cents += ot.otPay * share;
+    hours += ot.otHours * share;
+  }
+  return { cents: Math.round(cents), hours: Math.round(hours * 100) / 100, apportioned, enabled: true };
 }
 
 /** The period of equal length immediately before this one. */

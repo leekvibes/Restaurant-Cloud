@@ -7177,3 +7177,9 @@ input[type="date"], input[type="time"], input[type="search"], select {
 .perf-note--warn { color: var(--warning); }
 .epr-hint--warn { color: var(--warning); }
 .epr-tl--sal { margin-top: 10px; }
+
+/* "Not in these figures": the data-quality box, moved from the foot of the page
+   to the top, where the numbers it qualifies actually are. */
+.perf-dq--top { margin: 14px 0 0; }
+.perf-dq--top a { color: inherit; text-decoration: underline; }
+.perf-tgt-tax input { width: 5.5em; }
