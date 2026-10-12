@@ -138,15 +138,20 @@ test('the summary totals are the same figures the Performance page shows', async
   assert.strictEqual(valueFor(sum, 'Total sales'), page.sales / 100, 'sales match the page');
   assert.strictEqual(valueFor(sum, '— Food'), page.mix.food / 100);
   assert.strictEqual(valueFor(sum, '— Alcohol'), page.mix.alcohol / 100);
-  assert.strictEqual(valueFor(sum, 'Labour (wages)'), page.wages / 100, 'wages match');
+  // Labour is three lines now, not one: salaried cost used to be left out of
+  // this file altogether, so the figure labelled Labour was hourly-only.
+  assert.strictEqual(valueFor(sum, 'Labour — hourly wages'), page.wages / 100, 'hourly wages match');
+  assert.strictEqual(valueFor(sum, 'Labour — salaried'), page.salary / 100, 'and salaried cost');
+  assert.strictEqual(valueFor(sum, 'Labour (total)'), page.labor / 100, 'and the two add up to the total');
   assert.strictEqual(valueFor(sum, 'Food & drink invoices'), page.cogs / 100, 'and the food cost');
   assert.strictEqual(valueFor(sum, 'Labour % of sales'), page.laborPct);
   assert.strictEqual(valueFor(sum, 'Prime cost % of sales'), page.primePct);
   assert.strictEqual(valueFor(sum, 'Gross profit'), page.grossProfit / 100);
 
-  // Costs are the three kinds added up, not just the invoices.
+  // Costs are the three kinds added up, not just the invoices — and the labour
+  // in them is ALL of labour, which is what the ratios below are built on.
   assert.strictEqual(valueFor(sum, 'Total costs recorded'),
-    (page.wages + page.invoiceTotal + 6000) / 100, 'wages + every bill + out-of-pocket');
+    (page.labor + page.invoiceTotal + 6000) / 100, 'labour + every bill + out-of-pocket');
 });
 
 test('nothing outside the range gets in', async () => {
@@ -196,10 +201,10 @@ test('the labour sheet is per person and only wages count as the cost', async ()
   const lab = wb.getWorksheet('Labour');
   const text = flat(lab);
   assert.ok(text.includes('Perf Server') && text.includes('Perf Busser'), 'everybody who worked');
-  assert.match(text, /Wages are the only figure that counts as a cost/, 'and it says what is a cost and what is not');
+  assert.match(text, /count as labour on the Summary sheet/, 'and it says what is a cost and what is not');
   const sum = wb.getWorksheet('Summary');
-  assert.strictEqual(valueFor(lab, 'TOTAL', 5), valueFor(sum, 'Labour (wages)'),
-    'the labour total is the same number the summary calls labour');
+  assert.strictEqual(valueFor(lab, 'TOTAL', 5), valueFor(sum, 'Labour — hourly wages'),
+    'the per-person total is the same number the summary calls hourly wages');
 });
 
 test('a named range works the same as a custom one, and a bad one does not crash it', async () => {
@@ -271,4 +276,32 @@ test('a rise is marked too, so the arrow means direction and not trouble', async
     rose += 1;
   });
   assert.ok(rose >= 1, `the fixture should contain figures that rose (found ${rose})`);
+});
+
+test('a salaried person is in the file, in their own block, adding up to the total', async () => {
+  // Salaried cost reached this file through no column at all before: they have
+  // hours and no hourly rate, so the per-person sheet showed them earning
+  // nothing and the Summary agreed with it. An accountant reading that file
+  // would have been short the whole management line.
+  const SALARY = require('../src/salary');
+  const id = Number(db.prepare(`INSERT INTO employees (name, role, hourly_rate_cents, active, pay_type, salary_cents)
+    VALUES ('Perf Boss', 'manager', 0, 1, 'salary', 140000)`).run().lastInsertRowid);
+  SALARY.setSalary({ employeeId: id, cents: 140000, from: FROM, by: 'test' });
+  try {
+    const page = MX.period(FROM, TO);
+    assert.ok(page.salary > 0, 'the period carries a salaried cost to begin with');
+    const { wb } = await download(`r=custom&from=${FROM}&to=${TO}&c=prev`);
+    const lab = wb.getWorksheet('Labour');
+    assert.match(flat(lab), /Perf Boss/, 'they are named on the labour sheet');
+    assert.strictEqual(valueFor(lab, 'SALARIED TOTAL', 5), page.salary / 100);
+    assert.strictEqual(valueFor(lab, 'LABOUR TOTAL (hourly + salaried)', 5), page.labor / 100);
+    // And the sheet ties to the Summary, which is the only reason to print it.
+    const sum = wb.getWorksheet('Summary');
+    assert.strictEqual(valueFor(lab, 'LABOUR TOTAL (hourly + salaried)', 5), valueFor(sum, 'Labour (total)'));
+    assert.strictEqual(valueFor(lab, 'TOTAL', 5) + valueFor(lab, 'SALARIED TOTAL', 5),
+      valueFor(sum, 'Labour (total)'), 'hourly plus salaried is the labour the ratios use');
+  } finally {
+    SALARY.setSalary({ employeeId: id, cents: 0, from: FROM, by: 'test' });
+    db.prepare('DELETE FROM employees WHERE id = ?').run(id);
+  }
 });

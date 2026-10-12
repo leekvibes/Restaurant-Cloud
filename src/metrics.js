@@ -33,6 +33,9 @@ const SALES_SQL = `(COALESCE(sh.total_food_cents,0) + COALESCE(sh.total_coffee_c
 const SERVER_SALES_SQL = `(SELECT COALESCE(SUM(ss.food_cents + ss.coffee_cents + ss.alcohol_cents), 0)
   FROM server_sales ss WHERE ss.shift_id = sh.id)`;
 
+// Salaried cost is dated history of its own, not a column on a work row.
+const SALARY = require('./salary');
+
 const shiftRows = db.prepare(`
   SELECT sh.id, sh.date, sh.daypart, sh.status,
     (sh.closed_at IS NOT NULL) AS closed,
@@ -76,6 +79,17 @@ function period(from, to) {
 
   const sales = sum((r) => r.sales);
   const wages = sum((r) => r.wages);
+  // SALARIED LABOUR, which used to be missing from every ratio on this page.
+  //
+  // It is NOT added to `wages` and never will be: wages is hourly cost built
+  // out of work rows, one per person per service, and the per-service figures
+  // are read straight off it. A salary belongs to a fortnight, not to Tuesday
+  // dinner, so spreading it over services would invent a cost for each one.
+  // It is a separate number that joins in at `labor`, which is what the
+  // percentages are asked about.
+  const sal = SALARY.costBetween(from, to);
+  const salary = sal.cents;
+  const labor = wages + salary;
   const hours = sum((r) => r.hours);
   const tips = sum((r) => r.tips);
   const cogs = inv.filter((i) => COGS_CATEGORIES.includes(i.category)).reduce((a, i) => a + i.cents, 0);
@@ -88,13 +102,16 @@ function period(from, to) {
   return {
     from, to, rows, invoices: inv,
     sales, wages, hours, tips, cogs, invoiceTotal,
+    // What labour actually cost, and the two halves of it kept apart so a
+    // report can show its working rather than asking to be believed.
+    salary, labor, salaryPeople: sal.people, salaryUndated: sal.undated,
     shiftCount: rows.length,
     completedShifts: rows.filter((r) => r.sales > 0).length,
     dayCount,
-    laborPct: pct(wages, sales),
+    laborPct: pct(labor, sales),
     foodPct: cogs > 0 ? pct(cogs, sales) : null,
-    primePct: cogs > 0 ? pct(wages + cogs, sales) : null,
-    grossProfit: sales - wages - cogs,
+    primePct: cogs > 0 ? pct(labor + cogs, sales) : null,
+    grossProfit: sales - labor - cogs,
     avgDaily: dayCount ? Math.round(sales / dayCount) : null,
     avgShift: rows.filter((r) => r.sales > 0).length ? Math.round(sales / rows.filter((r) => r.sales > 0).length) : null,
     salesPerHour: hours > 0 ? Math.round(sales / hours) : null,
@@ -132,9 +149,19 @@ function days(from, to) {
   // reaching here would loop forever rather than throw, and an infinite loop
   // is a much worse failure than a wrong answer.
   if (!isDate(from) || !isDate(to) || from > to) return [];
+  // A salary is owed on a Monday the place was shut, so it is charged to every
+  // calendar day in the range, not only to the days that traded. Each day is
+  // rounded on its own, which can leave the summed days a cent or two off the
+  // range total in `period()` — a cent cannot move a figure printed to 0.1 of
+  // a percentage point, and the alternative is spreading remainders across
+  // days, which makes two days differ for no reason anybody could explain.
+  const salaryByDay = SALARY.dailyBetween(from, to);
   const out = [];
   for (let d = from; d <= to && out.length <= 3660; d = addDays(d, 1)) {
-    out.push(byDate.get(d) || { date: d, sales: 0, wages: 0, hours: 0, tips: 0, shifts: 0, had: false });
+    const day = byDate.get(d) || { date: d, sales: 0, wages: 0, hours: 0, tips: 0, shifts: 0, had: false };
+    day.salary = salaryByDay.get(d) || 0;
+    day.labor = day.wages + day.salary;
+    out.push(day);
   }
   return out;
 }

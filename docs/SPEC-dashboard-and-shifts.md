@@ -102,7 +102,9 @@ All dates are **business** dates in restaurant-local time. `TZ=America/New_York`
 | Rule | Where | What it says |
 |---|---|---|
 | **Shift sales** | `metrics.js:41` | Category totals if entered, else the sum of what servers rang: `CASE WHEN (food+coffee+alcohol+other) > 0 THEN that ELSE server_sales END` |
-| **Wages** | `metrics.js:49` | `hours × rate`, where rate resolves per-shift override → wage for *that role* → employee default. **Salaried staff excluded** — "their pay doesn't move with the shift, so folding it in would make a quiet Tuesday look as expensive as a full Saturday" |
+| **Wages** | `metrics.js:49` | `hours × rate`, where rate resolves per-shift override → wage for *that role* → employee default. **Salaried staff excluded from this figure** — "their pay doesn't move with the shift, so folding it in would make a quiet Tuesday look as expensive as a full Saturday". Still true, and still per-shift |
+| **Salaried cost** | `salary.js` | A salary carries the date it started (`salary_history`), and a range is charged `amount ÷ days in a pay period` for each day it was in force. Nothing is charged until a start date is recorded — a salaried person without one is **disclosed on the page and in the export**, never read as zero |
+| **Labour** | `metrics.js` | `wages + salary`. This is what `laborPct`, `primePct` and `grossProfit` are built on. `wages` stays hourly-only so the per-service figures still add up to it — the two must not be confused, and the Performance page names both |
 | **COGS** | `metrics.js:57` | Only invoice categories `Food`, `Coffee`, `Beverage`, `Alcohol` |
 | **Percentages** | `metrics.js:80` | `d > 0 ? round(n/d*1000)/10 : null` — *"A percentage of nothing is not zero, it is unanswerable."* One decimal |
 | **Averages** | `server.js:605` | *"Averages divide by shifts that HAVE figures. Counting a shift that was logged but never filled in halves the average and makes every service look worse than it was."* |

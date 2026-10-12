@@ -502,13 +502,20 @@ async function buildPerformanceWorkbook(from, to, opts = {}) {
   sum.addRow([]);
 
   sectionRow(sum, 'COSTS', 5);
-  line('Labour (wages)', cur.wages, prev && prev.wages, 'money');
-  line('Labour hours', Math.round(cur.hours * 100) / 100, prev && Math.round(prev.hours * 100) / 100, 'number');
+  // Labour, split. Whoever reads this has to be able to see which part is
+  // hourly and which is salary without being told — the ratios below are built
+  // on the total, and a total nobody can take apart is a total nobody can
+  // check.
+  line('Labour — hourly wages', cur.wages, prev && prev.wages, 'money');
+  line('Labour — salaried', cur.salary, prev && prev.salary, 'money');
+  const laborRow = line('Labour (total)', cur.labor, prev && prev.labor, 'money');
+  laborRow.font = { bold: true };
+  line('Labour hours (hourly staff)', Math.round(cur.hours * 100) / 100, prev && Math.round(prev.hours * 100) / 100, 'number');
   line('Food & drink invoices', cur.cogs, prev && prev.cogs, 'money');
   line('Other invoices', cur.invoiceTotal - cur.cogs, prev && (prev.invoiceTotal - prev.cogs), 'money');
   line('Out-of-pocket expenses', expTotal, prevExpTotal, 'money');
-  const totalCost = cur.wages + cur.invoiceTotal + expTotal;
-  const prevTotalCost = prev ? prev.wages + prev.invoiceTotal + prevExpTotal : null;
+  const totalCost = cur.labor + cur.invoiceTotal + expTotal;
+  const prevTotalCost = prev ? prev.labor + prev.invoiceTotal + prevExpTotal : null;
   const costRow = line('Total costs recorded', totalCost, prevTotalCost, 'money');
   costRow.font = { bold: true };
   sum.addRow([]);
@@ -522,15 +529,32 @@ async function buildPerformanceWorkbook(from, to, opts = {}) {
   const margin = cur.sales ? Math.round((cur.grossProfit / cur.sales) * 1000) / 10 : null;
   const prevMargin = prev && prev.sales ? Math.round((prev.grossProfit / prev.sales) * 1000) / 10 : null;
   line('Gross margin %', margin, prevMargin, 'pct');
+  // THE GAP, ON THE SHEET. A salaried person with no start date on record is
+  // not in any figure above. Leaving that off the export and only showing it on
+  // screen would mean handing somebody a spreadsheet that quietly understates
+  // labour, which is the exact fault this change exists to fix.
+  if (cur.salaryUndated && cur.salaryUndated.length) {
+    const warn = sum.addRow([`Not included: ${cur.salaryUndated.map((u) => u.name).join(', ')} `
+      + `— salaried, no start date on record`, null, null, null, null]);
+    warn.font = { italic: true, color: { argb: 'FFB45309' } };
+  }
   sum.addRow([]);
 
-  const note = sum.addRow(['Sales are what the services recorded. Labour is wages only — no tips, no payroll taxes. '
+  // The method note, which is the part an accountant reads first. It said
+  // "Labour is wages only" — true at the time and the reason the ratios were
+  // wrong, since a salaried manager appeared nowhere in them.
+  const note = sum.addRow(['Sales are what the services recorded. '
+    + 'Labour is hourly wages plus salaried cost — no tips, no payroll taxes. '
+    + 'Salaried cost is the salary on record for each person, spread evenly over the days in a pay period '
+    + 'and charged from the date that salary started; it is not taken from payroll. '
     + 'Food cost counts invoices dated in the range in the Food, Coffee, Beverage and Alcohol categories. '
     + 'Tips are not a cost to the business and are not counted here; they are on the Labour sheet for reference.']);
   note.font = { italic: true, size: 9, color: { argb: 'FF6B7280' } };
   sum.mergeCells(note.number, 1, note.number, 5);
   note.alignment = { wrapText: true, vertical: 'top' };
-  sum.getRow(note.number).height = 42;
+  // Taller than it was: the method note gained the sentence that explains how
+  // salaried cost is worked out, and a wrapped row with a fixed height clips.
+  sum.getRow(note.number).height = 70;
 
   // =========================================================================
   // 2. Daily sales
@@ -589,8 +613,33 @@ async function buildPerformanceWorkbook(from, to, opts = {}) {
     toDollars(pay.totals.paycheckTips), toDollars(pay.totals.cashTips), toDollars(pay.totals.takeHome)]);
   lTot.font = { bold: true };
   [5, 6, 7, 8].forEach((i) => { lTot.getCell(i).numFmt = MONEY_FMT; });
-  const labNote = lab.addRow(['Wages are the only figure that counts as a cost on the Summary sheet. '
-    + 'Card tips are money guests left that rides the paycheck; cash tips were already taken home.']);
+  // SALARIED PEOPLE, BELOW THE HOURLY TOTAL AND SEPARATE FROM IT.
+  //
+  // They have hours on this sheet and no wage, because they are not paid by
+  // the hour — which is exactly how their cost went missing from the Summary
+  // for as long as it did. Their cost is a share of a pay period, not of a
+  // service, so it cannot sit in the per-person wage column without pretending
+  // to be something it is not. It gets its own block, and the grand total
+  // underneath is the figure the Summary calls Labour (total).
+  const salaried = cur.salaryPeople || [];
+  if (salaried.length) {
+    lab.addRow([]);
+    sectionRow(lab, 'SALARIED — COST ACCRUED OVER THE PERIOD, NOT PAID BY THE HOUR', 8);
+    for (const p of salaried) {
+      const row = lab.addRow([p.name, 'salaried', null, null, toDollars(p.cents), null, null, null]);
+      row.getCell(5).numFmt = MONEY_FMT;
+    }
+    const sTot = lab.addRow(['SALARIED TOTAL', '', null, null, toDollars(cur.salary), null, null, null]);
+    sTot.font = { bold: true };
+    sTot.getCell(5).numFmt = MONEY_FMT;
+    const gTot = lab.addRow(['LABOUR TOTAL (hourly + salaried)', '', null, null, toDollars(cur.labor), null, null, null]);
+    gTot.font = { bold: true };
+    gTot.getCell(5).numFmt = MONEY_FMT;
+  }
+  const labNote = lab.addRow(['Wages and salaried cost are the figures that count as labour on the Summary sheet. '
+    + 'Card tips are money guests left that rides the paycheck; cash tips were already taken home. '
+    + 'Salaried cost is the salary on record spread evenly over the days in each pay period, '
+    + 'charged from the date it started.']);
   labNote.font = { italic: true, size: 9, color: { argb: 'FF6B7280' } };
 
   // =========================================================================

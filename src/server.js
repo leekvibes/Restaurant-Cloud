@@ -21,6 +21,8 @@ const { policyForShift, currentForDaypart, historyForDaypart, saveRules, revertT
 const { defaultRules, bucketsOf } = require('./engine');
 const { aggregatePayroll, buildWorkbook, buildPerformanceWorkbook, aggregateCosts, shiftTotalSales, WAGE_RATE_SQL } = require('./reports');
 const WAGES = require('./wages');
+// Salary as a dated cost — what it costs the business and when, never a paycheck.
+const SALARY = require('./salary');
 const SERVICES = require('./services');
 const OT = require('./overtime');
 const TC = require('./timeclock');
@@ -1015,18 +1017,22 @@ app.get('/', (req, res) => {
     for (const d of MX.days(from56, toStr)) {
       const dow = (new Date(d.date + 'T00:00:00').getDay() + 6) % 7;   // Monday = 0
       const wk = addDays(d.date, -dow);
-      const b = byWeek.get(wk) || { week: wk, sales: 0, wages: 0, hours: 0 };
-      b.sales += d.sales; b.wages += d.wages; b.hours += d.hours;
+      const b = byWeek.get(wk) || { week: wk, sales: 0, wages: 0, hours: 0, labor: 0 };
+      b.sales += d.sales; b.wages += d.wages; b.hours += d.hours; b.labor += d.labor;
       byWeek.set(wk, b);
     }
     for (const b of [...byWeek.values()].sort((a, x) => a.week.localeCompare(x.week))) {
       const cogs = invByWeek.get(b.week) || 0;
       weekly.push({
+        // Labour, not wages: salaried cost belongs in a labour percentage, and
+        // this trend line sits beside the one on Performance that now counts
+        // it. Two charts of "labor %" that mean different things is worse than
+        // either of them being wrong.
         ...b, cogs,
-        laborPct: b.sales > 0 ? (b.wages / b.sales) * 100 : null,
+        laborPct: b.sales > 0 ? (b.labor / b.sales) * 100 : null,
         foodPct: b.sales > 0 && cogs > 0 ? (cogs / b.sales) * 100 : null,
-        primePct: b.sales > 0 && cogs > 0 ? ((b.wages + cogs) / b.sales) * 100 : null,
-        profit: b.sales - b.wages - cogs,
+        primePct: b.sales > 0 && cogs > 0 ? ((b.labor + cogs) / b.sales) * 100 : null,
+        profit: b.sales - b.labor - cogs,
       });
     }
   }
@@ -11957,8 +11963,20 @@ function employeeSetupPage(req, opts = {}) {
                       value="${val(v.salary)}" placeholder="0.00"></div>
                 </div>
                 ${err('salary')}
-                <p class="esu-note esu-note--foot">Salaried staff carry no hourly rate and are left out of hourly
-                  wage cost on Performance and Payroll. Their hours are still tracked.</p>
+                <div class="esu-rate">
+                  <div class="esu-rate-l"><b>In force from</b><i>Backdate it if they have been salaried a while</i></div>
+                  <div class="esu-rate-i"><input name="salary_from" id="f-salary-from" type="date"
+                    value="${val(v.salary_from || isoDate(startOfToday()))}"></div>
+                </div>
+                ${/* The old sentence here read "...are left out of hourly wage cost on
+                     Performance and Payroll", which was accurate and was the bug: the
+                     ratios on Performance were hourly-only numbers wearing the names of
+                     whole ones. Performance counts salary now, from this date. Payroll
+                     still does not, and that is deliberate — payroll is what goes on a
+                     paycheck, and a salary is not paid by the hour. */''}
+                <p class="esu-note esu-note--foot">Salaried staff carry no hourly rate, and their hours are still
+                  tracked. Their salary counts as labor cost on Performance from the date above. Payroll still pays
+                  hourly work only — a salary is paid the way it has always been paid.</p>
               </div>`)}
 
             ${step(...SETUP_STEPS[3], `
@@ -12129,6 +12147,7 @@ function validateSetup(body) {
       active: String(body.active || '1') === '0' ? 0 : 1,
       pay_type: salary ? 'salary' : 'hourly',
       salary_cents: salary ? toCents(body.salary) : 0,
+      salary_from: salary ? (MX.isDate(body.salary_from) ? body.salary_from : isoDate(startOfToday())) : null,
       base: salary ? 0 : base,
       rates: salary ? new Map() : rates,
       overrides,
@@ -12202,6 +12221,14 @@ app.post('/employees', (req, res) => {
         for (const o of v.overrides) {
           WAGES.setWage(newId, o.role, o.cents, today, { by, service: o.svc, note: 'set at hire' });
         }
+      }
+      // A salary gets its dated record at hire for the same reason a wage
+      // does — except the date is one the manager may move back, because
+      // somebody can be put on the system weeks after they went on salary and
+      // the cost started when the salary did, not when the typing did.
+      if (v.pay_type === 'salary' && v.salary_cents > 0) {
+        SALARY.setSalary({ employeeId: newId, cents: v.salary_cents,
+          from: v.salary_from || isoDate(startOfToday()), by: tcActor(req), note: 'set at hire' });
       }
 
       OT.setExempt(newId, v.otExempt);
@@ -12724,6 +12751,9 @@ app.get('/employees/:id/edit', (req, res) => {
   const roles = [...allRoles(), 'manager'];
   const payRoles = allRoles();
   const isSalary = e.pay_type === 'salary';
+  // Their dated salary amounts, newest first. Empty is the state worth saying
+  // out loud: a salary with no start date is in no report.
+  const salHist = SALARY.historyFor(e.id);
   const mine = SERVICES.forEmployee(e.id);
   const today0 = isoDate(startOfToday());
 
@@ -12845,11 +12875,27 @@ app.get('/employees/:id/edit', (req, res) => {
       </div>
 
       ${isSalary ? `<h2 class="epr-h epr-h--2">Salary</h2>
-      <p class="epr-hint">Salaried staff carry no hourly rate and are left out of hourly wage cost.</p>
+      ${/* This used to read "Salaried staff carry no hourly rate and are left
+           out of hourly wage cost", which was true and was the whole problem:
+           Labor % and Prime Cost on Performance were hourly-only figures
+           presented as complete ones. Salary is counted now — from the day it
+           started, which is the thing this section has to collect. */''}
+      <p class="epr-hint">Salaried staff carry no hourly rate. Their salary is counted as labor cost on
+        Performance from the day it starts, spread evenly over the days in each pay period.</p>
       <div class="epr-rows">
         <div class="epr-row"><span>Salary<i>per pay period</i></span>
           <input name="salary" type="number" step="0.01" min="0" value="${e.salary_cents ? (e.salary_cents / 100).toFixed(2) : ''}" ${w ? '' : 'disabled'}></div>
+        <div class="epr-row"><span>In force from<i>${salHist.length
+    ? 'the day a NEW amount starts — earlier months keep what is already recorded'
+    : 'the day they went on this salary; backdate it and past months include it'}</i></span>
+          <input name="salary_from" type="date" value="${today0}" max="2100-12-31" ${w ? '' : 'disabled'}></div>
       </div>
+      ${salHist.length ? `<ol class="epr-tl epr-tl--sal">${salHist.map((h) => `<li>
+          <span class="epr-tl-d">${esc(h.effective_from)}</span>
+          <span class="epr-tl-b"><b>${h.cents ? money(h.cents) + ' per period' : 'Salary ended'}</b>${
+  h.created_by ? `<i>by ${esc(h.created_by)}</i>` : ''}${h.note ? `<i>${esc(h.note)}</i>` : ''}</span></li>`).join('')}</ol>`
+    : `<p class="epr-hint epr-hint--foot epr-hint--warn">No start date on record yet, so this salary is
+        <b>not in any Performance figure</b>. Save one above — backdated if they have been salaried a while.</p>`}
       <input type="hidden" name="rate" value="${e.hourly_rate_cents ? (e.hourly_rate_cents / 100).toFixed(2) : ''}">`
     : `${/* The hourly rate moved to Schedule & pay, where the other rates are —
              it is a catch-all rate, not an employment attribute, and sitting
@@ -12952,8 +12998,41 @@ app.post('/employees/:id', (req, res) => {
   // Overtime eligibility is its own column, set here — the checkbox only arrives
   // when ticked, so an absent value means exempt.
   OT.setExempt(e.id, req.body.ot_eligible !== '1');
-  res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.${wageNote(wage)}`));
+  // SALARY, DATED. `employees.salary_cents` stays what it has always been —
+  // what they earn now, which is what the staff pages ask. Beside it goes the
+  // dated history the reports read, so changing the amount today cannot
+  // restate a month that has already been reported, and a salary that started
+  // in June can say June.
+  //
+  // Only the Employment tab posts `salary_from`; every other tab posts neither
+  // field, and must not be read as ending somebody's salary.
+  const salaryNote = req.body.salary_from === undefined ? ''
+    : applySalaryChange(e, pay_type === 'salary' ? toCents(req.body.salary) : 0,
+      req.body.salary_from, tcActor(req));
+  res.redirect('/employees?msg=' + encodeURIComponent(`${name} updated.${wageNote(wage)}${salaryNote}`));
 });
+
+/**
+ * Record a salary as a dated amount, and say in words what it did.
+ *
+ * Writes only when something actually changed on the day in question, so
+ * opening the tab and saving does not litter the history with identical rows —
+ * and 0 is a real amount here, the one that ENDS a salary.
+ */
+function applySalaryChange(e, cents, fromRaw, actor) {
+  const today = isoDate(startOfToday());
+  const from = MX.isDate(fromRaw) ? fromRaw : today;
+  const inForce = SALARY.salaryOn(e.id, from);
+  const had = SALARY.historyFor(e.id).length > 0;
+  if (cents === inForce) return '';
+  if (cents === 0 && !had) return '';                   // never salaried, nothing to end
+  SALARY.setSalary({ employeeId: e.id, cents, from, by: actor,
+    note: cents === 0 ? 'salary ended' : null });
+  if (cents === 0) return ` Salary ended ${from} — nothing is charged to Performance after that.`;
+  return from > today
+    ? ` Salary of ${money(cents)} starts ${from} — nothing changes until then.`
+    : ` Salary counted as labor cost from ${from}.`;
+}
 
 // --- managing the services themselves ---------------------------------------
 //
@@ -13178,8 +13257,20 @@ app.post('/employees/:id/roles/delete', (req, res) => {
 });
 
 app.post('/employees/:id/deactivate', (req, res) => {
-  q.setActive.run({ id: Number(req.params.id), active: 0 });
-  res.redirect('/employees?msg=' + encodeURIComponent('Staff member deactivated.'));
+  const id = Number(req.params.id);
+  q.setActive.run({ id, active: 0 });
+  // A salary runs until something says it stopped. Nobody would think to go
+  // back to the Employment tab and end it by hand, so somebody who left in
+  // March would otherwise still be costing the business a salary in December —
+  // on Performance, in the export, and in front of an accountant.
+  const today = isoDate(startOfToday());
+  const wasSalaried = SALARY.salaryOn(id, today) > 0;
+  if (wasSalaried) {
+    SALARY.setSalary({ employeeId: id, cents: 0, from: today, by: tcActor(req),
+      note: 'deactivated' });
+  }
+  res.redirect('/employees?msg=' + encodeURIComponent('Staff member deactivated.'
+    + (wasSalaried ? ' Their salary stops counting as labor cost from today.' : '')));
 });
 
 // The other half of that. There was no way back in the app at all — `active`
@@ -14100,7 +14191,29 @@ app.get('/costs', (req, res) => {
       <div class="perf-tile-t">${sub}</div></div>`;
 
   const salesSpark = CH.spark(series.map((d) => d.sales));
-  const laborSpark = CH.spark(series.filter((d) => d.sales > 0).map((d) => (d.wages / d.sales) * 100), { invert: true });
+  const laborSpark = CH.spark(series.filter((d) => d.sales > 0).map((d) => (d.labor / d.sales) * 100), { invert: true });
+
+  // WHAT LABOUR IS MADE OF. Salaried people used to be left out of every
+  // figure on this page, which made Labor % and Prime Cost hourly-only numbers
+  // wearing the names of whole ones. They are counted now, and because a
+  // percentage that moved deserves to show its working, the two halves are
+  // named underneath it rather than summed silently.
+  // Its own line rather than the tile's small print, which is one ellipsised
+  // row: "$2,176.50 hourly wages + $7,844.29 salaried" gets cut off mid-figure
+  // there, and half a number is worse than none. It also keeps the tile's
+  // against-target line, which is what the owner reads it for.
+  const laborSplit = cur.salary > 0 ? `<p class="perf-note"><b>Labor is ${money(cur.labor)}</b>:
+      ${money(cur.wages)} in hourly wages and ${money(cur.salary)} of salary, charged over
+      ${cur.salaryPeople.length === 1 ? '' : 'each of '}${esc(cur.salaryPeople.map((x) => x.name).join(', '))}&rsquo;s
+      ${cur.salaryPeople.length === 1 ? 'pay periods' : 'pay periods'} in this range.</p>` : '';
+  // Somebody salaried with no start date on record costs nothing here, because
+  // the alternative is to invent one. Said out loud, with the amount, so it is
+  // a known gap rather than a silent zero.
+  const salaryGap = cur.salaryUndated.length ? `<p class="perf-note perf-note--warn">
+      ${cur.salaryUndated.length === 1 ? '<b>One salaried person is</b>' : `<b>${cur.salaryUndated.length} salaried people are</b>`}
+      not counted in these figures: ${esc(cur.salaryUndated.map((u) => u.name).join(', '))}.
+      Their salary has no start date on record, and this page will not guess one.
+      Set it on their Staff page and every figure here includes them from that day on.</p>` : '';
 
   const summary = `<section class="perf-summary">
     ${bigTile('blue', 'Sales', money(cur.sales), prev ? pctLine(cur.sales, prev.sales) : '', '', salesSpark)}
@@ -14109,12 +14222,13 @@ app.get('/costs', (req, res) => {
     ${bigTile(cur.primePct === null ? 'flat' : band(cur.primePct, TGT.prime), 'Prime cost', cur.primePct === null ? '—' : cur.primePct + '%',
       prev ? ptsLine(cur.primePct, prev.primePct) : '', cur.primePct === null ? 'needs invoices' : vsTarget(cur.primePct, TGT.prime), '')}
     ${bigTile('good', 'Gross profit', money(cur.grossProfit),
-      prev ? pctLine(cur.grossProfit, prev.grossProfit) : '', `after wages${cur.cogs ? ' &amp; goods' : ''}, before overhead`, '')}
+      prev ? pctLine(cur.grossProfit, prev.grossProfit) : '', `after labor${cur.cogs ? ' &amp; goods' : ''}, before overhead`, '')}
     ${smTile(cur.foodPct === null ? 'flat' : band(cur.foodPct, TGT.food), 'Food cost', cur.foodPct === null ? '—' : cur.foodPct + '%',
       cur.foodPct === null ? 'no invoices tagged' : vsTarget(cur.foodPct, TGT.food))}
     ${smTile('flat', 'Avg daily sales', cur.avgDaily === null ? '—' : money(cur.avgDaily),
       cur.dayCount ? `over ${cur.dayCount} day${cur.dayCount === 1 ? '' : 's'} traded` : 'nothing traded yet')}
-  </section>`;
+  </section>
+  ${laborSplit}${salaryGap}`;
 
   // --- what's driving performance ------------------------------------------
   // Deterministic, prioritized, and never a cause the data can't support — a
@@ -14218,18 +14332,22 @@ app.get('/costs', (req, res) => {
   const cv = salesMean ? Math.round((salesSd / salesMean) * 100) : null;
 
   // --- labor efficiency (swipeable on mobile) -------------------------------
-  const wpsNow = cur.sales ? cur.wages / cur.sales : null;
-  const wpsPrev = prev && prev.sales ? prev.wages / prev.sales : null;
+  const wpsNow = cur.sales ? cur.labor / cur.sales : null;
+  const wpsPrev = prev && prev.sales ? prev.labor / prev.sales : null;
   const laborMetrics = [
     { label: 'Labor %', value: cur.laborPct === null ? '—' : cur.laborPct + '%', sub: prev ? ptsLine(cur.laborPct, prev.laborPct) : '', foot: vsTarget(cur.laborPct, TGT.labor), tone: band(cur.laborPct, TGT.labor) },
     { label: 'Sales per labor hour', value: cur.salesPerHour === null ? '—' : money(cur.salesPerHour), sub: prev && prev.salesPerHour ? pctLine(cur.salesPerHour, prev.salesPerHour) : `${Math.round(cur.hours)} hours worked`, foot: 'higher is better', tone: 'flat' },
-    { label: 'Wage cost / sales $', value: wpsNow === null ? '—' : '$' + wpsNow.toFixed(3), sub: wpsPrev ? pctLine(wpsNow, wpsPrev) : '', foot: 'what each sales dollar costs in wages', tone: 'flat' },
-    { label: 'Avg wage / service', value: cur.completedShifts ? money(Math.round(cur.wages / cur.completedShifts)) : '—', sub: `${cur.completedShifts} service${cur.completedShifts === 1 ? '' : 's'} worked`, foot: 'wages per shift', tone: 'flat' },
+    { label: 'Labor cost / sales $', value: wpsNow === null ? '—' : '$' + wpsNow.toFixed(3), sub: wpsPrev ? pctLine(wpsNow, wpsPrev) : '', foot: 'what each sales dollar costs in labor', tone: 'flat' },
+    // Deliberately the HOURLY figure, and labelled as one: a salary is not a
+    // cost of a service, and dividing one by the services that happened to
+    // fall in the range would make the same salary look different in a busy
+    // fortnight and a quiet one.
+    { label: 'Avg hourly wage / service', value: cur.completedShifts ? money(Math.round(cur.wages / cur.completedShifts)) : '—', sub: `${cur.completedShifts} service${cur.completedShifts === 1 ? '' : 's'} worked`, foot: 'hourly wages only — salary is not a service cost', tone: 'flat' },
   ];
 
   // --- biggest cost drivers (tracked costs only — labor + purchases) --------
-  const costNow = trackedCosts(r.from, r.to, cur.wages);
-  const costPrev = prev ? trackedCosts(cmp.from, cmp.to, prev.wages) : null;
+  const costNow = trackedCosts(r.from, r.to, cur.labor);
+  const costPrev = prev ? trackedCosts(cmp.from, cmp.to, prev.labor) : null;
   const costRows = [...costNow.entries()].filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]);
   const costTotal = costRows.reduce((a, [, c]) => a + c, 0) || 1;
   const GROUP_COLOR = { Labor: '#2563eb', 'Food & beverage': '#059669', 'Packaging & supplies': '#0d9488', 'Rent & occupancy': '#92400e', Utilities: '#4f46e5', 'Software & subscriptions': '#9333ea', 'Repairs & maintenance': '#ea580c', Equipment: '#475569', Insurance: '#0f766e', Marketing: '#db2777', Recruiting: '#c2410c', 'Professional services': '#1d4ed8', Cleaning: '#0284c7', Other: '#64748b' };
